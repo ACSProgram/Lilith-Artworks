@@ -1,5 +1,5 @@
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Arc, Mutex},
 };
 
@@ -19,10 +19,6 @@ impl AuthenticityState {
             models_dir,
             engine: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub(crate) fn models_dir(&self) -> &Path {
-        &self.models_dir
     }
 
     pub(crate) fn model_files_ready(&self) -> bool {

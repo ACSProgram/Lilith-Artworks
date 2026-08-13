@@ -8,8 +8,17 @@ use uuid::Uuid;
 
 pub(crate) const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
 
+pub(crate) fn database_path(root: &Path) -> PathBuf {
+    root.join(DATABASE_NAME)
+}
+
 pub(crate) fn open(root: &Path) -> Result<Connection, String> {
-    let connection = Connection::open(root.join(DATABASE_NAME)).map_err(database_error)?;
+    let connection = Connection::open(database_path(root)).map_err(database_error)?;
+    configure(&connection)?;
+    Ok(connection)
+}
+
+pub(crate) fn configure(connection: &Connection) -> Result<(), String> {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = ON;
@@ -18,7 +27,7 @@ pub(crate) fn open(root: &Path) -> Result<Connection, String> {
              PRAGMA busy_timeout = 5000;",
         )
         .map_err(database_error)?;
-    Ok(connection)
+    Ok(())
 }
 
 pub(crate) fn now_ms() -> Result<i64, String> {

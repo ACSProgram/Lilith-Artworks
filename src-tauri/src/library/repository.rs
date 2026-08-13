@@ -2,27 +2,27 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
-use uuid::Uuid;
+
+use crate::storage::{
+    self, database_error, display_path, new_id, normalize_source_path, now_ms, validate_title,
+};
 
 use super::model::{
     ArtworkSummary, CreatedArtwork, LibraryNode, LibrarySearchResult, LibraryTrashEntry,
     LibraryTree, MoveLibraryNodesRequest, PrimaryBranch,
 };
 
-const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
 const REPOSITORY_FORMAT: &str = "lilith-artworks";
 const SCHEMA_VERSION: i64 = 5;
-const MAX_TITLE_CHARS: usize = 160;
 const MAX_MOVE_NODES: usize = 512;
 const MAX_SEARCH_CHARS: usize = 160;
 const MAX_SEARCH_RESULTS: usize = 100;
 
 pub(crate) fn database_path(root: &Path) -> PathBuf {
-    root.join(DATABASE_NAME)
+    storage::database_path(root)
 }
 
 pub(crate) fn initialize(root: &Path) -> Result<(), String> {
@@ -138,14 +138,7 @@ fn validate_repository_root(root: &Path) -> Result<(), String> {
 }
 
 fn configure(connection: &Connection) -> Result<(), String> {
-    connection
-        .execute_batch(
-            "PRAGMA foreign_keys = ON;
-             PRAGMA journal_mode = WAL;
-             PRAGMA synchronous = FULL;
-             PRAGMA busy_timeout = 5000;",
-        )
-        .map_err(|error| format!("无法配置作品数据库：{error}"))
+    storage::configure(connection)
 }
 
 fn create_schema(connection: &Connection) -> Result<(), String> {
@@ -1299,62 +1292,6 @@ fn ensure_group_parent(
         Some("artwork") => Err("Artwork 是叶节点，不能包含子节点".into()),
         _ => Err("找不到父分组".into()),
     }
-}
-
-fn normalize_source_path(root: &Path, source_path: &Path) -> Result<(String, String), String> {
-    if !source_path.is_absolute() {
-        return Err("分支工作文件必须使用绝对路径".into());
-    }
-    if !source_path.is_file() {
-        return Err("分支工作文件不存在或不是普通文件".into());
-    }
-    let canonical = source_path
-        .canonicalize()
-        .map_err(|error| format!("无法访问分支工作文件：{error}"))?;
-    let repository = root
-        .canonicalize()
-        .map_err(|error| format!("无法访问作品仓库：{error}"))?;
-    if canonical.starts_with(&repository) {
-        return Err("分支工作文件不能位于作品仓库内部".into());
-    }
-    let display = display_path(&canonical);
-    let key = if cfg!(windows) {
-        display.to_lowercase()
-    } else {
-        display.clone()
-    };
-    Ok((display, key))
-}
-
-fn display_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
-}
-
-fn validate_title(value: &str, label: &str) -> Result<(), String> {
-    let title = value.trim();
-    if title.is_empty() {
-        return Err(format!("{label}不能为空"));
-    }
-    if title.chars().count() > MAX_TITLE_CHARS {
-        return Err(format!("{label}不能超过 {MAX_TITLE_CHARS} 个字符"));
-    }
-    Ok(())
-}
-
-fn new_id() -> String {
-    Uuid::new_v4().to_string()
-}
-
-fn now_ms() -> Result<i64, String> {
-    let duration = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("系统时间无效：{error}"))?;
-    i64::try_from(duration.as_millis()).map_err(|_| "系统时间超出范围".into())
-}
-
-fn database_error(error: rusqlite::Error) -> String {
-    format!("作品数据库操作失败：{error}")
 }
 
 #[cfg(test)]

@@ -15,6 +15,7 @@ use super::{
     c2pa,
     error::{AuthenticityError, AuthenticityResult},
     model::{CertificationRecord, DecodeRequest, DecodeResult, PublishBranchRequest},
+    publication_repository,
     repository::{self, NewCertificationRecord},
     state::AuthenticityState,
     trustmark,
@@ -34,7 +35,7 @@ pub(crate) fn publish(
 ) -> AuthenticityResult<PublishedOutput> {
     let private_key = Zeroizing::new(std::mem::take(&mut request.private_key_pem));
     validate_publish_request(&request, &private_key)?;
-    let target = repository::publication_target(root, &request.branch_id)
+    let target = publication_repository::publication_target(root, &request.branch_id)
         .map_err(AuthenticityError::Task)?;
     let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
     let output = absolute_output_path(&request.output_path)?;

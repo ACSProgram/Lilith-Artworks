@@ -213,7 +213,7 @@ fn load_node_from(
     connection
         .query_row(
             "SELECT node.id, node.artwork_id, node.parent_id, node.sha256, node.snapshot_path,
-                    COALESCE(edge.delta_path, node.delta_path), node.is_checkpoint
+                    COALESCE(edge.delta_path, node.delta_path)
              FROM history_nodes node
              LEFT JOIN history_edges edge ON edge.child_history_id = node.id
              WHERE node.id = ?1",
@@ -226,7 +226,6 @@ fn load_node_from(
                     sha256: row.get(3)?,
                     snapshot_path: row.get(4)?,
                     delta_path: row.get(5)?,
-                    is_checkpoint: row.get::<_, i64>(6)? != 0,
                 })
             },
         )
@@ -650,7 +649,7 @@ pub(crate) fn delete_subtree(
     if !branch_valid {
         return Err("只能从当前分支的历史链删除节点".into());
     }
-    let contains_publication: bool = connection
+    let contains_publication: bool = transaction
         .query_row(
             "WITH RECURSIVE descendants(id) AS (
                SELECT id FROM history_nodes WHERE id = ?1
@@ -798,17 +797,9 @@ pub(crate) fn delete_subtree(
             [],
         )
         .map_err(storage::database_error)?;
-    let deleted_count: u64 = transaction
-        .query_row("SELECT COUNT(*) FROM history_delete", [], |row| {
-            row.get::<_, i64>(0)
-        })
-        .map_err(storage::database_error)?
-        .try_into()
-        .map_err(|_| "删除节点数量无效")?;
     transaction.commit().map_err(storage::database_error)?;
     Ok(HistoryDeletion {
         artwork_id,
-        deleted_count,
         storage_paths: paths.into_iter().collect(),
     })
 }
@@ -875,17 +866,17 @@ pub(crate) fn validate_subtree_deletion(
 pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeletion, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
-    let branch: Option<(String, String, Option<String>, bool)> = transaction
+    let branch: Option<(String, Option<String>, bool)> = transaction
         .query_row(
-            "SELECT b.artwork_id, b.title, b.created_from_history_id,
+            "SELECT b.artwork_id, b.created_from_history_id,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
              FROM branches b WHERE b.id = ?1",
             [branch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(storage::database_error)?;
-    let (artwork_id, branch_title, origin, locked) = branch.ok_or("找不到分支")?;
+    let (artwork_id, origin, locked) = branch.ok_or("找不到分支")?;
     if origin.is_none() {
         return Err("主分支不能删除".into());
     }
@@ -921,7 +912,6 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
         owned.push(row.0);
     }
     drop(statement);
-    let mut deleted_count = 0_u64;
     loop {
         let candidate = owned.iter().find(|id| {
             transaction
@@ -947,7 +937,6 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
             )
             .map_err(storage::database_error)?;
         owned.retain(|id| id != &candidate);
-        deleted_count = deleted_count.saturating_add(1);
     }
     if !owned.is_empty() {
         let replacement: String = transaction
@@ -972,8 +961,6 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
     transaction.commit().map_err(storage::database_error)?;
     Ok(BranchDeletion {
         artwork_id,
-        branch_title,
-        deleted_count,
         storage_paths: paths.into_iter().collect(),
     })
 }

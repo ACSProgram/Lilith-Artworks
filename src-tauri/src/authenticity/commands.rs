@@ -22,8 +22,9 @@ use super::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult,
         EnterPublicationRequest, PreviewImage, PublishBranchRequest, PublishResult,
     },
-    pipeline, repository,
-    repository::NewFinalArtifact,
+    pipeline,
+    publication_repository::{self, NewFinalArtifact},
+    repository,
     state::AuthenticityState,
 };
 
@@ -45,7 +46,7 @@ pub(crate) async fn enter_branch_publication(
     let models_ready = authenticity_state.model_files_ready();
     tauri::async_runtime::spawn_blocking(move || {
         state.run_exclusive(Some(&request.branch_id), || {
-            let (_, history_id) = repository::branch_head(&root, &request.branch_id)?;
+            let (_, history_id) = publication_repository::branch_head(&root, &request.branch_id)?;
             state.report_progress("publish-lock", "正在固化发布检查点", 0, 2);
             backup::ensure_checkpoint(&root, &history_id)?;
             state.report_progress("publish-lock", "正在保存最终成品", 1, 2);
@@ -180,7 +181,7 @@ fn store_final_artifact(
     let artifact_id = storage::new_id();
     let artifact_directory = root
         .join("artworks")
-        .join(repository::branch_head(root, branch_id)?.0)
+        .join(publication_repository::branch_head(root, branch_id)?.0)
         .join("artifacts")
         .join(branch_id);
     fs::create_dir_all(&artifact_directory)
@@ -222,7 +223,7 @@ fn store_final_artifact(
         byte_size: size,
         created_ms: storage::now_ms()?,
     };
-    if let Err(error) = repository::insert_final_artifact(root, &artifact) {
+    if let Err(error) = publication_repository::insert_final_artifact(root, &artifact) {
         let _ = fs::remove_file(&final_path);
         return Err(error);
     }

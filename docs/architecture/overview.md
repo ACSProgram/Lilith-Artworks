@@ -2,6 +2,8 @@
 
 ## 层级
 
+代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。认证发布状态与成品绑定在 `authenticity/publication_repository.rs`，认证配置/记录查询在 `repository.rs`；历史破坏性删除通过 `history/deletion_repository.rs` 进入。
+
 ```text
 src/app/                 应用启动、窗口、全局设置与跨模块工作区编排
 src/modules/library/     Artwork 树、搜索和选择交互

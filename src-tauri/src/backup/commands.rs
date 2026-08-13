@@ -170,7 +170,6 @@ pub(crate) async fn delete_history_subtree(
                 state.report_progress("delete", "正在删除历史节点", 1, 1);
             }
             let deletion = history::delete_subtree(&root, &history_id, &branch_id)?;
-            let _deleted_count = deletion.deleted_count;
             for relative in deletion.storage_paths {
                 if !history::storage_path_referenced(&root, &relative)? {
                     let _ = fs::remove_file(storage::resolve_path(&root, &relative)?);

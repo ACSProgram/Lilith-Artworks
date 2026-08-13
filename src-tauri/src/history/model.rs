@@ -82,7 +82,6 @@ pub(crate) struct HistoryRecord {
     pub(crate) sha256: String,
     pub(crate) snapshot_path: Option<String>,
     pub(crate) delta_path: Option<String>,
-    pub(crate) is_checkpoint: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -112,15 +111,12 @@ pub(crate) struct HistoryCommit<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryDeletion {
     pub(crate) artwork_id: String,
-    pub(crate) deleted_count: u64,
     pub(crate) storage_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BranchDeletion {
     pub(crate) artwork_id: String,
-    pub(crate) branch_title: String,
-    pub(crate) deleted_count: u64,
     pub(crate) storage_paths: Vec<String>,
 }
 

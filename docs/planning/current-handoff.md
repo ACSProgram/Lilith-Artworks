@@ -60,6 +60,16 @@
 
 在线生成锁文件曾因 Windows schannel `SEC_E_NO_CREDENTIALS` 失败，随后离线缓存解析成功并生成 `Cargo.lock`。这不是编译结果。
 
+## 本轮架构整理（2026-08-13）
+
+- 修复 `authenticity/repository.rs` 中配置加载的 `Result` 类型推断、查询映射临时借用，以及 `history/repository.rs` 中事务期间错误借用连接的编译问题。
+- 将认证发布状态和 `final_artifacts` 原子绑定抽到 `src-tauri/src/authenticity/publication_repository.rs`；认证配置、记录写入和匹配查询仍在 `repository.rs`。
+- 将历史破坏性操作收敛到 `src-tauri/src/history/deletion_repository.rs` 的命名能力面，`history/mod.rs` 不再通配符重导出仓储实现。
+- `src-tauri/src/storage.rs` 现在是数据库连接配置、路径、时间、ID 和基础校验的共享入口；Library 删除了重复实现并复用它。
+- 新增 `docs/architecture/ai-reading-guide.md`，规定按问题选择上下文入口、先读契约再读实现，并记录跨模块边界。
+
+本轮只做了 `cargo fmt --all -- --check` 和 `git diff --check`。`cargo check --lib` 在当前环境超过两分钟未返回，未继续等待；完整编译、测试和 GUI 人工验收仍由用户执行。
+
 ## 尚未执行
 
 - `cargo check`、`cargo test`、完整 Tauri 编译。
