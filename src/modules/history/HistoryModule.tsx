@@ -58,6 +58,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
   const [compactMode, setCompactMode] = useState(false);
   const [compactSelection, setCompactSelection] = useState<Set<string>>(new Set());
+  const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const wasRuntimeBusy = useRef(false);
 
   const applyHistory = useCallback((next: ArtworkHistory) => {
@@ -238,6 +239,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
 
   const nodeCard = (node: HistoryNode) => {
     const heads = history.branches.filter((branch) => branch.headHistoryId === node.id);
+    const publishedCount = history.branches.filter((branch) => branch.headHistoryId === node.id).reduce((sum, branch) => sum + branch.publishedCount, 0);
     const forks = history.branches.filter((branch) =>
       branch.createdFromHistoryId === node.id && branch.headHistoryId !== node.id);
     const selectable = compactMode && view === "branch" && branchNodeIds.has(node.id) && canCompact(node, history);
@@ -271,6 +273,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
         {heads.map((branch) => <i key={branch.id}>{branch.title} HEAD</i>)}
         {forks.map((branch) => <i className="fork-label" key={branch.id}>{branch.title} fork</i>)}
         {node.isCheckpoint && <i>检查点</i>}
+        {publishedCount > 0 && <i className="published-label">已发布 {publishedCount}</i>}
         {selectedForCompact && <i className="selected-label">待精简</i>}
       </span>
     </button>;
@@ -291,6 +294,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
           <button className={view === "overview" ? "active" : ""} onClick={() => { setView("overview"); setCompactMode(false); setCompactSelection(new Set()); }}>总览</button>
           <button className={view === "branch" ? "active" : ""} onClick={() => setView("branch")}>当前分支</button>
         </div>
+        {view === "overview" && <div className="segmented-control" aria-label="时间排列"><button className={mindmapMode === "compact" ? "active" : ""} type="button" onClick={() => setMindmapMode("compact")}>紧凑</button><button className={mindmapMode === "timeline" ? "active" : ""} type="button" onClick={() => setMindmapMode("timeline")}>时间轴</button></div>}
         <select value={selectedBranchId ?? ""} onChange={(event) => {
           setSelectedBranchId(event.target.value);
           setCompactMode(false);
@@ -307,7 +311,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
       <BranchSettings branch={selectedBranch} disabled={busy || runtime.busy} onSave={saveBranch} />
       <div className="branch-status-actions">
         <div className={`branch-schedule${selectedBranch.lastError ? " error" : ""}`}>
-          {selectedBranch.finalArtifactLocked ? <><Ban size={16} />成品已锁定</>
+          {selectedBranch.finalArtifactLocked ? <><Ban size={16} />成品已锁定 · 已发布 {selectedBranch.publishedCount} 条</>
             : selectedBranch.lastError ? selectedBranch.lastError
               : selectedBranch.backupEnabled ? <><Check size={16} />每 {selectedBranch.backupIntervalMinutes} 分钟自动备份</>
                 : "自动备份已关闭"}
@@ -344,7 +348,7 @@ export function HistoryModule({ artworkId, onError }: HistoryModuleProps) {
       <section className={`history-graph ${view === "overview" ? "mindmap" : "branch-list"}`}>
         <header><strong>{view === "overview" ? "历史总览" : selectedBranch?.title}</strong><span>{history.nodes.length} 个节点 · {history.branches.length} 个分支</span></header>
         {!history.nodes.length && <div className="history-empty">提交工作文件以创建第一个历史节点。</div>}
-        {view === "overview" ? <Mindmap branches={roots} renderNode={nodeCard} /> : <div className="branch-line">{branchLine.map(nodeCard)}</div>}
+        {view === "overview" ? <Mindmap branches={roots} renderNode={nodeCard} mode={mindmapMode} branchesByNode={history.branches} /> : <div className="branch-line">{branchLine.map(nodeCard)}</div>}
       </section>
       <aside className="history-inspector">
         <header>节点信息</header>
@@ -405,10 +409,17 @@ function OperationProgress({ runtime, onCancel }: { runtime: BackupRuntimeStatus
   </div>;
 }
 
-function Mindmap({ branches, renderNode }: { branches: HistoryTreeNode[]; renderNode: (node: HistoryNode) => ReactNode }) {
-  return <ul className="mindmap-root">{branches.map((branch) => <MindmapBranch key={branch.node.id} branch={branch} renderNode={renderNode} />)}</ul>;
+function Mindmap({ branches, renderNode, mode, branchesByNode }: { branches: HistoryTreeNode[]; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[] }) {
+  const firstTime = Math.min(...branches.flatMap((branch) => collectTimes(branch)));
+  return <ul className={`mindmap-root mindmap-${mode}`}>{branches.map((branch) => <MindmapBranch key={branch.node.id} branch={branch} renderNode={renderNode} mode={mode} branchesByNode={branchesByNode} firstTime={firstTime} />)}</ul>;
 }
 
-function MindmapBranch({ branch, renderNode }: { branch: HistoryTreeNode; renderNode: (node: HistoryNode) => ReactNode }) {
-  return <li><div>{renderNode(branch.node)}</div>{branch.children.length > 0 && <ul>{branch.children.map((child) => <MindmapBranch key={child.node.id} branch={child} renderNode={renderNode} />)}</ul>}</li>;
+function collectTimes(branch: HistoryTreeNode): number[] {
+  return [branch.node.createdMs, ...branch.children.flatMap((child) => collectTimes(child))];
+}
+
+function MindmapBranch({ branch, renderNode, mode, branchesByNode, firstTime }: { branch: HistoryTreeNode; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[]; firstTime: number }) {
+  const leafLabels = branchesByNode.filter((item) => item.headHistoryId === branch.node.id).map((item) => item.title);
+  const timelineOffset = mode === "timeline" ? Math.min(180, Math.max(0, Math.log2(1 + (branch.node.createdMs - firstTime) / 60_000) * 12)) : 0;
+  return <li style={{ paddingTop: timelineOffset }}><div>{renderNode(branch.node)}</div>{leafLabels.length > 0 && <div className="mindmap-leaf-label">{leafLabels.join(" · ")}</div>}{branch.children.length > 0 && <ul>{branch.children.map((child) => <MindmapBranch key={child.node.id} branch={child} renderNode={renderNode} mode={mode} branchesByNode={branchesByNode} firstTime={firstTime} />)}</ul>}</li>;
 }

@@ -393,7 +393,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
           />
         ) : activeNode?.kind === "artwork" && selectedIds.size === 1 ? (
           <ArtworkWorkspace
-            key={`${activeNode.id}:${traceTarget?.branchId ?? "default"}`}
+            key={activeNode.id}
             artworkId={activeNode.id}
             initialView={traceTarget?.artworkId === activeNode.id ? "publish" : "history"}
             initialBranchId={traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null}

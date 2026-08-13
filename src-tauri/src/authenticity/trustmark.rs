@@ -7,8 +7,9 @@ use super::{
     state::AuthenticityState,
 };
 
-pub(crate) const WATERMARK_BITS: usize = 61;
-pub(crate) const SOFT_BINDING_ALGORITHM: &str = "com.adobe.trustmark.Q";
+pub(crate) const WATERMARK_BITS: usize = 40;
+pub(crate) const SOFT_BINDING_ALGORITHM: &str = "com.adobe.trustmark";
+pub(crate) const MODEL_VARIANT: &str = "Q / BCH_SUPER";
 const SCHEMA_PREFIX: &str = "1";
 
 pub(crate) fn resolve_identifier(requested: Option<&str>) -> AuthenticityResult<String> {
@@ -83,20 +84,19 @@ pub(crate) fn encode_regions(
             "图片至少需要 96 x 96 像素".into(),
         ));
     }
+    if additional_regions.is_empty() {
+        return Err(AuthenticityError::InvalidInput(
+            "请先框选至少一个 TrustMark 区域".into(),
+        ));
+    }
     let bounds = additional_regions
         .iter()
         .map(|region| pixel_bounds(*region, width, height, 96))
         .collect::<AuthenticityResult<Vec<_>>>()?;
     state.with_engine(|engine| {
-        let mut output = engine
-            .encode(
-                identifier.to_owned(),
-                DynamicImage::ImageRgb8(image),
-                strength,
-            )?
-            .to_rgb8();
+        let mut output = image.clone();
         for (x, y, region_width, region_height) in bounds {
-            let region = imageops::crop_imm(&output, x, y, region_width, region_height).to_image();
+            let region = imageops::crop_imm(&image, x, y, region_width, region_height).to_image();
             let encoded = engine
                 .encode(
                     identifier.to_owned(),

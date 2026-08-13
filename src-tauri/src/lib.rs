@@ -258,10 +258,12 @@ pub fn run() {
             backup::cancel_backup_operation,
             authenticity::enter_branch_publication,
             authenticity::get_branch_publication,
+            authenticity::cancel_branch_publication,
             authenticity::publish_branch_artifact,
             authenticity::decode_authenticity,
             authenticity::search_certification_records,
             authenticity::preview_authenticity_image,
+            authenticity::estimate_authenticity_output_size,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lilith Artworks");

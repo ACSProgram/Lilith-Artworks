@@ -12,6 +12,11 @@ export interface PreviewImage {
   sourceBytes: number;
 }
 
+export interface FileSizeEstimate {
+  jpegBytes: number;
+  sourceBytes: number;
+}
+
 export interface CertificationConfig {
   branchId: string;
   title: string;
@@ -69,6 +74,9 @@ export interface BranchPublication {
   config: CertificationConfig;
   records: CertificationRecord[];
   modelsReady: boolean;
+  modelVariant: string;
+  encoderSha256: string | null;
+  decoderSha256: string | null;
 }
 
 export interface PublishBranchRequest {

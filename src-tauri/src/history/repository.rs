@@ -30,7 +30,8 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
             "SELECT b.id, b.title, b.source_path, b.head_history_id,
                     b.created_from_history_id, b.backup_enabled, b.backup_interval_minutes,
                     b.last_check_ms, b.last_success_ms, b.last_error,
-                    EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
+                    EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
+                    (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id)
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
@@ -48,6 +49,7 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 last_success_ms: row.get(8)?,
                 last_error: row.get(9)?,
                 final_artifact_locked: row.get::<_, bool>(10)?,
+                published_count: row.get(11)?,
             })
         })
         .map_err(storage::database_error)?

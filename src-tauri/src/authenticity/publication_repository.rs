@@ -125,6 +125,43 @@ pub(crate) fn find_artifact(root: &Path, branch_id: &str) -> Result<Option<Final
     Ok(artifact)
 }
 
+pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<(), String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let path: Option<String> = transaction
+        .query_row(
+            "SELECT source_path FROM final_artifacts WHERE branch_id = ?1",
+            [branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let mut output_statement = transaction
+        .prepare("SELECT output_path FROM certification_records WHERE branch_id = ?1")
+        .map_err(storage::database_error)?;
+    let outputs = output_statement
+        .query_map([branch_id], |row| row.get::<_, String>(0))
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    drop(output_statement);
+    transaction
+        .execute(
+            "DELETE FROM final_artifacts WHERE branch_id = ?1",
+            [branch_id],
+        )
+        .map_err(storage::database_error)?;
+    transaction.commit().map_err(storage::database_error)?;
+    if let Some(relative) = path {
+        let absolute = storage::resolve_path(root, &relative)?;
+        let _ = std::fs::remove_file(absolute);
+    }
+    for output in outputs {
+        let _ = std::fs::remove_file(output);
+    }
+    Ok(())
+}
+
 fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {
     Ok(FinalArtifact {
         id: row.get(0)?,

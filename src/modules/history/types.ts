@@ -17,6 +17,7 @@ export interface ArtworkBranch {
   lastSuccessMs: number | null;
   lastError: string | null;
   finalArtifactLocked: boolean;
+  publishedCount: number;
 }
 
 export interface HistoryNode {

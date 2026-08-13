@@ -34,6 +34,8 @@ pub(crate) fn publish(
     mut request: PublishBranchRequest,
 ) -> AuthenticityResult<PublishedOutput> {
     let private_key = Zeroizing::new(std::mem::take(&mut request.private_key_pem));
+    request.config.trustmark_enabled =
+        request.config.trustmark_enabled && !request.config.additional_regions.is_empty();
     validate_publish_request(&request, &private_key)?;
     let target = publication_repository::publication_target(root, &request.branch_id)
         .map_err(AuthenticityError::Task)?;
@@ -116,7 +118,10 @@ pub(crate) fn publish(
             final_artifact_id: &target.artifact_id,
             branch_id: &request.branch_id,
             history_id: &target.history_id,
-            watermark_id: Some(&identifier),
+            watermark_id: request
+                .config
+                .trustmark_enabled
+                .then_some(identifier.as_str()),
             output_path: &output_path,
             output_sha256: &output_sha256,
             output_bytes,
@@ -138,7 +143,7 @@ pub(crate) fn publish(
         width,
         height,
         watermark_region_count: if request.config.trustmark_enabled {
-            request.config.additional_regions.len() as u32 + 1
+            request.config.additional_regions.len() as u32
         } else {
             0
         },
@@ -199,6 +204,11 @@ fn validate_publish_request(
     }
     if private_key.trim().is_empty() {
         return Err(AuthenticityError::InvalidInput("请粘贴 PEM 私钥".into()));
+    }
+    if request.config.trustmark_enabled && request.config.additional_regions.is_empty() {
+        return Err(AuthenticityError::InvalidInput(
+            "启用 TrustMark 前请先框选水印区域".into(),
+        ));
     }
     if !Path::new(&request.config.certificate_path).is_file() {
         return Err(AuthenticityError::InvalidInput("证书链文件不存在".into()));

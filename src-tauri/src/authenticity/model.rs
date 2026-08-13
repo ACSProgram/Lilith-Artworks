@@ -61,6 +61,21 @@ pub(crate) struct PreviewImage {
     pub(crate) source_bytes: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EstimateRequest {
+    pub(crate) input_path: String,
+    pub(crate) jpeg_quality: u8,
+    pub(crate) background_color: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FileSizeEstimate {
+    pub(crate) jpeg_bytes: u64,
+    pub(crate) source_bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ValidationItem {
@@ -114,6 +129,9 @@ pub(crate) struct BranchPublication {
     pub(crate) config: CertificationConfig,
     pub(crate) records: Vec<CertificationRecord>,
     pub(crate) models_ready: bool,
+    pub(crate) model_variant: String,
+    pub(crate) encoder_sha256: Option<String>,
+    pub(crate) decoder_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

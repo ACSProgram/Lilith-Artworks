@@ -12,7 +12,7 @@
 - 不执行 GUI 自动化、启动窗口、浏览器截图或基于截图的测试。界面验收由用户手工完成。
 - 引入 `c2pa`、`trustmark`/ONNX 依赖后，不再执行全量 Rust 编译；只运行前端类型检查、格式检查、静态检查和不链接重依赖的针对性测试。
 - 如果静态检查不足以控制错误积累，将停止后续实现，并明确请求用户执行一次完整编译/测试。
-- 不下载 TrustMark 模型；只使用 Tauri 工程 `src-tauri/resources/models/` 中随应用打包的 Q/BCH-5 encoder 与 decoder。
+- 不下载 TrustMark 模型；只使用 Tauri 工程 `src-tauri/resources/models/` 中随应用打包的 Q/BCH_SUPER encoder 与 decoder。
 - 不自动创建 Git 提交。每个阶段由用户验收后自行提交。
 
 ## 数据与行为不变量
@@ -24,7 +24,7 @@
 - 分支标题与每个历史节点标题均可修改。
 - 删除历史节点会永久删除该节点及其所有后代；不提供回收站。
 - 分支绑定最终成品后进入只读状态，禁止继续提交。移除成品后才可恢复提交；如果已有认证记录，移除前必须返回明确影响提示并要求显式确认。
-- TrustMark 的 61 位标识是认证记录的快速关联键。识别时先按标识索引匹配所有分支，再回读 C2PA 清单并报告一致性。
+- TrustMark 的 40 位标识是认证记录的快速关联键。识别时先按标识索引匹配所有分支，再回读 C2PA 清单并报告一致性。
 - 私钥不进入持久化配置、数据库或日志。允许持久化的是证书路径、签名算法、时间戳地址和作品声明等非秘密配置。
 
 ## 阶段状态
@@ -57,7 +57,7 @@
 | --- | --- | --- |
 | 树、拖放、多选、查询 | LilithClient `auto-backup` 前端 | 保留模块边界和稳定 ID，加入多选与搜索，不沿用线性版本假设 |
 | snapshot/delta、调度、恢复 | LilithClient `backup_agent` | 保留 ChunkFile 格式与事务顺序，把 job/head 改成 Artwork/branch/history 图 |
-| TrustMark 与 C2PA | Proven Rust 流水线 | 保留 Q/BCH-5、soft binding 和私钥零持久化，关联键改由分支认证记录管理 |
+| TrustMark 与 C2PA | Proven Rust 流水线 | 使用 Q/BCH_SUPER、区域 soft binding 和私钥零持久化，关联键改由分支认证记录管理 |
 | 配置、窗口、文档层级 | LilithClient 应用架构 | 应用层只负责生命周期和设置，领域逻辑保持独立 Rust 模块 |
 
 ## 阶段 3 验收清单

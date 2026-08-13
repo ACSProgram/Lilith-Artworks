@@ -23,6 +23,7 @@ pub(crate) struct ArtworkBranch {
     pub(crate) last_success_ms: Option<i64>,
     pub(crate) last_error: Option<String>,
     pub(crate) final_artifact_locked: bool,
+    pub(crate) published_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]

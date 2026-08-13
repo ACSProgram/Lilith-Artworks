@@ -25,6 +25,7 @@ pub(crate) fn get_publication(
     root: &Path,
     branch_id: &str,
     models_ready: bool,
+    model_info: (String, Option<String>, Option<String>),
 ) -> Result<BranchPublication, String> {
     let connection = storage::open(root)?;
     let artifact = super::publication_repository::find_artifact(root, branch_id)?;
@@ -36,6 +37,9 @@ pub(crate) fn get_publication(
         config,
         records,
         models_ready,
+        model_variant: model_info.0,
+        encoder_sha256: model_info.1,
+        decoder_sha256: model_info.2,
     })
 }
 

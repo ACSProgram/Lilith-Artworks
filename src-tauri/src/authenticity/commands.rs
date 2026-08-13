@@ -5,7 +5,7 @@ use std::{
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{GenericImageView, ImageFormat};
+use image::{codecs::jpeg::JpegEncoder, GenericImageView, ImageFormat};
 use sha2::Digest;
 use tauri::State;
 use tempfile::NamedTempFile;
@@ -20,7 +20,8 @@ use super::{
     error::{AuthenticityError, AuthenticityResult},
     model::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult,
-        EnterPublicationRequest, PreviewImage, PublishBranchRequest, PublishResult,
+        EnterPublicationRequest, EstimateRequest, FileSizeEstimate, PreviewImage,
+        PublishBranchRequest, PublishResult,
     },
     pipeline,
     publication_repository::{self, NewFinalArtifact},
@@ -44,6 +45,7 @@ pub(crate) async fn enter_branch_publication(
     let root = root(app_state.inner())?;
     let state = backup_state.inner().clone();
     let models_ready = authenticity_state.model_files_ready();
+    let model_info = authenticity_state.model_info();
     tauri::async_runtime::spawn_blocking(move || {
         state.run_exclusive(Some(&request.branch_id), || {
             let (_, history_id) = publication_repository::branch_head(&root, &request.branch_id)?;
@@ -57,7 +59,7 @@ pub(crate) async fn enter_branch_publication(
                 &request.artifact_path,
             )?;
             state.report_progress("publish-lock", "分支已进入发布状态", 2, 2);
-            repository::get_publication(&root, &request.branch_id, models_ready)
+            repository::get_publication(&root, &request.branch_id, models_ready, model_info)
         })
     })
     .await
@@ -74,7 +76,20 @@ pub(crate) fn get_branch_publication(
         &root(app_state.inner())?,
         &branch_id,
         authenticity_state.model_files_ready(),
+        authenticity_state.model_info(),
     )
+}
+
+#[tauri::command]
+pub(crate) fn cancel_branch_publication(
+    branch_id: String,
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+) -> Result<(), String> {
+    let root = root(app_state.inner())?;
+    backup_state.run_exclusive(Some(&branch_id), || {
+        publication_repository::remove_artifact(&root, &branch_id)
+    })
 }
 
 #[tauri::command]
@@ -131,6 +146,35 @@ pub(crate) async fn preview_authenticity_image(path: String) -> AuthenticityResu
     tauri::async_runtime::spawn_blocking(move || make_preview(PathBuf::from(path)))
         .await
         .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn estimate_authenticity_output_size(
+    request: EstimateRequest,
+) -> AuthenticityResult<FileSizeEstimate> {
+    tauri::async_runtime::spawn_blocking(move || {
+        if !(1..=100).contains(&request.jpeg_quality) {
+            return Err(AuthenticityError::InvalidInput(
+                "JPEG 质量必须在 1 到 100 之间".into(),
+            ));
+        }
+        let path = PathBuf::from(request.input_path);
+        let source_bytes = fs::metadata(&path)?.len();
+        let source = image::open(path)?;
+        let flattened = super::trustmark::flatten_to_rgb(
+            &source,
+            super::trustmark::parse_background(&request.background_color)?,
+        );
+        let mut output = Vec::new();
+        JpegEncoder::new_with_quality(&mut output, request.jpeg_quality)
+            .encode_image(&flattened)?;
+        Ok(FileSizeEstimate {
+            jpeg_bytes: output.len() as u64,
+            source_bytes,
+        })
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
 fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {

@@ -22,6 +22,7 @@ interface AuthenticityModuleProps {
   onSelectBranch: (branchId: string) => void;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
+  onPublicationChanged?: () => Promise<void>;
 }
 
 type ImageTarget = "publish" | "decode";
@@ -43,6 +44,17 @@ function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
 }
 
+const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
+
+function loadSharedSigning(): Partial<CertificationConfig> {
+  try { return JSON.parse(localStorage.getItem(SHARED_SIGNING_KEY) ?? "{}"); }
+  catch { return {}; }
+}
+
+function saveSharedSigning(config: CertificationConfig) {
+  localStorage.setItem(SHARED_SIGNING_KEY, JSON.stringify({ certificatePath: config.certificatePath, signingAlgorithm: config.signingAlgorithm, timestampUrl: config.timestampUrl }));
+}
+
 export function AuthenticityModule(props: AuthenticityModuleProps) {
   return props.mode === "publish"
     ? <PublishView {...props} />
@@ -50,7 +62,7 @@ export function AuthenticityModule(props: AuthenticityModuleProps) {
 }
 
 function PublishView({
-  artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord,
+  artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const [publication, setPublication] = useState<BranchPublication | null>(null);
   const [config, setConfig] = useState<CertificationConfig | null>(null);
@@ -59,6 +71,8 @@ function PublishView({
   const [watermarkId, setWatermarkId] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CertificationRecord | null>(null);
+  const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
+  const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
   const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
 
   const load = useCallback(async () => {
@@ -67,7 +81,7 @@ function PublishView({
     try {
       const next = await authenticityApi.getPublication(selectedBranchId);
       setPublication(next);
-      setConfig({ ...next.config, trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled });
+      setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
       if (next.artifact) setPreview(await authenticityApi.preview(next.artifact.sourcePath));
       else setPreview(null);
     } catch (error) {
@@ -78,6 +92,15 @@ function PublishView({
   }, [onError, selectedBranchId]);
 
   useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (!publication?.artifact || !config) return;
+    const timer = window.setTimeout(() => {
+      authenticityApi.estimate(publication.artifact!.sourcePath, config.jpegQuality, config.backgroundColor)
+        .then((value) => setSizeEstimate(value.jpegBytes)).catch(() => setSizeEstimate(null));
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [config?.backgroundColor, config?.jpegQuality, publication?.artifact]);
+  useEffect(() => { if (config) saveSharedSigning(config); }, [config?.certificatePath, config?.signingAlgorithm, config?.timestampUrl]);
   useEffect(() => {
     if (!selectedRecordId || !publication) return;
     window.requestAnimationFrame(() => document.querySelector(`[data-record-id="${selectedRecordId}"]`)?.scrollIntoView({ block: "center" }));
@@ -95,7 +118,8 @@ function PublishView({
     try {
       const next = await authenticityApi.enterPublication(selectedBranch.id, artifactPath);
       setPublication(next);
-      setConfig({ ...next.config, trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled });
+      await onPublicationChanged?.();
+      setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
       if (next.artifact) setPreview(await authenticityApi.preview(next.artifact.sourcePath));
     } catch (error) {
       onError(message(error));
@@ -133,12 +157,23 @@ function PublishView({
       setResult(published.record);
       setPrivateKey("");
       await load();
+      await onPublicationChanged?.();
     } catch (error) {
       onError(message(error));
     } finally {
       setBusy(false);
     }
   };
+
+  const cancelPublication = async () => {
+    if (!selectedBranch || !window.confirm("取消发布模式会删除发布记录、最终成品和原图副本，是否继续？")) return;
+    setBusy(true);
+    try { await authenticityApi.cancelPublication(selectedBranch.id); setPublication(null); setConfig(null); setPreview(null); await onPublicationChanged?.(); }
+    catch (error) { onError(message(error)); }
+    finally { setBusy(false); }
+  };
+
+  if (viewingRecord) return <div className="auth-workspace record-view-mode"><header className="auth-header"><div><span>发布记录查看</span><h1>{viewingRecord.title}</h1></div><button className="secondary-button" type="button" onClick={() => setViewingRecord(null)}><X size={15} />退出查看</button></header><div className="record-view-content"><dl className="claim-grid"><div><dt>作品</dt><dd>{viewingRecord.artworkTitle}</dd></div><div><dt>分支</dt><dd>{viewingRecord.branchTitle}</dd></div><div><dt>创作者</dt><dd>{viewingRecord.creator || "未声明"}</dd></div><div><dt>发布时间</dt><dd>{new Date(viewingRecord.createdMs).toLocaleString()}</dd></div><div><dt>输出文件</dt><dd>{viewingRecord.outputPath}</dd></div><div><dt>SHA-256</dt><dd><code>{viewingRecord.outputSha256}</code></dd></div></dl>{viewingRecord.c2paManifestJson && <details className="manifest-details" open><summary>C2PA 报告</summary><pre>{viewingRecord.c2paManifestJson}</pre></details>}</div></div>;
 
   return <div className="auth-workspace">
     <header className="auth-header">
@@ -161,9 +196,9 @@ function PublishView({
           <RegionEditor
             target="publish"
             preview={preview}
-            regions={config.trustmarkEnabled ? config.additionalRegions : []}
+            regions={config.additionalRegions}
             maxRegions={8}
-            onChange={(regions) => setConfig({ ...config, additionalRegions: regions })}
+            onChange={(regions) => setConfig({ ...config, additionalRegions: regions, trustmarkEnabled: regions.length > 0 })}
           />
           <div className="artifact-proof"><span>发布检查点</span><code>{publication.artifact.historyId}</code><span>成品 SHA-256</span><code>{publication.artifact.sourceSha256}</code></div>
         </section>
@@ -177,24 +212,27 @@ function PublishView({
           </div>
           <div className="auth-form-section two-fields">
             <label>签名算法<select value={config.signingAlgorithm} onChange={(event) => setConfig({ ...config, signingAlgorithm: event.target.value })}><option value="es256">ES256</option><option value="es384">ES384</option><option value="ps256">PS256</option><option value="ed25519">Ed25519</option></select></label>
-            <label>JPEG 质量<input type="number" min={1} max={100} value={config.jpegQuality} onChange={(event) => setConfig({ ...config, jpegQuality: Number(event.target.value) })} /></label>
             <label className="wide-field">证书链<div className="auth-path-control"><input readOnly value={config.certificatePath} placeholder="选择 PEM 证书链" /><button className="icon-button" type="button" title="选择证书" onClick={() => void chooseCertificate()}><FolderOpen size={16} /></button></div></label>
-            <label className="wide-field">PEM 私钥<textarea className="secret-field" value={privateKey} rows={3} autoComplete="new-password" onChange={(event) => setPrivateKey(event.target.value)} /></label>
+            <label className="wide-field">PEM 私钥<input className="secret-field" type="password" value={privateKey} autoComplete="new-password" placeholder="输入后仅在本次发布使用" onChange={(event) => setPrivateKey(event.target.value)} /></label>
             <label className="wide-field">时间戳服务<input value={config.timestampUrl ?? ""} placeholder="可选 RFC 3161 URL" onChange={(event) => setConfig({ ...config, timestampUrl: event.target.value || null })} /></label>
           </div>
           <div className="auth-form-section trustmark-section">
-            <header><strong>TrustMark Q</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled={!publication.modelsReady} onChange={(event) => setConfig({ ...config, trustmarkEnabled: event.target.checked })} /></label></header>
+              <header><strong>TrustMark {publication.modelVariant}</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled={!publication.modelsReady} onChange={(event) => setConfig({ ...config, trustmarkEnabled: event.target.checked && config.additionalRegions.length > 0 })} /></label></header>
             {!publication.modelsReady && <p className="auth-warning">TrustMark 模型不可用，仍可发布 C2PA 凭证。</p>}
+            <details className="model-info"><summary>模型信息</summary><dl><div><dt>变体</dt><dd>{publication.modelVariant}</dd></div><div><dt>Encoder SHA-256</dt><dd><code>{publication.encoderSha256 ?? "不可用"}</code></dd></div><div><dt>Decoder SHA-256</dt><dd><code>{publication.decoderSha256 ?? "不可用"}</code></dd></div></dl></details>
             {config.trustmarkEnabled && <>
-              <label>自定义 ID<input value={watermarkId} maxLength={61} placeholder="留空自动生成 61 位 ID" onChange={(event) => setWatermarkId(event.target.value.replace(/[^01]/g, ""))} /></label>
-              <div className="two-fields"><label>强度<input type="number" min={0.5} max={1.5} step={0.05} value={config.watermarkStrength} onChange={(event) => setConfig({ ...config, watermarkStrength: Number(event.target.value) })} /></label><label>透明背景<input type="color" value={config.backgroundColor} onChange={(event) => setConfig({ ...config, backgroundColor: event.target.value })} /></label></div>
-              <p>{config.additionalRegions.length ? `全图 + ${config.additionalRegions.length} 个额外区域` : "全图基础水印；可在左侧拖拽添加局部范围。"}</p>
+              <label>自定义 ID<input value={watermarkId} maxLength={40} placeholder="留空自动生成 40 位 ID" onChange={(event) => setWatermarkId(event.target.value.replace(/[^01]/g, ""))} /></label>
+              <label className="range-field">TrustMark 强度 <output>{config.watermarkStrength.toFixed(2)}</output><input type="range" min={0.5} max={1.5} step={0.05} value={config.watermarkStrength} onChange={(event) => setConfig({ ...config, watermarkStrength: Number(event.target.value) })} />{config.watermarkStrength > 1 && <small className="auth-warning">超过 1.00 可能造成质量损失</small>}</label>
+              <p>{config.additionalRegions.length ? `仅在 ${config.additionalRegions.length} 个框选区域嵌入水印` : "请在左侧框选区域；未框选时不会启用 TrustMark。"}</p>
             </>}
           </div>
+          <div className="auth-form-section output-settings"><label className="range-field">JPEG 质量 <output>{config.jpegQuality}</output><input type="range" min={1} max={100} value={config.jpegQuality} onChange={(event) => setConfig({ ...config, jpegQuality: Number(event.target.value) })} /></label><div className="size-preview"><span>JPEG 预估大小</span><strong>{sizeEstimate == null ? "计算中" : formatBytes(sizeEstimate)}</strong><small>原图 {formatBytes(preview.sourceBytes)}</small></div><label>透明背景<input type="color" value={config.backgroundColor} onChange={(event) => setConfig({ ...config, backgroundColor: event.target.value })} /></label></div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
-          <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
+          {privateKey.trim().length === 0 && <p className="auth-warning inline-warning">请输入 PEM 私钥后再发布。</p>}
+          <button className="primary-button publish-command" type="button" disabled={busy || privateKey.trim().length === 0} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
+          <button className="text-button cancel-publication" type="button" disabled={busy} onClick={() => void cancelPublication()}><Trash2 size={15} />取消发布并删除成品</button>
         </section>
-        <RecordList records={publication.records} onNavigate={onNavigateRecord} selectedId={selectedRecordId} />
+        <RecordList records={publication.records} onNavigate={(record) => { setViewingRecord(record); onNavigateRecord(record); }} selectedId={selectedRecordId} />
       </div> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取发布状态</div>}
   </div>;
 }
@@ -236,6 +274,11 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
     finally { setBusy(false); }
   };
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void searchRecords(); }, 220);
+    return () => window.clearTimeout(timer);
+  }, [query]);
+
   return <div className="auth-workspace identify-workspace">
     <header className="auth-header"><div><span>识别与溯源</span><h1>验证发布图片</h1></div></header>
     <div className="identify-layout">
@@ -243,7 +286,8 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
         {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>C2PA 会始终读取；TrustMark 可识别整图或框选区域。</span></button> : <>
           <header><div><strong>{fileName(path)}</strong><span>{preview.width} x {preview.height}</span></div><button className="text-button" type="button" onClick={() => void choose()}>更换图片</button></header>
           <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} />
-          <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" title="改用整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>
+          <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" type="button" title="取消区域并识别整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>
+          {region && <button className="text-button scope-reset" type="button" onClick={() => setRegion(null)}>改用整图</button>}
           <button className="primary-button" type="button" disabled={busy} onClick={() => void decode()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ScanSearch size={16} />}开始识别</button>
         </>}
       </section>
@@ -251,13 +295,15 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
         {!result ? <div className="decode-placeholder"><Fingerprint size={24} /><span>识别结果将在这里显示</span></div> : <>
           <header className={result.c2paPresent ? "verified" : ""}><ShieldCheck size={20} /><div><strong>{result.c2paPresent ? "已读取 C2PA" : "未发现 C2PA"}</strong><span>{result.c2paValidationState ?? "无验证状态"}</span></div></header>
           <dl><div><dt>C2PA ID</dt><dd><code>{result.c2paWatermarkId ?? "未声明"}</code></dd></div><div><dt>TrustMark ID</dt><dd><code>{result.watermarkId ?? "未识别"}</code></dd></div><div><dt>双通道</dt><dd>{result.identifiersMatch == null ? "只有单通道证据" : result.identifiersMatch ? "ID 一致" : "ID 冲突，需人工调查"}</dd></div></dl>
+          <dl className="claim-grid"><div><dt>作品</dt><dd>{result.title ?? "未声明"}</dd></div><div><dt>创作者</dt><dd>{result.creator ?? "未声明"}</dd></div><div><dt>权利声明</dt><dd>{result.rightsStatement ?? "未声明"}</dd></div><div><dt>认证内容</dt><dd>{result.authenticationContent ?? "未声明"}</dd></div></dl>
           {result.c2paValidationStatus.length > 0 && <ul className="validation-list">{result.c2paValidationStatus.map((item) => <li key={`${item.code}-${item.explanation}`}><strong>{item.code}</strong><span>{item.explanation}</span></li>)}</ul>}
+          {result.manifestJson && <details className="manifest-details" open><summary>原始 C2PA 报告</summary><pre>{result.manifestJson}</pre></details>}
           <RecordList records={result.matches} onNavigate={onNavigateRecord} compact />
         </>}
       </section>
       <section className="record-search">
         <header><Search size={17} /><div><strong>搜索导出记录</strong><span>按 ID、标题、创作者或输出路径</span></div></header>
-        <div className="record-search-control"><input value={query} maxLength={160} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchRecords(); }} /><button className="secondary-button" disabled={!query.trim() || busy} onClick={() => void searchRecords()}><Search size={15} />搜索</button></div>
+        <div className="record-search-control"><input value={query} maxLength={160} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchRecords(); }} /><button className="secondary-button" disabled={busy} onClick={() => void searchRecords()}><Search size={15} />搜索</button></div>
         <RecordList records={records} onNavigate={onNavigateRecord} compact />
       </section>
     </div>
@@ -273,6 +319,7 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange }: {
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const [draft, setDraft] = useState<NormalizedRegion | null>(null);
+  const draftRef = useRef<NormalizedRegion | null>(null);
   const drag = useRef<{ pointerId: number; x: number; y: number } | null>(null);
   const imageRect = useCallback(() => {
     const stage = stageRef.current;
@@ -302,19 +349,25 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange }: {
     const start = point(event);
     if (!start) return;
     drag.current = { pointerId: event.pointerId, ...start };
-    setDraft({ x: start.x, y: start.y, width: 0, height: 0 });
+    const next = { x: start.x, y: start.y, width: 0, height: 0 };
+    draftRef.current = next;
+    setDraft(next);
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!drag.current || drag.current.pointerId !== event.pointerId) return;
     const next = point(event);
     if (!next) return;
-    setDraft({ x: Math.min(drag.current.x, next.x), y: Math.min(drag.current.y, next.y), width: Math.abs(next.x - drag.current.x), height: Math.abs(next.y - drag.current.y) });
+    const nextDraft = { x: Math.min(drag.current.x, next.x), y: Math.min(drag.current.y, next.y), width: Math.abs(next.x - drag.current.x), height: Math.abs(next.y - drag.current.y) };
+    draftRef.current = nextDraft;
+    setDraft(nextDraft);
   };
   const finish = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!drag.current || drag.current.pointerId !== event.pointerId) return;
     drag.current = null;
-    if (draft && draft.width * preview.width >= (target === "publish" ? 96 : 64) && draft.height * preview.height >= (target === "publish" ? 96 : 64)) onChange(target === "decode" ? [draft] : [...regions, draft]);
+    const finalDraft = draftRef.current;
+    if (finalDraft && finalDraft.width * preview.width >= (target === "publish" ? 96 : 64) && finalDraft.height * preview.height >= (target === "publish" ? 96 : 64)) onChange(target === "decode" ? [finalDraft] : [...regions, finalDraft]);
+    draftRef.current = null;
     setDraft(null);
   };
   return <div className="region-stage" ref={stageRef}>
@@ -332,7 +385,7 @@ function RecordList({ records, onNavigate, compact = false, selectedId = null }:
     {!compact && <header><strong>分支导出记录</strong><span>{records.length} 条</span></header>}
     {records.length === 0 ? <div className="records-empty">没有匹配的导出记录。</div> : records.map((record) => <button type="button" data-record-id={record.id} className={`record-row${selectedId === record.id ? " selected" : ""}`} key={record.id} onClick={() => onNavigate(record)}>
       <BadgeCheck size={16} />
-      <span><strong>{record.title}</strong><small>{record.artworkTitle} / {record.branchTitle} · {new Date(record.createdMs).toLocaleString()}</small><code>{record.watermarkId ?? "无 TrustMark"}</code></span>
+      <span><strong>{record.title}</strong><small>{record.creator || "作者未声明"} · {record.artworkTitle} / {record.branchTitle} · {new Date(record.createdMs).toLocaleString()}</small><small>{record.outputPath} · {formatBytes(record.outputBytes)}</small><code>{record.watermarkId ?? "无 TrustMark"}</code></span>
       <i>{record.trustmarkEnabled ? "C2PA + TrustMark" : "C2PA"}</i>
     </button>)}
   </section>;

@@ -58,12 +58,11 @@ pub(crate) fn sign_jpeg(
     builder.set_claim_generator_info(generator);
 
     if config.trustmark_enabled {
-        let mut binding_blocks = vec![json!({
-            "scope": {},
-            "value": soft_binding_value(identifier)
-        })];
-        binding_blocks.extend(config.additional_regions.iter().enumerate().map(
-            |(index, region)| {
+        let binding_blocks = config
+            .additional_regions
+            .iter()
+            .enumerate()
+            .map(|(index, region)| {
                 json!({
                     "scope": {
                         "region": {
@@ -85,13 +84,13 @@ pub(crate) fn sign_jpeg(
                     },
                     "value": soft_binding_value(identifier)
                 })
-            },
-        ));
+            })
+            .collect::<Vec<_>>();
         let soft_binding: SoftBinding = serde_json::from_value(json!({
             "alg": SOFT_BINDING_ALGORITHM,
             "blocks": binding_blocks,
             "name": "Lilith Artworks durable identifier",
-            "alg-params": "variant=Q;schema=BCH_5;payload=binary"
+            "alg-params": "variant=Q;schema=BCH_SUPER;payload=binary"
         }))?;
         builder.add_assertion(SoftBinding::LABEL, &soft_binding)?;
     }
@@ -110,17 +109,17 @@ pub(crate) fn sign_jpeg(
         ASSERTION_LABEL,
         &json!({
             "version": 1,
-            "watermarkId": identifier,
+            "watermarkId": config.trustmark_enabled.then_some(identifier),
             "authenticationContent": config.authentication_content,
             "creator": config.creator,
             "rightsStatement": config.rights_statement,
             "watermark": config.trustmark_enabled.then(|| json!({
                 "algorithm": SOFT_BINDING_ALGORITHM,
                 "variant": "Q",
-                "schema": "BCH_5",
+                "schema": "BCH_SUPER",
                 "strength": config.watermark_strength,
-                "coverage": "fullImage",
-                "additionalRegions": config.additional_regions
+                "coverage": "selectedRegions",
+                "regions": config.additional_regions
             })),
             "rendition": { "format": "image/jpeg", "quality": config.jpeg_quality }
         }),

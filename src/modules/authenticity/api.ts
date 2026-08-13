@@ -18,8 +18,12 @@ export const authenticityApi = {
     }),
   publish: (request: PublishBranchRequest) =>
     invokeCommand<PublishResult>("publish_branch_artifact", { request }),
+  cancelPublication: (branchId: string) =>
+    invokeCommand<void>("cancel_branch_publication", { branchId }),
   preview: (path: string) =>
     invokeCommand<PreviewImage>("preview_authenticity_image", { path }),
+  estimate: (inputPath: string, jpegQuality: number, backgroundColor: string) =>
+    invokeCommand<{ jpegBytes: number; sourceBytes: number }>("estimate_authenticity_output_size", { request: { inputPath, jpegQuality, backgroundColor } }),
   decode: (inputPath: string, region: NormalizedRegion | null) =>
     invokeCommand<DecodeResult>("decode_authenticity", {
       request: { inputPath, region },

@@ -120,6 +120,7 @@
 .branch-schedule { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .branch-schedule svg { color: var(--accent); }
 .branch-schedule.error { color: var(--danger); }
+.branch-schedule:has(.lucide-ban) { color: var(--danger); font-weight: 700; }
 
 .history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .commit-block { display: grid; gap: 5px; width: min(560px, 62%); }
@@ -167,6 +168,7 @@
 .history-labels { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding-top: 1px; }
 .history-labels i { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: 4px; color: var(--accent); font-size: 9px; font-style: normal; white-space: nowrap; }
 .history-labels i.fork-label { border-color: var(--border); color: var(--muted); }
+.history-labels i.published-label { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
 
 .history-inspector { min-width: 0; overflow: auto; background: var(--surface); }
 .history-inspector > header { padding: 15px 16px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 650; }
@@ -178,13 +180,17 @@
 .history-inspector code { font-family: Consolas, monospace; font-size: 9px; }
 
 .mindmap-root, .mindmap-root ul { margin: 0; padding: 0; list-style: none; }
-.mindmap-root { display: grid; gap: 8px; width: min(760px, 100%); min-width: 0; margin: 0 auto; }
+.mindmap-root { display: grid; gap: 8px; width: max-content; min-width: 100%; margin: 0; }
 .mindmap-root li { position: relative; display: grid; gap: 7px; min-width: 0; padding: 0; }
 .mindmap-root li > div { min-width: 0; }
-.mindmap-root li > ul { position: relative; display: grid; gap: 7px; margin-left: 30px; }
-.mindmap-root li > ul::before { content: ""; position: absolute; top: -7px; bottom: 34px; left: -16px; width: 1px; background: var(--border); }
-.mindmap-root li > ul > li::before { content: ""; position: absolute; top: 34px; left: -16px; width: 16px; height: 1px; background: var(--border); }
+.mindmap-root li > ul { position: relative; display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; min-width: 560px; margin: 8px 0 0; padding-top: 16px; }
+.mindmap-root li > ul::before { content: ""; position: absolute; top: 0; left: 12.5%; right: 12.5%; height: 1px; background: var(--border); }
+.mindmap-root li > ul > li::before { content: ""; position: absolute; top: -16px; left: 50%; width: 1px; height: 16px; background: var(--border); }
 .mindmap-root .history-node-card { min-height: 62px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.mindmap-root.mindmap-compact li > ul { align-items: start; }
+.mindmap-root.mindmap-timeline li > ul { align-items: start; }
+.mindmap-root.mindmap-timeline li > ul > li:nth-child(n) { margin-top: calc(var(--timeline-gap, 0) * 1px); }
+.mindmap-leaf-label { margin: -3px 0 0 12px; color: var(--accent); font-size: 9px; font-weight: 650; }
 .branch-list .branch-line { display: grid; gap: 0; }
 .branch-list .history-node-card { padding-left: 16px; }
 
