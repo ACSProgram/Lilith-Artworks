@@ -22,7 +22,8 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { libraryApi } from "./api";
-import { HistoryModule } from "../history/HistoryModule";
+import { ArtworkWorkspace } from "../../app/ArtworkWorkspace";
+import type { CertificationRecord } from "../authenticity/types";
 import { flattenTree, selectionForClick, visibleTree } from "./tree";
 import { LibraryTreeView } from "./LibraryTreeView";
 import type {
@@ -84,6 +85,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashEntries, setTrashEntries] = useState<LibraryTrashEntry[]>([]);
+  const [traceTarget, setTraceTarget] = useState<{ artworkId: string; branchId: string; recordId: string } | null>(null);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
   const nodeById = useMemo(
@@ -257,6 +259,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
     setSelectedIds(new Set([result.id]));
     setAnchorId(result.id);
     setActiveId(result.id);
+    setTraceTarget(null);
     setQuery("");
     setSearchResults([]);
   };
@@ -361,6 +364,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
                 setSelectedIds(next.ids);
                 setAnchorId(next.anchorId);
                 setActiveId(node.id);
+                setTraceTarget(null);
               }}
               onMove={(request: MoveLibraryNodesRequest) => {
                 void runMutation(() => libraryApi.moveNodes(request)).catch(() => undefined);
@@ -388,7 +392,34 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
             action={<button className="primary-button" type="button" onClick={onConfigure}><Settings aria-hidden="true" size={18} />设置仓库</button>}
           />
         ) : activeNode?.kind === "artwork" && selectedIds.size === 1 ? (
-          <HistoryModule artworkId={activeNode.id} onError={onError} />
+          <ArtworkWorkspace
+            key={`${activeNode.id}:${traceTarget?.branchId ?? "default"}`}
+            artworkId={activeNode.id}
+            initialView={traceTarget?.artworkId === activeNode.id ? "publish" : "history"}
+            initialBranchId={traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null}
+            initialRecordId={traceTarget?.artworkId === activeNode.id ? traceTarget.recordId : null}
+            onError={onError}
+            onNavigateRecord={(record: CertificationRecord) => {
+              const node = nodeById.get(record.artworkId);
+              if (!node) {
+                onError("匹配记录所属 Artwork 当前不在作品树中。");
+                return;
+              }
+              setExpandedIds((current) => {
+                const ancestors: string[] = [];
+                let parentId = node.parentId;
+                while (parentId) {
+                  ancestors.push(parentId);
+                  parentId = nodeById.get(parentId)?.parentId ?? null;
+                }
+                return new Set([...current, ...ancestors]);
+              });
+              setSelectedIds(new Set([record.artworkId]));
+              setAnchorId(record.artworkId);
+              setActiveId(record.artworkId);
+              setTraceTarget({ artworkId: record.artworkId, branchId: record.branchId, recordId: record.id });
+            }}
+          />
         ) : activeNode ? (
           <NodeOverview node={activeNode} selectedCount={selectedIds.size} />
         ) : (

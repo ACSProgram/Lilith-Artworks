@@ -527,7 +527,8 @@ pub(crate) fn compaction_target(root: &Path, history_id: &str) -> Result<Compact
              JOIN history_nodes child ON child.parent_id = node.id
              WHERE node.id = ?1
              AND NOT EXISTS (SELECT 1 FROM history_nodes sibling WHERE sibling.parent_id = node.id AND sibling.id <> child.id)
-             AND NOT EXISTS (SELECT 1 FROM branches WHERE head_history_id = node.id OR created_from_history_id = node.id)",
+             AND NOT EXISTS (SELECT 1 FROM branches WHERE head_history_id = node.id OR created_from_history_id = node.id)
+             AND NOT EXISTS (SELECT 1 FROM final_artifacts WHERE history_id = node.id)",
             [history_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get::<_, i64>(4)? != 0, row.get(5)?)),
         ).optional().map_err(storage::database_error)?;
@@ -648,6 +649,23 @@ pub(crate) fn delete_subtree(
         .map_err(storage::database_error)?;
     if !branch_valid {
         return Err("只能从当前分支的历史链删除节点".into());
+    }
+    let contains_publication: bool = connection
+        .query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM history_nodes WHERE id = ?1
+               UNION ALL
+               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
+             )
+             SELECT EXISTS(
+               SELECT 1 FROM final_artifacts artifact JOIN descendants ON artifact.history_id = descendants.id
+             )",
+            [history_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if contains_publication {
+        return Err("无法删除历史：这段历史包含已发布节点，发布记录必须保留可恢复基线".into());
     }
     transaction
         .execute_batch("CREATE TEMP TABLE IF NOT EXISTS history_delete (id TEXT PRIMARY KEY);")

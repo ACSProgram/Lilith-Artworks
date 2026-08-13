@@ -13,7 +13,13 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2.6", features = [] }
 
 [dependencies]
+anyhow = "1"
+base64 = "0.22"
+c2pa = { version = "0.90.11", default-features = false, features = ["file_io", "rust_native_crypto", "http_ureq"] }
+hex = "0.4"
 ico = "0.5"
+image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -21,7 +27,10 @@ sha2 = "0.10"
 tauri = { version = "2.11", features = ["tray-icon", "image-ico"] }
 tauri-plugin-dialog = "2.4"
 tempfile = "3"
+thiserror = "2"
+trustmark = "0.2.2"
 uuid = { version = "1", features = ["v4"] }
+zeroize = "1.8"
 zstd = "0.13"
 
 [profile.release]

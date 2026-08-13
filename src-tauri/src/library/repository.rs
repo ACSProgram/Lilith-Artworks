@@ -15,7 +15,7 @@ use super::model::{
 
 const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
 const REPOSITORY_FORMAT: &str = "lilith-artworks";
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const MAX_TITLE_CHARS: usize = 160;
 const MAX_MOVE_NODES: usize = 512;
 const MAX_SEARCH_CHARS: usize = 160;
@@ -158,7 +158,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '4');
+               ('schema_version', '5');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -239,6 +239,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
              CREATE TABLE final_artifacts (
                id TEXT PRIMARY KEY,
                branch_id TEXT NOT NULL UNIQUE REFERENCES branches(id) ON DELETE CASCADE,
+               history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
                source_path TEXT NOT NULL,
                source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
                media_type TEXT NOT NULL,
@@ -252,6 +253,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
                creator TEXT NOT NULL DEFAULT '',
                rights_statement TEXT NOT NULL DEFAULT '',
                authentication_content TEXT NOT NULL DEFAULT '',
+               trustmark_enabled INTEGER NOT NULL DEFAULT 1 CHECK (trustmark_enabled IN (0, 1)),
                certificate_path TEXT NOT NULL DEFAULT '',
                signing_algorithm TEXT NOT NULL DEFAULT 'es256',
                timestamp_url TEXT,
@@ -266,10 +268,19 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
                id TEXT PRIMARY KEY,
                final_artifact_id TEXT NOT NULL REFERENCES final_artifacts(id) ON DELETE CASCADE,
                branch_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
-               watermark_id TEXT NOT NULL CHECK (length(watermark_id) = 61),
+               history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
+               watermark_id TEXT CHECK (watermark_id IS NULL OR length(watermark_id) = 61),
+               trustmark_enabled INTEGER NOT NULL CHECK (trustmark_enabled IN (0, 1)),
                output_path TEXT NOT NULL,
                output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+               output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+               title TEXT NOT NULL,
+               creator TEXT NOT NULL,
+               rights_statement TEXT NOT NULL,
+               authentication_content TEXT NOT NULL,
+               regions_json TEXT NOT NULL DEFAULT '[]',
                c2pa_manifest_label TEXT,
+               c2pa_manifest_json TEXT,
                validation_state TEXT,
                created_ms INTEGER NOT NULL
              );
@@ -392,6 +403,10 @@ fn validate_existing(connection: &Connection) -> Result<(), String> {
         migrate_schema_v3_to_v4(connection)?;
         version = 4;
     }
+    if version == 4 {
+        migrate_schema_v4_to_v5(connection)?;
+        version = 5;
+    }
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{}", version));
     }
@@ -462,6 +477,62 @@ fn migrate_schema_v3_to_v4(connection: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("无法把作品仓库迁移到版本 4：{error}"))
+}
+
+fn migrate_schema_v4_to_v5(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE certification_configs ADD COLUMN trustmark_enabled INTEGER NOT NULL DEFAULT 1
+               CHECK (trustmark_enabled IN (0, 1));
+             DROP TABLE certification_records;
+             ALTER TABLE final_artifacts RENAME TO final_artifacts_v4;
+             CREATE TABLE final_artifacts (
+               id TEXT PRIMARY KEY,
+               branch_id TEXT NOT NULL UNIQUE REFERENCES branches(id) ON DELETE CASCADE,
+               history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
+               source_path TEXT NOT NULL,
+               source_sha256 TEXT NOT NULL CHECK (length(source_sha256) = 64),
+               media_type TEXT NOT NULL,
+               byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+               created_ms INTEGER NOT NULL
+             );
+             INSERT INTO final_artifacts
+               (id, branch_id, history_id, source_path, source_sha256, media_type, byte_size, created_ms)
+             SELECT artifact.id, artifact.branch_id, branch.head_history_id,
+                    artifact.source_path, artifact.source_sha256, artifact.media_type,
+                    artifact.byte_size, artifact.created_ms
+             FROM final_artifacts_v4 artifact
+             JOIN branches branch ON branch.id = artifact.branch_id;
+             DROP TABLE final_artifacts_v4;
+             CREATE TABLE certification_records (
+               id TEXT PRIMARY KEY,
+               final_artifact_id TEXT NOT NULL REFERENCES final_artifacts(id) ON DELETE CASCADE,
+               branch_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+               history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
+               watermark_id TEXT CHECK (watermark_id IS NULL OR length(watermark_id) = 61),
+               trustmark_enabled INTEGER NOT NULL CHECK (trustmark_enabled IN (0, 1)),
+               output_path TEXT NOT NULL,
+               output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+               output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+               title TEXT NOT NULL,
+               creator TEXT NOT NULL,
+               rights_statement TEXT NOT NULL,
+               authentication_content TEXT NOT NULL,
+               regions_json TEXT NOT NULL DEFAULT '[]',
+               c2pa_manifest_label TEXT,
+               c2pa_manifest_json TEXT,
+               validation_state TEXT,
+               created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX certification_records_watermark
+               ON certification_records(watermark_id, created_ms DESC);
+             CREATE INDEX certification_records_branch
+               ON certification_records(branch_id, created_ms DESC);
+             UPDATE repository_meta SET value = '5' WHERE key = 'schema_version';
+             COMMIT;",
+        )
+        .map_err(|error| format!("无法把作品仓库迁移到版本 5：{error}"))
 }
 
 fn create_directories(root: &Path) -> Result<(), String> {

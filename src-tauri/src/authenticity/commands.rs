@@ -1,0 +1,230 @@
+use std::{
+    fs::{self, File},
+    io::{Cursor, Read, Write},
+    path::{Path, PathBuf},
+};
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use image::{GenericImageView, ImageFormat};
+use sha2::Digest;
+use tauri::State;
+use tempfile::NamedTempFile;
+
+use crate::{
+    app::AppState,
+    backup::{self, BackupState},
+    library, storage,
+};
+
+use super::{
+    error::{AuthenticityError, AuthenticityResult},
+    model::{
+        BranchPublication, CertificationRecord, DecodeRequest, DecodeResult,
+        EnterPublicationRequest, PreviewImage, PublishBranchRequest, PublishResult,
+    },
+    pipeline, repository,
+    repository::NewFinalArtifact,
+    state::AuthenticityState,
+};
+
+fn root(state: &AppState) -> Result<PathBuf, String> {
+    let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
+    library::initialize(&root)?;
+    Ok(root)
+}
+
+#[tauri::command]
+pub(crate) async fn enter_branch_publication(
+    request: EnterPublicationRequest,
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+    authenticity_state: State<'_, AuthenticityState>,
+) -> Result<BranchPublication, String> {
+    let root = root(app_state.inner())?;
+    let state = backup_state.inner().clone();
+    let models_ready = authenticity_state.model_files_ready();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.run_exclusive(Some(&request.branch_id), || {
+            let (_, history_id) = repository::branch_head(&root, &request.branch_id)?;
+            state.report_progress("publish-lock", "正在固化发布检查点", 0, 2);
+            backup::ensure_checkpoint(&root, &history_id)?;
+            state.report_progress("publish-lock", "正在保存最终成品", 1, 2);
+            store_final_artifact(
+                &root,
+                &request.branch_id,
+                &history_id,
+                &request.artifact_path,
+            )?;
+            state.report_progress("publish-lock", "分支已进入发布状态", 2, 2);
+            repository::get_publication(&root, &request.branch_id, models_ready)
+        })
+    })
+    .await
+    .map_err(|error| format!("进入发布状态的任务异常结束：{error}"))?
+}
+
+#[tauri::command]
+pub(crate) fn get_branch_publication(
+    branch_id: String,
+    app_state: State<'_, AppState>,
+    authenticity_state: State<'_, AuthenticityState>,
+) -> Result<BranchPublication, String> {
+    repository::get_publication(
+        &root(app_state.inner())?,
+        &branch_id,
+        authenticity_state.model_files_ready(),
+    )
+}
+
+#[tauri::command]
+pub(crate) async fn publish_branch_artifact(
+    request: PublishBranchRequest,
+    app_state: State<'_, AppState>,
+    authenticity_state: State<'_, AuthenticityState>,
+) -> Result<PublishResult, AuthenticityError> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    let state = authenticity_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let published = pipeline::publish(&root, &state, request)?;
+        Ok(PublishResult {
+            record: published.record,
+            width: published.width,
+            height: published.height,
+            watermark_region_count: published.watermark_region_count,
+        })
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn decode_authenticity(
+    request: DecodeRequest,
+    app_state: State<'_, AppState>,
+    authenticity_state: State<'_, AuthenticityState>,
+) -> Result<DecodeResult, AuthenticityError> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    let state = authenticity_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || pipeline::decode(&root, &state, request))
+        .await
+        .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) fn search_certification_records(
+    query: String,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<CertificationRecord>, String> {
+    let query = query.trim();
+    if query.chars().count() > 160 {
+        return Err("记录搜索内容不能超过 160 个字符".into());
+    }
+    if query.is_empty() {
+        return Ok(Vec::new());
+    }
+    repository::search_records(&root(app_state.inner())?, query)
+}
+
+#[tauri::command]
+pub(crate) async fn preview_authenticity_image(path: String) -> AuthenticityResult<PreviewImage> {
+    tauri::async_runtime::spawn_blocking(move || make_preview(PathBuf::from(path)))
+        .await
+        .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
+    if !path.is_file() {
+        return Err(AuthenticityError::InvalidInput("预览图片不存在".into()));
+    }
+    let source = image::open(&path)?;
+    let (width, height) = source.dimensions();
+    let preview = source.thumbnail(1600, 1600);
+    let mut encoded = Cursor::new(Vec::new());
+    preview.write_to(&mut encoded, ImageFormat::Png)?;
+    Ok(PreviewImage {
+        data_url: format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(encoded.into_inner())
+        ),
+        width,
+        height,
+        source_bytes: fs::metadata(path)?.len(),
+    })
+}
+
+fn store_final_artifact(
+    root: &Path,
+    branch_id: &str,
+    history_id: &str,
+    source_value: &str,
+) -> Result<(), String> {
+    let source = Path::new(source_value.trim());
+    if !source.is_file() {
+        return Err("最终成品不存在或不是普通文件".into());
+    }
+    let source = source
+        .canonicalize()
+        .map_err(|error| format!("无法访问最终成品：{error}"))?;
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let media_type = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "tif" | "tiff" => "image/tiff",
+        _ => return Err("最终成品仅支持 PNG、JPEG、WebP 或 TIFF".into()),
+    };
+    let artifact_id = storage::new_id();
+    let artifact_directory = root
+        .join("artworks")
+        .join(repository::branch_head(root, branch_id)?.0)
+        .join("artifacts")
+        .join(branch_id);
+    fs::create_dir_all(&artifact_directory)
+        .map_err(|error| format!("无法创建成品目录：{error}"))?;
+    let final_path = artifact_directory.join(format!("{artifact_id}.{extension}"));
+    let mut source_file =
+        File::open(&source).map_err(|error| format!("无法读取最终成品：{error}"))?;
+    let mut temp = NamedTempFile::new_in(&artifact_directory)
+        .map_err(|error| format!("无法创建成品临时文件：{error}"))?;
+    let mut hasher = sha2::Sha256::new();
+    let mut size = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = source_file
+            .read(&mut buffer)
+            .map_err(|error| format!("无法读取最终成品：{error}"))?;
+        if read == 0 {
+            break;
+        }
+        temp.write_all(&buffer[..read])
+            .map_err(|error| format!("无法写入最终成品：{error}"))?;
+        hasher.update(&buffer[..read]);
+        size += read as u64;
+    }
+    temp.as_file()
+        .sync_all()
+        .map_err(|error| format!("无法同步最终成品：{error}"))?;
+    temp.persist_noclobber(&final_path)
+        .map_err(|error| format!("无法发布最终成品：{}", error.error))?;
+    let source_sha256 = hex::encode_upper(hasher.finalize());
+    let stored_path = storage::relative_path(root, &final_path)?;
+    let artifact = NewFinalArtifact {
+        id: &artifact_id,
+        branch_id,
+        history_id,
+        source_path: &stored_path,
+        source_sha256: &source_sha256,
+        media_type,
+        byte_size: size,
+        created_ms: storage::now_ms()?,
+    };
+    if let Err(error) = repository::insert_final_artifact(root, &artifact) {
+        let _ = fs::remove_file(&final_path);
+        return Err(error);
+    }
+    Ok(())
+}

@@ -176,6 +176,21 @@ pub fn run() {
             let backup_state = backup::BackupState::default();
             backup_state.start_scheduler(application.handle().clone())?;
             application.manage(backup_state);
+            let resource_dir = application.path().resource_dir()?;
+            let model_candidates = [
+                resource_dir.join("resources").join("models"),
+                resource_dir.join("models"),
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .join("resources")
+                    .join("models"),
+            ];
+            let models_dir = model_candidates
+                .into_iter()
+                .find(|path| {
+                    path.join("encoder_Q.onnx").is_file() && path.join("decoder_Q.onnx").is_file()
+                })
+                .unwrap_or_else(|| resource_dir.join("resources").join("models"));
+            application.manage(authenticity::AuthenticityState::new(models_dir));
             app::restore_window_settings(application.handle())?;
             let executable =
                 std::env::current_exe().map_err(|error| format!("无法获取程序路径：{error}"))?;
@@ -241,6 +256,12 @@ pub fn run() {
             backup::set_history_checkpoint,
             backup::get_backup_runtime_status,
             backup::cancel_backup_operation,
+            authenticity::enter_branch_publication,
+            authenticity::get_branch_publication,
+            authenticity::publish_branch_artifact,
+            authenticity::decode_authenticity,
+            authenticity::search_certification_records,
+            authenticity::preview_authenticity_image,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lilith Artworks");

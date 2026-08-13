@@ -2,61 +2,69 @@
 
 更新时间：2026-08-13
 
-当前结论：本轮代码与文档任务已完成；待办代码项为 0。剩余 6 项全部是用户执行完整编译后的人工作流验收，若验收暴露新问题，再按下方入口开启下一轮修复。
+当前结论：阶段 5“成品与认证整合”和阶段 6“全库识别”已实现，历史阶段已由用户完成完整编译验收。本轮前端构建与静态检查通过；按重依赖验证策略，没有运行完整 Rust 编译、ONNX/C2PA 流程或 GUI 自动化。下一步是用户执行完整编译和下面的人工工作流验收，发现问题后再按单一入口修复。
 
 ## 本轮范围
 
-本轮只处理历史与增量备份工作流：历史页面排布、分支进入、当前分支精简、节点/分支删除、确认窗口、保存状态、检查点、恢复文件选择、进度显示、主动提交命名、自动备份开关和托盘动态文案。
+- 参考 `F:\programs\Proven` 迁移 C2PA、TrustMark Q/BCH-5、整图/局部区域、图片预览、私钥零持久化和双通道识别。
+- 把认证流程融合到 Artwork/branch/history：分支进入发布状态、发布 head 强制检查点、仓库内最终成品、C2PA 导出记录和跨作品溯源跳转。
+- C2PA 为强制基础，不能关闭；TrustMark 可关闭，模型不可用时自动降级为仅 C2PA。
+- 历史总览从横向 mindmap 改为纵向缩进树，使用工作区原生滚轮纵向浏览，减少横向滑动和底部空白。
+- schema 升级到 v5；同步架构、历史、Library、认证模块和实施计划文档。
 
-不在本轮范围：Artwork 树、回收站、C2PA/TrustMark、发布成品、数据库大版本迁移和完整 GUI 自动化。
+不在本轮范围：解除发布状态、删除最终成品、修改已有导出记录、在线身份认证、完整 Rust/ONNX/C2PA 编译测试和 GUI 自动化。
 
 ## 代码入口
 
 | 问题 | 首选入口 | 相邻契约 |
 | --- | --- | --- |
-| 历史页面状态与命令编排 | `src/modules/history/HistoryModule.tsx` | `api.ts`, `types.ts` |
-| 分支设置、系统对话框、确认窗口 | `src/modules/history/HistoryControls.tsx` | `src/styles/history.css` |
-| 分支链、唯一归属、精简资格 | `src/modules/history/historyModel.ts` | `types.ts` |
-| 历史图与删除事务 | `src-tauri/src/history/repository.rs` | `history/model.rs` |
-| snapshot/delta、检查点、恢复、精简 | `src-tauri/src/backup/restore.rs`, `commands.rs` | `chunk_file.rs` |
-| 运行进度和取消 | `src-tauri/src/backup/runtime.rs` | `backup/mod.rs` |
-| 全局暂停和托盘动态项 | `src-tauri/src/app/settings.rs`, `src-tauri/src/lib.rs` | `backup/scheduler.rs` |
+| Artwork 页签与跨作品溯源 | `src/app/ArtworkWorkspace.tsx` | `src/modules/library/LibraryModule.tsx` |
+| 发布、区域框选、识别和记录 UI | `src/modules/authenticity/AuthenticityModule.tsx` | `types.ts`, `api.ts`, `src/styles/authenticity.css` |
+| 发布/识别流水线 | `src-tauri/src/authenticity/pipeline.rs` | `commands.rs`, `model.rs` |
+| C2PA manifest | `src-tauri/src/authenticity/c2pa.rs` | Proven `c2pa_io.rs` |
+| TrustMark 编解码 | `src-tauri/src/authenticity/trustmark.rs` | Proven `watermark.rs`, `state.rs` |
+| 成品、配置、记录和匹配 | `src-tauri/src/authenticity/repository.rs` | `src-tauri/src/library/repository.rs` schema v5 |
+| 发布检查点和分支锁 | `src-tauri/src/authenticity/commands.rs` | `src-tauri/src/backup/restore.rs`, `history/repository.rs` |
+| 历史总览布局 | `src/styles/history.css` 的 `.mindmap-root` | `src/modules/history/HistoryModule.tsx` |
 
-## 已实现但待人工编译验收
+## 已实现待人工验收
 
-- 当前分支视图提供显式“进入精简模式”，只允许选择可精简的普通中间节点，确认后按链顺序重建和整理。
-- 节点标签不再点击进入分支；右键仅在节点唯一属于一个分支时提供“进入分支”。
-- 节点删除仅在当前分支视角提供，删除该节点及后代并回退当前分支；若其他分支占用子树则预检拒绝，要求先删分支。
-- fork 节点右键可删除上方分支，当前分支视图也有删除分支按钮，均使用二次确认。
-- 分支设置改为带标签的自动保存表单，包含已保存、未保存、保存中、保存失败状态；自动备份使用开关。
-- 检查点使用自定义二次确认和运行进度；取消检查点恢复为唯一子节点反向 delta 的存储路径与大小统计。
-- 恢复使用系统“另存为”窗口，命令发出后立即显示进度区域。
-- 空备注手动提交名称改为“主动提交”；详情中的提交类型同样显示“主动提交”。
-- 设置页自动备份调度使用开关；托盘项根据当前状态显示“暂停所有自动备份”或“继续所有自动备份”。
+- 分支没有 head 时拒绝发布；进入发布状态时先调用 `backup::ensure_checkpoint`，再复制成品并在事务中确认 head 未变化。
+- 最终成品流式复制到仓库 `artifacts/<branch-id>/`，同步后以不覆盖方式发布，并保存 SHA-256、大小、媒体类型和发布节点 ID。
+- `final_artifacts` 存在后，已有 history/backup 约束自动禁止继续提交、调度和删除分支；发布节点作为 checkpoint 保留。
+- C2PA 每次强制签名，签入 Lilith 自定义声明、CreativeWork、ingredient 和 actions；TrustMark 可选。
+- TrustMark 沿用 Proven 的 61 位 ID、Q/BCH-5、整图水印、最多 8 个额外范围和 0.50..1.50 强度。
+- 签名输出先写临时文件，成功回读 C2PA 后才发布；记录落库失败会删除本次输出。私钥只存在于单次命令内。
+- 导出记录保存时间、发布节点、ID、输出路径/大小/SHA-256、声明、区域、manifest 和验证状态，并支持字段搜索。
+- 识别支持整图或框选区域，组合 C2PA 与 TrustMark 结果，按任一 ID 匹配本地记录；点击结果会切换 Artwork/分支并高亮记录。
+- schema v5 强制最终成品关联发布节点；v4 预留认证记录表迁移时重建，已有最终成品保留并绑定分支当前 head。
 
-## 人工验收重点
+## 人工验收顺序
 
-1. 在包含共享祖先和两个后续分支的历史图中，确认删除一个分支不会破坏另一个分支；删除共享子树会提示先删除占用分支。
-2. 在当前分支进入精简模式，连续选择多个相邻/不相邻中间节点，确认操作完成后链仍可恢复且节点计数正确。
-3. 设立普通检查点后取消，确认“当前存储”由 snapshot 全量大小刷新为相应反向 delta 大小，并且祖先恢复仍成功。
-4. 恢复节点时确认系统文件窗口出现、不能覆盖既有文件、运行期间页面头部持续显示进度与取消按钮。
-5. 在设置页和托盘来回暂停/继续自动备份，确认开关状态、托盘文案和调度行为一致。
-6. 缩窄窗口检查分支设置和进度区不会相互覆盖；深色主题下确认危险确认窗口可读。
+1. 完整编译一次。若失败，记录完整命令、首个错误和文件；不要同时处理后续错误。
+2. 新建测试仓库，提交一个分支 head，选择 PNG 最终成品进入发布状态；确认 head 显示检查点、分支显示成品锁定、自动提交和手动提交均不可用。
+3. 使用有效测试证书和私钥发布一次“C2PA + TrustMark”，再关闭 TrustMark 发布一次“仅 C2PA”；确认两个 JPG 均可由 C2PA 工具读取，记录内容、大小和 SHA-256 正确。
+4. 启用 TrustMark，在预览中添加/删除多个局部区域，确认最小区域和最多 8 个限制、全图基础水印和区域 soft-binding 坐标正确。
+5. 分别用原导出图、去除 metadata 的图、裁剪图执行整图/框选识别；确认双通道一致、仅 TrustMark、仅 C2PA、无证据和冲突文案符合实际。
+6. 从另一个 Artwork 的识别页点击匹配记录，确认左侧树展开并选择正确 Artwork，发布页选中正确分支且具体记录高亮。
+7. 打开 v4 测试仓库触发迁移，确认 schema_version=5、历史/分支/成品仍可读取；迁移前应备份测试数据库，不直接用唯一生产仓库首测。
+8. 用深分叉历史图检查纵向 mindmap：滚轮自然浏览，无持续横向滚动、底部大块空白或节点/连线重叠；再检查窄窗口和深色主题。
 
-## 下次继续规则
+## 已通过检查
 
-1. 先记录用户完整编译命令、首个错误和对应文件，不要重新通读仓库。
-2. 编译错误按 `AGENTS.md` 的模块入口读取；GUI 行为错误先从本文件“代码入口”选择单一路径。
-3. 一次只修复一类失败：前端类型/样式、Tauri 命令契约、历史事务、ChunkFile 恢复或托盘生命周期。
-4. 每修复一类失败就同步更新本文件的验收状态；通过的人工项目从清单移到“已验收”。
-5. 阶段 5 的成品与认证整合必须等本轮 6 项全部通过后开始，避免在未稳定的历史图上叠加认证流程。
-
-## 验证状态
-
-本轮按用户要求未执行完整 Rust/GUI 编译测试。已通过：
-
-- `npx tsc --noEmit`
+- `npm run build`
 - `cargo fmt --all -- --check`
 - `git diff --check`
+- `cargo metadata --format-version 1 --no-deps`
+- `cargo generate-lockfile --offline`（解析 682 个包；未编译）
 
-尚未执行：`cargo check`、`cargo test`、完整 Tauri 编译、GUI 与大文件恢复/精简流程。这些由用户在人工验收阶段执行。
+在线生成锁文件曾因 Windows schannel `SEC_E_NO_CREDENTIALS` 失败，随后离线缓存解析成功并生成 `Cargo.lock`。这不是编译结果。
+
+## 尚未执行
+
+- `cargo check`、`cargo test`、完整 Tauri 编译。
+- C2PA 实际签名、manifest 第三方验证、TrustMark ONNX 编解码。
+- schema v4 到 v5 的真实临时数据库迁移测试。
+- GUI 人工作流、窄窗口、深色主题和大图性能检查。
+
+这些项目由用户按上方顺序执行。若完整编译暴露接口错误，优先修复 `src-tauri/src/authenticity/`，不要进入 ChunkFile；只有发布检查点物化失败才读取 `backup/restore.rs`。

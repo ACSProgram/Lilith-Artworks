@@ -178,13 +178,13 @@
 .history-inspector code { font-family: Consolas, monospace; font-size: 9px; }
 
 .mindmap-root, .mindmap-root ul { margin: 0; padding: 0; list-style: none; }
-.mindmap-root { display: flex; flex-direction: column; gap: 12px; min-width: max-content; }
-.mindmap-root li { position: relative; display: flex; align-items: center; gap: 28px; padding: 4px 0; }
-.mindmap-root li > div { flex: none; width: 330px; }
-.mindmap-root li > ul { position: relative; display: flex; flex-direction: column; gap: 8px; }
-.mindmap-root li > ul::before { content: ""; position: absolute; top: 34px; bottom: 34px; left: -14px; width: 1px; background: var(--border); }
-.mindmap-root li > ul > li::before { content: ""; position: absolute; top: 50%; left: -14px; width: 14px; height: 1px; background: var(--border); }
-.mindmap-root li:has(> ul)::after { content: ""; position: absolute; top: 50%; left: 330px; width: 14px; height: 1px; background: var(--border); }
+.mindmap-root { display: grid; gap: 8px; width: min(760px, 100%); min-width: 0; margin: 0 auto; }
+.mindmap-root li { position: relative; display: grid; gap: 7px; min-width: 0; padding: 0; }
+.mindmap-root li > div { min-width: 0; }
+.mindmap-root li > ul { position: relative; display: grid; gap: 7px; margin-left: 30px; }
+.mindmap-root li > ul::before { content: ""; position: absolute; top: -7px; bottom: 34px; left: -16px; width: 1px; background: var(--border); }
+.mindmap-root li > ul > li::before { content: ""; position: absolute; top: 34px; left: -16px; width: 16px; height: 1px; background: var(--border); }
+.mindmap-root .history-node-card { min-height: 62px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
 .branch-list .branch-line { display: grid; gap: 0; }
 .branch-list .history-node-card { padding-left: 16px; }
 
