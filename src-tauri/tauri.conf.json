@@ -1,0 +1,46 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Lilith Artworks",
+  "version": "0.1.0",
+  "identifier": "art.lilith.artworks",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://127.0.0.1:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Lilith Artworks",
+        "width": 1320,
+        "height": 840,
+        "minWidth": 760,
+        "minHeight": 560,
+        "center": true,
+        "resizable": true,
+        "dragDropEnabled": false,
+        "fullscreen": false,
+        "decorations": true,
+        "backgroundColor": "#f4f5f2"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: http://asset.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; connect-src ipc: http://ipc.localhost"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["resources/icon.ico"],
+    "resources": {
+      "resources/icon.ico": "resources/icon.ico",
+      "resources/models/decoder_Q.onnx": "resources/models/decoder_Q.onnx",
+      "resources/models/encoder_Q.onnx": "resources/models/encoder_Q.onnx",
+      "resources/models/README.md": "resources/models/README.md"
+    },
+    "shortDescription": "作品历史、分支与真实性管理工具",
+    "longDescription": "Lilith Artworks 管理作品的增量历史、分支成品与 C2PA/TrustMark 认证。"
+  }
+}
