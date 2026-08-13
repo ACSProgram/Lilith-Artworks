@@ -24,6 +24,28 @@ struct RuntimeIcons {
     tray: Image<'static>,
 }
 
+struct TrayMenuState {
+    pause_automatic: MenuItem<tauri::Wry>,
+}
+
+fn automatic_backup_menu_text(paused: bool) -> &'static str {
+    if paused {
+        "继续所有自动备份"
+    } else {
+        "暂停所有自动备份"
+    }
+}
+
+pub(crate) fn refresh_tray_backup_menu(app: &AppHandle) -> Result<(), String> {
+    if let Some(menu) = app.try_state::<TrayMenuState>() {
+        let paused = app.state::<app::AppState>().automatic_backups_paused();
+        menu.pause_automatic
+            .set_text(automatic_backup_menu_text(paused))
+            .map_err(|error| format!("无法更新托盘备份菜单：{error}"))?;
+    }
+    Ok(())
+}
+
 fn load_runtime_icons(icon_path: &Path, tray_target_size: u32) -> Result<RuntimeIcons, String> {
     let window =
         Image::from_path(icon_path).map_err(|error| format!("无法读取应用图标：{error}"))?;
@@ -89,11 +111,18 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
     let pause = MenuItem::with_id(
         application,
         "pause-automatic",
-        "暂停所有自动备份",
+        automatic_backup_menu_text(
+            application
+                .state::<app::AppState>()
+                .automatic_backups_paused(),
+        ),
         true,
         None::<&str>,
     )?;
     let menu = Menu::with_items(application, &[&show, &pause, &quit])?;
+    application.manage(TrayMenuState {
+        pause_automatic: pause.clone(),
+    });
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Lilith Artworks")
         .menu(&menu)

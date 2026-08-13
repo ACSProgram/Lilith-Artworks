@@ -1,5 +1,20 @@
 # 历史与增量备份模块
 
+## 上下文入口
+
+按问题只读取一条路径：
+
+- 页面状态、右键菜单、分支进入、精简选择与命令编排：`src/modules/history/HistoryModule.tsx`。
+- 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
+- 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
+- DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
+- SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
+- snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file.rs`。
+- 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`。
+- 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
+
+当前未验收项和人工检查清单只读 `docs/planning/current-handoff.md`。
+
 ## 模块边界
 
 - `src-tauri/src/library/`：仓库初始化、作品树、搜索与项目回收站。
@@ -18,7 +33,7 @@ fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_
 
 ## 提交与恢复
 
-提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件；相同 SHA-256 只更新时间，不创建节点。手动提交备注可为空并生成未命名提交；调度器使用独立的 automatic 类型和空备注，不会覆盖手动备注。
+提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件；相同 SHA-256 只更新时间，不创建节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
 恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线。
 
@@ -28,11 +43,13 @@ fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_
 
 ## 历史操作
 
-历史总览是父子 mindmap，分支视图则列出当前 head 的祖先链。节点操作统一位于右键菜单；总览点击只选择节点，右键菜单用于进入分支、删除分支和其它破坏性操作。恢复会把目标节点物化到原文件同目录的 `_restored` 文件，并报告可取消进度。
+历史总览是父子 mindmap，分支视图则列出当前 head 的祖先链。节点左键只选择或在精简模式中勾选；只有节点唯一属于一个分支时，右键菜单才提供进入分支。恢复使用系统“另存为”窗口选择新文件，并在页面头部报告可取消进度。
 
-精简只允许在当前分支视图中选择有一个子节点且不是叶节点、分支 head、fork 起点或检查点的普通中间节点。任务会重新物化父子节点，使用原始 ChunkFile API 重建新的反向 delta，再以事务改接历史边并销毁旧节点和不再引用的文件。删除子树同样绕过回收站；若仍有完整分支指向后续历史，会先拒绝并要求删除对应分支。
+精简只允许在当前分支视图进入专用模式后，选择有一个子节点且不是叶节点、分支 head、fork 起点或检查点的普通中间节点。任务按分支链从后向前处理所选节点，重新物化父子节点，使用原始 ChunkFile API 重建新的反向 delta，再以事务改接历史边并销毁旧节点和不再引用的文件。删除节点仅从当前分支视角发起，会删除该节点及后代并回退当前分支；若其它完整分支仍指向子树，预检会拒绝并要求先删除对应分支。
 
-全局设置和托盘菜单均可暂停所有自动备份，状态会持久化；提交工具显示保存中、已保存和未保存状态。
+检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta，并把 UI 的当前存储路径/大小统计切回该 delta。分支 head、fork 起点和分叉点是强制检查点，不能取消。
+
+全局设置和分支设置使用开关表达自动备份状态。托盘菜单会根据持久化状态动态显示“暂停所有自动备份”或“继续所有自动备份”；分支设置自动保存并显示未保存、保存中、已保存和保存失败状态。
 
 ## 命令
 

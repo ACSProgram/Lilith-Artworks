@@ -172,12 +172,12 @@ export function App() {
               <label>
                 <PanelLeftClose aria-hidden="true" size={18} />
                 <span>关闭主窗口时驻留托盘</span>
-                <input type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
+                <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
               </label>
               <label>
                 <LoaderCircle aria-hidden="true" size={18} />
-                <span>暂停所有自动备份</span>
-                <input type="checkbox" checked={draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: event.target.checked })} />
+                <span><strong>自动备份调度</strong><small>{draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}</small></span>
+                <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
               </label>
             </div>
 

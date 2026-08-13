@@ -482,12 +482,16 @@ pub(crate) fn unmark_checkpoint(root: &Path, history_id: &str) -> Result<Option<
     if !marked {
         return Ok(None);
     }
-    let delta_size: i64 = transaction
+    let child_delta: Option<(String, i64)> = transaction
         .query_row(
-            "SELECT COALESCE((SELECT delta_size FROM history_edges WHERE child_history_id = ?1), chunk_file_size) FROM history_nodes WHERE id = ?1",
+            "SELECT edge.delta_path, edge.delta_size
+             FROM history_nodes child
+             JOIN history_edges edge ON edge.child_history_id = child.id
+             WHERE child.parent_id = ?1",
             [history_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(storage::database_error)?;
     let alternative: bool = transaction.query_row(
         "WITH RECURSIVE descendants(id) AS (
@@ -499,10 +503,13 @@ pub(crate) fn unmark_checkpoint(root: &Path, history_id: &str) -> Result<Option<
     if !alternative {
         return Err("该检查点是恢复祖先历史所需的唯一 snapshot，不能取消".into());
     }
+    let (delta_path, delta_size) = child_delta.ok_or("取消检查点时找不到唯一子节点的反向增量")?;
     transaction
         .execute(
-            "UPDATE history_nodes SET is_checkpoint = 0, snapshot_path = NULL, chunk_file_size = ?2 WHERE id = ?1",
-            rusqlite::params![history_id, delta_size],
+            "UPDATE history_nodes
+             SET is_checkpoint = 0, snapshot_path = NULL, delta_path = ?2, chunk_file_size = ?3
+             WHERE id = ?1",
+            rusqlite::params![history_id, delta_path, delta_size],
         )
         .map_err(storage::database_error)?;
     transaction.commit().map_err(storage::database_error)?;
@@ -607,7 +614,11 @@ pub(crate) fn apply_compaction(
     Ok(paths)
 }
 
-pub(crate) fn delete_subtree(root: &Path, history_id: &str) -> Result<HistoryDeletion, String> {
+pub(crate) fn delete_subtree(
+    root: &Path,
+    history_id: &str,
+    branch_id: &str,
+) -> Result<HistoryDeletion, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let artwork_id: String = transaction
@@ -619,6 +630,25 @@ pub(crate) fn delete_subtree(root: &Path, history_id: &str) -> Result<HistoryDel
         .optional()
         .map_err(storage::database_error)?
         .ok_or("找不到历史节点")?;
+    let branch_valid: bool = transaction
+        .query_row(
+            "WITH RECURSIVE ancestors(id, parent_id) AS (
+               SELECT node.id, node.parent_id
+               FROM branches branch
+               JOIN history_nodes node ON node.id = branch.head_history_id
+               WHERE branch.id = ?2 AND branch.artwork_id = ?3
+               UNION ALL
+               SELECT parent.id, parent.parent_id
+               FROM history_nodes parent JOIN ancestors ON parent.id = ancestors.parent_id
+             )
+             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
+            params![history_id, branch_id, artwork_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if !branch_valid {
+        return Err("只能从当前分支的历史链删除节点".into());
+    }
     transaction
         .execute_batch("CREATE TEMP TABLE IF NOT EXISTS history_delete (id TEXT PRIMARY KEY);")
         .map_err(storage::database_error)?;
@@ -639,8 +669,9 @@ pub(crate) fn delete_subtree(root: &Path, history_id: &str) -> Result<HistoryDel
              )
              SELECT b.title FROM branches b JOIN descendants d
                ON b.head_history_id = d.id OR b.created_from_history_id = d.id
+             WHERE b.id <> ?2
              LIMIT 1",
-            [history_id],
+            params![history_id, branch_id],
             |row| row.get(0),
         )
         .optional()
@@ -762,6 +793,65 @@ pub(crate) fn delete_subtree(root: &Path, history_id: &str) -> Result<HistoryDel
         deleted_count,
         storage_paths: paths.into_iter().collect(),
     })
+}
+
+pub(crate) fn validate_subtree_deletion(
+    root: &Path,
+    history_id: &str,
+    branch_id: &str,
+) -> Result<(), String> {
+    let connection = storage::open(root)?;
+    let artwork_id: String = connection
+        .query_row(
+            "SELECT artwork_id FROM history_nodes WHERE id = ?1",
+            [history_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .ok_or("找不到历史节点")?;
+    let branch_valid: bool = connection
+        .query_row(
+            "WITH RECURSIVE ancestors(id, parent_id) AS (
+               SELECT node.id, node.parent_id
+               FROM branches branch
+               JOIN history_nodes node ON node.id = branch.head_history_id
+               WHERE branch.id = ?2 AND branch.artwork_id = ?3
+               UNION ALL
+               SELECT parent.id, parent.parent_id
+               FROM history_nodes parent JOIN ancestors ON parent.id = ancestors.parent_id
+             )
+             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
+            params![history_id, branch_id, artwork_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if !branch_valid {
+        return Err("只能从当前分支的历史链删除节点".into());
+    }
+    let conflict: Option<String> = connection
+        .query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM history_nodes WHERE id = ?1
+               UNION ALL
+               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
+             )
+             SELECT branch.title
+             FROM branches branch JOIN descendants
+               ON branch.head_history_id = descendants.id OR branch.created_from_history_id = descendants.id
+             WHERE branch.id <> ?2
+             LIMIT 1",
+            params![history_id, branch_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    if let Some(title) = conflict {
+        return Err(format!(
+            "无法删除历史：分支“{title}”仍然指向这段历史，请先删除该分支"
+        ));
+    }
+    Ok(())
 }
 
 pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeletion, String> {

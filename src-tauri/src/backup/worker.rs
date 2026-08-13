@@ -34,7 +34,7 @@ pub(crate) fn run_backup(
         if commit_kind == "automatic" {
             "自动备份"
         } else {
-            "未命名提交"
+            "主动提交"
         }
     } else {
         note.trim()

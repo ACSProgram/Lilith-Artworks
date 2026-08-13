@@ -189,6 +189,7 @@ pub(crate) fn get_app_settings(state: State<'_, AppState>) -> Result<SettingsSna
 
 #[tauri::command]
 pub(crate) fn save_app_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
     settings: AppSettings,
@@ -206,6 +207,7 @@ pub(crate) fn save_app_settings(
     *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
     backup_state.set_automatic_scheduling(!paused);
     backup_state.wake_scheduler();
+    crate::refresh_tray_backup_menu(&app)?;
     snapshot(state.inner())
 }
 
@@ -218,6 +220,7 @@ pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Res
     let backup = app.state::<BackupState>();
     backup.set_automatic_scheduling(!paused);
     backup.wake_scheduler();
+    crate::refresh_tray_backup_menu(app)?;
     Ok(())
 }
 

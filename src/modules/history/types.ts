@@ -8,9 +8,6 @@ export interface ArtworkHistory {
 export interface ArtworkBranch {
   id: string;
   title: string;
-  note: string;
-  commitKind: "manual" | "automatic";
-  isCheckpoint: boolean;
   sourcePath: string;
   headHistoryId: string | null;
   createdFromHistoryId: string | null;

@@ -3,6 +3,7 @@
 ## 当前文档
 
 - [分阶段实施计划](planning/implementation-plan.md)
+- [当前任务交接](planning/current-handoff.md)
 - [系统架构](architecture/overview.md)
 - [Artwork 树模块](modules/library.md)
 - [历史与增量备份模块](modules/history-and-backup.md)

@@ -136,9 +136,21 @@ pub(crate) fn materialize_snapshot(
 }
 
 pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), String> {
+    ensure_checkpoint_with_progress(root, history_id, || false, |_, _, _| {})
+}
+
+pub(crate) fn ensure_checkpoint_with_progress(
+    root: &Path,
+    history_id: &str,
+    cancelled: impl Fn() -> bool,
+    progress: impl Fn(&str, u64, u64),
+) -> Result<(), String> {
+    ensure_not_cancelled(&cancelled)?;
     let target = history::load_node(root, history_id)?;
     if target.snapshot_path.is_some() {
-        return history::mark_checkpoint(root, history_id);
+        history::mark_checkpoint(root, history_id)?;
+        progress("检查点已就绪", 1, 1);
+        return Ok(());
     }
     let chain = history::materialization_chain(root, history_id)?;
     let first = chain.first().ok_or("checkpoint 恢复链为空")?;
@@ -149,9 +161,12 @@ pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), Str
             .as_deref()
             .ok_or("恢复链起点缺少 snapshot")?,
     )?;
+    let total = chain.len().max(1) as u64;
+    progress("正在准备检查点历史链", 0, total);
     let temp_directory = root.join("temp");
     let mut temporaries = Vec::new();
-    for child in chain.iter().take(chain.len().saturating_sub(1)) {
+    for (index, child) in chain.iter().take(chain.len().saturating_sub(1)).enumerate() {
+        ensure_not_cancelled(&cancelled)?;
         let mut base_file = File::open(&current_path)
             .map_err(|error| format!("无法打开 checkpoint snapshot：{error}"))?;
         let base = ChunkFile::open(&mut base_file)
@@ -174,6 +189,7 @@ pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), Str
             .map_err(|error| format!("无法同步 checkpoint：{error}"))?;
         current_path = next.path().to_owned();
         temporaries.push(next);
+        progress("正在回溯并生成检查点", index as u64 + 1, total);
     }
     let checkpoint = temporaries
         .pop()
@@ -188,6 +204,7 @@ pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), Str
         .metadata()
         .map_err(|error| format!("无法读取 checkpoint 大小：{error}"))?
         .len();
+    ensure_not_cancelled(&cancelled)?;
     checkpoint
         .persist_noclobber(&final_path)
         .map_err(|error| format!("无法发布 checkpoint：{}", error.error))?;
@@ -195,6 +212,7 @@ pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), Str
         let _ = fs::remove_file(&final_path);
         return Err(error);
     }
+    progress("检查点已就绪", total, total);
     Ok(())
 }
 

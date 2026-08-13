@@ -149,6 +149,7 @@ pub(crate) async fn compact_history_node(
 #[tauri::command]
 pub(crate) async fn delete_history_subtree(
     history_id: String,
+    branch_id: String,
     app_state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
 ) -> Result<String, String> {
@@ -157,12 +158,18 @@ pub(crate) async fn delete_history_subtree(
     tauri::async_runtime::spawn_blocking(move || {
         state.run_exclusive(None, || {
             let target = history::load_node(&root, &history_id)?;
+            history::validate_subtree_deletion(&root, &history_id, &branch_id)?;
             if let Some(parent_id) = target.parent_id.as_deref() {
                 state.report_progress("delete", "正在固化保留历史", 0, 1);
-                restore::ensure_checkpoint(&root, parent_id)?;
+                restore::ensure_checkpoint_with_progress(
+                    &root,
+                    parent_id,
+                    || state.cancelled(),
+                    |label, current, total| state.report_progress("delete", label, current, total),
+                )?;
                 state.report_progress("delete", "正在删除历史节点", 1, 1);
             }
-            let deletion = history::delete_subtree(&root, &history_id)?;
+            let deletion = history::delete_subtree(&root, &history_id, &branch_id)?;
             let _deleted_count = deletion.deleted_count;
             for relative in deletion.storage_paths {
                 if !history::storage_path_referenced(&root, &relative)? {
@@ -188,13 +195,20 @@ pub(crate) async fn set_history_checkpoint(
     tauri::async_runtime::spawn_blocking(move || {
         state.run_exclusive(None, || {
             if enabled {
-                let result = restore::ensure_checkpoint(&root, &history_id);
-                state.report_progress("checkpoint", "检查点已就绪", 1, 1);
-                result
+                restore::ensure_checkpoint_with_progress(
+                    &root,
+                    &history_id,
+                    || state.cancelled(),
+                    |label, current, total| {
+                        state.report_progress("checkpoint", label, current, total)
+                    },
+                )
             } else if let Some(relative) = history::unmark_checkpoint(&root, &history_id)? {
+                state.report_progress("checkpoint", "正在释放检查点并恢复增量统计", 0, 1);
                 if !history::storage_path_referenced(&root, &relative)? {
                     let _ = fs::remove_file(storage::resolve_path(&root, &relative)?);
                 }
+                state.report_progress("checkpoint", "检查点已取消", 1, 1);
                 Ok(())
             } else {
                 Ok(())
