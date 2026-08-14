@@ -242,6 +242,11 @@ button { color: inherit; }
 .trash-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 9px; min-height: 180px; color: var(--muted); font-size: 12px; }
 .trash-dialog > footer { justify-content: space-between; }
 .trash-dialog > footer span { color: var(--muted); font-size: 10px; }
+.cleanup-failure-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border-top: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-bottom: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.cleanup-failure-banner > span { display: grid; min-width: 0; gap: 2px; }
+.cleanup-failure-banner strong { font-size: 11px; }
+.cleanup-failure-banner small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.cleanup-failure-banner .secondary-button { flex: 0 0 auto; }
 
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

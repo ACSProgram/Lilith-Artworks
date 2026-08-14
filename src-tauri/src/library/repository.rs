@@ -6,8 +6,11 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
-use crate::storage::{
-    self, database_error, display_path, new_id, normalize_source_path, now_ms, validate_title,
+use crate::{
+    cleanup,
+    storage::{
+        self, database_error, display_path, new_id, normalize_source_path, now_ms, validate_title,
+    },
 };
 
 use super::model::{
@@ -16,7 +19,7 @@ use super::model::{
 };
 
 const REPOSITORY_FORMAT: &str = "lilith-artworks";
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 7;
 const MAX_MOVE_NODES: usize = 512;
 const MAX_SEARCH_CHARS: usize = 160;
 const MAX_SEARCH_RESULTS: usize = 100;
@@ -151,7 +154,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '6');
+               ('schema_version', '7');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -283,6 +286,20 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
              CREATE INDEX certification_records_branch
                ON certification_records(branch_id, created_ms DESC);
 
+             CREATE TABLE pending_file_cleanup (
+               id TEXT PRIMARY KEY,
+               path_kind TEXT NOT NULL CHECK (path_kind IN ('repository_file', 'repository_directory', 'external_file')),
+               path TEXT NOT NULL,
+               expected_sha256 TEXT CHECK (expected_sha256 IS NULL OR length(expected_sha256) = 64),
+               reason TEXT NOT NULL,
+               created_ms INTEGER NOT NULL,
+               last_attempt_ms INTEGER,
+               last_error TEXT,
+               UNIQUE (path_kind, path)
+             );
+             CREATE INDEX pending_file_cleanup_created
+               ON pending_file_cleanup(created_ms, id);
+
              CREATE TRIGGER artwork_nodes_only
              BEFORE INSERT ON artworks
              WHEN (SELECT kind FROM library_nodes WHERE id = NEW.id) <> 'artwork'
@@ -404,6 +421,10 @@ fn validate_existing(connection: &Connection) -> Result<(), String> {
     if version == 5 {
         migrate_schema_v5_to_v6(connection)?;
         version = 6;
+    }
+    if version == 6 {
+        migrate_schema_v6_to_v7(connection)?;
+        version = 7;
     }
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{}", version));
@@ -542,6 +563,29 @@ fn migrate_schema_v5_to_v6(connection: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("无法把作品仓库迁移到版本 6：{error}"))
+}
+
+fn migrate_schema_v6_to_v7(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE pending_file_cleanup (
+               id TEXT PRIMARY KEY,
+               path_kind TEXT NOT NULL CHECK (path_kind IN ('repository_file', 'repository_directory', 'external_file')),
+               path TEXT NOT NULL,
+               expected_sha256 TEXT CHECK (expected_sha256 IS NULL OR length(expected_sha256) = 64),
+               reason TEXT NOT NULL,
+               created_ms INTEGER NOT NULL,
+               last_attempt_ms INTEGER,
+               last_error TEXT,
+               UNIQUE (path_kind, path)
+             );
+             CREATE INDEX pending_file_cleanup_created
+               ON pending_file_cleanup(created_ms, id);
+             UPDATE repository_meta SET value = '7' WHERE key = 'schema_version';
+             COMMIT;",
+        )
+        .map_err(|error| format!("无法把作品仓库迁移到版本 7：{error}"))
 }
 
 fn create_directories(root: &Path) -> Result<(), String> {
@@ -858,17 +902,19 @@ pub(crate) fn restore_trash(root: &Path, id: &str) -> Result<LibraryTree, String
     list_tree(root)
 }
 
-pub(crate) fn permanently_delete_trash(root: &Path, ids: &[String]) -> Result<(), String> {
+pub(crate) fn permanently_delete_trash(root: &Path, ids: &[String]) -> Result<Vec<String>, String> {
     let ids = validate_node_ids(ids)?;
     let mut connection = open(root)?;
     let transaction = connection.transaction().map_err(database_error)?;
+    let mut cleanup_ids = Vec::new();
     for id in ids {
-        permanently_delete_trash_root(&transaction, &id)?;
+        cleanup_ids.extend(permanently_delete_trash_root(&transaction, &id)?);
     }
-    transaction.commit().map_err(database_error)
+    transaction.commit().map_err(database_error)?;
+    Ok(cleanup_ids)
 }
 
-pub(crate) fn empty_trash(root: &Path) -> Result<(), String> {
+pub(crate) fn empty_trash(root: &Path) -> Result<Vec<String>, String> {
     let mut connection = open(root)?;
     let transaction = connection.transaction().map_err(database_error)?;
     let ids = {
@@ -885,13 +931,18 @@ pub(crate) fn empty_trash(root: &Path) -> Result<(), String> {
             .map_err(database_error)?;
         rows
     };
+    let mut cleanup_ids = Vec::new();
     for id in ids {
-        permanently_delete_trash_root(&transaction, &id)?;
+        cleanup_ids.extend(permanently_delete_trash_root(&transaction, &id)?);
     }
-    transaction.commit().map_err(database_error)
+    transaction.commit().map_err(database_error)?;
+    Ok(cleanup_ids)
 }
 
-fn permanently_delete_trash_root(transaction: &Transaction<'_>, id: &str) -> Result<(), String> {
+fn permanently_delete_trash_root(
+    transaction: &Transaction<'_>,
+    id: &str,
+) -> Result<Vec<String>, String> {
     let exists: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM library_nodes
@@ -902,6 +953,57 @@ fn permanently_delete_trash_root(transaction: &Transaction<'_>, id: &str) -> Res
         .map_err(database_error)?;
     if !exists {
         return Err(format!("找不到回收站项目：{id}"));
+    }
+    let artwork_ids = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT id FROM library_nodes
+                 WHERE trash_root_id = ?1 AND kind = 'artwork'",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([id], |row| row.get::<_, String>(0))
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        rows
+    };
+    let external_outputs = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT record.output_path, record.output_sha256
+                 FROM certification_records record
+                 JOIN branches branch ON branch.id = record.branch_id
+                 WHERE branch.artwork_id IN (
+                   SELECT id FROM library_nodes
+                   WHERE trash_root_id = ?1 AND kind = 'artwork'
+                 )",
+            )
+            .map_err(database_error)?;
+        let rows = statement
+            .query_map([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(database_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        rows
+    };
+    let mut cleanup_ids = Vec::new();
+    for artwork_id in artwork_ids {
+        cleanup_ids.push(cleanup::enqueue_repository_directory(
+            transaction,
+            &format!("artworks/{artwork_id}"),
+            "permanent_artwork_deletion",
+        )?);
+    }
+    for (output_path, output_sha256) in external_outputs {
+        cleanup_ids.push(cleanup::enqueue_external_file(
+            transaction,
+            &output_path,
+            &output_sha256,
+            "permanent_artwork_deletion",
+        )?);
     }
     transaction
         .execute(
@@ -923,7 +1025,7 @@ fn permanently_delete_trash_root(transaction: &Transaction<'_>, id: &str) -> Res
     transaction
         .execute("DELETE FROM library_nodes WHERE id = ?1", [id])
         .map_err(database_error)?;
-    Ok(())
+    Ok(cleanup_ids)
 }
 
 pub(crate) fn move_nodes(
@@ -1361,6 +1463,29 @@ mod tests {
     }
 
     #[test]
+    fn initializes_current_cleanup_schema() {
+        let fixture = Fixture::new();
+        let connection = open(&fixture.root).unwrap();
+        let version: i64 = connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM repository_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cleanup_table: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'pending_file_cleanup')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert!(cleanup_table);
+    }
+
+    #[test]
     fn artwork_nodes_reject_children() {
         let fixture = Fixture::new();
         let error = create_group_id(&fixture.root, Some(&fixture.artwork.artwork_id), "Invalid")
@@ -1515,5 +1640,32 @@ mod tests {
             )
             .unwrap();
         assert!(!exists);
+    }
+
+    #[test]
+    fn permanently_deleted_artwork_removes_its_repository_directory() {
+        let fixture = Fixture::new();
+        let artwork_directory = fixture
+            .root
+            .join("artworks")
+            .join(&fixture.artwork.artwork_id);
+        fs::create_dir_all(&artwork_directory).unwrap();
+        fs::write(artwork_directory.join("snapshot.bin"), b"snapshot").unwrap();
+        trash_nodes(
+            &fixture.root,
+            std::slice::from_ref(&fixture.artwork.artwork_id),
+        )
+        .unwrap();
+
+        let cleanup_ids = permanently_delete_trash(
+            &fixture.root,
+            std::slice::from_ref(&fixture.artwork.artwork_id),
+        )
+        .unwrap();
+        assert!(artwork_directory.is_dir());
+        let report = crate::cleanup::run(&fixture.root, &cleanup_ids).unwrap();
+
+        assert!(report.failures.is_empty());
+        assert!(!artwork_directory.exists());
     }
 }

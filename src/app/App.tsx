@@ -39,10 +39,19 @@ export function App() {
         appApi.getSettings(),
         appApi.getRepositoryStatus(),
       ]);
+      const cleanupReport = nextRepository.ready
+        ? await appApi.retryFileCleanup([])
+        : null;
       setSnapshot(nextSnapshot);
       setDraft(nextSnapshot.settings);
       setRepository(nextRepository);
-      setMessage(nextSnapshot.warning ?? nextRepository.error);
+      setMessage(
+        nextSnapshot.warning
+        ?? nextRepository.error
+        ?? (cleanupReport && cleanupReport.failures.length > 0
+          ? `有 ${cleanupReport.failures.length} 个历史遗留文件仍无法清理，将在下次启动时重试。`
+          : null),
+      );
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {

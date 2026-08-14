@@ -31,11 +31,13 @@
 
 fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
+删除 fork 分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。SQLite 事务提交后仍逐项查询当前图是否引用该路径，只删除已经无引用的 snapshot/delta，避免共享祖先或其它分支仍使用的文件被误删。
+
 ## 提交与恢复
 
 提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件；相同 SHA-256 只更新时间，不创建节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
-恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线。
+恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线；建立 checkpoint 与创建分支属于同一个共享运行锁操作。
 
 ## 调度
 

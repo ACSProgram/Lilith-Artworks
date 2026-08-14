@@ -1,4 +1,5 @@
 import { invokeCommand } from "../../shared/tauri";
+import type { CleanupReport } from "../../app/types";
 import type {
   CreateArtworkRequest,
   LibrarySearchResult,
@@ -23,8 +24,8 @@ export const libraryApi = {
   restoreTrash: (id: string) =>
     invokeCommand<LibraryTree>("restore_library_trash", { id }),
   permanentlyDeleteTrash: (ids: string[]) =>
-    invokeCommand<void>("permanently_delete_library_trash", { ids }),
-  emptyTrash: () => invokeCommand<void>("empty_library_trash"),
+    invokeCommand<CleanupReport>("permanently_delete_library_trash", { ids }),
+  emptyTrash: () => invokeCommand<CleanupReport>("empty_library_trash"),
   moveNodes: (request: MoveLibraryNodesRequest) =>
     invokeCommand<LibraryTree>("move_library_nodes", { request }),
 };

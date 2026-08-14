@@ -34,15 +34,16 @@ pub(crate) fn fork_artwork_branch(
 ) -> Result<ArtworkHistory, String> {
     let root = root(app_state.inner())?;
     backup_state.run_exclusive(None, || {
-        backup::ensure_checkpoint(&root, &request.from_history_id)
+        backup::ensure_checkpoint(&root, &request.from_history_id)?;
+        super::create_branch(
+            &root,
+            &request.artwork_id,
+            &request.from_history_id,
+            &request.title,
+            Path::new(&request.source_path),
+        )?;
+        Ok(())
     })?;
-    super::create_branch(
-        &root,
-        &request.artwork_id,
-        &request.from_history_id,
-        &request.title,
-        Path::new(&request.source_path),
-    )?;
     backup_state.wake_scheduler();
     super::list(&root, &request.artwork_id)
 }

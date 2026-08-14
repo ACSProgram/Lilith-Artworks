@@ -198,17 +198,20 @@ pub(crate) fn save_app_settings(
     if settings.version != CURRENT_SETTINGS_VERSION {
         return Err("设置版本不受支持".into());
     }
-    if !settings.repository_path.trim().is_empty() {
-        library::initialize(Path::new(settings.repository_path.trim()))?;
-    }
     let paused = settings.pause_automatic_backups;
-    write_json_atomic(&state.settings_path, &settings)?;
-    *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
-    *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
+    let next = backup_state.run_exclusive(None, || {
+        if !settings.repository_path.trim().is_empty() {
+            library::initialize(Path::new(settings.repository_path.trim()))?;
+        }
+        write_json_atomic(&state.settings_path, &settings)?;
+        *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
+        *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
+        snapshot(state.inner())
+    })?;
     backup_state.set_automatic_scheduling(!paused);
     backup_state.wake_scheduler();
     crate::refresh_tray_backup_menu(&app)?;
-    snapshot(state.inner())
+    Ok(next)
 }
 
 pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Result<(), String> {

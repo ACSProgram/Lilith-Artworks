@@ -1,3 +1,4 @@
+pub(crate) mod cleanup_commands;
 pub(crate) mod settings;
 
 pub(crate) use settings::{

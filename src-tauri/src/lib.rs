@@ -1,6 +1,7 @@
 mod app;
 mod authenticity;
 mod backup;
+mod cleanup;
 mod history;
 mod library;
 mod storage;
@@ -232,6 +233,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::settings::get_app_settings,
             app::settings::save_app_settings,
+            app::cleanup_commands::retry_pending_file_cleanup,
             library::get_repository_status,
             library::list_library_tree,
             library::search_library,

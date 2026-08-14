@@ -12,6 +12,7 @@
 .auth-header span { color: var(--muted); font-size: 10px; text-transform: uppercase; }
 .auth-header h1 { margin: 3px 0 0; overflow: hidden; font-size: 18px; text-overflow: ellipsis; white-space: nowrap; }
 .auth-header select { width: min(260px, 34vw); height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); font-size: 12px; }
+.auth-cleanup-failure { margin: 12px 20px 0; border: 1px solid color-mix(in srgb, var(--danger) 35%, var(--border)); border-radius: 6px; }
 .auth-empty { display: flex; align-items: center; justify-content: center; gap: 8px; min-height: 180px; color: var(--muted); font-size: 12px; }
 .publication-gate { align-self: start; display: grid; grid-template-columns: 48px minmax(0, 1fr) auto; align-items: center; gap: 16px; width: min(820px, calc(100% - 48px)); margin: 42px auto; padding: 22px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .gate-icon { display: grid; place-items: center; width: 44px; height: 44px; border: 1px solid var(--border); border-radius: 7px; color: var(--accent); background: var(--surface); }

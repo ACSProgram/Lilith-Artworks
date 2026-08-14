@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::{params, OptionalExtension, Row};
 
-use crate::storage;
+use crate::{cleanup, storage};
 
 use super::model::FinalArtifact;
 
@@ -125,7 +125,7 @@ pub(crate) fn find_artifact(root: &Path, branch_id: &str) -> Result<Option<Final
     Ok(artifact)
 }
 
-pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<(), String> {
+pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<Vec<String>, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let path: Option<String> = transaction
@@ -137,16 +137,46 @@ pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<(), String
         .optional()
         .map_err(storage::database_error)?;
     let mut output_statement = transaction
-        .prepare("SELECT output_path, stored_path FROM certification_records WHERE branch_id = ?1")
+        .prepare(
+            "SELECT output_path, stored_path, output_sha256
+             FROM certification_records WHERE branch_id = ?1",
+        )
         .map_err(storage::database_error)?;
     let outputs = output_statement
         .query_map([branch_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
         })
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
     drop(output_statement);
+    let mut cleanup_ids = Vec::new();
+    if let Some(relative) = path.as_deref() {
+        cleanup_ids.push(cleanup::enqueue_repository_file(
+            &transaction,
+            relative,
+            "cancel_branch_publication",
+        )?);
+    }
+    for (output, stored, output_sha256) in &outputs {
+        cleanup_ids.push(cleanup::enqueue_external_file(
+            &transaction,
+            output,
+            output_sha256,
+            "cancel_branch_publication",
+        )?);
+        if let Some(relative) = stored {
+            cleanup_ids.push(cleanup::enqueue_repository_file(
+                &transaction,
+                relative,
+                "cancel_branch_publication",
+            )?);
+        }
+    }
     transaction
         .execute(
             "DELETE FROM final_artifacts WHERE branch_id = ?1",
@@ -154,19 +184,7 @@ pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<(), String
         )
         .map_err(storage::database_error)?;
     transaction.commit().map_err(storage::database_error)?;
-    if let Some(relative) = path {
-        let absolute = storage::resolve_path(root, &relative)?;
-        let _ = std::fs::remove_file(absolute);
-    }
-    for (output, stored) in outputs {
-        let _ = std::fs::remove_file(output);
-        if let Some(relative) = stored {
-            if let Ok(absolute) = storage::resolve_path(root, &relative) {
-                let _ = std::fs::remove_file(absolute);
-            }
-        }
-    }
-    Ok(())
+    Ok(cleanup_ids)
 }
 
 fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {

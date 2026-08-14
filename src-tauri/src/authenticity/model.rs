@@ -160,6 +160,7 @@ pub(crate) struct DecodeResult {
     pub(crate) c2pa_present: bool,
     pub(crate) c2pa_validation_state: Option<String>,
     pub(crate) c2pa_validation_status: Vec<ValidationItem>,
+    pub(crate) c2pa_record_id: Option<String>,
     pub(crate) c2pa_watermark_id: Option<String>,
     pub(crate) identifiers_match: Option<bool>,
     pub(crate) title: Option<String>,
@@ -167,13 +168,21 @@ pub(crate) struct DecodeResult {
     pub(crate) rights_statement: Option<String>,
     pub(crate) authentication_content: Option<String>,
     pub(crate) manifest_json: Option<String>,
-    pub(crate) matches: Vec<CertificationRecord>,
+    pub(crate) matches: Vec<CertificationMatch>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CertificationMatch {
+    pub(crate) record: CertificationRecord,
+    pub(crate) evidence_sources: Vec<String>,
 }
 
 pub(crate) struct ManifestSummary {
     pub(crate) present: bool,
     pub(crate) validation_state: Option<String>,
     pub(crate) validation_status: Vec<ValidationItem>,
+    pub(crate) record_id: Option<String>,
     pub(crate) watermark_id: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) creator: Option<String>,

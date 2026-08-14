@@ -914,6 +914,22 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
         owned.push(row.0);
     }
     drop(statement);
+    let mut edge_statement = transaction
+        .prepare(
+            "SELECT edge.delta_path
+             FROM history_edges edge
+             JOIN history_nodes child ON child.id = edge.child_history_id
+             WHERE child.created_on_branch_id = ?1",
+        )
+        .map_err(storage::database_error)?;
+    for path in edge_statement
+        .query_map([branch_id], |row| row.get::<_, String>(0))
+        .map_err(storage::database_error)?
+        .flatten()
+    {
+        paths.insert(path);
+    }
+    drop(edge_statement);
     loop {
         let candidate = owned.iter().find(|id| {
             transaction
@@ -1025,4 +1041,79 @@ pub(crate) fn ensure_directories(root: &Path, artwork_id: &str) -> Result<(), St
             .map_err(|error| format!("无法创建 Artwork 存储目录：{error}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn branch_deletion_collects_edge_delta_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let main_source = directory.path().join("main.psd");
+        let fork_source = directory.path().join("fork.psd");
+        fs::File::create(&main_source)
+            .unwrap()
+            .write_all(b"main")
+            .unwrap();
+        fs::File::create(&fork_source)
+            .unwrap()
+            .write_all(b"fork")
+            .unwrap();
+        crate::library::initialize(&root).unwrap();
+        let artwork =
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source).unwrap();
+        let root_node = "root-node";
+        commit(
+            &root,
+            HistoryCommit {
+                id: root_node,
+                branch_id: &artwork.branch_id,
+                parent_id: None,
+                title: "Root",
+                note: "",
+                commit_kind: "manual",
+                created_ms: 1,
+                logical_size: 1,
+                chunk_file_size: 1,
+                sha256: &"A".repeat(64),
+                chunk_count: 1,
+                snapshot_path: "artworks/root.snapshot",
+                delta_path: None,
+                delta_size: None,
+            },
+        )
+        .unwrap();
+        let branch_id =
+            create_branch(&root, &artwork.artwork_id, root_node, "Fork", &fork_source).unwrap();
+        commit(
+            &root,
+            HistoryCommit {
+                id: "fork-node",
+                branch_id: &branch_id,
+                parent_id: Some(root_node),
+                title: "Fork commit",
+                note: "",
+                commit_kind: "manual",
+                created_ms: 2,
+                logical_size: 1,
+                chunk_file_size: 1,
+                sha256: &"B".repeat(64),
+                chunk_count: 1,
+                snapshot_path: "artworks/fork.snapshot",
+                delta_path: Some("artworks/fork.delta"),
+                delta_size: Some(1),
+            },
+        )
+        .unwrap();
+
+        let deletion = delete_branch(&root, &branch_id).unwrap();
+
+        assert!(deletion
+            .storage_paths
+            .iter()
+            .any(|path| path == "artworks/fork.delta"));
+    }
 }

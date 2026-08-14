@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 use crate::{
     app::AppState,
     backup::{self, BackupState},
-    library, storage,
+    cleanup, library, storage,
 };
 
 use super::{
@@ -81,27 +81,40 @@ pub(crate) fn get_branch_publication(
 }
 
 #[tauri::command]
-pub(crate) fn cancel_branch_publication(
+pub(crate) async fn cancel_branch_publication(
     branch_id: String,
     app_state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
-) -> Result<(), String> {
+) -> Result<cleanup::CleanupReport, String> {
     let root = root(app_state.inner())?;
-    backup_state.run_exclusive(Some(&branch_id), || {
-        publication_repository::remove_artifact(&root, &branch_id)
+    let state = backup_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.run_exclusive(Some(&branch_id), || {
+            let cleanup_ids = publication_repository::remove_artifact(&root, &branch_id)?;
+            cleanup::run(&root, &cleanup_ids)
+        })
     })
+    .await
+    .map_err(|error| format!("取消发布任务异常结束：{error}"))?
 }
 
 #[tauri::command]
 pub(crate) async fn publish_branch_artifact(
     request: PublishBranchRequest,
     app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
     authenticity_state: State<'_, AuthenticityState>,
 ) -> Result<PublishResult, AuthenticityError> {
     let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
-    let state = authenticity_state.inner().clone();
+    let authenticity = authenticity_state.inner().clone();
+    let backup = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let published = pipeline::publish(&root, &state, request)?;
+        let branch_id = request.branch_id.clone();
+        let published = backup
+            .run_exclusive(Some(&branch_id), || {
+                pipeline::publish(&root, &authenticity, request).map_err(|error| error.to_string())
+            })
+            .map_err(AuthenticityError::Task)?;
         Ok(PublishResult {
             record: published.record,
             width: published.width,
@@ -187,6 +200,11 @@ pub(crate) async fn export_certification_record(
                 "认证图片必须导出为 .jpg 或 .jpeg".into(),
             ));
         }
+        if destination.exists() {
+            return Err(AuthenticityError::InvalidInput(
+                "导出目标已存在；请选择新的文件名".into(),
+            ));
+        }
         let directory = destination
             .parent()
             .ok_or_else(|| AuthenticityError::InvalidInput("导出目录无效".into()))?;
@@ -195,7 +213,7 @@ pub(crate) async fn export_certification_record(
         let mut temp = NamedTempFile::new_in(directory)?;
         std::io::copy(&mut input, &mut temp)?;
         temp.as_file().sync_all()?;
-        temp.persist(&destination)
+        temp.persist_noclobber(&destination)
             .map_err(|error| AuthenticityError::Io(error.error))?;
         Ok(())
     })

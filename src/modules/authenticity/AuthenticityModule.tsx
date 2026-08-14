@@ -1,11 +1,13 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle, BadgeCheck, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
-  LockKeyhole, MousePointer2, ScanSearch, Search, ShieldCheck, Trash2, X,
+  LockKeyhole, MousePointer2, RotateCcw, ScanSearch, Search, ShieldCheck, Trash2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { formatBytes } from "../../shared/format";
+import { appApi } from "../../app/api";
+import type { CleanupFailure } from "../../app/types";
 import type { ArtworkBranch } from "../history/types";
 import { authenticityApi } from "./api";
 import type {
@@ -75,32 +77,51 @@ function PublishView({
   const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
   const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
+  const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
+  const loadRequest = useRef(0);
+  const estimateRequest = useRef(0);
+  const selectedBranchIdRef = useRef(selectedBranchId);
+  selectedBranchIdRef.current = selectedBranchId;
   const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
 
   const load = useCallback(async () => {
     if (!selectedBranchId) return;
+    const branchId = selectedBranchId;
+    const requestId = ++loadRequest.current;
     setBusy(true);
     try {
-      const next = await authenticityApi.getPublication(selectedBranchId);
+      const next = await authenticityApi.getPublication(branchId);
+      const nextPreview = next.artifact ? await authenticityApi.preview(next.artifact.sourcePath) : null;
+      if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       setPublication(next);
       setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
-      if (next.artifact) setPreview(await authenticityApi.preview(next.artifact.sourcePath));
-      else setPreview(null);
+      setPreview(nextPreview);
     } catch (error) {
-      onError(message(error));
+      if (requestId === loadRequest.current) onError(message(error));
     } finally {
-      setBusy(false);
+      if (requestId === loadRequest.current) setBusy(false);
     }
   }, [onError, selectedBranchId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    setPublication(null);
+    setConfig(null);
+    setPreview(null);
+    setViewingRecord(null);
+    setBusy(Boolean(selectedBranchId));
+    void load();
+    return () => { loadRequest.current += 1; };
+  }, [load, selectedBranchId]);
   useEffect(() => {
     if (!publication?.artifact || !config) return;
+    const requestId = ++estimateRequest.current;
+    setSizeEstimate(null);
     const timer = window.setTimeout(() => {
       authenticityApi.estimate(publication.artifact!.sourcePath, config.jpegQuality, config.backgroundColor)
-        .then((value) => setSizeEstimate(value.jpegBytes)).catch(() => setSizeEstimate(null));
+        .then((value) => { if (requestId === estimateRequest.current) setSizeEstimate(value.jpegBytes); })
+        .catch(() => { if (requestId === estimateRequest.current) setSizeEstimate(null); });
     }, 180);
-    return () => window.clearTimeout(timer);
+    return () => { window.clearTimeout(timer); estimateRequest.current += 1; };
   }, [config?.backgroundColor, config?.jpegQuality, publication?.artifact]);
   useEffect(() => { if (config) saveSharedSigning(config); }, [config?.certificatePath, config?.signingAlgorithm, config?.timestampUrl]);
   useEffect(() => {
@@ -129,6 +150,10 @@ function PublishView({
     onError(null);
     try {
       const next = await authenticityApi.enterPublication(selectedBranch.id, artifactPath);
+      if (selectedBranchIdRef.current !== selectedBranch.id) {
+        await onPublicationChanged?.();
+        return;
+      }
       setPublication(next);
       await onPublicationChanged?.();
       setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
@@ -150,6 +175,10 @@ function PublishView({
 
   const publish = async () => {
     if (!selectedBranch || !config) return;
+    if (publication?.branchId !== selectedBranch.id || publication.artifact?.branchId !== selectedBranch.id || config.branchId !== selectedBranch.id) {
+      onError("当前分支的发布状态尚未加载完成，请稍后重试。");
+      return;
+    }
     if (!privateKey.trim()) {
       onError("请输入 PEM 私钥后再发布。");
       return;
@@ -170,9 +199,11 @@ function PublishView({
         config,
         watermarkId: watermarkId.trim() || null,
       });
-      setResult(published.record);
       setPrivateKey("");
-      await load();
+      if (selectedBranchIdRef.current === selectedBranch.id) {
+        setResult(published.record);
+        await load();
+      }
       await onPublicationChanged?.();
     } catch (error) {
       onError(message(error));
@@ -184,9 +215,33 @@ function PublishView({
   const cancelPublication = async () => {
     if (!selectedBranch) return;
     setBusy(true);
-    try { await authenticityApi.cancelPublication(selectedBranch.id); setDeleteConfirmOpen(false); setPublication(null); setConfig(null); setPreview(null); await onPublicationChanged?.(); }
+    try {
+      const report = await authenticityApi.cancelPublication(selectedBranch.id);
+      setCleanupFailures(report.failures);
+      if (report.failures.length > 0) onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
+      setDeleteConfirmOpen(false);
+      setPublication(null);
+      setConfig(null);
+      setPreview(null);
+      await onPublicationChanged?.();
+    }
     catch (error) { onError(message(error)); }
     finally { setBusy(false); }
+  };
+
+  const retryCleanup = async () => {
+    if (cleanupFailures.length === 0) return;
+    setBusy(true);
+    onError(null);
+    try {
+      const report = await appApi.retryFileCleanup(cleanupFailures.map((failure) => failure.id));
+      setCleanupFailures(report.failures);
+      if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
+    } catch (error) {
+      onError(message(error));
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (viewingRecord) return <RecordView record={viewingRecord} preview={viewingPreview} onClose={() => setViewingRecord(null)} onError={onError} />;
@@ -198,6 +253,7 @@ function PublishView({
         {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
       </select>
     </header>
+    {cleanupFailures.length > 0 && <div className="cleanup-failure-banner auth-cleanup-failure" role="status"><span><strong>{cleanupFailures.length} 个发布文件尚未清理</strong><small>{cleanupFailures[0].path}</small></span><button className="secondary-button" type="button" disabled={busy} onClick={() => void retryCleanup()}><RotateCcw size={15} />重试清理</button></div>}
     {!selectedBranch ? <div className="auth-empty">此 Artwork 尚无分支。</div> :
       !publication?.artifact ? <section className="publication-gate">
         <div className="gate-icon"><LockKeyhole size={24} /></div>
@@ -270,33 +326,52 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
   const [query, setQuery] = useState("");
   const [records, setRecords] = useState<CertificationRecord[]>([]);
   const [busy, setBusy] = useState(false);
+  const previewRequest = useRef(0);
+  const decodeRequest = useRef(0);
+  const searchRequest = useRef(0);
 
   const choose = async () => {
     const selected = await open({ multiple: false, filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }] });
     if (typeof selected !== "string") return;
+    const requestId = ++previewRequest.current;
+    decodeRequest.current += 1;
     setBusy(true);
     try {
+      const nextPreview = await authenticityApi.preview(selected);
+      if (requestId !== previewRequest.current) return;
       setPath(selected);
-      setPreview(await authenticityApi.preview(selected));
+      setPreview(nextPreview);
       setRegion(null);
       setResult(null);
-    } catch (error) { onError(message(error)); } finally { setBusy(false); }
+    } catch (error) { if (requestId === previewRequest.current) onError(message(error)); }
+    finally { if (requestId === previewRequest.current) setBusy(false); }
   };
 
   const decode = async () => {
     if (!path) return;
+    const requestId = ++decodeRequest.current;
+    const inputPath = path;
+    const inputRegion = region;
     setBusy(true);
     onError(null);
-    try { setResult(await authenticityApi.decode(path, region)); }
-    catch (error) { onError(message(error)); }
-    finally { setBusy(false); }
+    try {
+      const next = await authenticityApi.decode(inputPath, inputRegion);
+      if (requestId === decodeRequest.current) setResult(next);
+    }
+    catch (error) { if (requestId === decodeRequest.current) onError(message(error)); }
+    finally { if (requestId === decodeRequest.current) setBusy(false); }
   };
 
   const searchRecords = async () => {
+    const requestId = ++searchRequest.current;
+    const requestedQuery = query;
     setBusy(true);
-    try { setRecords(await authenticityApi.searchRecords(query)); }
-    catch (error) { onError(message(error)); }
-    finally { setBusy(false); }
+    try {
+      const next = await authenticityApi.searchRecords(requestedQuery);
+      if (requestId === searchRequest.current) setRecords(next);
+    }
+    catch (error) { if (requestId === searchRequest.current) onError(message(error)); }
+    finally { if (requestId === searchRequest.current) setBusy(false); }
   };
 
   useEffect(() => {
@@ -319,11 +394,11 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
       <section className="decode-results">
         {!result ? <div className="decode-placeholder"><Fingerprint size={24} /><span>识别结果将在这里显示</span></div> : <>
           <header className={result.c2paPresent ? "verified" : ""}><ShieldCheck size={20} /><div><strong>{result.c2paPresent ? "已读取 C2PA" : "未发现 C2PA"}</strong><span>{result.c2paValidationState ?? "无验证状态"}</span></div></header>
-          <dl><div><dt>C2PA ID</dt><dd><code>{result.c2paWatermarkId ?? "未声明"}</code></dd></div><div><dt>TrustMark ID</dt><dd><code>{result.watermarkId ?? "未识别"}</code></dd></div><div><dt>双通道</dt><dd>{result.identifiersMatch == null ? "只有单通道证据" : result.identifiersMatch ? "ID 一致" : "ID 冲突，需人工调查"}</dd></div></dl>
+          <dl><div><dt>C2PA 记录 ID</dt><dd><code>{result.c2paRecordId ?? "未声明"}</code></dd></div><div><dt>C2PA TrustMark ID</dt><dd><code>{result.c2paWatermarkId ?? "未声明"}</code></dd></div><div><dt>识别出的 TrustMark ID</dt><dd><code>{result.watermarkId ?? "未识别"}</code></dd></div><div><dt>双通道</dt><dd>{result.identifiersMatch == null ? "只有单通道证据" : result.identifiersMatch ? "ID 一致" : "ID 冲突，需人工调查"}</dd></div></dl>
           <dl className="claim-grid"><div><dt>作品</dt><dd>{result.title ?? "未声明"}</dd></div><div><dt>创作者</dt><dd>{result.creator ?? "未声明"}</dd></div><div><dt>权利声明</dt><dd>{result.rightsStatement ?? "未声明"}</dd></div><div><dt>认证内容</dt><dd>{result.authenticationContent ?? "未声明"}</dd></div></dl>
           {result.c2paValidationStatus.length > 0 && <ul className="validation-list">{result.c2paValidationStatus.map((item) => <li key={`${item.code}-${item.explanation}`}><strong>{item.code}</strong><span>{item.explanation}</span></li>)}</ul>}
           {result.manifestJson && <details className="manifest-details" open><summary>原始 C2PA 报告</summary><pre>{result.manifestJson}</pre></details>}
-          <RecordList records={result.matches} onNavigate={onNavigateRecord} compact />
+          <RecordList records={result.matches.map((match) => match.record)} evidence={Object.fromEntries(result.matches.map((match) => [match.record.id, match.evidenceSources]))} onNavigate={onNavigateRecord} compact />
         </>}
       </section>
       <section className="record-search">
@@ -454,12 +529,12 @@ function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { br
   </div>;
 }
 
-function RecordList({ records, onNavigate, compact = false, selectedId = null }: { records: CertificationRecord[]; onNavigate: (record: CertificationRecord) => void; compact?: boolean; selectedId?: string | null }) {
+function RecordList({ records, onNavigate, compact = false, selectedId = null, evidence = {} }: { records: CertificationRecord[]; onNavigate: (record: CertificationRecord) => void; compact?: boolean; selectedId?: string | null; evidence?: Record<string, string[]> }) {
   return <section className={`record-list${compact ? " compact" : ""}`}>
     {!compact && <header><strong>分支导出记录</strong><span>{records.length} 条</span></header>}
     {records.length === 0 ? <div className="records-empty">没有匹配的导出记录。</div> : records.map((record) => <button type="button" data-record-id={record.id} className={`record-row${selectedId === record.id ? " selected" : ""}`} key={record.id} onClick={() => onNavigate(record)}>
       <BadgeCheck size={16} />
-      <span><strong>{record.title}</strong><small>{record.creator || "作者未声明"} · {record.artworkTitle} / {record.branchTitle} · {new Date(record.createdMs).toLocaleString()}</small><small>{record.outputPath} · {formatBytes(record.outputBytes)}</small><code>{record.watermarkId ?? "无 TrustMark"}</code></span>
+      <span><strong>{record.title}</strong><small>{record.creator || "作者未声明"} · {record.artworkTitle} / {record.branchTitle} · {new Date(record.createdMs).toLocaleString()}</small><small>{record.outputPath} · {formatBytes(record.outputBytes)}</small>{evidence[record.id] && <small>候选证据：{evidence[record.id].map((source) => source === "c2pa" ? "C2PA" : "TrustMark").join(" + ")}</small>}<code>{record.watermarkId ?? "无 TrustMark"}</code></span>
       <i>{record.trustmarkEnabled ? "C2PA + TrustMark" : "C2PA"}</i>
     </button>)}
   </section>;

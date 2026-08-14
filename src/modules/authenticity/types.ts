@@ -107,6 +107,7 @@ export interface DecodeResult {
   c2paPresent: boolean;
   c2paValidationState: string | null;
   c2paValidationStatus: ValidationItem[];
+  c2paRecordId: string | null;
   c2paWatermarkId: string | null;
   identifiersMatch: boolean | null;
   title: string | null;
@@ -114,5 +115,10 @@ export interface DecodeResult {
   rightsStatement: string | null;
   authenticationContent: string | null;
   manifestJson: string | null;
-  matches: CertificationRecord[];
+  matches: CertificationMatch[];
+}
+
+export interface CertificationMatch {
+  record: CertificationRecord;
+  evidenceSources: Array<"c2pa" | "trustmark">;
 }

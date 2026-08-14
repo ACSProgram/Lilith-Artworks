@@ -22,7 +22,9 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { libraryApi } from "./api";
+import { appApi } from "../../app/api";
 import { ArtworkWorkspace } from "../../app/ArtworkWorkspace";
+import type { CleanupFailure, CleanupReport } from "../../app/types";
 import type { CertificationRecord } from "../authenticity/types";
 import { flattenTree, selectionForClick, visibleTree } from "./tree";
 import { LibraryTreeView } from "./LibraryTreeView";
@@ -85,9 +87,32 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [trashEntries, setTrashEntries] = useState<LibraryTrashEntry[]>([]);
+  const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
   const [traceTarget, setTraceTarget] = useState<{ artworkId: string; branchId: string; recordId: string } | null>(null);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
+
+  const applyCleanupReport = (report: CleanupReport) => {
+    setCleanupFailures(report.failures);
+    if (report.failures.length > 0) {
+      onError(`元数据已删除，但有 ${report.failures.length} 个文件清理失败；可在回收站中重试。`);
+    }
+  };
+
+  const retryCleanup = async () => {
+    if (cleanupFailures.length === 0) return;
+    setOperationBusy(true);
+    onError(null);
+    try {
+      const report = await appApi.retryFileCleanup(cleanupFailures.map((failure) => failure.id));
+      applyCleanupReport(report);
+      if (report.failures.length === 0) onError(null);
+    } catch (error) {
+      onError(errorMessage(error));
+    } finally {
+      setOperationBusy(false);
+    }
+  };
   const nodeById = useMemo(
     () => new Map(allNodes.map((node) => [node.id, node])),
     [allNodes],
@@ -496,6 +521,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
         <TrashDialog
           entries={trashEntries}
           busy={operationBusy}
+          cleanupFailures={cleanupFailures}
           onClose={() => setTrashOpen(false)}
           onRestore={async (entry) => {
             setOperationBusy(true);
@@ -515,7 +541,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
             setOperationBusy(true);
             onError(null);
             try {
-              await libraryApi.permanentlyDeleteTrash([entry.id]);
+              applyCleanupReport(await libraryApi.permanentlyDeleteTrash([entry.id]));
               await reloadTrash();
             } catch (error) {
               onError(errorMessage(error));
@@ -528,7 +554,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
             setOperationBusy(true);
             onError(null);
             try {
-              await libraryApi.emptyTrash();
+              applyCleanupReport(await libraryApi.emptyTrash());
               setTrashEntries([]);
             } catch (error) {
               onError(errorMessage(error));
@@ -536,6 +562,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
               setOperationBusy(false);
             }
           }}
+          onRetryCleanup={retryCleanup}
         />
       )}
     </Fragment>
@@ -607,13 +634,15 @@ function NodeOverview({ node, selectedCount }: { node: LibraryNode; selectedCoun
   );
 }
 
-function TrashDialog({ entries, busy, onClose, onRestore, onDelete, onEmpty }: {
+function TrashDialog({ entries, busy, cleanupFailures, onClose, onRestore, onDelete, onEmpty, onRetryCleanup }: {
   entries: LibraryTrashEntry[];
   busy: boolean;
+  cleanupFailures: CleanupFailure[];
   onClose: () => void;
   onRestore: (entry: LibraryTrashEntry) => Promise<void>;
   onDelete: (entry: LibraryTrashEntry) => Promise<void>;
   onEmpty: () => Promise<void>;
+  onRetryCleanup: () => Promise<void>;
 }) {
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
@@ -636,6 +665,7 @@ function TrashDialog({ entries, busy, onClose, onRestore, onDelete, onEmpty }: {
             </article>
           ))}
         </div>
+        {cleanupFailures.length > 0 && <div className="cleanup-failure-banner" role="status"><span><strong>{cleanupFailures.length} 个文件尚未清理</strong><small>{cleanupFailures[0].path}</small></span><button className="secondary-button" type="button" disabled={busy} onClick={() => void onRetryCleanup()}><RotateCcw aria-hidden="true" size={15} />重试清理</button></div>}
         <footer>
           <span>永久删除不会进入其他回收站。</span>
           <button className="danger-button" type="button" disabled={busy || !entries.length} onClick={() => void onEmpty()}><Trash2 aria-hidden="true" size={16} />清空回收站</button>

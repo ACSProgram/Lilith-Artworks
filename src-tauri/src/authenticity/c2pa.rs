@@ -21,6 +21,7 @@ pub(crate) const ASSERTION_LABEL: &str = "art.lilith.artworks.claim";
 pub(crate) fn sign_jpeg(
     config: &CertificationConfig,
     private_key: &[u8],
+    record_id: &str,
     identifier: &str,
     source_path: &Path,
     unsigned_jpeg: &Path,
@@ -109,6 +110,7 @@ pub(crate) fn sign_jpeg(
         ASSERTION_LABEL,
         &json!({
             "version": 1,
+            "recordId": record_id,
             "watermarkId": config.trustmark_enabled.then_some(identifier),
             "authenticationContent": config.authentication_content,
             "creator": config.creator,
@@ -183,6 +185,7 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
                 present: false,
                 validation_state: None,
                 validation_status: Vec::new(),
+                record_id: None,
                 watermark_id: None,
                 title: None,
                 creator: None,
@@ -207,6 +210,13 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         manifest.and_then(|active| active.find_assertion(ASSERTION_LABEL).ok());
     let soft_binding: Option<SoftBinding> =
         manifest.and_then(|active| active.find_assertion(SoftBinding::LABEL).ok());
+    let record_id = claim
+        .as_ref()
+        .and_then(|value| value.get("recordId"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && value.len() <= 160)
+        .map(str::to_owned);
     let watermark_id = soft_binding
         .and_then(|binding| binding.blocks.first().map(|block| block.value.clone()))
         .and_then(|value| identifier_from_soft_binding(&value))
@@ -225,6 +235,7 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         present: manifest.is_some(),
         validation_state: Some(format!("{:?}", reader.validation_state())),
         validation_status,
+        record_id,
         watermark_id,
         title: manifest.and_then(|active| active.title().map(str::to_owned)),
         creator: claim

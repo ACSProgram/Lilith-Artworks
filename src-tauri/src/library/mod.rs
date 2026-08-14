@@ -13,7 +13,7 @@ pub(crate) use model::{
 pub(crate) use repository::create_artwork;
 pub(crate) use repository::initialize;
 
-use crate::{app::AppState, backup::BackupState};
+use crate::{app::AppState, backup::BackupState, cleanup};
 
 fn ready_root(state: &AppState) -> Result<PathBuf, String> {
     let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
@@ -125,16 +125,42 @@ pub(crate) fn restore_library_trash(
 }
 
 #[tauri::command]
-pub(crate) fn permanently_delete_library_trash(
-    state: State<'_, AppState>,
+pub(crate) async fn permanently_delete_library_trash(
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
     ids: Vec<String>,
-) -> Result<(), String> {
-    repository::permanently_delete_trash(&ready_root(state.inner())?, &ids)
+) -> Result<cleanup::CleanupReport, String> {
+    let root = ready_root(app_state.inner())?;
+    let state = backup_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = state.run_exclusive(None, || {
+            let cleanup_ids = repository::permanently_delete_trash(&root, &ids)?;
+            cleanup::run(&root, &cleanup_ids)
+        })?;
+        state.wake_scheduler();
+        Ok(report)
+    })
+    .await
+    .map_err(|error| format!("永久删除任务异常结束：{error}"))?
 }
 
 #[tauri::command]
-pub(crate) fn empty_library_trash(state: State<'_, AppState>) -> Result<(), String> {
-    repository::empty_trash(&ready_root(state.inner())?)
+pub(crate) async fn empty_library_trash(
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+) -> Result<cleanup::CleanupReport, String> {
+    let root = ready_root(app_state.inner())?;
+    let state = backup_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let report = state.run_exclusive(None, || {
+            let cleanup_ids = repository::empty_trash(&root)?;
+            cleanup::run(&root, &cleanup_ids)
+        })?;
+        state.wake_scheduler();
+        Ok(report)
+    })
+    .await
+    .map_err(|error| format!("清空回收站任务异常结束：{error}"))?
 }
 
 #[tauri::command]

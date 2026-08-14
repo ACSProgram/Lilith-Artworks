@@ -1,4 +1,5 @@
 import { invokeCommand } from "../../shared/tauri";
+import type { CleanupReport } from "../../app/types";
 import type {
   BranchPublication,
   CertificationRecord,
@@ -19,7 +20,7 @@ export const authenticityApi = {
   publish: (request: PublishBranchRequest) =>
     invokeCommand<PublishResult>("publish_branch_artifact", { request }),
   cancelPublication: (branchId: string) =>
-    invokeCommand<void>("cancel_branch_publication", { branchId }),
+    invokeCommand<CleanupReport>("cancel_branch_publication", { branchId }),
   preview: (path: string) =>
     invokeCommand<PreviewImage>("preview_authenticity_image", { path }),
   previewRecord: (recordId: string) =>

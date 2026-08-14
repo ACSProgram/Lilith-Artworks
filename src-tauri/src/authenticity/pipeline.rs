@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, File},
     io::{self, Read},
     path::{Path, PathBuf},
@@ -90,9 +91,11 @@ pub(crate) fn publish(
         .encode_image(&rendition)?;
     drop(unsigned_file);
 
+    let record_id = storage::new_id();
     c2pa::sign_jpeg(
         &request.config,
         private_key.as_bytes(),
+        &record_id,
         &identifier,
         &input,
         &unsigned_path,
@@ -109,7 +112,6 @@ pub(crate) fn publish(
     let output_path = storage::display_path(&output);
     let output_sha256 = sha256_file(&output)?;
     let output_bytes = fs::metadata(&output)?.len();
-    let record_id = storage::new_id();
     let created_ms = storage::now_ms().map_err(AuthenticityError::Task)?;
     let (stored_path, stored_relative) =
         match store_certification_copy(root, &request.branch_id, &record_id, &output) {
@@ -200,12 +202,28 @@ pub(crate) fn decode(
         (Some(decoded), Some(declared)) => Some(decoded == declared),
         _ => None,
     };
-    let lookup_id = watermark_id.as_ref().or(manifest.watermark_id.as_ref());
-    let matches = lookup_id
-        .map(|identifier| repository::records_by_identifier(root, identifier))
-        .transpose()
-        .map_err(AuthenticityError::Task)?
-        .unwrap_or_default();
+    let mut matches = Vec::new();
+    let mut match_indexes = HashMap::new();
+    if let Some(identifier) = manifest
+        .record_id
+        .as_ref()
+        .or(manifest.watermark_id.as_ref())
+    {
+        merge_matches(
+            &mut matches,
+            &mut match_indexes,
+            repository::records_by_identifier(root, identifier).map_err(AuthenticityError::Task)?,
+            "c2pa",
+        );
+    }
+    if let Some(identifier) = watermark_id.as_ref() {
+        merge_matches(
+            &mut matches,
+            &mut match_indexes,
+            repository::records_by_identifier(root, identifier).map_err(AuthenticityError::Task)?,
+            "trustmark",
+        );
+    }
     Ok(DecodeResult {
         watermark_present: watermark_id.is_some(),
         watermark_id,
@@ -213,6 +231,7 @@ pub(crate) fn decode(
         c2pa_present: manifest.present,
         c2pa_validation_state: manifest.validation_state,
         c2pa_validation_status: manifest.validation_status,
+        c2pa_record_id: manifest.record_id,
         c2pa_watermark_id: manifest.watermark_id,
         identifiers_match,
         title: manifest.title,
@@ -222,6 +241,28 @@ pub(crate) fn decode(
         manifest_json: manifest.manifest_json,
         matches,
     })
+}
+
+fn merge_matches(
+    matches: &mut Vec<super::model::CertificationMatch>,
+    indexes: &mut HashMap<String, usize>,
+    records: Vec<CertificationRecord>,
+    evidence_source: &str,
+) {
+    for record in records {
+        if let Some(index) = indexes.get(&record.id).copied() {
+            let sources = &mut matches[index].evidence_sources;
+            if !sources.iter().any(|source| source == evidence_source) {
+                sources.push(evidence_source.to_owned());
+            }
+        } else {
+            indexes.insert(record.id.clone(), matches.len());
+            matches.push(super::model::CertificationMatch {
+                record,
+                evidence_sources: vec![evidence_source.to_owned()],
+            });
+        }
+    }
 }
 
 fn validate_publish_request(
@@ -287,4 +328,54 @@ pub(crate) fn sha256_file(path: &Path) -> AuthenticityResult<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode_upper(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record(id: &str) -> CertificationRecord {
+        CertificationRecord {
+            id: id.into(),
+            artwork_id: "artwork".into(),
+            artwork_title: "Artwork".into(),
+            branch_id: "branch".into(),
+            branch_title: "Branch".into(),
+            history_id: "history".into(),
+            watermark_id: Some("0".repeat(super::trustmark::WATERMARK_BITS)),
+            trustmark_enabled: true,
+            output_path: "output.jpg".into(),
+            content_stored: true,
+            output_sha256: "A".repeat(64),
+            output_bytes: 1,
+            title: "Title".into(),
+            creator: "Creator".into(),
+            rights_statement: String::new(),
+            authentication_content: String::new(),
+            additional_regions: Vec::new(),
+            c2pa_manifest_label: None,
+            c2pa_manifest_json: None,
+            validation_state: None,
+            created_ms: 1,
+        }
+    }
+
+    #[test]
+    fn merges_candidate_evidence_without_hiding_conflicts() {
+        let mut matches = Vec::new();
+        let mut indexes = HashMap::new();
+        merge_matches(&mut matches, &mut indexes, vec![record("same")], "c2pa");
+        merge_matches(
+            &mut matches,
+            &mut indexes,
+            vec![record("same"), record("other")],
+            "trustmark",
+        );
+
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].record.id, "same");
+        assert_eq!(matches[0].evidence_sources, vec!["c2pa", "trustmark"]);
+        assert_eq!(matches[1].record.id, "other");
+        assert_eq!(matches[1].evidence_sources, vec!["trustmark"]);
+    }
 }

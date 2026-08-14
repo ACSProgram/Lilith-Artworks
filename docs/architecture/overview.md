@@ -18,6 +18,7 @@ src-tauri/src/library/                 作品仓库树、分组/Artwork、搜索
 src-tauri/src/history/                 分支、历史节点、fork、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、调度和取消
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
+src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列、路径校验和失败重试
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
@@ -53,7 +54,9 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
   temp/
 ```
 
-数据库持有元数据和仓库内文件的相对路径。snapshot、delta 和最终成品先写临时目录、同步并以不覆盖方式发布，最后在 SQLite 事务中切换引用；认证导出由用户选择外部绝对路径，同时记录 SHA-256。失败时清理本次未引用文件；启动时清理残留临时文件。
+数据库持有元数据和仓库内文件的相对路径。snapshot、delta 和最终成品先写临时目录、同步并以不覆盖方式发布，最后在 SQLite 事务中切换引用；认证导出由用户选择外部绝对路径，同时记录 SHA-256。删除类跨边界操作先在同一事务写入 `pending_file_cleanup`，提交后执行文件清理；失败保留并可重试，应用启动时自动处理历史遗留项。
+
+提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试和仓库设置保存共享 `BackupState` 运行锁。前端 busy 状态只负责交互反馈，不承担并发正确性。
 
 ## 增量历史策略
 

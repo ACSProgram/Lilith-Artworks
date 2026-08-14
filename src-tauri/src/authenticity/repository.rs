@@ -220,7 +220,7 @@ pub(crate) fn records_by_identifier(
 ) -> Result<Vec<CertificationRecord>, String> {
     query_records(
         &storage::open(root)?,
-        "WHERE record.watermark_id = ?1 ORDER BY record.created_ms DESC",
+        "WHERE record.id = ?1 OR record.watermark_id = ?1 ORDER BY record.created_ms DESC",
         identifier,
     )
 }
