@@ -263,6 +263,8 @@ pub fn run() {
             authenticity::decode_authenticity,
             authenticity::search_certification_records,
             authenticity::preview_authenticity_image,
+            authenticity::preview_certification_record,
+            authenticity::export_certification_record,
             authenticity::estimate_authenticity_output_size,
         ])
         .run(tauri::generate_context!())

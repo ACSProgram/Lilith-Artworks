@@ -4,7 +4,7 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 ## 当前状态
 
-认证模块之外的作品仓库能力已完成，等待人工编译验收。当前包含：
+作品仓库、增量历史与认证（阶段 5/6）均已实现，等待完整编译与人工工作流验收。当前包含：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -19,10 +19,11 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - 作品树展开状态持久化，拖放沿用 LilithClient 的递归树实现；项目删除继续进入回收站。
 - Tauri 图标与 TrustMark 模型已迁入 `src-tauri/resources/` 并随应用打包。
 
-历史总览 mindmap、单分支历史、右键恢复与分支操作、当前分支精简模式、永久删除、中间节点 ChunkFile 重建与检查点均已接入；C2PA/TrustMark 依赖尚未接入。
+历史总览 mindmap、单分支历史、右键恢复与分支操作、当前分支精简模式、永久删除、中间节点 ChunkFile 重建与检查点均已接入；C2PA/TrustMark 认证（发布、区域水印、识别与溯源）已实现，待完整编译与人工验收。
 
 ## 文档入口
 
+- [AI 阅读引导](docs/architecture/ai-reading-guide.md)
 - [分阶段实施计划](docs/planning/implementation-plan.md)
 - [当前任务交接与人工验收](docs/planning/current-handoff.md)
 - [系统架构](docs/architecture/overview.md)

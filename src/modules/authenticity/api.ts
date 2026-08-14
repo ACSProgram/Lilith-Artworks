@@ -22,6 +22,10 @@ export const authenticityApi = {
     invokeCommand<void>("cancel_branch_publication", { branchId }),
   preview: (path: string) =>
     invokeCommand<PreviewImage>("preview_authenticity_image", { path }),
+  previewRecord: (recordId: string) =>
+    invokeCommand<PreviewImage>("preview_certification_record", { recordId }),
+  exportRecord: (recordId: string, outputPath: string) =>
+    invokeCommand<void>("export_certification_record", { request: { recordId, outputPath } }),
   estimate: (inputPath: string, jpegQuality: number, backgroundColor: string) =>
     invokeCommand<{ jpegBytes: number; sourceBytes: number }>("estimate_authenticity_output_size", { request: { inputPath, jpegQuality, backgroundColor } }),
   decode: (inputPath: string, region: NormalizedRegion | null) =>

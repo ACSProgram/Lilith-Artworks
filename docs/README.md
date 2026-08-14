@@ -2,6 +2,7 @@
 
 ## 当前文档
 
+- [AI 阅读引导](architecture/ai-reading-guide.md)
 - [分阶段实施计划](planning/implementation-plan.md)
 - [当前任务交接](planning/current-handoff.md)
 - [系统架构](architecture/overview.md)

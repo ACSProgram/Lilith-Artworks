@@ -16,7 +16,7 @@ use super::model::{
 };
 
 const REPOSITORY_FORMAT: &str = "lilith-artworks";
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const MAX_MOVE_NODES: usize = 512;
 const MAX_SEARCH_CHARS: usize = 160;
 const MAX_SEARCH_RESULTS: usize = 100;
@@ -151,7 +151,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '5');
+               ('schema_version', '6');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -265,6 +265,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
                watermark_id TEXT CHECK (watermark_id IS NULL OR length(watermark_id) = 40),
                trustmark_enabled INTEGER NOT NULL CHECK (trustmark_enabled IN (0, 1)),
                output_path TEXT NOT NULL,
+               stored_path TEXT,
                output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
                output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
                title TEXT NOT NULL,
@@ -400,6 +401,10 @@ fn validate_existing(connection: &Connection) -> Result<(), String> {
         migrate_schema_v4_to_v5(connection)?;
         version = 5;
     }
+    if version == 5 {
+        migrate_schema_v5_to_v6(connection)?;
+        version = 6;
+    }
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{}", version));
     }
@@ -526,6 +531,17 @@ fn migrate_schema_v4_to_v5(connection: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("无法把作品仓库迁移到版本 5：{error}"))
+}
+
+fn migrate_schema_v5_to_v6(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE certification_records ADD COLUMN stored_path TEXT;
+             UPDATE repository_meta SET value = '6' WHERE key = 'schema_version';
+             COMMIT;",
+        )
+        .map_err(|error| format!("无法把作品仓库迁移到版本 6：{error}"))
 }
 
 fn create_directories(root: &Path) -> Result<(), String> {

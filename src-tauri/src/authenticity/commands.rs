@@ -20,8 +20,8 @@ use super::{
     error::{AuthenticityError, AuthenticityResult},
     model::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult,
-        EnterPublicationRequest, EstimateRequest, FileSizeEstimate, PreviewImage,
-        PublishBranchRequest, PublishResult,
+        EnterPublicationRequest, EstimateRequest, ExportCertificationRecordRequest,
+        FileSizeEstimate, PreviewImage, PublishBranchRequest, PublishResult,
     },
     pipeline,
     publication_repository::{self, NewFinalArtifact},
@@ -146,6 +146,61 @@ pub(crate) async fn preview_authenticity_image(path: String) -> AuthenticityResu
     tauri::async_runtime::spawn_blocking(move || make_preview(PathBuf::from(path)))
         .await
         .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn preview_certification_record(
+    record_id: String,
+    app_state: State<'_, AppState>,
+) -> AuthenticityResult<PreviewImage> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = repository::record_source_path(&root, record_id.trim())
+            .map_err(AuthenticityError::Task)?;
+        make_preview(source)
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn export_certification_record(
+    request: ExportCertificationRecordRequest,
+    app_state: State<'_, AppState>,
+) -> AuthenticityResult<()> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = repository::record_source_path(&root, request.record_id.trim())
+            .map_err(AuthenticityError::Task)?;
+        let destination = PathBuf::from(request.output_path.trim());
+        if !destination.is_absolute() {
+            return Err(AuthenticityError::InvalidInput(
+                "导出路径必须是绝对路径".into(),
+            ));
+        }
+        if destination
+            .extension()
+            .and_then(|value| value.to_str())
+            .is_none_or(|value| !matches!(value.to_ascii_lowercase().as_str(), "jpg" | "jpeg"))
+        {
+            return Err(AuthenticityError::InvalidInput(
+                "认证图片必须导出为 .jpg 或 .jpeg".into(),
+            ));
+        }
+        let directory = destination
+            .parent()
+            .ok_or_else(|| AuthenticityError::InvalidInput("导出目录无效".into()))?;
+        fs::create_dir_all(directory)?;
+        let mut input = File::open(source)?;
+        let mut temp = NamedTempFile::new_in(directory)?;
+        std::io::copy(&mut input, &mut temp)?;
+        temp.as_file().sync_all()?;
+        temp.persist(&destination)
+            .map_err(|error| AuthenticityError::Io(error.error))?;
+        Ok(())
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
 #[tauri::command]

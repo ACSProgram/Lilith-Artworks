@@ -1,9 +1,9 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import {
-  BadgeCheck, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
-  LockKeyhole, ScanSearch, Search, ShieldCheck, Trash2, X,
+  AlertTriangle, BadgeCheck, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
+  LockKeyhole, MousePointer2, ScanSearch, Search, ShieldCheck, Trash2, X,
 } from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import { formatBytes } from "../../shared/format";
 import type { ArtworkBranch } from "../history/types";
@@ -73,6 +73,8 @@ function PublishView({
   const [result, setResult] = useState<CertificationRecord | null>(null);
   const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
   const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
+  const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
 
   const load = useCallback(async () => {
@@ -105,6 +107,16 @@ function PublishView({
     if (!selectedRecordId || !publication) return;
     window.requestAnimationFrame(() => document.querySelector(`[data-record-id="${selectedRecordId}"]`)?.scrollIntoView({ block: "center" }));
   }, [publication, selectedRecordId]);
+  useEffect(() => {
+    let cancelled = false;
+    setViewingPreview(null);
+    if (viewingRecord) {
+      authenticityApi.previewRecord(viewingRecord.id)
+        .then((next) => { if (!cancelled) setViewingPreview(next); })
+        .catch((error) => { if (!cancelled) onError(message(error)); });
+    }
+    return () => { cancelled = true; };
+  }, [onError, viewingRecord]);
 
   const enterPublication = async () => {
     if (!selectedBranch) return;
@@ -138,6 +150,10 @@ function PublishView({
 
   const publish = async () => {
     if (!selectedBranch || !config) return;
+    if (!privateKey.trim()) {
+      onError("请输入 PEM 私钥后再发布。");
+      return;
+    }
     const outputPath = await save({
       defaultPath: `${config.title.trim() || artworkTitle}-certified.jpg`,
       filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
@@ -166,14 +182,14 @@ function PublishView({
   };
 
   const cancelPublication = async () => {
-    if (!selectedBranch || !window.confirm("取消发布模式会删除发布记录、最终成品和原图副本，是否继续？")) return;
+    if (!selectedBranch) return;
     setBusy(true);
-    try { await authenticityApi.cancelPublication(selectedBranch.id); setPublication(null); setConfig(null); setPreview(null); await onPublicationChanged?.(); }
+    try { await authenticityApi.cancelPublication(selectedBranch.id); setDeleteConfirmOpen(false); setPublication(null); setConfig(null); setPreview(null); await onPublicationChanged?.(); }
     catch (error) { onError(message(error)); }
     finally { setBusy(false); }
   };
 
-  if (viewingRecord) return <div className="auth-workspace record-view-mode"><header className="auth-header"><div><span>发布记录查看</span><h1>{viewingRecord.title}</h1></div><button className="secondary-button" type="button" onClick={() => setViewingRecord(null)}><X size={15} />退出查看</button></header><div className="record-view-content"><dl className="claim-grid"><div><dt>作品</dt><dd>{viewingRecord.artworkTitle}</dd></div><div><dt>分支</dt><dd>{viewingRecord.branchTitle}</dd></div><div><dt>创作者</dt><dd>{viewingRecord.creator || "未声明"}</dd></div><div><dt>发布时间</dt><dd>{new Date(viewingRecord.createdMs).toLocaleString()}</dd></div><div><dt>输出文件</dt><dd>{viewingRecord.outputPath}</dd></div><div><dt>SHA-256</dt><dd><code>{viewingRecord.outputSha256}</code></dd></div></dl>{viewingRecord.c2paManifestJson && <details className="manifest-details" open><summary>C2PA 报告</summary><pre>{viewingRecord.c2paManifestJson}</pre></details>}</div></div>;
+  if (viewingRecord) return <RecordView record={viewingRecord} preview={viewingPreview} onClose={() => setViewingRecord(null)} onError={onError} />;
 
   return <div className="auth-workspace">
     <header className="auth-header">
@@ -216,23 +232,32 @@ function PublishView({
             <label className="wide-field">PEM 私钥<input className="secret-field" type="password" value={privateKey} autoComplete="new-password" placeholder="输入后仅在本次发布使用" onChange={(event) => setPrivateKey(event.target.value)} /></label>
             <label className="wide-field">时间戳服务<input value={config.timestampUrl ?? ""} placeholder="可选 RFC 3161 URL" onChange={(event) => setConfig({ ...config, timestampUrl: event.target.value || null })} /></label>
           </div>
+          <div className="auth-form-section output-settings">
+            <header><strong>JPG 输出</strong><span>固定导出格式</span></header>
+            <label className="range-field">JPEG 质量 <output>{config.jpegQuality}</output><input type="range" min={1} max={100} value={config.jpegQuality} onChange={(event) => setConfig({ ...config, jpegQuality: Number(event.target.value) })} /></label>
+            <div className="size-preview"><span>JPEG 预估大小</span><strong>{sizeEstimate == null ? "计算中" : formatBytes(sizeEstimate)}</strong><small>原图 {formatBytes(preview.sourceBytes)}</small></div>
+            <label>透明背景<input type="color" value={config.backgroundColor} onChange={(event) => setConfig({ ...config, backgroundColor: event.target.value })} /></label>
+          </div>
           <div className="auth-form-section trustmark-section">
-              <header><strong>TrustMark {publication.modelVariant}</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled={!publication.modelsReady} onChange={(event) => setConfig({ ...config, trustmarkEnabled: event.target.checked && config.additionalRegions.length > 0 })} /></label></header>
+            <header><strong>TrustMark {publication.modelVariant}</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled={!publication.modelsReady || config.additionalRegions.length === 0} onChange={(event) => setConfig({ ...config, trustmarkEnabled: event.target.checked && config.additionalRegions.length > 0 })} /></label></header>
+            <div className="trustmark-region-hint"><MousePointer2 size={16} /><span><strong>在左侧图片上拖动框选区域</strong><small>完成第一个框选后自动启用 TrustMark 水印；清空区域后自动关闭。</small></span></div>
             {!publication.modelsReady && <p className="auth-warning">TrustMark 模型不可用，仍可发布 C2PA 凭证。</p>}
             <details className="model-info"><summary>模型信息</summary><dl><div><dt>变体</dt><dd>{publication.modelVariant}</dd></div><div><dt>Encoder SHA-256</dt><dd><code>{publication.encoderSha256 ?? "不可用"}</code></dd></div><div><dt>Decoder SHA-256</dt><dd><code>{publication.decoderSha256 ?? "不可用"}</code></dd></div></dl></details>
             {config.trustmarkEnabled && <>
               <label>自定义 ID<input value={watermarkId} maxLength={40} placeholder="留空自动生成 40 位 ID" onChange={(event) => setWatermarkId(event.target.value.replace(/[^01]/g, ""))} /></label>
               <label className="range-field">TrustMark 强度 <output>{config.watermarkStrength.toFixed(2)}</output><input type="range" min={0.5} max={1.5} step={0.05} value={config.watermarkStrength} onChange={(event) => setConfig({ ...config, watermarkStrength: Number(event.target.value) })} />{config.watermarkStrength > 1 && <small className="auth-warning">超过 1.00 可能造成质量损失</small>}</label>
-              <p>{config.additionalRegions.length ? `仅在 ${config.additionalRegions.length} 个框选区域嵌入水印` : "请在左侧框选区域；未框选时不会启用 TrustMark。"}</p>
+              <p>仅在 {config.additionalRegions.length} 个框选区域嵌入水印。</p>
             </>}
           </div>
-          <div className="auth-form-section output-settings"><label className="range-field">JPEG 质量 <output>{config.jpegQuality}</output><input type="range" min={1} max={100} value={config.jpegQuality} onChange={(event) => setConfig({ ...config, jpegQuality: Number(event.target.value) })} /></label><div className="size-preview"><span>JPEG 预估大小</span><strong>{sizeEstimate == null ? "计算中" : formatBytes(sizeEstimate)}</strong><small>原图 {formatBytes(preview.sourceBytes)}</small></div><label>透明背景<input type="color" value={config.backgroundColor} onChange={(event) => setConfig({ ...config, backgroundColor: event.target.value })} /></label></div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
-          {privateKey.trim().length === 0 && <p className="auth-warning inline-warning">请输入 PEM 私钥后再发布。</p>}
-          <button className="primary-button publish-command" type="button" disabled={busy || privateKey.trim().length === 0} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
-          <button className="text-button cancel-publication" type="button" disabled={busy} onClick={() => void cancelPublication()}><Trash2 size={15} />取消发布并删除成品</button>
+          <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
         </section>
         <RecordList records={publication.records} onNavigate={(record) => { setViewingRecord(record); onNavigateRecord(record); }} selectedId={selectedRecordId} />
+        <section className="publication-danger-zone">
+          <div><AlertTriangle size={18} /><span><strong>移除整个分支的发布内容</strong><small>删除最终成品、全部认证记录、认证 JPG 副本及首次导出文件，并解除分支锁定。</small></span></div>
+          <button className="danger-button solid" type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={15} />取消发布并全部删除</button>
+        </section>
+        {deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
       </div> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取发布状态</div>}
   </div>;
 }
@@ -302,7 +327,7 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
         </>}
       </section>
       <section className="record-search">
-        <header><Search size={17} /><div><strong>搜索导出记录</strong><span>按 ID、标题、创作者或输出路径</span></div></header>
+        <header><Search size={17} /><div><strong>搜索导出记录</strong><span>按 ID、标题、创作者或首次输出路径</span></div></header>
         <div className="record-search-control"><input value={query} maxLength={160} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchRecords(); }} /><button className="secondary-button" disabled={busy} onClick={() => void searchRecords()}><Search size={15} />搜索</button></div>
         <RecordList records={records} onNavigate={onNavigateRecord} compact />
       </section>
@@ -310,44 +335,45 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
   </div>;
 }
 
-function RegionEditor({ target, preview, regions, maxRegions, onChange }: {
+function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly = false }: {
   target: ImageTarget;
   preview: PreviewImage;
   regions: NormalizedRegion[];
   maxRegions: number;
   onChange: (regions: NormalizedRegion[]) => void;
+  readOnly?: boolean;
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
+  const [frame, setFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [draft, setDraft] = useState<NormalizedRegion | null>(null);
   const draftRef = useRef<NormalizedRegion | null>(null);
   const drag = useRef<{ pointerId: number; x: number; y: number } | null>(null);
-  const imageRect = useCallback(() => {
+  useLayoutEffect(() => {
     const stage = stageRef.current;
-    if (!stage) return null;
-    const scale = Math.min(stage.clientWidth / preview.width, stage.clientHeight / preview.height);
-    const width = preview.width * scale;
-    const height = preview.height * scale;
-    return { left: (stage.clientWidth - width) / 2, top: (stage.clientHeight - height) / 2, width, height };
+    if (!stage) return;
+    const update = () => {
+      const scale = Math.min(stage.clientWidth / preview.width, stage.clientHeight / preview.height);
+      const width = preview.width * scale;
+      const height = preview.height * scale;
+      setFrame({ left: (stage.clientWidth - width) / 2, top: (stage.clientHeight - height) / 2, width, height });
+    };
+    update();
+    const observer = new ResizeObserver(update);
+    observer.observe(stage);
+    return () => observer.disconnect();
   }, [preview.height, preview.width]);
   const point = (event: ReactPointerEvent) => {
-    const stage = stageRef.current;
-    const image = imageRect();
-    if (!stage || !image) return null;
-    const bounds = stage.getBoundingClientRect();
-    const x = (event.clientX - bounds.left - image.left) / image.width;
-    const y = (event.clientY - bounds.top - image.top) / image.height;
-    if (event.type === "pointerdown" && (x < 0 || x > 1 || y < 0 || y > 1)) return null;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const x = (event.clientX - bounds.left) / bounds.width;
+    const y = (event.clientY - bounds.top) / bounds.height;
     return { x: Math.max(0, Math.min(1, x)), y: Math.max(0, Math.min(1, y)) };
   };
-  const style = (region: NormalizedRegion) => {
-    const image = imageRect();
-    if (!image) return undefined;
-    return { left: image.left + region.x * image.width, top: image.top + region.y * image.height, width: region.width * image.width, height: region.height * image.height };
-  };
+  const style = (region: NormalizedRegion) => ({ left: `${region.x * 100}%`, top: `${region.y * 100}%`, width: `${region.width * 100}%`, height: `${region.height * 100}%` });
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (event.button !== 0 || regions.length >= maxRegions) return;
+    if (readOnly || event.button !== 0 || (target !== "decode" && regions.length >= maxRegions)) return;
     const start = point(event);
     if (!start) return;
+    if (target === "decode" && regions.length > 0) onChange([]);
     drag.current = { pointerId: event.pointerId, ...start };
     const next = { x: start.x, y: start.y, width: 0, height: 0 };
     draftRef.current = next;
@@ -370,13 +396,61 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange }: {
     draftRef.current = null;
     setDraft(null);
   };
-  return <div className="region-stage" ref={stageRef}>
-    <img src={preview.dataUrl} alt={target === "publish" ? "最终成品预览" : "待识别图片预览"} draggable={false} />
-    <div className="region-layer" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finish} onPointerCancel={finish}>
-      {regions.map((region, index) => <div className="region-box" style={style(region)} key={`${region.x}-${region.y}-${index}`}><span>{target === "publish" ? `区域 ${index + 1}` : "识别区域"}</span>{target === "publish" && <button type="button" title="移除区域" onPointerDown={(event) => event.stopPropagation()} onClick={() => onChange(regions.filter((_, item) => item !== index))}><X size={12} /></button>}</div>)}
-      {draft && <div className="region-box draft" style={style(draft)}><span>框选中</span></div>}
+  return <div className={`region-stage${readOnly ? " read-only" : ""}`} ref={stageRef}>
+    {frame && <div className="region-image-frame" style={frame}>
+      <img src={preview.dataUrl} alt={target === "publish" ? "最终成品预览" : "待识别图片预览"} draggable={false} />
+      <div className="region-layer" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finish} onPointerCancel={finish}>
+        {regions.map((region, index) => <div className="region-box" style={style(region)} key={`${region.x}-${region.y}-${index}`}><span>{target === "publish" ? `区域 ${index + 1}` : "识别区域"}</span>{target === "publish" && !readOnly && <button type="button" title="移除区域" onPointerDown={(event) => event.stopPropagation()} onClick={() => onChange(regions.filter((_, item) => item !== index))}><X size={12} /></button>}</div>)}
+        {draft && <div className="region-box draft" style={style(draft)}><span>框选中</span></div>}
+      </div>
+    </div>}
+    {target === "publish" && regions.length > 0 && !readOnly && <button className="clear-regions" type="button" onClick={() => onChange([])}><Trash2 size={13} />清除区域</button>}
+  </div>;
+}
+
+function RecordView({ record, preview, onClose, onError }: { record: CertificationRecord; preview: PreviewImage | null; onClose: () => void; onError: (message: string | null) => void }) {
+  const [exporting, setExporting] = useState(false);
+  const exportAgain = async () => {
+    const outputPath = await save({
+      defaultPath: fileName(record.outputPath),
+      filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
+    });
+    if (!outputPath) return;
+    setExporting(true);
+    onError(null);
+    try { await authenticityApi.exportRecord(record.id, outputPath); }
+    catch (error) { onError(message(error)); }
+    finally { setExporting(false); }
+  };
+  return <div className="auth-workspace record-view-mode">
+    <header className="auth-header"><div><span>发布记录 · 只读</span><h1>{record.title}</h1></div><div className="record-view-actions"><button className="secondary-button" type="button" disabled={exporting} onClick={() => void exportAgain()}>{exporting ? <LoaderCircle className="spin" size={15} /> : <ImageDown size={15} />}再次导出</button><button className="secondary-button" type="button" onClick={onClose}><X size={15} />退出查看</button></div></header>
+    <div className="publish-layout record-review-layout">
+      <section className="auth-preview-panel">
+        <header><div><strong>{fileName(record.outputPath)}</strong><span>{preview ? `${preview.width} x ${preview.height} · ` : ""}{formatBytes(record.outputBytes)}</span></div><i><LockKeyhole size={14} />记录已锁定</i></header>
+        {preview ? <RegionEditor target="publish" preview={preview} regions={record.additionalRegions} maxRegions={0} onChange={() => undefined} readOnly /> : <div className="record-preview-loading"><LoaderCircle className="spin" size={18} />读取认证图片</div>}
+        <div className="artifact-proof"><span>发布节点</span><code>{record.historyId}</code><span>成品 SHA-256</span><code>{record.outputSha256}</code></div>
+      </section>
+      <section className="publish-controls read-only-controls">
+        <div className="auth-form-section"><header><strong>C2PA 内容凭证</strong><span>只读快照</span></header><ReadOnlyField label="作品标题" value={record.title} /><ReadOnlyField label="创作者" value={record.creator || "未声明"} /><ReadOnlyField label="权利声明" value={record.rightsStatement || "未声明"} multiline /><ReadOnlyField label="认证说明" value={record.authenticationContent || "未声明"} multiline /></div>
+        <div className="auth-form-section"><header><strong>发布信息</strong><span>{new Date(record.createdMs).toLocaleString()}</span></header><ReadOnlyField label="Artwork / 分支" value={`${record.artworkTitle} / ${record.branchTitle}`} /><ReadOnlyField label="首次导出位置" value={record.outputPath} multiline /><ReadOnlyField label="保存方式" value={record.contentStored ? "仓库内已保存认证 JPG" : "旧记录：使用原导出文件"} /><ReadOnlyField label="验证状态" value={record.validationState || "未记录"} /><ReadOnlyField label="Manifest 标签" value={record.c2paManifestLabel || "未记录"} multiline /></div>
+        <div className="auth-form-section trustmark-section"><header><strong>TrustMark</strong><span>{record.trustmarkEnabled ? "已嵌入" : "未嵌入"}</span></header><ReadOnlyField label="TrustMark ID" value={record.watermarkId || "无"} /><p>{record.additionalRegions.length > 0 ? `水印写入 ${record.additionalRegions.length} 个框选区域。` : "此记录未使用框选水印区域。"}</p></div>
+      </section>
+      {record.c2paManifestJson && <section className="record-manifest"><details className="manifest-details" open><summary>C2PA 报告</summary><pre>{record.c2paManifestJson}</pre></details></section>}
     </div>
-    {target === "publish" && regions.length > 0 && <button className="clear-regions" type="button" onClick={() => onChange([])}><Trash2 size={13} />清除区域</button>}
+  </div>;
+}
+
+function ReadOnlyField({ label, value, multiline = false }: { label: string; value: string; multiline?: boolean }) {
+  return <div className={`readonly-field${multiline ? " multiline" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
+}
+
+function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { branchTitle: string; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  return <div className="dialog-backdrop" onMouseDown={onClose}>
+    <section className="publication-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-publication-title" onMouseDown={(event) => event.stopPropagation()}>
+      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-publication-title">删除全部发布内容</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
+      <div><strong>{branchTitle}</strong><p>将删除该分支的最终成品、全部认证记录、仓库内认证 JPG 副本及记录指向的首次导出文件。完成后分支会解除锁定。</p><div className="delete-detail">这是分支发布内容的总删除操作，不是删除单条导出记录。</div></div>
+      <footer><button className="text-button" type="button" onClick={onClose}>保留发布内容</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认全部删除</button></footer>
+    </section>
   </div>;
 }
 

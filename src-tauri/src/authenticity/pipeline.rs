@@ -1,12 +1,12 @@
 use std::{
     fs::{self, File},
-    io::Read,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 
 use image::{codecs::jpeg::JpegEncoder, GenericImageView};
 use sha2::{Digest, Sha256};
-use tempfile::tempdir_in;
+use tempfile::{tempdir_in, NamedTempFile};
 use zeroize::Zeroizing;
 
 use crate::storage;
@@ -111,6 +111,14 @@ pub(crate) fn publish(
     let output_bytes = fs::metadata(&output)?.len();
     let record_id = storage::new_id();
     let created_ms = storage::now_ms().map_err(AuthenticityError::Task)?;
+    let (stored_path, stored_relative) =
+        match store_certification_copy(root, &request.branch_id, &record_id, &output) {
+            Ok(value) => value,
+            Err(error) => {
+                let _ = fs::remove_file(&output);
+                return Err(error);
+            }
+        };
     let inserted = repository::insert_record(
         root,
         &NewCertificationRecord {
@@ -123,6 +131,7 @@ pub(crate) fn publish(
                 .trustmark_enabled
                 .then_some(identifier.as_str()),
             output_path: &output_path,
+            stored_path: &stored_relative,
             output_sha256: &output_sha256,
             output_bytes,
             config: &request.config,
@@ -135,6 +144,7 @@ pub(crate) fn publish(
         Ok(record) => record,
         Err(error) => {
             let _ = fs::remove_file(&output);
+            let _ = fs::remove_file(&stored_path);
             return Err(AuthenticityError::Task(error));
         }
     };
@@ -148,6 +158,28 @@ pub(crate) fn publish(
             0
         },
     })
+}
+
+fn store_certification_copy(
+    root: &Path,
+    branch_id: &str,
+    record_id: &str,
+    source: &Path,
+) -> AuthenticityResult<(PathBuf, String)> {
+    let destination = repository::certification_storage_path(root, branch_id, record_id)
+        .map_err(AuthenticityError::Task)?;
+    let directory = destination
+        .parent()
+        .ok_or_else(|| AuthenticityError::Task("认证副本目录无效".into()))?;
+    fs::create_dir_all(directory)?;
+    let mut input = File::open(source)?;
+    let mut temp = NamedTempFile::new_in(directory)?;
+    io::copy(&mut input, &mut temp)?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(&destination)
+        .map_err(|error| AuthenticityError::Io(error.error))?;
+    let relative = storage::relative_path(root, &destination).map_err(AuthenticityError::Task)?;
+    Ok((destination, relative))
 }
 
 pub(crate) fn decode(

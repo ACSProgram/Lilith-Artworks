@@ -11,6 +11,11 @@
   --accent: #1f7253;
   --accent-hover: #185c43;
   --danger: #a23b35;
+  --warning: #7a4f08;
+  --control-border: #aeb7af;
+  --control-bg: #ffffff;
+  --control-disabled-bg: #eef0ec;
+  --control-disabled-text: #646c66;
   letter-spacing: 0;
 }
 
@@ -25,6 +30,11 @@
   --accent: #67ba91;
   --accent-hover: #79c9a1;
   --danger: #e78278;
+  --warning: #e4b66a;
+  --control-border: #59625b;
+  --control-bg: #202421;
+  --control-disabled-bg: #2a2f2b;
+  --control-disabled-text: #aeb6af;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -39,6 +49,11 @@
     --accent: #67ba91;
     --accent-hover: #79c9a1;
     --danger: #e78278;
+    --warning: #e4b66a;
+    --control-border: #59625b;
+    --control-bg: #202421;
+    --control-disabled-bg: #2a2f2b;
+    --control-disabled-text: #aeb6af;
   }
 }
 
@@ -47,7 +62,7 @@ html, body, #root { width: 100%; height: 100%; margin: 0; }
 button, input, select, textarea { font: inherit; letter-spacing: 0; }
 input, select, textarea { color: var(--text); }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: .9; }
-input:disabled, select:disabled, textarea:disabled { color: var(--muted); background: color-mix(in srgb, var(--surface-subtle) 82%, var(--border)); }
+input:disabled, select:disabled, textarea:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); opacity: 1; }
 button { color: inherit; }
 .app-shell {
   display: grid;
@@ -193,7 +208,7 @@ button { color: inherit; }
 .settings-section { padding: 17px 20px; border-bottom: 1px solid var(--border); }
 .settings-section h3 { margin: 0 0 10px; font-size: 13px; }
 .path-control { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; }
-.path-control input, .settings-section select { min-width: 0; height: 34px; border: 1px solid #aeb7af; border-radius: 6px; padding: 0 10px; color: var(--text); background: var(--surface); }
+.path-control input, .settings-section select { min-width: 0; height: 34px; border: 1px solid var(--control-border); border-radius: 6px; padding: 0 10px; color: var(--text); background: var(--control-bg); }
 .two-column { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .two-column label { display: grid; gap: 7px; font-size: 12px; color: var(--muted); }
 .toggle-list { display: grid; gap: 6px; }
@@ -213,7 +228,7 @@ button { color: inherit; }
 .trash-dialog header small { color: var(--muted); font-size: 10px; }
 .editor-fields { display: grid; gap: 14px; padding: 18px; }
 .editor-fields label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
-.editor-fields input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid #aeb7af; border-radius: 6px; color: var(--text); background: var(--surface); }
+.editor-fields input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
 .node-editor > footer, .trash-dialog > footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--border); }
 .trash-dialog { width: min(680px, 100%); }
 .trash-list { min-height: 180px; max-height: min(520px, 62vh); overflow: auto; }

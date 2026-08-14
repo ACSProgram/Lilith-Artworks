@@ -45,6 +45,13 @@ pub(crate) struct PublishBranchRequest {
     pub(crate) watermark_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExportCertificationRecordRequest {
+    pub(crate) record_id: String,
+    pub(crate) output_path: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DecodeRequest {
@@ -95,6 +102,7 @@ pub(crate) struct CertificationRecord {
     pub(crate) watermark_id: Option<String>,
     pub(crate) trustmark_enabled: bool,
     pub(crate) output_path: String,
+    pub(crate) content_stored: bool,
     pub(crate) output_sha256: String,
     pub(crate) output_bytes: u64,
     pub(crate) title: String,

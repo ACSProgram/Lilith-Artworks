@@ -27,11 +27,12 @@
 - 永久删除和清空只能从回收站执行，并会删除项目的 Artwork、分支、历史与认证元数据。
 - Artwork 内部的历史节点裁剪不使用项目回收站，仍按历史图规则直接永久删除。
 
-schema version 2 增加 `trashed_ms`、`trash_root_id`、`restore_parent_id` 和 `restore_position`；version 3 增加分支调度字段和 fork 安全的 `history_edges`；version 4 增加提交备注、提交类型和检查点；version 5 把最终成品固定关联到发布节点，并扩展 C2PA/TrustMark 配置与不可变导出记录。打开旧仓库时按版本原地迁移。Library 负责迁移和级联清理，但不执行业务发布流程。
+schema version 2 增加 `trashed_ms`、`trash_root_id`、`restore_parent_id` 和 `restore_position`；version 3 增加分支调度字段和 fork 安全的 `history_edges`；version 4 增加提交备注、提交类型和检查点；version 5 把最终成品固定关联到发布节点，并扩展 C2PA/TrustMark 配置与不可变导出记录；version 6 为认证记录增加可空 `stored_path`，新发布原子保存仓库内 JPG 副本，v5 旧记录不迁移文件、原路径仍存在时继续兼容。打开旧仓库时按版本原地迁移。Library 负责迁移和级联清理，但不执行业务发布流程。
 
 ## 当前命令
 
 ```text
+get_repository_status
 list_library_tree
 search_library
 create_library_group

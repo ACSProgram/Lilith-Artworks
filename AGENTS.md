@@ -2,7 +2,7 @@
 
 ## 先选择上下文入口
 
-不要默认通读整个仓库。先按任务范围选择一条路径，只有契约跨界时才补读相邻模块。
+代码任务先读 `docs/architecture/ai-reading-guide.md` 选择路由；不要默认通读整个仓库。先按任务范围选择一条路径，只有契约跨界时才补读相邻模块。
 
 - 历史图、分支、精简、检查点、恢复或自动备份：先读 `docs/modules/history-and-backup.md` 的“上下文入口”，再进入 `src/modules/history/` 或 `src-tauri/src/history/`、`src-tauri/src/backup/`。
 - Artwork 树、搜索、拖放或回收站：先读 `docs/modules/library.md`，再进入 `src/modules/library/` 或 `src-tauri/src/library/`。
