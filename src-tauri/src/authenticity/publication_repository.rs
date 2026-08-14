@@ -42,6 +42,7 @@ pub(crate) fn branch_head(root: &Path, branch_id: &str) -> Result<(String, Strin
 pub(crate) fn insert_final_artifact(
     root: &Path,
     artifact: &NewFinalArtifact<'_>,
+    cleanup_id: &str,
 ) -> Result<(), String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
@@ -77,6 +78,7 @@ pub(crate) fn insert_final_artifact(
     if inserted != 1 {
         return Err("未能绑定最终成品".into());
     }
+    cleanup::complete(&transaction, &[cleanup_id.to_owned()])?;
     transaction.commit().map_err(storage::database_error)
 }
 
@@ -198,4 +200,101 @@ fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {
         byte_size: row.get(6)?,
         created_ms: row.get(7)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn publication_fixture(root: &Path) {
+        crate::library::initialize(root).unwrap();
+        storage::open(root)
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO library_nodes
+                   (id, kind, title, position, created_ms, updated_ms)
+                 VALUES ('artwork', 'artwork', 'Artwork', 0, 0, 0);
+                 INSERT INTO artworks (id, description, created_ms, updated_ms)
+                 VALUES ('artwork', '', 0, 0);
+                 INSERT INTO branches
+                   (id, artwork_id, title, source_path, source_path_key,
+                    backup_enabled, backup_interval_minutes, created_ms, updated_ms)
+                 VALUES ('branch', 'artwork', 'Main', 'source.psd', 'source.psd', 1, 5, 0, 0);
+                 INSERT INTO history_nodes
+                   (id, artwork_id, created_on_branch_id, title, note, commit_kind,
+                    is_checkpoint, created_ms, logical_size, chunk_file_size, sha256,
+                    chunk_count, snapshot_path)
+                 VALUES ('history', 'artwork', 'branch', 'History', '', 'manual',
+                         1, 0, 1, 1,
+                         '0000000000000000000000000000000000000000000000000000000000000000',
+                         1, 'artworks/snapshot.chunk');
+                 UPDATE branches SET head_history_id = 'history' WHERE id = 'branch';",
+            )
+            .unwrap();
+    }
+
+    fn artifact<'a>(source_path: &'a str) -> NewFinalArtifact<'a> {
+        NewFinalArtifact {
+            id: "artifact",
+            branch_id: "branch",
+            history_id: "history",
+            source_path,
+            source_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            media_type: "image/jpeg",
+            byte_size: 1,
+            created_ms: 0,
+        }
+    }
+
+    #[test]
+    fn final_artifact_atomically_takes_over_cleanup_intent() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        publication_fixture(&root);
+        let mut connection = storage::open(&root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let cleanup_id = cleanup::enqueue_repository_file_with_hash(
+            &transaction,
+            "artworks/artifact.jpg",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "test",
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+
+        insert_final_artifact(&root, &artifact("artworks/artifact.jpg"), &cleanup_id).unwrap();
+
+        let connection = storage::open(&root).unwrap();
+        let values: (i64, i64) = connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM final_artifacts),
+                   (SELECT COUNT(*) FROM pending_file_cleanup)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(values, (1, 0));
+    }
+
+    #[test]
+    fn missing_cleanup_intent_rolls_back_final_artifact() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        publication_fixture(&root);
+
+        let error = insert_final_artifact(
+            &root,
+            &artifact("artworks/artifact.jpg"),
+            "missing-cleanup-intent",
+        )
+        .unwrap_err();
+
+        let count: i64 = storage::open(&root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM final_artifacts", [], |row| row.get(0))
+            .unwrap();
+        assert!(error.contains("待清理文件登记已丢失"), "{error}");
+        assert_eq!(count, 0);
+    }
 }

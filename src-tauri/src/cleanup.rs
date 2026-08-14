@@ -46,6 +46,22 @@ pub(crate) fn enqueue_repository_file(
     enqueue(transaction, REPOSITORY_FILE, path, None, reason)
 }
 
+pub(crate) fn enqueue_repository_file_with_hash(
+    transaction: &Transaction<'_>,
+    path: &str,
+    expected_sha256: &str,
+    reason: &str,
+) -> Result<String, String> {
+    storage::validate_sha256(expected_sha256)?;
+    enqueue(
+        transaction,
+        REPOSITORY_FILE,
+        path,
+        Some(expected_sha256),
+        reason,
+    )
+}
+
 pub(crate) fn enqueue_repository_directory(
     transaction: &Transaction<'_>,
     path: &str,
@@ -108,6 +124,28 @@ fn enqueue(
         .map_err(storage::database_error)
 }
 
+pub(crate) fn complete(
+    transaction: &Transaction<'_>,
+    cleanup_ids: &[String],
+) -> Result<(), String> {
+    for id in cleanup_ids {
+        let deleted = transaction
+            .execute("DELETE FROM pending_file_cleanup WHERE id = ?1", [id])
+            .map_err(storage::database_error)?;
+        if deleted != 1 {
+            return Err(format!("待清理文件登记已丢失：{id}"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn discard(root: &Path, cleanup_ids: &[String]) -> Result<(), String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    complete(&transaction, cleanup_ids)?;
+    transaction.commit().map_err(storage::database_error)
+}
+
 pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport, String> {
     let requested = requested_ids.iter().cloned().collect::<HashSet<_>>();
     let connection = storage::open(root)?;
@@ -137,7 +175,12 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
         .into_iter()
         .filter(|entry| requested.is_empty() || requested.contains(&entry.id))
     {
-        match remove_entry(root, &entry) {
+        let result = match referenced_path(&connection, &entry) {
+            Ok(Some(reference)) => Err(format!("文件仍被 {reference} 引用，已保留")),
+            Ok(None) => remove_entry(root, &entry),
+            Err(error) => Err(error),
+        };
+        match result {
             Ok(()) => {
                 connection
                     .execute(
@@ -172,15 +215,78 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
 
 fn remove_entry(root: &Path, entry: &PendingCleanup) -> Result<(), String> {
     match entry.path_kind.as_str() {
-        REPOSITORY_FILE => remove_repository_file(root, &entry.path),
+        REPOSITORY_FILE => {
+            remove_repository_file(root, &entry.path, entry.expected_sha256.as_deref())
+        }
         REPOSITORY_DIRECTORY => remove_repository_directory(root, &entry.path),
         EXTERNAL_FILE => remove_external_file(&entry.path, entry.expected_sha256.as_deref()),
         _ => Err("待清理条目的路径类型无效".into()),
     }
 }
 
-fn remove_repository_file(root: &Path, relative: &str) -> Result<(), String> {
+fn referenced_path(
+    connection: &rusqlite::Connection,
+    entry: &PendingCleanup,
+) -> Result<Option<String>, String> {
+    let reference = match entry.path_kind.as_str() {
+        REPOSITORY_FILE => connection
+            .query_row(
+                "SELECT CASE
+                   WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path = ?1) THEN '最终成品'
+                   WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path = ?1) THEN '认证副本'
+                   WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1) THEN '历史节点'
+                   WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1) THEN '历史边'
+                 END",
+                [&entry.path],
+                |row| row.get(0),
+            )
+            .map_err(storage::database_error)?,
+        REPOSITORY_DIRECTORY => {
+            let prefix = format!("{}/%", entry.path.trim_end_matches(['/', '\\']));
+            connection
+                .query_row(
+                    "SELECT CASE
+                       WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path LIKE ?1) THEN '最终成品'
+                       WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path LIKE ?1) THEN '认证副本'
+                       WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path LIKE ?1 OR delta_path LIKE ?1) THEN '历史节点'
+                       WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path LIKE ?1) THEN '历史边'
+                     END",
+                    [&prefix],
+                    |row| row.get(0),
+                )
+                .map_err(storage::database_error)?
+        }
+        EXTERNAL_FILE => connection
+            .query_row(
+                "SELECT CASE WHEN EXISTS(
+                   SELECT 1 FROM certification_records WHERE output_path = ?1
+                 ) THEN '认证导出记录' END",
+                [&entry.path],
+                |row| row.get(0),
+            )
+            .map_err(storage::database_error)?,
+        _ => None,
+    };
+    Ok(reference)
+}
+
+fn remove_repository_file(
+    root: &Path,
+    relative: &str,
+    expected_sha256: Option<&str>,
+) -> Result<(), String> {
     let path = safe_repository_path(root, relative)?;
+    if path.exists() {
+        if !path.is_file() {
+            return Err("仓库清理路径不再是普通文件".into());
+        }
+        if let Some(expected) = expected_sha256 {
+            let actual = sha256_file(&path)?;
+            if !actual.eq_ignore_ascii_case(expected) {
+                return Err("仓库文件内容已变化，为避免误删已保留该文件".into());
+            }
+        }
+    }
     match fs::remove_file(&path) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -317,5 +423,70 @@ mod tests {
 
         assert_eq!(report.failures.len(), 1);
         assert!(outside.is_dir());
+    }
+
+    #[test]
+    fn repository_cleanup_checks_expected_hash_and_can_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored = root.join("artworks").join("artifact.jpg");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"original").unwrap();
+        let expected = sha256_file(&stored).unwrap();
+        let mut connection = storage::open(&root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let id = enqueue_repository_file_with_hash(
+            &transaction,
+            "artworks/artifact.jpg",
+            &expected,
+            "test",
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        fs::write(&stored, b"changed").unwrap();
+
+        let failed = run(&root, std::slice::from_ref(&id)).unwrap();
+        assert_eq!(failed.failures.len(), 1);
+        assert!(stored.is_file());
+
+        fs::write(&stored, b"original").unwrap();
+        let retried = run(&root, &[id]).unwrap();
+        assert!(retried.failures.is_empty());
+        assert!(!stored.exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_a_file_that_is_referenced_by_database_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored = root.join("artworks").join("artifact.jpg");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"artifact").unwrap();
+        let expected = sha256_file(&stored).unwrap();
+        let mut connection = storage::open(&root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let id = enqueue_repository_file_with_hash(
+            &transaction,
+            "artworks/artifact.jpg",
+            &expected,
+            "test",
+        )
+        .unwrap();
+        transaction.commit().unwrap();
+        connection
+            .execute_batch("PRAGMA foreign_keys = OFF;
+                INSERT INTO final_artifacts
+                  (id, branch_id, history_id, source_path, source_sha256, media_type, byte_size, created_ms)
+                VALUES ('artifact', 'branch', 'history', 'artworks/artifact.jpg',
+                        '0000000000000000000000000000000000000000000000000000000000000000',
+                        'image/jpeg', 8, 0);")
+            .unwrap();
+
+        let report = run(&root, std::slice::from_ref(&id)).unwrap();
+        assert_eq!(report.failures.len(), 1);
+        assert!(stored.is_file());
+        assert_eq!(report.pending_count, 1);
     }
 }

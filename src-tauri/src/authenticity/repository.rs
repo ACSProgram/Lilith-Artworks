@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension, Row, Transaction};
 
-use crate::storage;
+use crate::{cleanup, storage};
 
 use super::model::{BranchPublication, CertificationConfig, CertificationRecord, NormalizedRegion};
 
@@ -120,6 +120,7 @@ fn default_config(connection: &Connection, branch_id: &str) -> Result<Certificat
 pub(crate) fn insert_record(
     root: &Path,
     record: &NewCertificationRecord<'_>,
+    cleanup_ids: &[String],
 ) -> Result<CertificationRecord, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
@@ -156,11 +157,17 @@ pub(crate) fn insert_record(
             ],
         )
         .map_err(storage::database_error)?;
+    cleanup::complete(&transaction, cleanup_ids)?;
+    let inserted = query_records(
+        &transaction,
+        "WHERE record.id = ?1 ORDER BY record.created_ms DESC",
+        record.id,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| "发布记录写入后无法回读".to_owned())?;
     transaction.commit().map_err(storage::database_error)?;
-    search_records(root, record.id)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| "发布记录写入后无法回读".into())
+    Ok(inserted)
 }
 
 fn save_config(

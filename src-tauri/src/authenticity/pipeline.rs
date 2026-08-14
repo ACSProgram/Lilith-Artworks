@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tempfile::{tempdir_in, NamedTempFile};
 use zeroize::Zeroizing;
 
-use crate::storage;
+use crate::{cleanup, storage};
 
 use super::{
     c2pa,
@@ -107,20 +107,50 @@ pub(crate) fn publish(
             "签名完成后未能回读 C2PA 清单".into(),
         ));
     }
-    fs::rename(&signed_path, &output)?;
-
     let output_path = storage::display_path(&output);
-    let output_sha256 = sha256_file(&output)?;
-    let output_bytes = fs::metadata(&output)?.len();
+    let output_sha256 = sha256_file(&signed_path)?;
+    let output_bytes = fs::metadata(&signed_path)?.len();
     let created_ms = storage::now_ms().map_err(AuthenticityError::Task)?;
-    let (stored_path, stored_relative) =
-        match store_certification_copy(root, &request.branch_id, &record_id, &output) {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = fs::remove_file(&output);
-                return Err(error);
-            }
+    let stored_destination =
+        repository::certification_storage_path(root, &request.branch_id, &record_id)
+            .map_err(AuthenticityError::Task)?;
+    let stored_relative =
+        storage::relative_path(root, &stored_destination).map_err(AuthenticityError::Task)?;
+    let cleanup_ids = {
+        let mut connection = storage::open(root).map_err(AuthenticityError::Task)?;
+        let transaction = connection
+            .transaction()
+            .map_err(|error| AuthenticityError::Task(storage::database_error(error)))?;
+        let external_id = cleanup::enqueue_external_file(
+            &transaction,
+            &output_path,
+            &output_sha256,
+            "publish_certification",
+        )
+        .map_err(AuthenticityError::Task)?;
+        let stored_id = cleanup::enqueue_repository_file_with_hash(
+            &transaction,
+            &stored_relative,
+            &output_sha256,
+            "publish_certification",
+        )
+        .map_err(AuthenticityError::Task)?;
+        transaction
+            .commit()
+            .map_err(|error| AuthenticityError::Task(storage::database_error(error)))?;
+        vec![external_id, stored_id]
+    };
+    if let Err(error) = publish_noclobber(&signed_path, &output) {
+        let message = match cleanup::discard(root, &cleanup_ids) {
+            Ok(()) => error.to_string(),
+            Err(cleanup_error) => format!("{}；无法撤销清理登记：{}", error, cleanup_error),
         };
+        return Err(AuthenticityError::Task(message));
+    }
+    if let Err(error) = store_certification_copy(&stored_destination, &output) {
+        let message = recover_failed_publication(root, &cleanup_ids, error.to_string());
+        return Err(AuthenticityError::Task(message));
+    }
     let inserted = repository::insert_record(
         root,
         &NewCertificationRecord {
@@ -141,13 +171,16 @@ pub(crate) fn publish(
             validation_state: manifest.validation_state.as_deref(),
             created_ms,
         },
+        &cleanup_ids,
     );
     let record = match inserted {
         Ok(record) => record,
         Err(error) => {
-            let _ = fs::remove_file(&output);
-            let _ = fs::remove_file(&stored_path);
-            return Err(AuthenticityError::Task(error));
+            return Err(AuthenticityError::Task(recover_failed_publication(
+                root,
+                &cleanup_ids,
+                error,
+            )));
         }
     };
     Ok(PublishedOutput {
@@ -162,14 +195,7 @@ pub(crate) fn publish(
     })
 }
 
-fn store_certification_copy(
-    root: &Path,
-    branch_id: &str,
-    record_id: &str,
-    source: &Path,
-) -> AuthenticityResult<(PathBuf, String)> {
-    let destination = repository::certification_storage_path(root, branch_id, record_id)
-        .map_err(AuthenticityError::Task)?;
+fn store_certification_copy(destination: &Path, source: &Path) -> AuthenticityResult<()> {
     let directory = destination
         .parent()
         .ok_or_else(|| AuthenticityError::Task("认证副本目录无效".into()))?;
@@ -180,8 +206,32 @@ fn store_certification_copy(
     temp.as_file().sync_all()?;
     temp.persist_noclobber(&destination)
         .map_err(|error| AuthenticityError::Io(error.error))?;
-    let relative = storage::relative_path(root, &destination).map_err(AuthenticityError::Task)?;
-    Ok((destination, relative))
+    Ok(())
+}
+
+fn publish_noclobber(source: &Path, destination: &Path) -> AuthenticityResult<()> {
+    let directory = destination
+        .parent()
+        .ok_or_else(|| AuthenticityError::InvalidInput("输出目录无效".into()))?;
+    let mut input = File::open(source)?;
+    let mut temp = NamedTempFile::new_in(directory)?;
+    io::copy(&mut input, &mut temp)?;
+    temp.as_file().sync_all()?;
+    temp.persist_noclobber(destination)
+        .map_err(|error| AuthenticityError::Io(error.error))?;
+    Ok(())
+}
+
+fn recover_failed_publication(root: &Path, cleanup_ids: &[String], error: String) -> String {
+    match cleanup::run(root, cleanup_ids) {
+        Ok(report) if report.failures.is_empty() => error,
+        Ok(report) => format!(
+            "{}；有 {} 个发布文件清理失败，将在下次启动时重试",
+            error,
+            report.failures.len()
+        ),
+        Err(cleanup_error) => format!("{}；发布文件清理任务失败：{}", error, cleanup_error),
+    }
 }
 
 pub(crate) fn decode(

@@ -326,10 +326,31 @@ fn store_final_artifact(
     temp.as_file()
         .sync_all()
         .map_err(|error| format!("无法同步最终成品：{error}"))?;
-    temp.persist_noclobber(&final_path)
-        .map_err(|error| format!("无法发布最终成品：{}", error.error))?;
     let source_sha256 = hex::encode_upper(hasher.finalize());
     let stored_path = storage::relative_path(root, &final_path)?;
+    let created_ms = storage::now_ms()?;
+    let cleanup_id = {
+        let mut connection = storage::open(root)?;
+        let transaction = connection.transaction().map_err(storage::database_error)?;
+        let id = cleanup::enqueue_repository_file_with_hash(
+            &transaction,
+            &stored_path,
+            &source_sha256,
+            "enter_branch_publication",
+        )?;
+        transaction.commit().map_err(storage::database_error)?;
+        id
+    };
+    if let Err(error) = temp.persist_noclobber(&final_path) {
+        let message = match cleanup::discard(root, std::slice::from_ref(&cleanup_id)) {
+            Ok(()) => format!("无法发布最终成品：{}", error.error),
+            Err(cleanup_error) => format!(
+                "无法发布最终成品：{}；无法撤销清理登记：{}",
+                error.error, cleanup_error
+            ),
+        };
+        return Err(message);
+    }
     let artifact = NewFinalArtifact {
         id: &artifact_id,
         branch_id,
@@ -338,11 +359,23 @@ fn store_final_artifact(
         source_sha256: &source_sha256,
         media_type,
         byte_size: size,
-        created_ms: storage::now_ms()?,
+        created_ms,
     };
-    if let Err(error) = publication_repository::insert_final_artifact(root, &artifact) {
-        let _ = fs::remove_file(&final_path);
-        return Err(error);
+    if let Err(error) = publication_repository::insert_final_artifact(root, &artifact, &cleanup_id)
+    {
+        return Err(recover_failed_artifact(root, &cleanup_id, error));
     }
     Ok(())
+}
+
+fn recover_failed_artifact(root: &Path, cleanup_id: &str, error: String) -> String {
+    match cleanup::run(root, &[cleanup_id.to_owned()]) {
+        Ok(report) if report.failures.is_empty() => error,
+        Ok(report) => format!(
+            "{}；有 {} 个最终成品文件清理失败，将在下次启动时重试",
+            error,
+            report.failures.len()
+        ),
+        Err(cleanup_error) => format!("{}；最终成品清理任务失败：{}", error, cleanup_error),
+    }
 }
