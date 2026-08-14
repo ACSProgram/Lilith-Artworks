@@ -651,21 +651,7 @@ pub(crate) fn delete_subtree(
     if !branch_valid {
         return Err("只能从当前分支的历史链删除节点".into());
     }
-    let contains_publication: bool = transaction
-        .query_row(
-            "WITH RECURSIVE descendants(id) AS (
-               SELECT id FROM history_nodes WHERE id = ?1
-               UNION ALL
-               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-             )
-             SELECT EXISTS(
-               SELECT 1 FROM final_artifacts artifact JOIN descendants ON artifact.history_id = descendants.id
-             )",
-            [history_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)?;
-    if contains_publication {
+    if subtree_contains_publication(&transaction, history_id)? {
         return Err("无法删除历史：这段历史包含已发布节点，发布记录必须保留可恢复基线".into());
     }
     transaction
@@ -759,6 +745,16 @@ pub(crate) fn delete_subtree(
             }
             continue;
         };
+        let head_deleted = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_delete WHERE id = ?1)",
+                [&head],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(storage::database_error)?;
+        if !head_deleted && !origin_deleted {
+            continue;
+        }
         let mut cursor = head;
         loop {
             let deleted = transaction
@@ -840,6 +836,9 @@ pub(crate) fn validate_subtree_deletion(
     if !branch_valid {
         return Err("只能从当前分支的历史链删除节点".into());
     }
+    if subtree_contains_publication(&connection, history_id)? {
+        return Err("无法删除历史：这段历史包含已发布节点，发布记录必须保留可恢复基线".into());
+    }
     let conflict: Option<String> = connection
         .query_row(
             "WITH RECURSIVE descendants(id) AS (
@@ -863,6 +862,26 @@ pub(crate) fn validate_subtree_deletion(
         ));
     }
     Ok(())
+}
+
+fn subtree_contains_publication(
+    connection: &rusqlite::Connection,
+    history_id: &str,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM history_nodes WHERE id = ?1
+               UNION ALL
+               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
+             )
+             SELECT EXISTS(
+               SELECT 1 FROM final_artifacts artifact JOIN descendants ON artifact.history_id = descendants.id
+             )",
+            [history_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)
 }
 
 pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeletion, String> {
@@ -1048,6 +1067,61 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    struct HistoryFixture {
+        _directory: tempfile::TempDir,
+        root: PathBuf,
+        artwork_id: String,
+        main_branch_id: String,
+        fork_source: PathBuf,
+    }
+
+    impl HistoryFixture {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let root = directory.path().join("repository");
+            let main_source = directory.path().join("main.psd");
+            let fork_source = directory.path().join("fork.psd");
+            fs::write(&main_source, b"main").unwrap();
+            fs::write(&fork_source, b"fork").unwrap();
+            crate::library::initialize(&root).unwrap();
+            let artwork =
+                crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source)
+                    .unwrap();
+            Self {
+                _directory: directory,
+                root,
+                artwork_id: artwork.artwork_id,
+                main_branch_id: artwork.branch_id,
+                fork_source,
+            }
+        }
+
+        fn commit_node(&self, branch_id: &str, id: &str, parent_id: Option<&str>, created_ms: i64) {
+            let snapshot = format!("artworks/{id}.snapshot");
+            let delta = parent_id.map(|parent| format!("artworks/{id}-to-{parent}.delta"));
+            commit(
+                &self.root,
+                HistoryCommit {
+                    id,
+                    branch_id,
+                    parent_id,
+                    title: id,
+                    note: "",
+                    commit_kind: "manual",
+                    created_ms,
+                    logical_size: 1,
+                    chunk_file_size: 1,
+                    sha256: &format!("{:064X}", created_ms),
+                    chunk_count: 1,
+                    snapshot_path: &snapshot,
+                    delta_path: delta.as_deref(),
+                    delta_size: delta.as_ref().map(|_| 1),
+                },
+            )
+            .unwrap();
+        }
+    }
+
     #[test]
     fn branch_deletion_collects_edge_delta_paths() {
         let directory = tempfile::tempdir().unwrap();
@@ -1115,5 +1189,121 @@ mod tests {
             .storage_paths
             .iter()
             .any(|path| path == "artworks/fork.delta"));
+    }
+
+    #[test]
+    fn subtree_preflight_rejects_published_history() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        fixture.commit_node(&fixture.main_branch_id, "published", Some("root"), 2);
+        storage::open(&fixture.root)
+            .unwrap()
+            .execute(
+                "INSERT INTO final_artifacts
+                 (id, branch_id, history_id, source_path, source_sha256, media_type, byte_size, created_ms)
+                 VALUES ('artifact', ?1, 'published', 'artworks/final.jpg', ?2, 'image/jpeg', 1, 3)",
+                params![fixture.main_branch_id, "A".repeat(64)],
+            )
+            .unwrap();
+
+        let error = validate_subtree_deletion(&fixture.root, "published", &fixture.main_branch_id)
+            .unwrap_err();
+
+        assert!(error.contains("已发布节点"), "{error}");
+    }
+
+    #[test]
+    fn subtree_deletion_does_not_update_unaffected_branches() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        fixture.commit_node(&fixture.main_branch_id, "cut", Some("root"), 2);
+        fixture.commit_node(&fixture.main_branch_id, "main-head", Some("cut"), 3);
+        let fork_branch = create_branch(
+            &fixture.root,
+            &fixture.artwork_id,
+            "root",
+            "Fork",
+            &fixture.fork_source,
+        )
+        .unwrap();
+        fixture.commit_node(&fork_branch, "fork-head", Some("root"), 4);
+        storage::open(&fixture.root)
+            .unwrap()
+            .execute(
+                "UPDATE branches SET updated_ms = 777 WHERE id = ?1",
+                [&fork_branch],
+            )
+            .unwrap();
+
+        delete_subtree(&fixture.root, "cut", &fixture.main_branch_id).unwrap();
+
+        let connection = storage::open(&fixture.root).unwrap();
+        let main_head: Option<String> = connection
+            .query_row(
+                "SELECT head_history_id FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let fork_state: (Option<String>, i64) = connection
+            .query_row(
+                "SELECT head_history_id, updated_ms FROM branches WHERE id = ?1",
+                [&fork_branch],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(main_head.as_deref(), Some("root"));
+        assert_eq!(fork_state.0.as_deref(), Some("fork-head"));
+        assert_eq!(fork_state.1, 777);
+    }
+
+    #[test]
+    fn compaction_atomically_rewires_child_and_edge() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        fixture.commit_node(&fixture.main_branch_id, "middle", Some("root"), 2);
+        fixture.commit_node(&fixture.main_branch_id, "child", Some("middle"), 3);
+        let target = compaction_target(&fixture.root, "middle").unwrap();
+
+        let old_paths =
+            apply_compaction(&fixture.root, &target, "artworks/child-to-root.delta", 9).unwrap();
+
+        let connection = storage::open(&fixture.root).unwrap();
+        let child: (Option<String>, Option<String>, i64) = connection
+            .query_row(
+                "SELECT parent_id, delta_path, chunk_file_size FROM history_nodes WHERE id = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let edge: (String, String, i64) = connection
+            .query_row(
+                "SELECT parent_history_id, delta_path, delta_size
+                 FROM history_edges WHERE child_history_id = 'child'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let middle_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM history_nodes WHERE id = 'middle')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(child.0.as_deref(), Some("root"));
+        assert_eq!(child.1.as_deref(), Some("artworks/child-to-root.delta"));
+        assert_eq!(child.2, 9);
+        assert_eq!(
+            edge,
+            ("root".into(), "artworks/child-to-root.delta".into(), 9)
+        );
+        assert!(!middle_exists);
+        assert!(old_paths
+            .iter()
+            .any(|path| path == "artworks/middle-to-root.delta"));
+        assert!(old_paths
+            .iter()
+            .any(|path| path == "artworks/child-to-middle.delta"));
     }
 }
