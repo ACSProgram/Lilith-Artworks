@@ -12,6 +12,7 @@ import {
   X,
 } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
+import { ArtworkWorkspace } from "./ArtworkWorkspace";
 import { appApi } from "./api";
 import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
 import { WindowTitleBar } from "./WindowTitleBar";
@@ -136,6 +137,23 @@ export function App() {
           repositoryReady={repository.ready}
           onConfigure={openSettings}
           onError={setMessage}
+          onRetryFileCleanup={appApi.retryFileCleanup}
+          renderArtworkWorkspace={(workspace) => (
+            <ArtworkWorkspace
+              key={workspace.artworkId}
+              artworkId={workspace.artworkId}
+              initialView={workspace.initialView}
+              initialBranchId={workspace.initialBranchId}
+              initialRecordId={workspace.initialRecordId}
+              onError={setMessage}
+              onRetryFileCleanup={appApi.retryFileCleanup}
+              onNavigateRecord={(record) => workspace.onNavigateRecord({
+                artworkId: record.artworkId,
+                branchId: record.branchId,
+                recordId: record.id,
+              })}
+            />
+          )}
         />
       )}
       {message && <div className="notice" role="alert">

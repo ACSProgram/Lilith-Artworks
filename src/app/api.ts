@@ -1,5 +1,6 @@
 import { invokeCommand } from "../shared/tauri";
-import type { AppSettings, CleanupReport, RepositoryStatus, SettingsSnapshot } from "./types";
+import type { CleanupReport } from "../shared/fileCleanup";
+import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
 
 export const appApi = {
   getSettings: () => invokeCommand<SettingsSnapshot>("get_app_settings"),

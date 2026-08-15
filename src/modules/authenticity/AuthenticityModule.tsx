@@ -5,25 +5,24 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
+import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
-import { appApi } from "../../app/api";
-import type { CleanupFailure } from "../../app/types";
-import type { ArtworkBranch } from "../history/types";
 import { authenticityApi } from "./api";
 import type {
-  BranchPublication, CertificationConfig, CertificationRecord, DecodeResult,
+  AuthenticityBranch, BranchPublication, CertificationConfig, CertificationRecord, DecodeResult,
   NormalizedRegion, PreviewImage,
 } from "./types";
 
 interface AuthenticityModuleProps {
   mode: "publish" | "identify";
   artworkTitle: string;
-  branches: ArtworkBranch[];
+  branches: AuthenticityBranch[];
   selectedBranchId: string | null;
   selectedRecordId?: string | null;
   onSelectBranch: (branchId: string) => void;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
+  onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
   onPublicationChanged?: () => Promise<void>;
 }
 
@@ -64,7 +63,7 @@ export function AuthenticityModule(props: AuthenticityModuleProps) {
 }
 
 function PublishView({
-  artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord, onPublicationChanged,
+  artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const [publication, setPublication] = useState<BranchPublication | null>(null);
   const [config, setConfig] = useState<CertificationConfig | null>(null);
@@ -234,7 +233,7 @@ function PublishView({
     setBusy(true);
     onError(null);
     try {
-      const report = await appApi.retryFileCleanup(cleanupFailures.map((failure) => failure.id));
+      const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
       setCleanupFailures(report.failures);
       if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
     } catch (error) {

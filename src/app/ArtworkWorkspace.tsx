@@ -5,6 +5,7 @@ import type { CertificationRecord } from "../modules/authenticity/types";
 import { HistoryModule } from "../modules/history/HistoryModule";
 import { historyApi } from "../modules/history/api";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
+import type { CleanupReport } from "../shared/fileCleanup";
 
 type WorkspaceView = "history" | "publish" | "identify";
 
@@ -15,6 +16,7 @@ interface ArtworkWorkspaceProps {
   initialRecordId?: string | null;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
+  onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
 }
 
 export function ArtworkWorkspace({
@@ -24,6 +26,7 @@ export function ArtworkWorkspace({
   initialRecordId = null,
   onError,
   onNavigateRecord,
+  onRetryFileCleanup,
 }: ArtworkWorkspaceProps) {
   const [view, setView] = useState<WorkspaceView>(initialView);
   const [title, setTitle] = useState("");
@@ -64,8 +67,8 @@ export function ArtworkWorkspace({
     </nav>
     <div className="artwork-view">
       <div hidden={view !== "history"} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>
-      <div hidden={view !== "publish"} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onPublicationChanged={refreshAfterPublication} /></div>
-      <div hidden={view !== "identify"} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} /></div>
+      <div hidden={view !== "publish"} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>
+      <div hidden={view !== "identify"} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>
     </div>
   </div>;
 }

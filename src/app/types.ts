@@ -39,15 +39,3 @@ export interface RepositoryStatus {
   databasePath: string;
   error: string | null;
 }
-
-export interface CleanupFailure {
-  id: string;
-  path: string;
-  error: string;
-}
-
-export interface CleanupReport {
-  cleanedCount: number;
-  pendingCount: number;
-  failures: CleanupFailure[];
-}

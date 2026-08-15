@@ -22,7 +22,7 @@ src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
-前端业务模块不能直接互相导入。`ArtworkWorkspace` 在应用层组合历史和认证视图；Library 只负责选中 Artwork 与处理跨作品定位。所有文件系统、数据库和模型操作都在 Rust 中完成。
+前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史和认证视图。Library 只管理作品树、当前选择和跨作品定位，Authenticity 只接收认证所需的最小分支视图。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
 ## 应用生命周期
 

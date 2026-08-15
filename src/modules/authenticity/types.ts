@@ -69,6 +69,12 @@ export interface CertificationRecord {
   createdMs: number;
 }
 
+export interface AuthenticityBranch {
+  id: string;
+  title: string;
+  headHistoryId: string | null;
+}
+
 export interface BranchPublication {
   branchId: string;
   artifact: FinalArtifact | null;

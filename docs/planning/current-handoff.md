@@ -11,7 +11,7 @@
 
 当前 schema 为 v7。项目仍采用测试期兼容政策：公开承诺数据兼容前允许使用新仓库，不为内部 schema 版本补长期无损迁移。
 
-当前正在继续用户提出的体验与鲁棒性优化。阶段 A-C 已提交但尚待用户人工检查；阶段 D 已实现并通过静态验证，尚待提交和人工窗口交互检查。
+当前正在继续用户提出的体验与鲁棒性优化。阶段 A-D 已提交但尚待用户人工检查；阶段 E 已实现并通过静态验证，尚待提交和 Library/认证导航冒烟检查。
 
 ## 四轮已完成
 
@@ -70,13 +70,21 @@
 - 设置 `settings.json` 已使用同目录临时文件、文件 `sync_all` 和原子替换；新增覆盖已有设置的重复写入回归通过，本阶段无需改实现。
 - 强制终止进程仍可能留下 NamedTempFile 或极短发布窗口中的未引用历史文件，但 SQLite 图、正式恢复输出和认证记录保持原子；后续可把历史 snapshot/delta 扩展到清理意图并增加陈旧临时文件维护命令。
 
-## 本轮阶段 D：窗口顶栏与历史展示拆分（待提交/人工验收）
+## 本轮阶段 D：窗口顶栏与历史展示拆分（已提交/待人工验收）
 
 - 回归确认截图中的空隙不来自页面 margin：`html/body/#root` 已为满高零边距，间隔位于 Windows 原生装饰栏与 WebView 应用顶栏的边界。
 - 主窗口改用无原生装饰的 48px 应用顶栏，合并品牌、仓库状态、设置和窗口控制，消除两层标题栏之间的分隔空隙；拖动、最小化、最大化/还原与关闭只开放对应的 Tauri window capability。
 - 自定义关闭按钮继续调用标准 window close，仍由 Rust `CloseRequested` 决定隐藏到托盘或真正退出，不绕开现有生命周期。
 - 左侧时间轴条目改为“创建分支 - 节点标题”；只消费现有 `createdOnBranchId` 和 branch DTO，未改变历史数据或后端契约。
 - 将时间轴与 mindmap 纯展示从 `HistoryModule.tsx` 拆到 `HistoryGraph.tsx`；历史状态、命令编排、节点选择与图模型保持原位置，作为超大前端组件拆分的第一步。
+
+## 本轮阶段 E：Library 展示拆分与前端依赖反转（待提交/人工验收）
+
+- 回归确认 P2 的大组件与模块边界问题存在：`LibraryModule.tsx` 共 738 行，同时包含树工作流、弹窗和展示；并反向导入应用层 `ArtworkWorkspace`、清理 API 及 Authenticity DTO，Authenticity 也直接引用 History 分支 DTO。
+- 将新建/重命名和回收站弹窗拆到 `LibraryDialogs.tsx`，命令菜单、空状态和节点概览拆到 `LibraryViews.tsx`；`LibraryModule.tsx` 降至约 570 行，只保留页面状态、树交互和命令编排。
+- `App` 现在注入 Artwork 工作区渲染器与文件清理重试，并把 `CertificationRecord` 转换为 `{ artworkId, branchId, recordId }` 后交给 Library 定位；现有标签切换、跨作品溯源和回收站流程保持不变。
+- 共享清理 DTO 从 `src/app/types.ts` 移到 `src/shared/fileCleanup.ts`；Library 与 Authenticity 不再反向导入应用层 API/类型。
+- Authenticity 新增仅含 `id`、`title`、`headHistoryId` 的最小分支视图，不再直接导入 History DTO；静态搜索确认 `src/modules/*` 之间无直接导入。
 
 ## 当前验证
 
@@ -89,6 +97,7 @@
 - 阶段 B：新增 3 个仓库打开/设置初始化回归通过；Library 仓储测试 12 个通过。
 - 阶段 C：退出等待/拒绝排队任务回归 1 个、备用数据库改名/WAL 恢复回归 2 个、设置原子覆盖回归 1 个通过。
 - 阶段 D：`npm run build`、Tauri 配置/能力 JSON 解析、`cargo metadata --no-deps`、`git diff --check` 通过。
+- 阶段 E：`npm run build` 通过；模块反向导入静态检查无结果。
 - `cargo fmt --check`、`cargo metadata --no-deps`、`git diff --check`：通过。
 
 未运行：全量 `cargo test`、GUI 自动化、真实 C2PA 证书/第三方验证器与 TrustMark ONNX 自动化。GUI 自动化按验证策略继续禁止。
@@ -101,6 +110,7 @@
 - 人工检查阶段 C：在大文件提交或恢复过程中从托盘退出，确认窗口等待操作取消和清理后退出；重新启动后仓库应可正常读取。
 - 人工检查阶段 D：确认顶栏与窗口边缘无空隙，可拖动窗口，最小化、最大化/还原、双击顶栏和关闭到托盘行为正常；检查窄窗口下仓库状态与窗口按钮不重叠。
 - 人工检查阶段 D：在时间轴中确认同名节点显示为“分支 - 标题”，点击后仍能把对应 mindmap 卡片滚动到中央。
+- 人工检查阶段 E：新建分组/Artwork、重命名、回收站恢复/永久删除/清空与失败重试应保持原流程；从识别结果跳到其它 Artwork 的发布记录后应选中对应树节点、分支和记录。
 - 为阶段 1 新 claim/冲突 UI 和阶段 2 取消发布失败重试做一次可丢弃仓库人工验收。
 - 为阶段 3 正常进入发布、认证导出和重启 reconciliation 做一次可丢弃仓库人工验收；故障注入继续由自动测试覆盖。
 - 扩充核心不变量测试：认证发布/查询与前端异步状态。
@@ -108,7 +118,7 @@
 
 ### P2
 
-- 拆出 Library schema/migration；拆分三个超大前端组件。
+- 拆出 Library schema/migration；继续拆分 History 与 Authenticity 大组件，Library 的弹窗/展示拆分已完成第一步。
 - 把 history/backup 跨模块工作流进一步上移应用层。
 - 缓存仓库初始化，避免每个命令执行完整 `integrity_check`。
 - 将历史 snapshot/delta 的发布窗口接入清理意图，并增加陈旧临时文件维护命令，回收强制终止留下的无引用文件。

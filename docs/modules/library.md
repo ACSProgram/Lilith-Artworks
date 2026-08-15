@@ -3,6 +3,8 @@
 ## 上下文入口
 
 - 页面工作流：`src/modules/library/LibraryModule.tsx`
+- 新建/重命名与回收站弹窗：`src/modules/library/LibraryDialogs.tsx`
+- 命令菜单、空状态与节点概览：`src/modules/library/LibraryViews.tsx`
 - 树渲染与拖放：`src/modules/library/LibraryTreeView.tsx`
 - 多选与树计算：`src/modules/library/tree.ts`
 - 前端命令和类型：`src/modules/library/api.ts`、`types.ts`
@@ -17,6 +19,7 @@
 - 新建 Artwork 必须同时填写标题、初始分支标题并选择现有工作文件。Rust 负责绝对路径、普通文件、仓库外路径和同 Artwork 分支路径唯一性检查。
 - 搜索匹配节点标题与 Artwork 主分支工作文件路径；选择结果会展开完整祖先路径并定位节点。
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
+- Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器和文件清理重试，并把认证记录转换为 `{ artworkId, branchId, recordId }` 导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
 
 ## 仓库打开与初始化
 
@@ -36,6 +39,8 @@
 - Artwork 内部的历史节点裁剪不使用项目回收站，仍按历史图规则直接永久删除。
 
 schema v7 增加 `pending_file_cleanup`。仓库文件/目录只保存相对路径并在执行前校验仓库边界；外部文件保存绝对路径与期望 SHA-256，内容变化时拒绝删除。成功项出队，失败项记录错误；应用启动和页面重试均通过应用层清理命令执行。更早 schema 变更见规划归档。
+
+清理命令仍由应用层拥有；Library 通过注入回调重试失败项。跨 Library、Authenticity 和应用层复用的清理结果 DTO 位于 `src/shared/fileCleanup.ts`，不再反向导入 `src/app/types.ts`。
 
 ## 当前命令
 

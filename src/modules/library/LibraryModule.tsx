@@ -1,8 +1,6 @@
-import { open } from "@tauri-apps/plugin-dialog";
 import {
   FileImage,
   FolderPlus,
-  GitBranch,
   LoaderCircle,
   ChevronsUp,
   Pencil,
@@ -10,7 +8,6 @@ import {
   Search,
   Settings,
   Trash2,
-  RotateCcw,
   X,
 } from "lucide-react";
 import {
@@ -19,15 +16,15 @@ import {
   useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
-  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
 } from "react";
 import { libraryApi } from "./api";
-import { appApi } from "../../app/api";
-import { ArtworkWorkspace } from "../../app/ArtworkWorkspace";
-import type { CleanupFailure, CleanupReport } from "../../app/types";
-import type { CertificationRecord } from "../authenticity/types";
+import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
 import { flattenTree, selectionForClick, visibleTree } from "./tree";
+import { NodeEditor, TrashDialog } from "./LibraryDialogs";
+import type { EditorState } from "./LibraryDialogs";
 import { LibraryTreeView } from "./LibraryTreeView";
+import { CommandMenu, NodeOverview, WorkspaceEmpty } from "./LibraryViews";
 import type {
   LibraryNode,
   LibrarySearchResult,
@@ -40,14 +37,22 @@ interface LibraryModuleProps {
   repositoryReady: boolean;
   onConfigure: () => void;
   onError: (message: string | null) => void;
+  onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
+  renderArtworkWorkspace: (props: LibraryArtworkWorkspaceProps) => ReactNode;
 }
 
-type EditorMode = "group" | "artwork" | "rename";
+export interface ArtworkTraceTarget {
+  artworkId: string;
+  branchId: string;
+  recordId: string;
+}
 
-interface EditorState {
-  mode: EditorMode;
-  parentId: string | null;
-  node: LibraryNode | null;
+export interface LibraryArtworkWorkspaceProps {
+  artworkId: string;
+  initialView: "history" | "publish";
+  initialBranchId: string | null;
+  initialRecordId: string | null;
+  onNavigateRecord: (target: ArtworkTraceTarget) => void;
 }
 
 interface ContextState {
@@ -62,7 +67,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-export function LibraryModule({ repositoryReady, onConfigure, onError }: LibraryModuleProps) {
+export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, renderArtworkWorkspace }: LibraryModuleProps) {
   const [tree, setTree] = useState(EMPTY_TREE);
   const [loading, setLoading] = useState(false);
   const [operationBusy, setOperationBusy] = useState(false);
@@ -104,7 +109,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
     setOperationBusy(true);
     onError(null);
     try {
-      const report = await appApi.retryFileCleanup(cleanupFailures.map((failure) => failure.id));
+      const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
       applyCleanupReport(report);
       if (report.failures.length === 0) onError(null);
     } catch (error) {
@@ -417,15 +422,13 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
             action={<button className="primary-button" type="button" onClick={onConfigure}><Settings aria-hidden="true" size={18} />设置仓库</button>}
           />
         ) : activeNode?.kind === "artwork" && selectedIds.size === 1 ? (
-          <ArtworkWorkspace
-            key={activeNode.id}
-            artworkId={activeNode.id}
-            initialView={traceTarget?.artworkId === activeNode.id ? "publish" : "history"}
-            initialBranchId={traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null}
-            initialRecordId={traceTarget?.artworkId === activeNode.id ? traceTarget.recordId : null}
-            onError={onError}
-            onNavigateRecord={(record: CertificationRecord) => {
-              const node = nodeById.get(record.artworkId);
+          renderArtworkWorkspace({
+            artworkId: activeNode.id,
+            initialView: traceTarget?.artworkId === activeNode.id ? "publish" : "history",
+            initialBranchId: traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null,
+            initialRecordId: traceTarget?.artworkId === activeNode.id ? traceTarget.recordId : null,
+            onNavigateRecord: (target) => {
+              const node = nodeById.get(target.artworkId);
               if (!node) {
                 onError("匹配记录所属 Artwork 当前不在作品树中。");
                 return;
@@ -439,12 +442,12 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
                 }
                 return new Set([...current, ...ancestors]);
               });
-              setSelectedIds(new Set([record.artworkId]));
-              setAnchorId(record.artworkId);
-              setActiveId(record.artworkId);
-              setTraceTarget({ artworkId: record.artworkId, branchId: record.branchId, recordId: record.id });
-            }}
-          />
+              setSelectedIds(new Set([target.artworkId]));
+              setAnchorId(target.artworkId);
+              setActiveId(target.artworkId);
+              setTraceTarget(target);
+            },
+          })
         ) : activeNode ? (
           <NodeOverview node={activeNode} selectedCount={selectedIds.size} />
         ) : (
@@ -566,173 +569,5 @@ export function LibraryModule({ repositoryReady, onConfigure, onError }: Library
         />
       )}
     </Fragment>
-  );
-}
-
-function CommandMenu({ className, onGroup, onArtwork, onPointerDown }: {
-  className: string;
-  onGroup: () => void;
-  onArtwork: () => void;
-  onPointerDown: (event: ReactPointerEvent) => void;
-}) {
-  return (
-    <div className={`command-menu ${className}`} onPointerDown={onPointerDown}>
-      <button type="button" onClick={onGroup}><FolderPlus aria-hidden="true" size={16} />新建分组</button>
-      <button type="button" onClick={onArtwork}><FileImage aria-hidden="true" size={16} />新建 Artwork</button>
-    </div>
-  );
-}
-
-function WorkspaceEmpty({ icon, title, description, action }: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-  action?: React.ReactNode;
-}) {
-  return (
-    <div className="empty-workspace">
-      <div className="empty-icon">{icon}</div>
-      <h1>{title}</h1>
-      <p>{description}</p>
-      {action}
-    </div>
-  );
-}
-
-function NodeOverview({ node, selectedCount }: { node: LibraryNode; selectedCount: number }) {
-  return (
-    <div className="node-overview">
-      <header>
-        <div className={`overview-icon ${node.kind}`}>
-          {node.kind === "group" ? <FolderPlus aria-hidden="true" size={22} /> : <FileImage aria-hidden="true" size={22} />}
-        </div>
-        <div>
-          <span>{node.kind === "group" ? "分组" : "Artwork"}</span>
-          <h1>{node.title}</h1>
-        </div>
-      </header>
-      {selectedCount > 1 ? (
-        <div className="selection-summary"><strong>{selectedCount}</strong><span>个节点已选择，可一起拖动或移到回收站。</span></div>
-      ) : node.kind === "group" ? (
-        <dl className="overview-facts">
-          <div><dt>直接子节点</dt><dd>{node.children.length}</dd></div>
-          <div><dt>最后更新</dt><dd>{new Date(node.updatedMs).toLocaleString()}</dd></div>
-        </dl>
-      ) : (
-        <>
-          <dl className="overview-facts">
-            <div><dt>分支数量</dt><dd>{node.artwork?.branchCount ?? 0}</dd></div>
-            <div><dt>主分支</dt><dd>{node.artwork?.primaryBranch?.title ?? "未创建"}</dd></div>
-          </dl>
-          <section className="source-file-band">
-            <GitBranch aria-hidden="true" size={18} />
-            <div><span>工作文件</span><strong>{node.artwork?.primaryBranch?.sourcePath ?? "-"}</strong></div>
-          </section>
-        </>
-      )}
-    </div>
-  );
-}
-
-function TrashDialog({ entries, busy, cleanupFailures, onClose, onRestore, onDelete, onEmpty, onRetryCleanup }: {
-  entries: LibraryTrashEntry[];
-  busy: boolean;
-  cleanupFailures: CleanupFailure[];
-  onClose: () => void;
-  onRestore: (entry: LibraryTrashEntry) => Promise<void>;
-  onDelete: (entry: LibraryTrashEntry) => Promise<void>;
-  onEmpty: () => Promise<void>;
-  onRetryCleanup: () => Promise<void>;
-}) {
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="trash-dialog" role="dialog" aria-modal="true" aria-labelledby="trash-title" onMouseDown={(event) => event.stopPropagation()}>
-        <header>
-          <div><h2 id="trash-title">回收站</h2><small>{entries.length} 个项目</small></div>
-          <button className="icon-button" type="button" title="关闭" onClick={onClose}><X aria-hidden="true" size={18} /></button>
-        </header>
-        <div className="trash-list">
-          {!entries.length && <div className="trash-empty"><Trash2 aria-hidden="true" size={24} /><span>回收站为空</span></div>}
-          {entries.map((entry) => (
-            <article key={entry.id} className="trash-row">
-              <div className="trash-kind">{entry.kind === "group" ? <FolderPlus aria-hidden="true" size={18} /> : <FileImage aria-hidden="true" size={18} />}</div>
-              <div className="trash-copy">
-                <strong>{entry.title}</strong>
-                <span>{new Date(entry.deletedMs).toLocaleString()} · {entry.artworkCount} 个 Artwork{entry.originalParentTitle ? ` · 原位置：${entry.originalParentTitle}` : " · 原位置：根目录"}</span>
-              </div>
-              <button className="icon-button" type="button" title="恢复" disabled={busy} onClick={() => void onRestore(entry)}><RotateCcw aria-hidden="true" size={16} /></button>
-              <button className="icon-button danger-icon" type="button" title="永久删除" disabled={busy} onClick={() => void onDelete(entry)}><Trash2 aria-hidden="true" size={16} /></button>
-            </article>
-          ))}
-        </div>
-        {cleanupFailures.length > 0 && <div className="cleanup-failure-banner" role="status"><span><strong>{cleanupFailures.length} 个文件尚未清理</strong><small>{cleanupFailures[0].path}</small></span><button className="secondary-button" type="button" disabled={busy} onClick={() => void onRetryCleanup()}><RotateCcw aria-hidden="true" size={15} />重试清理</button></div>}
-        <footer>
-          <span>永久删除不会进入其他回收站。</span>
-          <button className="danger-button" type="button" disabled={busy || !entries.length} onClick={() => void onEmpty()}><Trash2 aria-hidden="true" size={16} />清空回收站</button>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
-interface EditorValues {
-  title: string;
-  branchTitle: string;
-  sourcePath: string;
-}
-
-function NodeEditor({ state, busy, onClose, onSubmit }: {
-  state: EditorState;
-  busy: boolean;
-  onClose: () => void;
-  onSubmit: (values: EditorValues) => Promise<void>;
-}) {
-  const [title, setTitle] = useState(state.node?.title ?? "");
-  const [branchTitle, setBranchTitle] = useState("主分支");
-  const [sourcePath, setSourcePath] = useState("");
-  const isArtwork = state.mode === "artwork";
-  const heading = state.mode === "rename" ? "重命名" : isArtwork ? "新建 Artwork" : "新建分组";
-
-  const chooseSource = async () => {
-    const selected = await open({ directory: false, multiple: false });
-    if (typeof selected === "string") setSourcePath(selected);
-  };
-
-  const valid = title.trim() && (!isArtwork || (branchTitle.trim() && sourcePath.trim()));
-  return (
-    <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <form
-        className="node-editor"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="node-editor-title"
-        onMouseDown={(event) => event.stopPropagation()}
-        onSubmit={(event) => {
-          event.preventDefault();
-          if (valid && !busy) void onSubmit({ title, branchTitle, sourcePath });
-        }}
-      >
-        <header>
-          <h2 id="node-editor-title">{heading}</h2>
-          <button className="icon-button" type="button" title="关闭" onClick={onClose}><X aria-hidden="true" size={18} /></button>
-        </header>
-        <div className="editor-fields">
-          <label><span>标题</span><input autoFocus value={title} maxLength={160} onChange={(event) => setTitle(event.target.value)} /></label>
-          {isArtwork && (
-            <>
-              <label><span>初始分支标题</span><input value={branchTitle} maxLength={160} onChange={(event) => setBranchTitle(event.target.value)} /></label>
-              <label>
-                <span>工作文件</span>
-                <div className="path-control"><input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="选择现有作品文件" /><button className="secondary-button" type="button" onClick={chooseSource}>浏览</button></div>
-              </label>
-            </>
-          )}
-        </div>
-        <footer>
-          <button className="text-button" type="button" onClick={onClose}>取消</button>
-          <button className="primary-button" type="submit" disabled={!valid || busy}>{busy && <LoaderCircle className="spin" aria-hidden="true" size={16} />}{state.mode === "rename" ? "保存" : "创建"}</button>
-        </footer>
-      </form>
-    </div>
   );
 }

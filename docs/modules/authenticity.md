@@ -2,7 +2,7 @@
 
 ## 上下文入口
 
-- Artwork 级页面切换与跨作品跳转：`src/app/ArtworkWorkspace.tsx`、`src/modules/library/LibraryModule.tsx`。
+- Artwork 级页面切换与跨作品跳转：`src/app/App.tsx`、`src/app/ArtworkWorkspace.tsx`；Library 只接收应用层转换后的导航目标。
 - 发布、局部范围和识别 UI：`src/modules/authenticity/AuthenticityModule.tsx`，样式只读 `src/styles/authenticity.css`。
 - 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`。
 - 发布/识别流水线：`src-tauri/src/authenticity/pipeline.rs`。
@@ -65,6 +65,7 @@ schema v7 使用共享待清理队列处理取消发布和发布创建的数据�
 TrustMark 使用 Q / BCH_SUPER，标识长度为 40 位。水印只写入用户在预览中框选的区域；没有框选区域时不会启用 TrustMark，发布仍保留 C2PA。发布页提供强度与 JPEG 质量滑条、质量损失提示、大小预览及模型哈希摘要；识别页展示完整 C2PA manifest，导出记录支持自动搜索和详细字段查看。
 ## 前端交互约定
 
+- Authenticity 不直接导入 App、Library 或 History。应用层传入只含 `id`、`title`、`headHistoryId` 的认证分支视图，注入清理重试，并把认证记录转换为 Library 导航目标。
 - 当前分支由 `ArtworkWorkspace` 统一持有；历史页和发布页共用同一选择，任一页面切换分支都会同步到另一页面。发布、进入发布和取消发布后刷新 Artwork 工作区分支数据，发布状态与当前内容保持同步。
 - 发布状态、预览和大小估算使用 latest-request-wins；分支切换后旧请求不得覆盖新分支状态。发布命令发出前再次确认当前选择、配置、最终成品和已加载发布状态属于同一分支。
 - PEM 私钥仅以密码输入控件接收，并且发布完成后清空，不写入共享配置。

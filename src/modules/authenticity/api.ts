@@ -1,5 +1,5 @@
 import { invokeCommand } from "../../shared/tauri";
-import type { CleanupReport } from "../../app/types";
+import type { CleanupReport } from "../../shared/fileCleanup";
 import type {
   BranchPublication,
   CertificationRecord,
