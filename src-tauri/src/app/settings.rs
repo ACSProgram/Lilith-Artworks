@@ -13,7 +13,7 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State};
 use tempfile::NamedTempFile;
 
 use crate::backup::BackupState;
-use crate::library;
+use crate::{history, library};
 
 const CURRENT_SETTINGS_VERSION: u32 = 1;
 
@@ -137,6 +137,7 @@ pub(crate) struct SettingsSnapshot {
     settings: AppSettings,
     settings_path: String,
     warning: Option<String>,
+    automatic_backup_file_count: Option<usize>,
 }
 
 pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
@@ -277,6 +278,9 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
 }
 
 fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
+    let automatic_backup_file_count = state
+        .repository_path()?
+        .and_then(|root| history::count_scheduled_files(&root).ok());
     Ok(SettingsSnapshot {
         settings: state.settings.read().map_err(|_| "设置状态已损坏")?.clone(),
         settings_path: state.settings_path.to_string_lossy().into_owned(),
@@ -285,6 +289,7 @@ fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
             .read()
             .map_err(|_| "设置警告状态已损坏")?
             .clone(),
+        automatic_backup_file_count,
     })
 }
 

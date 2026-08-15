@@ -1049,6 +1049,20 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     Ok(branches)
 }
 
+pub(crate) fn count_scheduled_files(root: &Path) -> Result<usize, String> {
+    let count: i64 = storage::open(root)?
+        .query_row(
+            "SELECT COUNT(DISTINCT b.source_path_key)
+             FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
+             WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
+               AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    usize::try_from(count).map_err(|_| "自动备份文件数量无效".into())
+}
+
 pub(crate) fn artwork_directory(root: &Path, artwork_id: &str) -> PathBuf {
     root.join("artworks").join(artwork_id)
 }
@@ -1120,6 +1134,15 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn scheduled_file_count_tracks_enabled_branches() {
+        let fixture = HistoryFixture::new();
+        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 1);
+
+        update_branch(&fixture.root, &fixture.main_branch_id, "Main", false, 10).unwrap();
+        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
     }
 
     #[test]

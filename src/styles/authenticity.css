@@ -1,5 +1,5 @@
 .artwork-workspace { display: grid; grid-template-rows: 39px minmax(0, 1fr); height: 100%; min-width: 0; overflow: hidden; }
-.artwork-tabs { display: flex; align-items: stretch; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.artwork-tabs { display: flex; align-items: stretch; gap: 2px; padding: 0 8px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .artwork-tabs button { position: relative; display: inline-flex; align-items: center; gap: 7px; min-width: 118px; padding: 0 12px; border: 0; color: var(--muted); background: transparent; font-size: 11px; cursor: pointer; }
 .artwork-tabs button:hover { color: inherit; background: var(--surface-subtle); }
 .artwork-tabs button.active { color: var(--accent); font-weight: 650; }

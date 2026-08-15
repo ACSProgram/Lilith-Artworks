@@ -29,6 +29,7 @@ export interface SettingsSnapshot {
   settings: AppSettings;
   settingsPath: string;
   warning: string | null;
+  automaticBackupFileCount: number | null;
 }
 
 export interface RepositoryStatus {

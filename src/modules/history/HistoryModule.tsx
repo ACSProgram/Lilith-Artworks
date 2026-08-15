@@ -1,5 +1,5 @@
 import {
-  Ban, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
+  Ban, CalendarDays, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
   MoreHorizontal, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -75,6 +75,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const [mindmapNodeWidth, setMindmapNodeWidth] = useState(loadMindmapNodeWidth);
   const wasRuntimeBusy = useRef(false);
+  const nodeElements = useRef(new Map<string, HTMLButtonElement>());
 
   const applyHistory = useCallback((next: ArtworkHistory) => {
     setHistory(next);
@@ -265,6 +266,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     return <div className="history-loading"><LoaderCircle className="spin" size={18} />读取分支历史</div>;
   }
 
+  const jumpToNode = (nodeId: string) => {
+    setSelectedNodeId(nodeId);
+    const element = nodeElements.current.get(nodeId);
+    if (!element) return;
+    element.scrollIntoView({ behavior: "smooth", block: "center", inline: "center" });
+    element.focus({ preventScroll: true });
+  };
+
   const nodeCard = (node: HistoryNode) => {
     const heads = history.branches.filter((branch) => branch.headHistoryId === node.id);
     const publishedCount = history.branches.filter((branch) => branch.headHistoryId === node.id).reduce((sum, branch) => sum + branch.publishedCount, 0);
@@ -274,6 +283,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     const selectedForCompact = compactSelection.has(node.id);
     return <button
       key={node.id}
+      ref={(element) => {
+        if (element) nodeElements.current.set(node.id, element);
+        else nodeElements.current.delete(node.id);
+      }}
       className={`history-node-card${selectedNodeId === node.id ? " selected" : ""}${selectable ? " compactable" : ""}${selectedForCompact ? " compact-selected" : ""}`}
       type="button"
       onClick={() => {
@@ -371,7 +384,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <button className="text-button" type="button" onClick={() => { setCompactMode(false); setCompactSelection(new Set()); }}>退出</button>
     </div>}
 
-    <div className="history-main">
+    <div className={`history-main${view === "overview" && mindmapMode === "timeline" ? " with-timeline" : ""}`}>
+      {view === "overview" && mindmapMode === "timeline" && <HistoryTimeline nodes={history.nodes} selectedNodeId={selectedNodeId} onJump={jumpToNode} />}
       <section
         className={`history-graph ${view === "overview" ? "mindmap" : "branch-list"}`}
         style={view === "overview" ? { "--mindmap-node-width": `${mindmapNodeWidth}px` } as CSSProperties : undefined}
@@ -447,6 +461,42 @@ function OperationProgress({ runtime, onCancel }: { runtime: BackupRuntimeStatus
 
 function Mindmap({ branches, renderNode, mode, branchesByNode }: { branches: HistoryTreeNode[]; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[] }) {
   return <ul className={`mindmap-root mindmap-${mode}`}>{branches.map((branch) => <MindmapBranch key={branch.node.id} branch={branch} renderNode={renderNode} mode={mode} branchesByNode={branchesByNode} siblingIndex={0} />)}</ul>;
+}
+
+function HistoryTimeline({ nodes, selectedNodeId, onJump }: { nodes: HistoryNode[]; selectedNodeId: string | null; onJump: (nodeId: string) => void }) {
+  const groups = useMemo(() => {
+    const result: Array<{ label: string; nodes: HistoryNode[] }> = [];
+    const sorted = [...nodes].sort((left, right) => right.createdMs - left.createdMs);
+    for (const node of sorted) {
+      const label = new Date(node.createdMs).toLocaleDateString("zh-CN", {
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit",
+      });
+      const current = result[result.length - 1];
+      if (current?.label === label) current.nodes.push(node);
+      else result.push({ label, nodes: [node] });
+    }
+    return result;
+  }, [nodes]);
+
+  return <aside className="history-timeline" aria-label="历史时间轴导航">
+    <header><CalendarDays aria-hidden="true" size={15} /><strong>时间轴</strong><span>{nodes.length}</span></header>
+    <div className="history-timeline-groups">
+      {groups.map((group) => <section className="history-timeline-group" key={group.label}>
+        <h3>{group.label}</h3>
+        <ol>
+          {group.nodes.map((node) => <li key={node.id}>
+            <button className={selectedNodeId === node.id ? "active" : ""} type="button" onClick={() => onJump(node.id)} title={node.title}>
+              <time>{new Date(node.createdMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
+              <i aria-hidden="true" />
+              <span>{node.title}</span>
+            </button>
+          </li>)}
+        </ol>
+      </section>)}
+    </div>
+  </aside>;
 }
 
 function MindmapBranch({ branch, renderNode, mode, branchesByNode, siblingIndex }: { branch: HistoryTreeNode; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[]; siblingIndex: number }) {

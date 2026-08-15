@@ -3,7 +3,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   Archive,
   AlertCircle,
+  Clock3,
+  FolderOpen,
   LoaderCircle,
+  MonitorCog,
+  Palette,
   PanelLeftClose,
   Settings,
   X,
@@ -89,6 +93,14 @@ export function App() {
     }
   };
 
+  const openSettings = () => {
+    setSettingsOpen(true);
+    void appApi.getSettings().then((next) => {
+      setSnapshot(next);
+      setDraft(next.settings);
+    }).catch((error) => setMessage(errorMessage(error)));
+  };
+
   const save = async () => {
     if (!draft) return;
     setBusy(true);
@@ -117,7 +129,7 @@ export function App() {
           <span aria-hidden="true" />
           {repositoryLabel}
         </div>
-        <button className="icon-button" type="button" title="设置" onClick={() => setSettingsOpen(true)}>
+        <button className="icon-button" type="button" title="设置" onClick={openSettings}>
           <Settings aria-hidden="true" size={18} />
         </button>
       </header>
@@ -129,7 +141,7 @@ export function App() {
       ) : (
         <LibraryModule
           repositoryReady={repository.ready}
-          onConfigure={() => setSettingsOpen(true)}
+          onConfigure={openSettings}
           onError={setMessage}
         />
       )}
@@ -144,53 +156,63 @@ export function App() {
         <div className="dialog-backdrop" role="presentation" onMouseDown={() => setSettingsOpen(false)}>
           <section className="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title" onMouseDown={(event) => event.stopPropagation()}>
             <header>
-              <div>
-                <h2 id="settings-title">设置</h2>
-                <small>{snapshot?.settingsPath}</small>
+              <div className="settings-heading">
+                <span className="settings-heading-icon"><Settings aria-hidden="true" size={18} /></span>
+                <div>
+                  <h2 id="settings-title">设置</h2>
+                  <small title={snapshot?.settingsPath}>应用与仓库</small>
+                </div>
               </div>
-              <button className="text-button" type="button" onClick={() => setSettingsOpen(false)}>取消</button>
+              <button className="icon-button" type="button" title="关闭设置" onClick={() => setSettingsOpen(false)}><X aria-hidden="true" size={18} /></button>
             </header>
 
             <div className="settings-section">
-              <h3>作品仓库</h3>
+              <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>作品仓库</h3></div>
               <div className="path-control">
-                <input value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
-                <button className="secondary-button" type="button" onClick={chooseRepository}>浏览</button>
+                <input aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
+                <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
               </div>
             </div>
 
-            <div className="settings-section two-column">
-              <label>
-                <span>主题</span>
-                <select value={draft.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value as AppSettings["theme"] })}>
-                  <option value="system">跟随系统</option>
-                  <option value="light">浅色</option>
-                  <option value="dark">深色</option>
-                </select>
-              </label>
-              <label>
-                <span>内容密度</span>
-                <select value={draft.content.density} onChange={(event) => setDraft({ ...draft, content: { ...draft.content, density: event.target.value as AppSettings["content"]["density"] } })}>
-                  <option value="comfortable">舒适</option>
-                  <option value="compact">紧凑</option>
-                </select>
-              </label>
+            <div className="settings-section">
+              <div className="settings-section-title"><Palette aria-hidden="true" size={17} /><h3>外观</h3></div>
+              <div className="settings-select-grid">
+                <label>
+                  <span>主题</span>
+                  <select value={draft.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value as AppSettings["theme"] })}>
+                    <option value="system">跟随系统</option>
+                    <option value="light">浅色</option>
+                    <option value="dark">深色</option>
+                  </select>
+                </label>
+                <label>
+                  <span>内容密度</span>
+                  <select value={draft.content.density} onChange={(event) => setDraft({ ...draft, content: { ...draft.content, density: event.target.value as AppSettings["content"]["density"] } })}>
+                    <option value="comfortable">舒适</option>
+                    <option value="compact">紧凑</option>
+                  </select>
+                </label>
+              </div>
             </div>
 
-            <div className="settings-section toggle-list">
-              <label>
-                <PanelLeftClose aria-hidden="true" size={18} />
-                <span>关闭主窗口时驻留托盘</span>
-                <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
-              </label>
-              <label>
-                <LoaderCircle aria-hidden="true" size={18} />
-                <span><strong>自动备份调度</strong><small>{draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}</small></span>
-                <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
-              </label>
+            <div className="settings-section">
+              <div className="settings-section-title"><MonitorCog aria-hidden="true" size={17} /><h3>应用行为</h3></div>
+              <div className="settings-preference-list">
+                <label className="settings-preference-row">
+                  <span className="settings-row-icon"><PanelLeftClose aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>关闭时驻留托盘</strong><small>{draft.closeToTray ? "已启用" : "已关闭"}</small></span>
+                  <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
+                </label>
+                <label className="settings-preference-row">
+                  <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
+                  <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
+                </label>
+              </div>
             </div>
 
             <footer>
+              <button className="secondary-button" type="button" onClick={() => setSettingsOpen(false)}>取消</button>
               <button className="primary-button" type="button" onClick={save} disabled={busy}>
                 {busy && <LoaderCircle className="spin" aria-hidden="true" size={16} />}
                 保存
