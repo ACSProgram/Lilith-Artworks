@@ -10,6 +10,7 @@ import type {
   DecodeResult,
   NormalizedRegion,
   PreviewImage,
+  PublicationPreview,
 } from "./types";
 
 const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
@@ -40,6 +41,18 @@ function saveSharedSigning(config: CertificationConfig) {
   }));
 }
 
+function visualPreviewSignature(config: CertificationConfig, watermarkId: string): string {
+  return JSON.stringify({
+    branchId: config.branchId,
+    jpegQuality: config.jpegQuality,
+    backgroundColor: config.backgroundColor,
+    trustmarkEnabled: config.trustmarkEnabled,
+    watermarkStrength: config.watermarkStrength,
+    additionalRegions: config.additionalRegions,
+    watermarkId: watermarkId.trim(),
+  });
+}
+
 interface PublicationControllerOptions {
   artworkTitle: string;
   branches: AuthenticityBranch[];
@@ -66,6 +79,9 @@ export function usePublicationController({
   const [publication, setPublication] = useState<BranchPublication | null>(null);
   const [config, setConfig] = useState<CertificationConfig | null>(null);
   const [preview, setPreview] = useState<PreviewImage | null>(null);
+  const [outputPreview, setOutputPreview] = useState<PublicationPreview | null>(null);
+  const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
+  const [outputPreviewBusy, setOutputPreviewBusy] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [watermarkId, setWatermarkId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -79,8 +95,13 @@ export function usePublicationController({
   const loadRequest = useRef(0);
   const estimateRequest = useRef(0);
   const viewingRequest = useRef(0);
+  const outputPreviewRequest = useRef(0);
   const selectedBranchIdRef = useRef(selectedBranchId);
+  const configRef = useRef(config);
+  const watermarkIdRef = useRef(watermarkId);
   selectedBranchIdRef.current = selectedBranchId;
+  configRef.current = config;
+  watermarkIdRef.current = watermarkId;
   const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
 
   const applyPublication = useCallback((next: BranchPublication) => {
@@ -121,6 +142,10 @@ export function usePublicationController({
     setPublication(null);
     setConfig(null);
     setPreview(null);
+    setOutputPreview(null);
+    setOutputPreviewOpen(false);
+    setOutputPreviewBusy(false);
+    outputPreviewRequest.current += 1;
     setViewingRecord(null);
     setResult(null);
     setBusy(Boolean(selectedBranchId));
@@ -215,6 +240,40 @@ export function usePublicationController({
     }
   }, []);
 
+  const generateOutputPreview = useCallback(async () => {
+    if (!selectedBranch || !config) return;
+    if (publication?.branchId !== selectedBranch.id
+      || publication.artifact?.branchId !== selectedBranch.id
+      || config.branchId !== selectedBranch.id) {
+      onError("当前分支的发布状态尚未加载完成，请稍后重试。");
+      return;
+    }
+    const branchId = selectedBranch.id;
+    const signature = visualPreviewSignature(config, watermarkId);
+    const requestId = ++outputPreviewRequest.current;
+    setOutputPreviewBusy(true);
+    setOutputPreview(null);
+    onError(null);
+    try {
+      const next = await authenticityApi.previewPublication({
+        branchId,
+        config,
+        watermarkId: watermarkId.trim() || null,
+      });
+      if (requestId !== outputPreviewRequest.current
+        || selectedBranchIdRef.current !== branchId
+        || !configRef.current
+        || visualPreviewSignature(configRef.current, watermarkIdRef.current) !== signature) return;
+      if (next.watermarkId) setWatermarkId(next.watermarkId);
+      setOutputPreview(next);
+      setOutputPreviewOpen(true);
+    } catch (error) {
+      if (requestId === outputPreviewRequest.current) onError(message(error));
+    } finally {
+      if (requestId === outputPreviewRequest.current) setOutputPreviewBusy(false);
+    }
+  }, [config, onError, publication, selectedBranch, watermarkId]);
+
   const publish = useCallback(async () => {
     if (!selectedBranch || !config) return;
     if (publication?.branchId !== selectedBranch.id
@@ -224,6 +283,7 @@ export function usePublicationController({
       return;
     }
     if (!privateKey.trim()) {
+      setOutputPreviewOpen(false);
       onError("请输入 PEM 私钥后再发布。");
       return;
     }
@@ -247,10 +307,13 @@ export function usePublicationController({
       setPrivateKey("");
       if (selectedBranchIdRef.current === branchId) {
         setResult(published.record);
+        setOutputPreviewOpen(false);
+        setOutputPreview(null);
         await load();
       }
       await onPublicationChanged?.();
     } catch (error) {
+      setOutputPreviewOpen(false);
       onError(message(error));
     } finally {
       if (selectedBranchIdRef.current === branchId) setBusy(false);
@@ -273,6 +336,8 @@ export function usePublicationController({
         setPublication(null);
         setConfig(null);
         setPreview(null);
+        setOutputPreview(null);
+        setOutputPreviewOpen(false);
         setPrivateKey("");
         setWatermarkId("");
         setResult(null);
@@ -324,6 +389,10 @@ export function usePublicationController({
     config,
     setConfig,
     preview,
+    outputPreview,
+    outputPreviewOpen,
+    setOutputPreviewOpen,
+    outputPreviewBusy,
     privateKey,
     setPrivateKey,
     watermarkId,
@@ -341,6 +410,7 @@ export function usePublicationController({
     selectedBranch,
     enterPublication,
     chooseCertificate,
+    generateOutputPreview,
     publish,
     cancelPublication,
     retryCleanup,

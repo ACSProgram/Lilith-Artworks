@@ -6,6 +6,8 @@ import type {
   DecodeResult,
   NormalizedRegion,
   PreviewImage,
+  PublicationPreview,
+  PublicationPreviewRequest,
   PublishBranchRequest,
   PublishResult,
 } from "./types";
@@ -19,6 +21,8 @@ export const authenticityApi = {
     }),
   publish: (request: PublishBranchRequest) =>
     invokeCommand<PublishResult>("publish_branch_artifact", { request }),
+  previewPublication: (request: PublicationPreviewRequest) =>
+    invokeCommand<PublicationPreview>("preview_branch_artifact_output", { request }),
   cancelPublication: (branchId: string) =>
     invokeCommand<CleanupReport>("cancel_branch_publication", { branchId }),
   preview: (path: string) =>

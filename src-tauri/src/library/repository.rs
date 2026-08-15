@@ -661,6 +661,16 @@ fn permanently_delete_trash_root(
         .map_err(database_error)?;
     transaction
         .execute(
+            "DELETE FROM final_artifacts WHERE branch_id IN (
+               SELECT b.id FROM branches b
+               JOIN library_nodes n ON n.id = b.artwork_id
+               WHERE n.trash_root_id = ?1 AND n.kind = 'artwork'
+             )",
+            [id],
+        )
+        .map_err(database_error)?;
+    transaction
+        .execute(
             "DELETE FROM history_nodes WHERE artwork_id IN (
                SELECT id FROM library_nodes WHERE trash_root_id = ?1 AND kind = 'artwork'
              )",
@@ -1377,5 +1387,64 @@ mod tests {
 
         assert!(report.failures.is_empty());
         assert!(!artwork_directory.exists());
+    }
+
+    #[test]
+    fn permanently_deletes_published_artwork_without_foreign_key_failure() {
+        let fixture = Fixture::new();
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "INSERT INTO history_nodes
+                 (id, artwork_id, created_on_branch_id, parent_id, title, note, commit_kind,
+                  is_checkpoint, created_ms, logical_size, chunk_file_size, sha256, chunk_count,
+                  snapshot_path, delta_path)
+                 VALUES ('published-history', ?1, ?2, NULL, 'Published', '', 'manual',
+                         1, 1, 1, 1, ?3, 1, 'snapshots/published.lbc', NULL)",
+                params![
+                    fixture.artwork.artwork_id,
+                    fixture.artwork.branch_id,
+                    "A".repeat(64)
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE branches SET head_history_id = 'published-history' WHERE id = ?1",
+                [&fixture.artwork.branch_id],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO final_artifacts
+                 (id, branch_id, history_id, source_path, source_sha256, media_type,
+                  byte_size, created_ms)
+                 VALUES ('published-artifact', ?1, 'published-history',
+                         'artworks/published.png', ?2, 'image/png', 1, 1)",
+                params![fixture.artwork.branch_id, "B".repeat(64)],
+            )
+            .unwrap();
+        drop(connection);
+        trash_nodes(
+            &fixture.root,
+            std::slice::from_ref(&fixture.artwork.artwork_id),
+        )
+        .unwrap();
+
+        permanently_delete_trash(
+            &fixture.root,
+            std::slice::from_ref(&fixture.artwork.artwork_id),
+        )
+        .unwrap();
+
+        let connection = open(&fixture.root).unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM library_nodes WHERE id = ?1",
+                [&fixture.artwork.artwork_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0);
     }
 }

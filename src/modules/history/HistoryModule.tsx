@@ -47,6 +47,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [commitNote, setCommitNote] = useState("");
+  const [commitFeedback, setCommitFeedback] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>("overview");
   const [forkOpen, setForkOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -62,6 +63,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   useEffect(() => {
     setSelectedNodeId(null);
     setCommitNote("");
+    setCommitFeedback(null);
     setView("overview");
     setForkOpen(false);
     setEditOpen(false);
@@ -71,6 +73,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     setCompactMode(false);
     setCompactSelection(new Set());
   }, [artworkId]);
+
+  useEffect(() => setCommitFeedback(null), [selectedBranchId]);
 
   useEffect(() => {
     setSelectedNodeId((current) => current && history?.nodes.some((node) => node.id === current)
@@ -101,11 +105,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const branchNodeIds = useMemo(() => new Set(branchLine.map((node) => node.id)), [branchLine]);
   const commit = async () => {
     if (!selectedBranch) return;
+    setCommitFeedback(null);
     const result = await commitBranch(selectedBranch.id, commitNote.trim());
     if (!result) return;
     setCommitNote("");
     if (result.historyId) setSelectedNodeId(result.historyId);
-    if (result.unchanged) onError("工作文件内容没有变化，本次检查未创建新节点");
+    setCommitFeedback(result.created
+      ? "提交成功，已创建新的历史节点"
+      : "检查完成：当前内容已经是最新备份（可能已由自动备份记录）");
   };
 
   const beginRestore = async (node: HistoryNode) => {
@@ -253,8 +260,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="branch-status-actions">
         <div className={`branch-schedule${selectedBranch.lastError ? " error" : ""}`}>
           {selectedBranch.finalArtifactLocked ? <><Ban size={16} />成品已锁定 · 已发布 {selectedBranch.publishedCount} 条</>
-            : selectedBranch.lastError ? selectedBranch.lastError
-              : selectedBranch.backupEnabled ? <><Check size={16} />每 {selectedBranch.backupIntervalMinutes} 分钟自动备份</>
+            : selectedBranch.lastError ? <>备份失败，约 1 分钟后重试 · {selectedBranch.lastError}</>
+              : selectedBranch.backupEnabled ? <><Check size={16} />每 {selectedBranch.backupIntervalMinutes} 分钟自动备份 · {selectedBranch.lastSuccessMs ? `最近成功 ${new Date(selectedBranch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}</>
                 : "自动备份已关闭"}
         </div>
         {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={busy || runtime.busy} onClick={() => {
@@ -271,6 +278,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
           <input id="commit-note" value={commitNote} maxLength={500} placeholder="添加本次提交备注（可选）" disabled={!selectedBranch || selectedBranch.finalArtifactLocked || busy || runtime.busy} onChange={(event) => setCommitNote(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void commit(); }} />
           <button className="primary-button" type="button" disabled={!selectedBranch || selectedBranch.finalArtifactLocked || busy || runtime.busy} onClick={() => void commit()}>{visibleRuntime.busy && visibleRuntime.activeBranchId === selectedBranch?.id ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}提交</button>
         </div>
+        {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
       {view === "branch" && !compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !branchLine.some((node) => canCompact(node, history))} onClick={beginCompactMode}><MoreHorizontal size={16} />进入精简模式</button>}
     </section>

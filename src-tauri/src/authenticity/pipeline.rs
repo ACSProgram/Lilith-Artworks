@@ -5,6 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, GenericImageView};
 use sha2::{Digest, Sha256};
 use tempfile::{tempdir_in, NamedTempFile};
@@ -15,7 +16,10 @@ use crate::{cleanup, storage};
 use super::{
     c2pa,
     error::{AuthenticityError, AuthenticityResult},
-    model::{CertificationRecord, DecodeRequest, DecodeResult, PublishBranchRequest},
+    model::{
+        CertificationRecord, DecodeRequest, DecodeResult, PreviewImage, PublicationPreview,
+        PublicationPreviewRequest, PublishBranchRequest,
+    },
     publication_repository,
     repository::{self, NewCertificationRecord},
     state::AuthenticityState,
@@ -27,6 +31,54 @@ pub(crate) struct PublishedOutput {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) watermark_region_count: u32,
+}
+
+pub(crate) fn preview(
+    root: &Path,
+    state: &AuthenticityState,
+    mut request: PublicationPreviewRequest,
+) -> AuthenticityResult<PublicationPreview> {
+    request.config.branch_id = request.branch_id.clone();
+    request.config.trustmark_enabled =
+        request.config.trustmark_enabled && !request.config.additional_regions.is_empty();
+    validate_visual_config(&request.config)?;
+    let target = publication_repository::publication_target(root, &request.branch_id)
+        .map_err(AuthenticityError::Task)?;
+    let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
+    let source = image::open(&input)?;
+    let (width, height) = source.dimensions();
+    let background = trustmark::parse_background(&request.config.background_color)?;
+    let flattened = trustmark::flatten_to_rgb(&source, background);
+    let identifier = request
+        .config
+        .trustmark_enabled
+        .then(|| trustmark::resolve_identifier(request.watermark_id.as_deref()))
+        .transpose()?;
+    let rendition = if let Some(identifier) = identifier.as_deref() {
+        trustmark::encode_regions(
+            state,
+            flattened,
+            identifier,
+            request.config.watermark_strength,
+            &request.config.additional_regions,
+        )?
+    } else {
+        flattened
+    };
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, request.config.jpeg_quality)
+        .encode_image(&rendition)?;
+    let output_bytes = encoded.len() as u64;
+    Ok(PublicationPreview {
+        image: PreviewImage {
+            data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(encoded)),
+            width,
+            height,
+            source_bytes: fs::metadata(input)?.len(),
+        },
+        output_bytes,
+        watermark_id: identifier,
+    })
 }
 
 pub(crate) fn publish(
@@ -336,7 +388,12 @@ fn validate_publish_request(
     if !Path::new(&request.config.certificate_path).is_file() {
         return Err(AuthenticityError::InvalidInput("证书链文件不存在".into()));
     }
-    if !(1..=100).contains(&request.config.jpeg_quality) {
+    validate_visual_config(&request.config)?;
+    Ok(())
+}
+
+fn validate_visual_config(config: &super::model::CertificationConfig) -> AuthenticityResult<()> {
+    if !(1..=100).contains(&config.jpeg_quality) {
         return Err(AuthenticityError::InvalidInput(
             "JPEG 质量必须在 1 到 100 之间".into(),
         ));

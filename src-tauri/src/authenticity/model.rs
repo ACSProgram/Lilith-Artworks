@@ -47,6 +47,14 @@ pub(crate) struct PublishBranchRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PublicationPreviewRequest {
+    pub(crate) branch_id: String,
+    pub(crate) config: CertificationConfig,
+    pub(crate) watermark_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ExportCertificationRecordRequest {
     pub(crate) record_id: String,
     pub(crate) output_path: String,
@@ -66,6 +74,14 @@ pub(crate) struct PreviewImage {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) source_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublicationPreview {
+    pub(crate) image: PreviewImage,
+    pub(crate) output_bytes: u64,
+    pub(crate) watermark_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

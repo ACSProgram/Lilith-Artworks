@@ -40,7 +40,15 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 continue;
             }
         };
-        let now = storage::now_ms().unwrap_or_default();
+        let now = match storage::now_ms() {
+            Ok(now) => now,
+            Err(_) => {
+                if !state.wait_scheduler(ERROR_RETRY) {
+                    break;
+                }
+                continue;
+            }
+        };
         let mut due = None;
         let mut next_due = None;
         for branch in branches {
@@ -61,6 +69,9 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             });
             if let Err(error) = result {
                 history::mark_error(&root, &branch_id, &error);
+                if !state.wait_scheduler(ERROR_RETRY) {
+                    break;
+                }
             }
             continue;
         }

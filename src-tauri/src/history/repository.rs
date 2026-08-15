@@ -1005,8 +1005,8 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
 pub(crate) fn mark_error(root: &Path, branch_id: &str, error: &str) {
     if let Ok(connection) = storage::open(root) {
         let _ = connection.execute(
-            "UPDATE branches SET last_check_ms = ?2, last_error = ?3 WHERE id = ?1",
-            params![branch_id, storage::now_ms().unwrap_or_default(), error],
+            "UPDATE branches SET last_error = ?2 WHERE id = ?1",
+            params![branch_id, error],
         );
     }
 }
@@ -1143,6 +1143,26 @@ mod tests {
 
         update_branch(&fixture.root, &fixture.main_branch_id, "Main", false, 10).unwrap();
         assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
+    }
+
+    #[test]
+    fn backup_error_preserves_last_successful_check_for_retry() {
+        let fixture = HistoryFixture::new();
+        mark_unchanged(&fixture.root, &fixture.main_branch_id, 100).unwrap();
+
+        mark_error(&fixture.root, &fixture.main_branch_id, "temporary failure");
+
+        let state: (Option<i64>, Option<i64>, Option<String>) = storage::open(&fixture.root)
+            .unwrap()
+            .query_row(
+                "SELECT last_check_ms, last_success_ms, last_error FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(state.0, Some(100));
+        assert_eq!(state.1, Some(100));
+        assert_eq!(state.2.as_deref(), Some("temporary failure"));
     }
 
     #[test]

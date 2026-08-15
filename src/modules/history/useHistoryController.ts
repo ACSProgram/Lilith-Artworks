@@ -163,7 +163,11 @@ export function useHistoryController({
     let result: BackupCommitResult | null = null;
     const succeeded = await runOperation("commit", "正在提交工作文件", async () => {
       result = await historyApi.commit(branchId, note);
-      await reload();
+      try {
+        await reload();
+      } catch (error) {
+        onErrorRef.current(`提交已完成，但历史列表刷新失败：${errorMessage(error)}`);
+      }
     });
     return succeeded ? result : null;
   }, [reload, runOperation]);

@@ -93,6 +93,18 @@ export interface PublishBranchRequest {
   watermarkId: string | null;
 }
 
+export interface PublicationPreviewRequest {
+  branchId: string;
+  config: CertificationConfig;
+  watermarkId: string | null;
+}
+
+export interface PublicationPreview {
+  image: PreviewImage;
+  outputBytes: number;
+  watermarkId: string | null;
+}
+
 export interface PublishResult {
   record: CertificationRecord;
   width: number;

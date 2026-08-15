@@ -1,13 +1,14 @@
 import {
-  AlertTriangle, BadgeCheck, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
-  LockKeyhole, MousePointer2, RotateCcw, ScanSearch, Search, ShieldCheck, Trash2, X,
+  BadgeCheck, Eye, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
+  LockKeyhole, Maximize2, MoreVertical, MousePointer2, RotateCcw, ScanSearch, Search,
+  ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
 import { useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
 import type {
-  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage,
+  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PublicationPreview,
 } from "./types";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
@@ -41,10 +42,11 @@ function PublishView({
   artworkTitle, branches, selectedBranchId, selectedRecordId, recordNavigationKey, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const {
-    publication, config, setConfig, preview, privateKey, setPrivateKey, watermarkId,
+    publication, config, setConfig, preview, outputPreview, outputPreviewOpen,
+    setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey, watermarkId,
     setWatermarkId, busy, result, sizeEstimate, viewingRecord, setViewingRecord,
     viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
-    selectedBranch, enterPublication, chooseCertificate, publish, cancelPublication,
+    selectedBranch, enterPublication, chooseCertificate, generateOutputPreview, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
   } = usePublicationController({
     artworkTitle,
@@ -63,9 +65,18 @@ function PublishView({
   return <div className="auth-workspace">
     <header className="auth-header">
       <div><span>发布与认证</span><h1>{artworkTitle}</h1></div>
-      <select value={selectedBranchId ?? ""} disabled={busy} onChange={(event) => onSelectBranch(event.target.value)}>
-        {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
-      </select>
+      <div className="auth-header-actions">
+        <select value={selectedBranchId ?? ""} disabled={busy} onChange={(event) => onSelectBranch(event.target.value)}>
+          {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
+        </select>
+        {publication?.artifact && <details className="auth-more-menu">
+          <summary className="icon-button" title="更多发布操作"><MoreVertical size={17} /></summary>
+          <div><button className="danger" type="button" disabled={busy} onClick={(event) => {
+            (event.currentTarget.closest("details") as HTMLDetailsElement).open = false;
+            setDeleteConfirmOpen(true);
+          }}><Trash2 size={15} />取消发布并删除本地数据</button></div>
+        </details>}
+      </div>
     </header>
     {cleanupFailures.length > 0 && <div className="cleanup-failure-banner auth-cleanup-failure" role="status"><span><strong>{cleanupFailures.length} 个发布文件尚未清理</strong><small>{cleanupFailures[0].path}</small></span><button className="secondary-button" type="button" disabled={busy} onClick={() => void retryCleanup()}><RotateCcw size={15} />重试清理</button></div>}
     {!selectedBranch ? <div className="auth-empty">此 Artwork 尚无分支。</div> :
@@ -120,13 +131,10 @@ function PublishView({
             </>}
           </div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
-          <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
+          <button className="primary-button publish-command" type="button" disabled={busy || outputPreviewBusy} onClick={() => void generateOutputPreview()}>{outputPreviewBusy ? <LoaderCircle className="spin" size={17} /> : <Eye size={17} />}生成质量预览</button>
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
-        <section className="publication-danger-zone">
-          <div><AlertTriangle size={18} /><span><strong>移除整个分支的本地发布数据</strong><small>删除仓库内最终成品、认证记录、副本与保存配置；首次导出的 JPG 保留在原位置。</small></span></div>
-          <button className="danger-button solid" type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={15} />取消发布并删除本地数据</button>
-        </section>
+        {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={busy} onBack={() => setOutputPreviewOpen(false)} onPublish={() => void publish()} />}
         {deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
       </div> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取发布状态</div>}
   </div>;
@@ -277,6 +285,35 @@ function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { br
       <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-publication-title">删除本地发布数据</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
       <div><strong>{branchTitle}</strong><p>将删除该分支的仓库内最终成品、全部认证记录、认证 JPG 副本和保存配置，并解除分支锁定。</p><div className="delete-detail">首次导出的 JPG 会保留在原发布路径，不会由此操作删除。</div></div>
       <footer><button className="text-button" type="button" onClick={onClose}>保留发布内容</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认删除本地数据</button></footer>
+    </section>
+  </div>;
+}
+
+function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
+  preview: PublicationPreview;
+  busy: boolean;
+  onBack: () => void;
+  onPublish: () => void;
+}) {
+  const [zoom, setZoom] = useState<number | "fit">("fit");
+  const zoomValue = zoom === "fit" ? 1 : zoom;
+  const changeZoom = (next: number) => setZoom(Math.max(0.25, Math.min(4, next)));
+  return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
+    <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
+      <header>
+        <div><small>发布前检查</small><h2 id="publication-preview-title">最终 JPG 质量预览</h2><span>{preview.image.width} x {preview.image.height} · {formatBytes(preview.outputBytes)}</span></div>
+        <div className="preview-zoom-controls">
+          <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(zoomValue - 0.25)}><ZoomOut size={16} /></button>
+          <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => setZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
+          <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(zoomValue + 0.25)}><ZoomIn size={16} /></button>
+          <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
+          <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
+        </div>
+      </header>
+      <div className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}>
+        <img src={preview.image.dataUrl} alt="最终 JPG 全分辨率质量预览" style={zoom === "fit" ? undefined : { width: `${preview.image.width * zoom}px` }} />
+      </div>
+      <footer><span>预览使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
     </section>
   </div>;
 }
