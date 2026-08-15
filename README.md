@@ -37,6 +37,9 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。Windows CI 运行前端生产构建、Rust 格式检查和完整库测试；桌面 GUI、真实 C2PA 第三方回读与 TrustMark 实图检查仍由维护者人工完成。不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。
 
-## 许可证状态
+## 许可证
 
-项目所有者尚未选择源码许可证。当前仓库不应被描述为已授权开源发布；公开源码发行前须加入明确的 `LICENSE`。
+本项目源码以 [GNU General Public License v3.0](LICENSE) 发布（copyleft：任何人分发本项目或其衍生作品时必须同样以 GPL 开源）。
+
+- **第三方组件**不并入 GPL，各自保留原始许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）为 MIT License（Copyright Adobe），条款见 `src-tauri/resources/models/LICENSE`。

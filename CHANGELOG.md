@@ -5,6 +5,12 @@ before and after the first stable release.
 
 ## Unreleased
 
+### Added
+
+- Source code is released under GPL-3.0; added root `LICENSE` and
+  `THIRD_PARTY_NOTICES.md`. Adobe TrustMark models keep their independent MIT
+  license under `src-tauri/resources/models/LICENSE`.
+
 ### Changed
 
 - Cancellation of branch publication now removes only repository-owned final

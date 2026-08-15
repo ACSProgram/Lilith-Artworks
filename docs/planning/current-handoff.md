@@ -25,7 +25,7 @@
 
 - 新增 Windows CI：锁定 npm 依赖、前端生产构建、Rust 格式检查和完整库测试。
 - 补齐 `CONTRIBUTING.md`、`SECURITY.md`、`CHANGELOG.md` 与 `docs/guides/release-policy.md`，README 已更新为公开候选前状态。
-- 源码 `LICENSE` 尚未由项目所有者选择。公开源码发行前必须完成该法律授权决策；代理不能代替所有者选择许可证。
+- 源码已由所有者选择并加入 GPL-3.0 `LICENSE`；Adobe TrustMark 模型保留独立 MIT 许可（`src-tauri/resources/models/LICENSE`）。
 
 ## 最后人工回归
 

@@ -8,3 +8,9 @@
 | `decoder_Q.onnx` | 45.2 MB | `ee3268f057c9dabef680e169302f5973d0589feea86189ed229a896cc3aa88df` |
 
 模型变体与哈希摘要由后端在运行时读取，显示于应用的发布/识别页面；不在前端写死。
+
+## 许可
+
+模型文件来源于 [adobe/trustmark](https://github.com/adobe/trustmark) 官方开源
+实现，沿用 Adobe 的 MIT License，**不并入**仓库根目录 `LICENSE`（GPL-3.0）。
+具体条款见本目录 `LICENSE`。

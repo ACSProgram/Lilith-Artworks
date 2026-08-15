@@ -36,4 +36,4 @@ Windows CI 必须通过以下项目：
 - 发布说明从 `CHANGELOG.md` 生成，并列出 schema 版本、已知限制和人工验收结果。
 - 公布安装包前记录 SHA-256；具备代码签名证书后，公开候选和正式安装包必须签名。
 - 不把私钥、证书、测试仓库、用户 Artwork 或未确认再分发许可的模型文件上传为发行资产。
-- 项目所有者选择并加入 `LICENSE` 之前，不把源码仓库描述为已授权的开源发行。
+- 源码以 `LICENSE`（GPL-3.0）发布；第三方组件与 Adobe TrustMark 模型不并入 GPL，条款见 `THIRD_PARTY_NOTICES.md` 与 `src-tauri/resources/models/LICENSE`。

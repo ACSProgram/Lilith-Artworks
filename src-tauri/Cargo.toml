@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Branch-aware artwork history and provenance manager"
 authors = ["Lilith Artworks contributors"]
 edition = "2021"
+license = "GPL-3.0-only"
 
 [lib]
 name = "lilith_artworks_lib"
