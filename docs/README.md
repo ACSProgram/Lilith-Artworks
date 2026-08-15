@@ -10,5 +10,6 @@
 - [历史与增量备份模块](modules/history-and-backup.md)
 - [成品与真实性模块](modules/authenticity.md)
 - [验证策略](guides/validation.md)
+- [发行政策](guides/release-policy.md)
 
 当前交接只记录尚未验收的工作和下一阶段入口；完成或被替代的计划进入归档。架构与指南文档只记录已经确定并持续有效的约束。

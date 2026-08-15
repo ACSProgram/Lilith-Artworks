@@ -4,7 +4,7 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 ## 当前状态
 
-作品仓库、增量历史、认证发布/识别与恢复清理均已实现；近期工作集中在不改变用户流程的架构拆分和核心不变量补测。当前包含：
+作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现，当前进入 Windows 公开候选前的人工回归阶段。当前包含：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -28,7 +28,15 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - [规划归档](docs/planning/archive/README.md)
 - [系统架构](docs/architecture/overview.md)
 - [验证策略](docs/guides/validation.md)
+- [发行政策](docs/guides/release-policy.md)
+- [贡献指南](CONTRIBUTING.md)
+- [安全策略](SECURITY.md)
+- [变更日志](CHANGELOG.md)
 
 项目严格禁止代理执行 GUI 自动化和截图测试。引入 ONNX/C2PA 后也不执行全量 Rust 编译，具体规则以验证策略为准。
 
-验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。
+验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。Windows CI 运行前端生产构建、Rust 格式检查和完整库测试；桌面 GUI、真实 C2PA 第三方回读与 TrustMark 实图检查仍由维护者人工完成。不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。
+
+## 许可证状态
+
+项目所有者尚未选择源码许可证。当前仓库不应被描述为已授权开源发布；公开源码发行前须加入明确的 `LICENSE`。

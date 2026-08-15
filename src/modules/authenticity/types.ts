@@ -55,7 +55,6 @@ export interface CertificationRecord {
   watermarkId: string | null;
   trustmarkEnabled: boolean;
   outputPath: string;
-  contentStored: boolean;
   outputSha256: string;
   outputBytes: number;
   title: string;

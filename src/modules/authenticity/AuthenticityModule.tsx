@@ -17,6 +17,7 @@ interface AuthenticityModuleProps {
   branches: AuthenticityBranch[];
   selectedBranchId: string | null;
   selectedRecordId?: string | null;
+  recordNavigationKey?: number;
   onSelectBranch: (branchId: string) => void;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
@@ -37,7 +38,7 @@ export function AuthenticityModule(props: AuthenticityModuleProps) {
 }
 
 function PublishView({
-  artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
+  artworkTitle, branches, selectedBranchId, selectedRecordId, recordNavigationKey, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const {
     publication, config, setConfig, preview, privateKey, setPrivateKey, watermarkId,
@@ -50,6 +51,7 @@ function PublishView({
     branches,
     selectedBranchId,
     selectedRecordId,
+    recordNavigationKey,
     onError,
     onNavigateRecord,
     onRetryFileCleanup,
@@ -61,7 +63,7 @@ function PublishView({
   return <div className="auth-workspace">
     <header className="auth-header">
       <div><span>发布与认证</span><h1>{artworkTitle}</h1></div>
-      <select value={selectedBranchId ?? ""} onChange={(event) => onSelectBranch(event.target.value)}>
+      <select value={selectedBranchId ?? ""} disabled={busy} onChange={(event) => onSelectBranch(event.target.value)}>
         {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
       </select>
     </header>
@@ -122,8 +124,8 @@ function PublishView({
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
         <section className="publication-danger-zone">
-          <div><AlertTriangle size={18} /><span><strong>移除整个分支的发布内容</strong><small>删除最终成品、全部认证记录、认证 JPG 副本及首次导出文件，并解除分支锁定。</small></span></div>
-          <button className="danger-button solid" type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={15} />取消发布并全部删除</button>
+          <div><AlertTriangle size={18} /><span><strong>移除整个分支的本地发布数据</strong><small>删除仓库内最终成品、认证记录、副本与保存配置；首次导出的 JPG 保留在原位置。</small></span></div>
+          <button className="danger-button solid" type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={15} />取消发布并删除本地数据</button>
         </section>
         {deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
       </div> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取发布状态</div>}
@@ -257,7 +259,7 @@ function RecordView({ record, preview, exporting, onExport, onClose }: {
       </section>
       <section className="publish-controls read-only-controls">
         <div className="auth-form-section"><header><strong>C2PA 内容凭证</strong><span>只读快照</span></header><ReadOnlyField label="作品标题" value={record.title} /><ReadOnlyField label="创作者" value={record.creator || "未声明"} /><ReadOnlyField label="权利声明" value={record.rightsStatement || "未声明"} multiline /><ReadOnlyField label="认证说明" value={record.authenticationContent || "未声明"} multiline /></div>
-        <div className="auth-form-section"><header><strong>发布信息</strong><span>{new Date(record.createdMs).toLocaleString()}</span></header><ReadOnlyField label="Artwork / 分支" value={`${record.artworkTitle} / ${record.branchTitle}`} /><ReadOnlyField label="首次导出位置" value={record.outputPath} multiline /><ReadOnlyField label="保存方式" value={record.contentStored ? "仓库内已保存认证 JPG" : "旧记录：使用原导出文件"} /><ReadOnlyField label="验证状态" value={record.validationState || "未记录"} /><ReadOnlyField label="Manifest 标签" value={record.c2paManifestLabel || "未记录"} multiline /></div>
+        <div className="auth-form-section"><header><strong>发布信息</strong><span>{new Date(record.createdMs).toLocaleString()}</span></header><ReadOnlyField label="Artwork / 分支" value={`${record.artworkTitle} / ${record.branchTitle}`} /><ReadOnlyField label="首次导出位置" value={record.outputPath} multiline /><ReadOnlyField label="验证状态" value={record.validationState || "未记录"} /><ReadOnlyField label="Manifest 标签" value={record.c2paManifestLabel || "未记录"} multiline /></div>
         <div className="auth-form-section trustmark-section"><header><strong>TrustMark</strong><span>{record.trustmarkEnabled ? "已嵌入" : "未嵌入"}</span></header><ReadOnlyField label="TrustMark ID" value={record.watermarkId || "无"} /><p>{record.additionalRegions.length > 0 ? `水印写入 ${record.additionalRegions.length} 个框选区域。` : "此记录未使用框选水印区域。"}</p></div>
       </section>
       {record.c2paManifestJson && <section className="record-manifest"><details className="manifest-details" open><summary>C2PA 报告</summary><pre>{record.c2paManifestJson}</pre></details></section>}
@@ -272,9 +274,9 @@ function ReadOnlyField({ label, value, multiline = false }: { label: string; val
 function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { branchTitle: string; busy: boolean; onClose: () => void; onConfirm: () => void }) {
   return <div className="dialog-backdrop" onMouseDown={onClose}>
     <section className="publication-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-publication-title" onMouseDown={(event) => event.stopPropagation()}>
-      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-publication-title">删除全部发布内容</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
-      <div><strong>{branchTitle}</strong><p>将删除该分支的最终成品、全部认证记录、仓库内认证 JPG 副本及记录指向的首次导出文件。完成后分支会解除锁定。</p><div className="delete-detail">这是分支发布内容的总删除操作，不是删除单条导出记录。</div></div>
-      <footer><button className="text-button" type="button" onClick={onClose}>保留发布内容</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认全部删除</button></footer>
+      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-publication-title">删除本地发布数据</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
+      <div><strong>{branchTitle}</strong><p>将删除该分支的仓库内最终成品、全部认证记录、认证 JPG 副本和保存配置，并解除分支锁定。</p><div className="delete-detail">首次导出的 JPG 会保留在原发布路径，不会由此操作删除。</div></div>
+      <footer><button className="text-button" type="button" onClick={onClose}>保留发布内容</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认删除本地数据</button></footer>
     </section>
   </div>;
 }

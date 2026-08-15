@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 7;
+pub(super) const SCHEMA_VERSION: i64 = 8;
 
 #[cfg(test)]
 thread_local! {
@@ -21,7 +21,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '7');
+               ('schema_version', '8');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -135,7 +135,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                watermark_id TEXT CHECK (watermark_id IS NULL OR length(watermark_id) = 40),
                trustmark_enabled INTEGER NOT NULL CHECK (trustmark_enabled IN (0, 1)),
                output_path TEXT NOT NULL,
-               stored_path TEXT,
+               stored_path TEXT NOT NULL,
                output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
                output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
                title TEXT NOT NULL,
@@ -276,6 +276,10 @@ pub(super) fn validate_and_migrate(connection: &Connection) -> Result<(), String
     if version == 6 {
         migrate_v6_to_v7(connection)?;
         version = 7;
+    }
+    if version == 7 {
+        migrate_v7_to_v8(connection)?;
+        version = 8;
     }
     validate_current_version(version)
 }
@@ -473,4 +477,150 @@ fn migrate_v6_to_v7(connection: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("无法把作品仓库迁移到版本 7：{error}"))
+}
+
+fn migrate_v7_to_v8(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             DELETE FROM certification_records WHERE stored_path IS NULL;
+             ALTER TABLE certification_records RENAME TO certification_records_v7;
+             CREATE TABLE certification_records (
+               id TEXT PRIMARY KEY,
+               final_artifact_id TEXT NOT NULL REFERENCES final_artifacts(id) ON DELETE CASCADE,
+               branch_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+               history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
+               watermark_id TEXT CHECK (watermark_id IS NULL OR length(watermark_id) = 40),
+               trustmark_enabled INTEGER NOT NULL CHECK (trustmark_enabled IN (0, 1)),
+               output_path TEXT NOT NULL,
+               stored_path TEXT NOT NULL,
+               output_sha256 TEXT NOT NULL CHECK (length(output_sha256) = 64),
+               output_bytes INTEGER NOT NULL CHECK (output_bytes >= 0),
+               title TEXT NOT NULL,
+               creator TEXT NOT NULL,
+               rights_statement TEXT NOT NULL,
+               authentication_content TEXT NOT NULL,
+               regions_json TEXT NOT NULL DEFAULT '[]',
+               c2pa_manifest_label TEXT,
+               c2pa_manifest_json TEXT,
+               validation_state TEXT,
+               created_ms INTEGER NOT NULL
+             );
+             INSERT INTO certification_records
+               (id, final_artifact_id, branch_id, history_id, watermark_id,
+                trustmark_enabled, output_path, stored_path, output_sha256,
+                output_bytes, title, creator, rights_statement,
+                authentication_content, regions_json, c2pa_manifest_label,
+                c2pa_manifest_json, validation_state, created_ms)
+             SELECT id, final_artifact_id, branch_id, history_id, watermark_id,
+                    trustmark_enabled, output_path, stored_path, output_sha256,
+                    output_bytes, title, creator, rights_statement,
+                    authentication_content, regions_json, c2pa_manifest_label,
+                    c2pa_manifest_json, validation_state, created_ms
+             FROM certification_records_v7;
+             DROP TABLE certification_records_v7;
+             CREATE INDEX certification_records_watermark
+               ON certification_records(watermark_id, created_ms DESC);
+             CREATE INDEX certification_records_branch
+               ON certification_records(branch_id, created_ms DESC);
+             UPDATE repository_meta SET value = '8' WHERE key = 'schema_version';
+             COMMIT;",
+        )
+        .map_err(|error| format!("无法把作品仓库迁移到版本 8：{error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v8_requires_repository_copies_for_certification_records() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = ON;
+                 CREATE TABLE repository_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO repository_meta VALUES ('format', 'lilith-artworks');
+                 INSERT INTO repository_meta VALUES ('schema_version', '7');
+                 CREATE TABLE final_artifacts (id TEXT PRIMARY KEY);
+                 CREATE TABLE branches (id TEXT PRIMARY KEY);
+                 CREATE TABLE history_nodes (id TEXT PRIMARY KEY);
+                 CREATE TABLE certification_records (
+                   id TEXT PRIMARY KEY,
+                   final_artifact_id TEXT NOT NULL REFERENCES final_artifacts(id) ON DELETE CASCADE,
+                   branch_id TEXT NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+                   history_id TEXT NOT NULL REFERENCES history_nodes(id) ON DELETE RESTRICT,
+                   watermark_id TEXT,
+                   trustmark_enabled INTEGER NOT NULL,
+                   output_path TEXT NOT NULL,
+                   stored_path TEXT,
+                   output_sha256 TEXT NOT NULL,
+                   output_bytes INTEGER NOT NULL,
+                   title TEXT NOT NULL,
+                   creator TEXT NOT NULL,
+                   rights_statement TEXT NOT NULL,
+                   authentication_content TEXT NOT NULL,
+                   regions_json TEXT NOT NULL,
+                   c2pa_manifest_label TEXT,
+                   c2pa_manifest_json TEXT,
+                   validation_state TEXT,
+                   created_ms INTEGER NOT NULL
+                 );
+                 CREATE INDEX certification_records_watermark
+                   ON certification_records(watermark_id, created_ms DESC);
+                 CREATE INDEX certification_records_branch
+                   ON certification_records(branch_id, created_ms DESC);
+                 INSERT INTO final_artifacts VALUES ('artifact');
+                 INSERT INTO branches VALUES ('branch');
+                 INSERT INTO history_nodes VALUES ('history');
+                 INSERT INTO certification_records
+                   (id, final_artifact_id, branch_id, history_id, trustmark_enabled,
+                    output_path, stored_path, output_sha256, output_bytes, title,
+                    creator, rights_statement, authentication_content, regions_json,
+                    created_ms)
+                 VALUES
+                   ('stored', 'artifact', 'branch', 'history', 0, 'C:/stored.jpg',
+                    'artworks/stored.jpg',
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    1, 'Stored', '', '', '', '[]', 0),
+                   ('legacy', 'artifact', 'branch', 'history', 0, 'C:/legacy.jpg',
+                    NULL,
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    1, 'Legacy', '', '', '', '[]', 0);",
+            )
+            .unwrap();
+
+        migrate_v7_to_v8(&connection).unwrap();
+
+        let version: i64 = connection
+            .query_row(
+                "SELECT CAST(value AS INTEGER) FROM repository_meta
+                 WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let records: Vec<String> = {
+            let mut statement = connection
+                .prepare("SELECT id FROM certification_records ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let stored_path_not_null: i64 = connection
+            .query_row(
+                "SELECT \"notnull\" FROM pragma_table_info('certification_records')
+                 WHERE name = 'stored_path'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(version, 8);
+        assert_eq!(records, vec!["stored"]);
+        assert_eq!(stored_path_not_null, 1);
+    }
 }

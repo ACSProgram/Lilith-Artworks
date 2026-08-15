@@ -102,7 +102,6 @@ pub(crate) struct CertificationRecord {
     pub(crate) watermark_id: Option<String>,
     pub(crate) trustmark_enabled: bool,
     pub(crate) output_path: String,
-    pub(crate) content_stored: bool,
     pub(crate) output_sha256: String,
     pub(crate) output_bytes: u64,
     pub(crate) title: String,

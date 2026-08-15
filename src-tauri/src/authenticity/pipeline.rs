@@ -395,7 +395,6 @@ mod tests {
             watermark_id: Some("0".repeat(super::trustmark::WATERMARK_BITS)),
             trustmark_enabled: true,
             output_path: "output.jpg".into(),
-            content_stored: true,
             output_sha256: "A".repeat(64),
             output_bytes: 1,
             title: "Title".into(),

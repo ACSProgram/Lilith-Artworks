@@ -13,6 +13,7 @@ interface ArtworkWorkspaceProps {
   initialView?: WorkspaceView;
   initialBranchId?: string | null;
   initialRecordId?: string | null;
+  navigationKey?: number;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
@@ -23,6 +24,7 @@ export function ArtworkWorkspace({
   initialView = "history",
   initialBranchId = null,
   initialRecordId = null,
+  navigationKey = 0,
   onError,
   onNavigateRecord,
   onRetryFileCleanup,
@@ -52,7 +54,12 @@ export function ArtworkWorkspace({
     setTitle("");
     setBranches([]);
     setBranchId(initialBranchId);
-  }, [artworkId, initialBranchId, initialView]);
+  }, [artworkId]);
+
+  useEffect(() => {
+    setView(initialView);
+    if (navigationKey) setBranchId(initialBranchId);
+  }, [initialBranchId, initialView, navigationKey]);
 
   return <div className="artwork-workspace">
     <nav className="artwork-tabs" aria-label="Artwork 工作区">
@@ -62,7 +69,7 @@ export function ArtworkWorkspace({
     </nav>
     <div className="artwork-view">
       <div hidden={view !== "history"} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>
-      <div hidden={view !== "publish"} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>
+      <div hidden={view !== "publish"} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>
       <div hidden={view !== "identify"} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>
     </div>
   </div>;

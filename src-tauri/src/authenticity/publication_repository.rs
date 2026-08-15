@@ -138,24 +138,18 @@ pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<Vec<String
         )
         .optional()
         .map_err(storage::database_error)?;
-    let mut output_statement = transaction
+    let mut stored_statement = transaction
         .prepare(
-            "SELECT output_path, stored_path, output_sha256
+            "SELECT stored_path
              FROM certification_records WHERE branch_id = ?1",
         )
         .map_err(storage::database_error)?;
-    let outputs = output_statement
-        .query_map([branch_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
+    let stored_paths = stored_statement
+        .query_map([branch_id], |row| row.get::<_, String>(0))
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
-    drop(output_statement);
+    drop(stored_statement);
     let mut cleanup_ids = Vec::new();
     if let Some(relative) = path.as_deref() {
         cleanup_ids.push(cleanup::enqueue_repository_file(
@@ -164,21 +158,19 @@ pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<Vec<String
             "cancel_branch_publication",
         )?);
     }
-    for (output, stored, output_sha256) in &outputs {
-        cleanup_ids.push(cleanup::enqueue_external_file(
+    for stored_path in &stored_paths {
+        cleanup_ids.push(cleanup::enqueue_repository_file(
             &transaction,
-            output,
-            output_sha256,
+            stored_path,
             "cancel_branch_publication",
         )?);
-        if let Some(relative) = stored {
-            cleanup_ids.push(cleanup::enqueue_repository_file(
-                &transaction,
-                relative,
-                "cancel_branch_publication",
-            )?);
-        }
     }
+    transaction
+        .execute(
+            "DELETE FROM certification_configs WHERE branch_id = ?1",
+            [branch_id],
+        )
+        .map_err(storage::database_error)?;
     transaction
         .execute(
             "DELETE FROM final_artifacts WHERE branch_id = ?1",
@@ -296,5 +288,73 @@ mod tests {
             .unwrap();
         assert!(error.contains("待清理文件登记已丢失"), "{error}");
         assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn cancel_publication_keeps_external_outputs_and_resets_config() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        publication_fixture(&root);
+        let connection = storage::open(&root).unwrap();
+        connection
+            .execute_batch(
+                "INSERT INTO final_artifacts
+                   (id, branch_id, history_id, source_path, source_sha256,
+                    media_type, byte_size, created_ms)
+                 VALUES
+                   ('artifact', 'branch', 'history', 'artworks/final.jpg',
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    'image/jpeg', 1, 0);
+                 INSERT INTO certification_configs (branch_id, updated_ms)
+                 VALUES ('branch', 0);
+                 INSERT INTO certification_records
+                   (id, final_artifact_id, branch_id, history_id, watermark_id,
+                    trustmark_enabled, output_path, stored_path, output_sha256,
+                    output_bytes, title, creator, rights_statement,
+                    authentication_content, regions_json, created_ms)
+                 VALUES
+                   ('record', 'artifact', 'branch', 'history', NULL, 0,
+                    'C:/published/output.jpg', 'artworks/certified.jpg',
+                    '0000000000000000000000000000000000000000000000000000000000000000',
+                    1, 'Title', '', '', '', '[]', 0);",
+            )
+            .unwrap();
+
+        let cleanup_ids = remove_artifact(&root, "branch").unwrap();
+
+        let connection = storage::open(&root).unwrap();
+        let counts: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM final_artifacts),
+                   (SELECT COUNT(*) FROM certification_records),
+                   (SELECT COUNT(*) FROM certification_configs)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut statement = connection
+            .prepare(
+                "SELECT path_kind, path FROM pending_file_cleanup
+                 ORDER BY path",
+            )
+            .unwrap();
+        let cleanup_entries = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+
+        assert_eq!(counts, (0, 0, 0));
+        assert_eq!(cleanup_ids.len(), 2);
+        assert_eq!(
+            cleanup_entries,
+            vec![
+                ("repository_file".into(), "artworks/certified.jpg".into()),
+                ("repository_file".into(), "artworks/final.jpg".into()),
+            ]
+        );
     }
 }

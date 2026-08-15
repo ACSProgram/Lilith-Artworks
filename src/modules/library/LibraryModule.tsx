@@ -46,6 +46,7 @@ export interface LibraryArtworkWorkspaceProps {
   initialView: "history" | "publish";
   initialBranchId: string | null;
   initialRecordId: string | null;
+  navigationKey: number;
   onNavigateRecord: (target: ArtworkTraceTarget) => void;
 }
 
@@ -68,7 +69,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
   const [context, setContext] = useState<ContextState | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
-  const [traceTarget, setTraceTarget] = useState<{ artworkId: string; branchId: string; recordId: string } | null>(null);
+  const [traceTarget, setTraceTarget] = useState<(ArtworkTraceTarget & { navigationKey: number }) | null>(null);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
 
@@ -287,6 +288,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
             initialView: traceTarget?.artworkId === activeNode.id ? "publish" : "history",
             initialBranchId: traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null,
             initialRecordId: traceTarget?.artworkId === activeNode.id ? traceTarget.recordId : null,
+            navigationKey: traceTarget?.artworkId === activeNode.id ? traceTarget.navigationKey : 0,
             onNavigateRecord: (target) => {
               const node = nodeById.get(target.artworkId);
               if (!node) {
@@ -305,7 +307,10 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
               setSelectedIds(new Set([target.artworkId]));
               setAnchorId(target.artworkId);
               setActiveId(target.artworkId);
-              setTraceTarget(target);
+              setTraceTarget((current) => ({
+                ...target,
+                navigationKey: (current?.navigationKey ?? 0) + 1,
+              }));
             },
           })
         ) : activeNode ? (

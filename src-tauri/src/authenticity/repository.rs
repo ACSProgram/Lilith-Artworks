@@ -267,26 +267,19 @@ pub(crate) fn certification_storage_path(
 }
 
 pub(crate) fn record_source_path(root: &Path, record_id: &str) -> Result<PathBuf, String> {
-    let value: Option<(String, Option<String>)> = storage::open(root)?
+    let stored_path: Option<String> = storage::open(root)?
         .query_row(
-            "SELECT output_path, stored_path FROM certification_records WHERE id = ?1",
+            "SELECT stored_path FROM certification_records WHERE id = ?1",
             [record_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .optional()
         .map_err(storage::database_error)?;
-    let (output_path, stored_path) = value.ok_or("找不到发布记录")?;
-    if let Some(stored_path) = stored_path {
-        let stored = storage::resolve_path(root, &stored_path)?;
-        if stored.is_file() {
-            return Ok(stored);
-        }
+    let stored = storage::resolve_path(root, &stored_path.ok_or("找不到发布记录")?)?;
+    if stored.is_file() {
+        return Ok(stored);
     }
-    let legacy = PathBuf::from(output_path);
-    if legacy.is_file() {
-        return Ok(legacy);
-    }
-    Err("该记录的仓库副本不可用，原导出文件也已不存在".into())
+    Err("该记录的仓库副本不可用".into())
 }
 
 fn records_for_branch(
@@ -308,7 +301,7 @@ fn query_records(
     let sql = format!(
         "SELECT record.id, b.artwork_id, artwork.title, record.branch_id, b.title,
                 record.history_id, record.watermark_id,
-                record.trustmark_enabled, record.output_path, record.stored_path,
+                record.trustmark_enabled, record.output_path,
                 record.output_sha256, record.output_bytes, record.title, record.creator, record.rights_statement,
                 record.authentication_content, record.regions_json,
                 record.c2pa_manifest_label, record.c2pa_manifest_json,
@@ -328,7 +321,7 @@ fn query_records(
 }
 
 fn certification_record_from_row(row: &Row<'_>) -> rusqlite::Result<CertificationRecord> {
-    let regions_json: String = row.get(16)?;
+    let regions_json: String = row.get(15)?;
     let additional_regions: Vec<NormalizedRegion> =
         serde_json::from_str(&regions_json).unwrap_or_default();
     Ok(CertificationRecord {
@@ -341,17 +334,16 @@ fn certification_record_from_row(row: &Row<'_>) -> rusqlite::Result<Certificatio
         watermark_id: row.get(6)?,
         trustmark_enabled: row.get::<_, i64>(7)? != 0,
         output_path: row.get(8)?,
-        content_stored: row.get::<_, Option<String>>(9)?.is_some(),
-        output_sha256: row.get(10)?,
-        output_bytes: row.get(11)?,
-        title: row.get(12)?,
-        creator: row.get(13)?,
-        rights_statement: row.get(14)?,
-        authentication_content: row.get(15)?,
+        output_sha256: row.get(9)?,
+        output_bytes: row.get(10)?,
+        title: row.get(11)?,
+        creator: row.get(12)?,
+        rights_statement: row.get(13)?,
+        authentication_content: row.get(14)?,
         additional_regions,
-        c2pa_manifest_label: row.get(17)?,
-        c2pa_manifest_json: row.get(18)?,
-        validation_state: row.get(19)?,
-        created_ms: row.get(20)?,
+        c2pa_manifest_label: row.get(16)?,
+        c2pa_manifest_json: row.get(17)?,
+        validation_state: row.get(18)?,
+        created_ms: row.get(19)?,
     })
 }

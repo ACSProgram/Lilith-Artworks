@@ -45,6 +45,7 @@ interface PublicationControllerOptions {
   branches: AuthenticityBranch[];
   selectedBranchId: string | null;
   selectedRecordId?: string | null;
+  recordNavigationKey?: number;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
@@ -56,6 +57,7 @@ export function usePublicationController({
   branches,
   selectedBranchId,
   selectedRecordId,
+  recordNavigationKey,
   onError,
   onNavigateRecord,
   onRetryFileCleanup,
@@ -159,7 +161,7 @@ export function usePublicationController({
       document.querySelector(`[data-record-id="${selectedRecordId}"]`)
         ?.scrollIntoView({ block: "center" });
     });
-  }, [publication, selectedRecordId]);
+  }, [publication, recordNavigationKey, selectedRecordId]);
 
   useEffect(() => {
     const requestId = ++viewingRequest.current;
@@ -265,11 +267,16 @@ export function usePublicationController({
       if (report.failures.length > 0) {
         onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
       }
+      localStorage.removeItem(SHARED_SIGNING_KEY);
       if (selectedBranchIdRef.current === branchId) {
         setDeleteConfirmOpen(false);
         setPublication(null);
         setConfig(null);
         setPreview(null);
+        setPrivateKey("");
+        setWatermarkId("");
+        setResult(null);
+        setViewingRecord(null);
       }
       await onPublicationChanged?.();
     } catch (error) {

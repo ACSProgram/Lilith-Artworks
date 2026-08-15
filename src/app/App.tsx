@@ -145,6 +145,7 @@ export function App() {
               initialView={workspace.initialView}
               initialBranchId={workspace.initialBranchId}
               initialRecordId={workspace.initialRecordId}
+              navigationKey={workspace.navigationKey}
               onError={setMessage}
               onRetryFileCleanup={appApi.retryFileCleanup}
               onNavigateRecord={(record) => workspace.onNavigateRecord({
