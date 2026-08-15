@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 use crate::{
     cleanup,
@@ -111,18 +111,40 @@ fn locate_database(root: &Path) -> Result<PathBuf, String> {
         if candidate == preferred {
             continue;
         }
-        let connection = match Connection::open(&candidate) {
-            Ok(connection) => connection,
-            Err(_) => continue,
+        let matches_repository = {
+            let connection =
+                match Connection::open_with_flags(&candidate, OpenFlags::SQLITE_OPEN_READ_WRITE) {
+                    Ok(connection) => connection,
+                    Err(_) => continue,
+                };
+            let format = connection
+                .query_row(
+                    "SELECT value FROM repository_meta WHERE key = 'format'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional();
+            let matches = format.ok().flatten().as_deref() == Some(REPOSITORY_FORMAT);
+            if matches {
+                let busy: i64 = connection
+                    .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+                    .map_err(|error| {
+                        format!(
+                            "无法合并备用作品数据库 {} 的 WAL：{error}",
+                            display_path(&candidate)
+                        )
+                    })?;
+                if busy != 0 {
+                    return Err(format!(
+                        "备用作品数据库 {} 正在使用，无法完成 WAL 合并",
+                        display_path(&candidate)
+                    ));
+                }
+            }
+            matches
         };
-        let format = connection
-            .query_row(
-                "SELECT value FROM repository_meta WHERE key = 'format'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional();
-        if format.ok().flatten().as_deref() == Some(REPOSITORY_FORMAT) {
+        if matches_repository {
+            remove_sqlite_sidecars(&candidate)?;
             if preferred.exists()
                 && preferred
                     .metadata()
@@ -131,6 +153,7 @@ fn locate_database(root: &Path) -> Result<PathBuf, String> {
             {
                 fs::remove_file(&preferred)
                     .map_err(|error| format!("无法移除空数据库占位文件：{error}"))?;
+                remove_sqlite_sidecars(&preferred)?;
             }
             fs::rename(&candidate, &preferred).map_err(|error| {
                 format!(
@@ -155,6 +178,29 @@ fn locate_database(root: &Path) -> Result<PathBuf, String> {
     } else {
         Ok(preferred)
     }
+}
+
+fn remove_sqlite_sidecars(database: &Path) -> Result<(), String> {
+    for suffix in ["-wal", "-shm"] {
+        let sidecar = sqlite_sidecar_path(database, suffix);
+        match fs::remove_file(&sidecar) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(format!(
+                    "无法清理 SQLite sidecar {}：{error}",
+                    display_path(&sidecar)
+                ))
+            }
+        }
+    }
+    Ok(())
+}
+
+fn sqlite_sidecar_path(database: &Path, suffix: &str) -> PathBuf {
+    let mut value = database.as_os_str().to_os_string();
+    value.push(suffix);
+    PathBuf::from(value)
 }
 
 fn validate_repository_root(root: &Path) -> Result<(), String> {
@@ -1483,6 +1529,61 @@ mod tests {
 
         assert!(error.contains("缺少数据库"));
         assert!(!database.exists());
+    }
+
+    #[test]
+    fn discovers_and_renames_alternate_repository_database() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root).unwrap();
+        let preferred = database_path(&root);
+        let alternate = root.join("legacy.sqlite3");
+        fs::rename(&preferred, &alternate).unwrap();
+
+        open_existing(&root).unwrap();
+
+        assert!(preferred.is_file());
+        assert!(!alternate.exists());
+    }
+
+    #[test]
+    fn alternate_repository_migration_checkpoints_committed_wal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root).unwrap();
+        let preferred = database_path(&root);
+        let alternate = root.join("legacy.sqlite3");
+        let preferred_wal = sqlite_sidecar_path(&preferred, "-wal");
+        let alternate_wal = sqlite_sidecar_path(&alternate, "-wal");
+
+        let connection = storage::open(&root).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA wal_autocheckpoint = 0;
+                 INSERT INTO library_nodes
+                   (id, parent_id, kind, title, position, created_ms, updated_ms)
+                 VALUES ('wal-group', NULL, 'group', 'Recovered from WAL', 0, 1, 1);",
+            )
+            .unwrap();
+        assert!(preferred_wal.is_file());
+        fs::copy(&preferred, &alternate).unwrap();
+        fs::copy(&preferred_wal, &alternate_wal).unwrap();
+        drop(connection);
+        remove_sqlite_sidecars(&preferred).unwrap();
+        fs::remove_file(&preferred).unwrap();
+
+        open_existing(&root).unwrap();
+
+        let recovered: i64 = storage::open(&root)
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM library_nodes WHERE id = 'wal-group'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recovered, 1);
+        assert!(!alternate_wal.exists());
     }
 
     #[test]

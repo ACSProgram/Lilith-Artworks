@@ -21,6 +21,7 @@ struct Inner {
     operation_lock: Mutex<()>,
     runtime: Mutex<BackupRuntimeStatus>,
     cancel_requested: AtomicBool,
+    shutting_down: AtomicBool,
     scheduler_signal: Mutex<SchedulerSignal>,
     scheduler_wake: Condvar,
     scheduler_handle: Mutex<Option<JoinHandle<()>>>,
@@ -48,6 +49,9 @@ impl BackupState {
             .operation_lock
             .lock()
             .map_err(|_| "备份操作锁已损坏")?;
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return Err("应用正在退出，操作已取消".into());
+        }
         self.inner.cancel_requested.store(false, Ordering::SeqCst);
         {
             let mut runtime = self.inner.runtime.lock().map_err(|_| "备份状态已损坏")?;
@@ -62,7 +66,9 @@ impl BackupState {
                 ..Default::default()
             };
         }
-        self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        if !self.inner.shutting_down.load(Ordering::SeqCst) {
+            self.inner.cancel_requested.store(false, Ordering::SeqCst);
+        }
         result
     }
 
@@ -109,6 +115,8 @@ impl BackupState {
         if handle.is_some() {
             return Ok(());
         }
+        self.inner.shutting_down.store(false, Ordering::SeqCst);
+        self.inner.cancel_requested.store(false, Ordering::SeqCst);
         if let Ok(mut signal) = self.inner.scheduler_signal.lock() {
             signal.stop = false;
             signal.generation = signal.generation.wrapping_add(1);
@@ -146,6 +154,7 @@ impl BackupState {
     }
 
     pub(crate) fn shutdown(&self) {
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
         self.inner.cancel_requested.store(true, Ordering::SeqCst);
         if let Ok(mut signal) = self.inner.scheduler_signal.lock() {
             signal.stop = true;
@@ -161,8 +170,81 @@ impl BackupState {
         {
             let _ = handle.join();
         }
+        let _operation_guard = self.inner.operation_lock.lock().ok();
         if let Ok(mut runtime) = self.inner.runtime.lock() {
-            runtime.automatic_scheduling = false;
+            *runtime = BackupRuntimeStatus::default();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::Duration,
+    };
+
+    use super::*;
+
+    #[test]
+    fn shutdown_waits_for_active_operation_and_rejects_queued_work() {
+        let state = BackupState::default();
+        let active_state = state.clone();
+        let (active_started_tx, active_started_rx) = mpsc::channel();
+        let (cancel_seen_tx, cancel_seen_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let active = thread::spawn(move || {
+            active_state.run_exclusive(None, || {
+                active_started_tx.send(()).unwrap();
+                while !active_state.cancelled() {
+                    thread::yield_now();
+                }
+                cancel_seen_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+                Err::<(), _>("cancelled".into())
+            })
+        });
+        active_started_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let queued_executed = Arc::new(AtomicBool::new(false));
+        let queued_flag = queued_executed.clone();
+        let queued_state = state.clone();
+        let queued = thread::spawn(move || {
+            queued_state.run_exclusive(None, || {
+                queued_flag.store(true, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let shutdown_state = state.clone();
+        let (shutdown_done_tx, shutdown_done_rx) = mpsc::channel();
+        let shutdown = thread::spawn(move || {
+            shutdown_state.shutdown();
+            shutdown_done_tx.send(()).unwrap();
+        });
+        cancel_seen_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        let returned_before_cleanup = shutdown_done_rx
+            .recv_timeout(Duration::from_millis(50))
+            .is_ok();
+
+        release_tx.send(()).unwrap();
+        if !returned_before_cleanup {
+            shutdown_done_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap();
+        }
+        active.join().unwrap().unwrap_err();
+        let queued_result = queued.join().unwrap();
+        shutdown.join().unwrap();
+
+        assert!(!returned_before_cleanup);
+        assert!(queued_result.is_err());
+        assert!(!queued_executed.load(Ordering::SeqCst));
     }
 }

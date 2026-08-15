@@ -379,6 +379,24 @@ mod tests {
     }
 
     #[test]
+    fn atomic_settings_write_replaces_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let initial = AppSettings::default();
+        write_json_atomic(&path, &initial).unwrap();
+
+        let mut updated = initial;
+        updated.theme = "dark".into();
+        updated.window.width = 1440;
+        write_json_atomic(&path, &updated).unwrap();
+
+        let (actual, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(actual.theme, "dark");
+        assert_eq!(actual.window.width, 1440);
+    }
+
+    #[test]
     fn repository_save_only_initializes_a_new_selection() {
         let directory = tempfile::tempdir().unwrap();
         let missing_existing = directory.path().join("missing-existing");
