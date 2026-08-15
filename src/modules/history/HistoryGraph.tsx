@@ -1,5 +1,5 @@
 import { CalendarDays } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { HistoryTreeNode } from "./historyModel";
 import type { ArtworkBranch, HistoryNode } from "./types";
@@ -14,13 +14,16 @@ interface HistoryTimelineProps {
 }
 
 export function HistoryTimeline({ branches, nodes, selectedNodeId, onJump }: HistoryTimelineProps) {
+  const [order, setOrder] = useState<"ascending" | "descending">("descending");
   const branchTitles = useMemo(
     () => new Map(branches.map((branch) => [branch.id, branch.title])),
     [branches],
   );
   const groups = useMemo(() => {
     const result: Array<{ label: string; nodes: HistoryNode[] }> = [];
-    const sorted = [...nodes].sort((left, right) => right.createdMs - left.createdMs);
+    const direction = order === "ascending" ? 1 : -1;
+    const sorted = [...nodes].sort((left, right) =>
+      direction * (left.createdMs - right.createdMs || left.id.localeCompare(right.id)));
     for (const node of sorted) {
       const label = new Date(node.createdMs).toLocaleDateString("zh-CN", {
         year: "numeric",
@@ -32,10 +35,18 @@ export function HistoryTimeline({ branches, nodes, selectedNodeId, onJump }: His
       else result.push({ label, nodes: [node] });
     }
     return result;
-  }, [nodes]);
+  }, [nodes, order]);
 
   return <aside className="history-timeline" aria-label="历史时间轴导航">
-    <header><CalendarDays aria-hidden="true" size={15} /><strong>时间轴</strong><span>{nodes.length}</span></header>
+    <header>
+      <CalendarDays aria-hidden="true" size={15} />
+      <strong>时间轴</strong>
+      <span>{nodes.length}</span>
+      <div className="segmented-control timeline-order" aria-label="时间轴顺序">
+        <button className={order === "ascending" ? "active" : ""} type="button" aria-pressed={order === "ascending"} onClick={() => setOrder("ascending")}>正序</button>
+        <button className={order === "descending" ? "active" : ""} type="button" aria-pressed={order === "descending"} onClick={() => setOrder("descending")}>倒序</button>
+      </div>
+    </header>
     <div className="history-timeline-groups">
       {groups.map((group) => <section className="history-timeline-group" key={group.label}>
         <h3>{group.label}</h3>

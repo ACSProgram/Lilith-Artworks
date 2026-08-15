@@ -281,14 +281,17 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       branch.createdFromHistoryId === node.id && branch.headHistoryId !== node.id);
     const selectable = compactMode && view === "branch" && branchNodeIds.has(node.id) && canCompact(node, history);
     const selectedForCompact = compactSelection.has(node.id);
+    const selected = selectedNodeId === node.id;
+    const onSelectedBranch = Boolean(selectedBranch && branchNodeIds.has(node.id));
     return <button
       key={node.id}
       ref={(element) => {
         if (element) nodeElements.current.set(node.id, element);
         else nodeElements.current.delete(node.id);
       }}
-      className={`history-node-card${selectedNodeId === node.id ? " selected" : ""}${selectable ? " compactable" : ""}${selectedForCompact ? " compact-selected" : ""}`}
+      className={`history-node-card${selected ? " selected" : ""}${onSelectedBranch ? " on-selected-branch" : ""}${selectable ? " compactable" : ""}${selectedForCompact ? " compact-selected" : ""}`}
       type="button"
+      aria-pressed={selected}
       onClick={() => {
         if (compactMode) {
           if (!selectable) return;
@@ -311,7 +314,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         <code>{node.sha256}</code>
       </span>
       <span className="history-labels">
-        {heads.map((branch) => <i key={branch.id}>{branch.title} HEAD</i>)}
+        {heads.map((branch) => <i className={branch.id === selectedBranchId ? "current-branch-label" : undefined} key={branch.id}>{branch.title} HEAD</i>)}
         {forks.map((branch) => <i className="fork-label" key={branch.id}>{branch.title} fork</i>)}
         {node.isCheckpoint && <i>检查点</i>}
         {publishedCount > 0 && <i className="published-label">已发布 {publishedCount}</i>}

@@ -151,8 +151,8 @@
 
 .history-main { display: grid; grid-template-columns: minmax(460px, 1fr) 280px; min-height: 0; }
 .history-main.with-timeline { grid-template-columns: 206px minmax(0, 1fr); }
-.history-graph { min-width: 0; overflow: auto; padding: 16px 20px 28px; border-right: 1px solid var(--border); }
-.history-graph > header { position: sticky; z-index: 5; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 48px; margin: -16px -20px 10px; padding: 10px 23px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.history-graph { min-width: 0; overflow: auto; padding: 0 20px 28px; border-right: 1px solid var(--border); }
+.history-graph > header { position: sticky; z-index: 5; top: 0; display: flex; justify-content: space-between; align-items: center; gap: 16px; min-height: 48px; margin: 0 -20px 10px; padding: 10px 23px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .history-graph-title { display: flex; align-items: baseline; gap: 10px; min-width: 0; }
 .history-graph > header strong { font-size: 12px; white-space: nowrap; }
 .history-graph > header span { color: var(--muted); font-size: 10px; white-space: nowrap; }
@@ -167,10 +167,12 @@
 .history-main.with-timeline .history-graph { border-right: 0; }
 
 .history-timeline { min-width: 0; overflow: auto; border-right: 1px solid var(--border); background: var(--surface); }
-.history-timeline > header { position: sticky; z-index: 6; top: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 6px; min-height: 48px; padding: 0 12px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.history-timeline > header { position: sticky; z-index: 6; top: 0; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto auto; align-items: center; gap: 6px; min-height: 48px; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .history-timeline > header svg { color: var(--accent); }
 .history-timeline > header strong { font-size: 11px; }
 .history-timeline > header span { color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.timeline-order { gap: 1px; padding: 1px; }
+.timeline-order button { min-height: 22px; padding: 0 5px; font-size: 9px; }
 .history-timeline-groups { padding: 11px 10px 18px; }
 .history-timeline-group + .history-timeline-group { margin-top: 14px; }
 .history-timeline-group h3 { margin: 0 0 5px 4px; color: var(--muted); font-size: 9px; font-weight: 600; }
@@ -195,6 +197,7 @@
 .history-node-copy code { margin-top: 5px; overflow: hidden; color: var(--muted); font-family: Consolas, monospace; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .history-labels { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; padding-top: 1px; }
 .history-labels i { padding: 2px 5px; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border)); border-radius: 4px; color: var(--accent); font-size: 9px; font-style: normal; white-space: nowrap; }
+.history-labels i.current-branch-label { color: var(--surface); border-color: var(--accent); background: var(--accent); }
 .history-labels i.fork-label { border-color: var(--border); color: var(--muted); }
 .history-labels i.published-label { border-color: color-mix(in srgb, var(--danger) 45%, var(--border)); color: var(--danger); }
 
@@ -215,6 +218,8 @@
 .mindmap-root li > ul::before { content: ""; position: absolute; top: 0; left: var(--mindmap-edge-inset, 50%); right: var(--mindmap-edge-inset, 50%); height: 1px; background: var(--border); }
 .mindmap-root li > ul > li::before { content: ""; position: absolute; top: -14px; left: 50%; width: 1px; height: 14px; background: var(--border); }
 .mindmap-root .history-node-card { min-height: 62px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+.mindmap-root .history-node-card.on-selected-branch { border-color: color-mix(in srgb, var(--accent) 52%, var(--border)); box-shadow: inset 3px 0 0 color-mix(in srgb, var(--accent) 62%, transparent); }
+.mindmap-root .history-node-card.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--surface)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
 .mindmap-root.mindmap-compact li > ul { align-items: start; }
 .mindmap-root.mindmap-timeline li > ul { align-items: start; }
 .mindmap-root.mindmap-timeline li > ul > li { padding-top: calc(var(--timeline-index, 0) * 76px); }

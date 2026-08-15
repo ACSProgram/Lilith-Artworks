@@ -1,6 +1,6 @@
 # 2026-08-15 优化与验收归档
 
-本归档承接 `optimization-2026-08-14.md` 的阶段 1-2，记录已提交并完成相应验证的阶段 3-4 与阶段 A-E。当前未验收工作只读 `../current-handoff.md`。
+本归档承接 `optimization-2026-08-14.md` 的阶段 1-2，记录已提交并完成相应验证的阶段 3-4 与阶段 A-G。当前未验收工作只读 `../current-handoff.md`。
 
 ## 优化阶段 3：发布意图与孤儿文件恢复
 
@@ -40,7 +40,7 @@
 - 时间轴条目显示“创建分支 - 节点标题”。
 - 时间轴与 mindmap 纯展示从 `HistoryModule.tsx` 拆到 `HistoryGraph.tsx`。
 
-人工验收时曾记录最小化图标与最大化图标相同。归档后的源码核对显示 `WindowTitleBar.tsx` 已使用 `Minus` 并调用 `appWindow.minimize()`；该项不再属于“未实现”，但仍保留一次最终目视确认。
+人工验收时曾记录最小化图标与最大化图标相同。`WindowTitleBar.tsx` 随后改用 `Minus` 并调用 `appWindow.minimize()`；用户已完成最终编译和目视确认。
 
 ## 阶段 E：Library 展示拆分与前端依赖反转
 
@@ -49,10 +49,23 @@
 - 共享清理 DTO 移到 `src/shared/fileCleanup.ts`。
 - Authenticity 使用最小分支视图；静态检查确认前端业务模块之间无直接导入。
 
+## 阶段 F：Library schema 边界拆分
+
+- 仓库 format、schema version、迁移和完整性校验集中到 `library/schema.rs`。
+- Library 业务仓储只负责领域读写，通过 schema 公开能力打开并校验连接。
+- 初始化、已配置仓库缺失保护、备用数据库/WAL 接管和 Library 树操作定向回归通过。
+
+## 阶段 G：仓库校验缓存与统一入口
+
+- `AppState` 按仓库路径缓存完整校验结果，并串行化并发首次访问。
+- 缓存命中仍执行 format 与 schema version 轻量校验；仓库缺失、清空或契约变化会立即拒绝并清除缓存。
+- Library、History、Authenticity、文件清理、手动备份和后台调度统一通过 `ready_repository_path()` 取得已就绪仓库。
+- 设置保存仍强制完整校验或显式初始化，Library 普通连接不再重复完整校验。
+
 ## 已完成验证
 
 自动验证包括前端生产构建、Rust lib 测试目标真实编译、schema v7、文件清理、发布意图、历史删除/精简、仓库打开、退出等待、WAL 恢复、设置原子覆盖等定向回归，以及 Rust 格式、Cargo metadata、Tauri JSON 和差异检查。阶段 E 完成后模块反向导入静态搜索无结果。
 
-用户已完成人工检查：标签与标题对齐、时间轴导航和跳转、设置浅色/深色及窄窗口布局、调度计数、长任务退出、顶栏拖动/最大化/关闭到托盘、时间轴同名节点、Library 创建/重命名/回收站、跨 Artwork 认证导航、认证 claim/冲突与清理重试，以及发布/认证导出/重启 reconciliation。
+用户已完成人工检查：标签与标题对齐、时间轴导航和跳转、设置浅色/深色及窄窗口布局、调度计数、长任务退出、顶栏拖动/最大化/最小化/关闭到托盘、时间轴同名节点、Library 创建/搜索/重命名/回收站、跨 Artwork 认证导航、认证 claim/冲突与清理重试、发布/认证导出/重启 reconciliation，以及阶段 G 的跨页面仓库读取、仓库切换后调度与设置统计。H01-H03 已由用户确认编译并验证完成。
 
 未运行全量 `cargo test`、GUI 自动化、真实 C2PA 第三方验证器和 TrustMark ONNX 自动化；GUI 自动化按项目验证策略禁止。
