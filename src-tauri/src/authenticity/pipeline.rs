@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{self, Read},
+    io::{self, Cursor, Read},
     path::{Path, PathBuf},
 };
 
@@ -69,12 +69,23 @@ pub(crate) fn preview(
     JpegEncoder::new_with_quality(&mut encoded, request.config.jpeg_quality)
         .encode_image(&rendition)?;
     let output_bytes = encoded.len() as u64;
+    let mut original_encoded = Cursor::new(Vec::new());
+    source.write_to(&mut original_encoded, image::ImageFormat::Png)?;
     Ok(PublicationPreview {
         image: PreviewImage {
             data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(encoded)),
             width,
             height,
-            source_bytes: fs::metadata(input)?.len(),
+            source_bytes: fs::metadata(&input)?.len(),
+        },
+        original_image: PreviewImage {
+            data_url: format!(
+                "data:image/png;base64,{}",
+                STANDARD.encode(original_encoded.into_inner())
+            ),
+            width,
+            height,
+            source_bytes: fs::metadata(&input)?.len(),
         },
         output_bytes,
         watermark_id: identifier,

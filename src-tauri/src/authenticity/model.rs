@@ -80,6 +80,7 @@ pub(crate) struct PreviewImage {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicationPreview {
     pub(crate) image: PreviewImage,
+    pub(crate) original_image: PreviewImage,
     pub(crate) output_bytes: u64,
     pub(crate) watermark_id: Option<String>,
 }

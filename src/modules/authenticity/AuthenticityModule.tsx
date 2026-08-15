@@ -1,5 +1,5 @@
 import {
-  BadgeCheck, Eye, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
+  BadgeCheck, Eye, FileImage, Fingerprint, FolderOpen, Image as ImageIcon, ImageDown, LoaderCircle,
   LockKeyhole, Maximize2, MoreVertical, MousePointer2, RotateCcw, ScanSearch, Search,
   ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
@@ -43,8 +43,8 @@ function PublishView({
 }: AuthenticityModuleProps) {
   const {
     publication, config, setConfig, preview, outputPreview, outputPreviewOpen,
-    setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey, watermarkId,
-    setWatermarkId, busy, result, sizeEstimate, viewingRecord, setViewingRecord,
+    setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey,
+    busy, result, sizeEstimate, viewingRecord, setViewingRecord,
     viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
     selectedBranch, enterPublication, chooseCertificate, generateOutputPreview, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
@@ -120,14 +120,13 @@ function PublishView({
             <label>透明背景<input type="color" value={config.backgroundColor} onChange={(event) => setConfig({ ...config, backgroundColor: event.target.value })} /></label>
           </div>
           <div className="auth-form-section trustmark-section">
-            <header><strong>TrustMark {publication.modelVariant}</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled={!publication.modelsReady || config.additionalRegions.length === 0} onChange={(event) => setConfig({ ...config, trustmarkEnabled: event.target.checked && config.additionalRegions.length > 0 })} /></label></header>
+            <header><strong>TrustMark {publication.modelVariant}</strong><label className="switch-field"><span className="switch-copy"><strong>{config.trustmarkEnabled ? "已启用" : "不嵌入"}</strong></span><input className="switch-input" type="checkbox" checked={config.trustmarkEnabled} disabled aria-label="TrustMark 状态由框选区域决定" /></label></header>
             <div className="trustmark-region-hint"><MousePointer2 size={16} /><span><strong>在左侧图片上拖动框选区域</strong><small>完成第一个框选后自动启用 TrustMark 水印；清空区域后自动关闭。</small></span></div>
             {!publication.modelsReady && <p className="auth-warning">TrustMark 模型不可用，仍可发布 C2PA 凭证。</p>}
             <details className="model-info"><summary>模型信息</summary><dl><div><dt>变体</dt><dd>{publication.modelVariant}</dd></div><div><dt>Encoder SHA-256</dt><dd><code>{publication.encoderSha256 ?? "不可用"}</code></dd></div><div><dt>Decoder SHA-256</dt><dd><code>{publication.decoderSha256 ?? "不可用"}</code></dd></div></dl></details>
             {config.trustmarkEnabled && <>
-              <label>自定义 ID<input value={watermarkId} maxLength={40} placeholder="留空自动生成 40 位 ID" onChange={(event) => setWatermarkId(event.target.value.replace(/[^01]/g, ""))} /></label>
               <label className="range-field">TrustMark 强度 <output>{config.watermarkStrength.toFixed(2)}</output><input type="range" min={0.5} max={1.5} step={0.05} value={config.watermarkStrength} onChange={(event) => setConfig({ ...config, watermarkStrength: Number(event.target.value) })} />{config.watermarkStrength > 1 && <small className="auth-warning">超过 1.00 可能造成质量损失</small>}</label>
-              <p>仅在 {config.additionalRegions.length} 个框选区域嵌入水印。</p>
+              <p>预览首次自动生成随机 ID，调整后保持一致并在发布时复用。仅在 {config.additionalRegions.length} 个框选区域嵌入水印。</p>
             </>}
           </div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
@@ -160,7 +159,11 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
       </section>
       <section className="decode-results">
         {!result ? <div className="decode-placeholder"><Fingerprint size={24} /><span>识别结果将在这里显示</span></div> : <>
-          <header className={result.c2paPresent ? "verified" : ""}><ShieldCheck size={20} /><div><strong>{result.c2paPresent ? "已读取 C2PA" : "未发现 C2PA"}</strong><span>{result.c2paValidationState ?? "无验证状态"}</span></div></header>
+          <header className={`decode-status ${result.c2paPresent ? "detected" : "not-detected"}`}><ShieldCheck size={20} /><div><strong>{result.c2paPresent ? "已读取 C2PA" : "未发现 C2PA"}</strong><span>{result.c2paValidationState ?? "无验证状态"}</span></div></header>
+          <div className="evidence-status-grid">
+            <div className={result.c2paPresent ? "detected" : "not-detected"}><ShieldCheck size={14} /><span><strong>C2PA</strong><small>{result.c2paPresent ? "已检出" : "未检出"}</small></span></div>
+            <div className={result.watermarkPresent ? "detected" : "not-detected"}><Fingerprint size={14} /><span><strong>TrustMark</strong><small>{result.watermarkPresent ? "已检出" : "未检出"}</small></span></div>
+          </div>
           <dl><div><dt>C2PA 记录 ID</dt><dd><code>{result.c2paRecordId ?? "未声明"}</code></dd></div><div><dt>C2PA TrustMark ID</dt><dd><code>{result.c2paWatermarkId ?? "未声明"}</code></dd></div><div><dt>识别出的 TrustMark ID</dt><dd><code>{result.watermarkId ?? "未识别"}</code></dd></div><div><dt>双通道</dt><dd>{result.identifiersMatch == null ? "只有单通道证据" : result.identifiersMatch ? "ID 一致" : "ID 冲突，需人工调查"}</dd></div></dl>
           <dl className="claim-grid"><div><dt>作品</dt><dd>{result.title ?? "未声明"}</dd></div><div><dt>创作者</dt><dd>{result.creator ?? "未声明"}</dd></div><div><dt>权利声明</dt><dd>{result.rightsStatement ?? "未声明"}</dd></div><div><dt>认证内容</dt><dd>{result.authenticationContent ?? "未声明"}</dd></div></dl>
           {result.c2paValidationStatus.length > 0 && <ul className="validation-list">{result.c2paValidationStatus.map((item) => <li key={`${item.code}-${item.explanation}`}><strong>{item.code}</strong><span>{item.explanation}</span></li>)}</ul>}
@@ -296,8 +299,36 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   onPublish: () => void;
 }) {
   const [zoom, setZoom] = useState<number | "fit">("fit");
+  const [showOriginal, setShowOriginal] = useState(false);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
   const zoomValue = zoom === "fit" ? 1 : zoom;
   const changeZoom = (next: number) => setZoom(Math.max(0.25, Math.min(4, next)));
+  const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    changeZoom(zoomValue + (event.deltaY < 0 ? 0.25 : -0.25));
+  };
+  const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (zoom === "fit" || event.button !== 0 || !canvasRef.current) return;
+    dragRef.current = {
+      pointerId: event.pointerId,
+      x: event.clientX,
+      y: event.clientY,
+      scrollLeft: canvasRef.current.scrollLeft,
+      scrollTop: canvasRef.current.scrollTop,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  };
+  const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current;
+    if (!drag || drag.pointerId !== event.pointerId || !canvasRef.current) return;
+    canvasRef.current.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
+    canvasRef.current.scrollTop = drag.scrollTop - (event.clientY - drag.y);
+  };
+  const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
+  };
+  const image = showOriginal ? preview.originalImage : preview.image;
   return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
     <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
       <header>
@@ -307,13 +338,22 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => setZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
           <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(zoomValue + 0.25)}><ZoomIn size={16} /></button>
           <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
+          <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} onClick={() => setShowOriginal((current) => !current)}><ImageIcon size={16} /></button>
           <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
         </div>
       </header>
-      <div className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}>
-        <img src={preview.image.dataUrl} alt="最终 JPG 全分辨率质量预览" style={zoom === "fit" ? undefined : { width: `${preview.image.width * zoom}px` }} />
+      <div
+        ref={canvasRef}
+        className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}
+        onWheel={onWheel}
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={onPointerUp}
+        onPointerCancel={onPointerUp}
+      >
+        <img src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
       </div>
-      <footer><span>预览使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
+      <footer><span>{showOriginal ? "当前显示原始成品，用于快速对比。" : "预览使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
     </section>
   </div>;
 }
