@@ -4,7 +4,7 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 ## 当前状态
 
-作品仓库、增量历史与认证（阶段 5/6）均已实现，等待完整编译与人工工作流验收。当前包含：
+作品仓库、增量历史、认证发布/识别与恢复清理均已实现；近期工作集中在不改变用户流程的架构拆分和核心不变量补测。当前包含：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -19,27 +19,16 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - 作品树展开状态持久化，拖放沿用 LilithClient 的递归树实现；项目删除继续进入回收站。
 - Tauri 图标与 TrustMark 模型已迁入 `src-tauri/resources/` 并随应用打包。
 
-历史总览 mindmap、单分支历史、右键恢复与分支操作、当前分支精简模式、永久删除、中间节点 ChunkFile 重建与检查点均已接入；C2PA/TrustMark 认证（发布、区域水印、识别与溯源）已实现，待完整编译与人工验收。
+历史总览 mindmap、单分支历史、右键恢复与分支操作、当前分支精简模式、永久删除、中间节点 ChunkFile 重建与检查点均已接入；C2PA/TrustMark 认证支持发布、区域水印、识别与跨 Artwork 溯源。
 
 ## 文档入口
 
 - [AI 阅读引导](docs/architecture/ai-reading-guide.md)
-- [分阶段实施计划](docs/planning/implementation-plan.md)
 - [当前任务交接与人工验收](docs/planning/current-handoff.md)
+- [规划归档](docs/planning/archive/README.md)
 - [系统架构](docs/architecture/overview.md)
 - [验证策略](docs/guides/validation.md)
 
 项目严格禁止代理执行 GUI 自动化和截图测试。引入 ONNX/C2PA 后也不执行全量 Rust 编译，具体规则以验证策略为准。
 
-## 基础验证
-
-```powershell
-npm ci
-npm run build
-cd src-tauri
-cargo fmt -- --check
-cargo check
-cargo test --quiet backup::worker::tests::commits_delta_and_restores_parent_bytes
-```
-
-不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。
+验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。

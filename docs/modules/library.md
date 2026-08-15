@@ -9,7 +9,8 @@
 - 多选与树计算：`src/modules/library/tree.ts`
 - 前端命令和类型：`src/modules/library/api.ts`、`types.ts`
 - Rust 命令边界：`src-tauri/src/library/mod.rs`
-- SQLite 与事务：`src-tauri/src/library/repository.rs`
+- 仓库格式、schema 与迁移：`src-tauri/src/library/schema.rs`
+- 仓库定位、Library 查询与事务：`src-tauri/src/library/repository.rs`
 
 ## 交互
 
@@ -28,6 +29,7 @@
 - 如果已配置目录不存在、被外部清空或缺少 `lilith-artworks.sqlite3`，仓库状态返回不可用并保留目录原状；用户需要重新选择新仓库，或先把数据库从备份恢复到原目录。
 - 共享 `storage::open` 使用不带 `CREATE` 的 SQLite `READ_WRITE` 打开标志；缺少数据库时直接失败，不生成无 schema 的占位文件。显式初始化负责新 schema 和受控目录创建，打开现有仓库仍会执行完整性、格式、版本与迁移检查。
 - 发现旧名称的备用 `.sqlite3` 时，先执行 `wal_checkpoint(TRUNCATE)` 合并已提交 WAL、关闭连接并清理旧 sidecar，再改名为标准数据库名；如果仍有进程占用导致 checkpoint busy，则保留原文件并返回错误，不做不完整迁移。
+- `schema.rs` 是仓库格式常量、当前建库 SQL、完整性/格式/版本校验和逐版本迁移的唯一所有者；Library 业务仓储不再内嵌 schema SQL。
 
 ## 回收站
 

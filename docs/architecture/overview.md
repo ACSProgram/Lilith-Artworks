@@ -11,10 +11,11 @@ src/modules/history/     分支历史图、提交、fork、恢复和裁剪
 src/modules/authenticity 成品、C2PA/TrustMark 发布与识别
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 
-src-tauri/src/app/       配置、窗口和应用生命周期
-src-tauri/src/library/   仓库、树、Artwork、分支和历史元数据
-src-tauri/src/storage.rs               SQLite 连接、迁移共用能力、路径与 ID 工具
-src-tauri/src/library/                 作品仓库树、分组/Artwork、搜索与回收站
+src-tauri/src/app/                     配置、窗口和应用生命周期
+src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
+src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
+src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
+src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务
 src-tauri/src/history/                 分支、历史节点、fork、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、调度和取消
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录

@@ -2,139 +2,40 @@
 
 更新时间：2026-08-15
 
-## 当前状态
+## 当前阶段：F - Library schema 边界
 
-全面审查整改的优化阶段 1 至阶段 4 已提交。用户已确认阶段 1/2 之前的历史、认证与 UI 人工清单通过；详情已归档到：
+本阶段先核对 handoff 描述再改代码。结果如下：
 
-- `docs/planning/archive/history-2026-08-13-2026-08-14.md`
-- `docs/planning/archive/optimization-2026-08-14.md`
+- 已完成阶段 1-4 与 A-E 已移入 `docs/planning/archive/`，归档入口见 `archive/README.md`。
+- 原 BUG-01 描述已过期：`src/app/WindowTitleBar.tsx` 当前使用 `Minus` 图标，点击调用 `appWindow.minimize()`，`src-tauri/capabilities/default.json` 也包含最小化权限。仍需用户目视确认标题栏图标显示正确。
+- “Library schema/migration 与业务仓储混在一起”的问题存在：改动前 `repository.rs` 共 1811 行，其中约 440 行属于 schema 创建、完整性校验和 v1-v7 迁移。
 
-当前 schema 为 v7。项目仍采用测试期兼容政策：公开承诺数据兼容前允许使用新仓库，不为内部 schema 版本补长期无损迁移。
+## 本阶段已实现
 
-当前正在继续用户提出的体验与鲁棒性优化。阶段 A-D 已提交但尚待用户人工检查；阶段 E 已实现并通过静态验证，尚待提交和 Library/认证导航冒烟检查。
+- 新增 `src-tauri/src/library/schema.rs`，集中管理仓库格式、schema 版本、当前建库 SQL、完整性/格式/版本校验和 v1-v7 迁移。
+- `repository.rs` 只保留仓库定位、备用数据库接管、受控目录准备和 Library 查询/事务；文件降至约 1366 行。
+- `library/mod.rs` 显式声明私有 `schema` 模块；Tauri 命令、前端 DTO 和数据库 schema 版本均未改变。
+- 已完成 Library 定向 Rust 测试：14 个通过，0 个失败。
+- `npm run build`、`cargo fmt --check`、`cargo metadata --no-deps`、capability JSON 解析和 `git diff --check` 均通过；文档中不再存在指向已归档实施计划旧位置的链接。
 
-## 四轮已完成
+## 待验收
 
-### 阶段 1：身份、候选与竞态
+- H01：目视确认主窗口最小化按钮显示为横线，点击后窗口正常最小化。
+- H02：使用可丢弃仓库确认作品树创建、搜索、重命名和回收站流程无变化。自动回归已覆盖对应后端行为，GUI 自动化仍禁止。
 
-- C2PA 固定写入签名前生成的本地 `recordId`；仅 C2PA 发布可回查记录。
-- C2PA/TrustMark 候选分别查询、去重并标注证据，冲突时两边都显示。
-- 再次导出后端禁止覆盖已有文件。
-- 发布/识别/搜索采用 latest-request-wins，发布前复核分支归属。
-- 分支删除补齐 edge delta 清理。
+## 下一阶段候选
 
-### 阶段 2：可恢复清理与互斥
+按优先级继续，每次只推进一个可独立验证的阶段：
 
-- schema v7 `pending_file_cleanup` 在事务内登记清理项；失败保留并可重试，启动时自动 reconciliation。
-- Artwork 永久删除和取消发布返回真实清理结果，不再忽略文件错误。
-- 仓库路径限制在仓库内；外部导出文件只有 SHA-256 仍匹配时才删除。
-- 认证发布、fork、永久删除、清理重试和仓库设置保存使用共享后端运行锁。
+1. 消除命令入口与仓储重复执行的 `integrity_check`，把完整仓库校验限制在配置/启动边界，同时保留普通连接的轻量格式与版本保护。
+2. 扩充认证发布/查询和前端 latest-request-wins 的核心不变量测试。
+3. 把 history/backup 跨模块工作流进一步上移到应用命令层。
+4. 继续拆分 `AuthenticityModule.tsx`、`LibraryModule.tsx` 和 `HistoryModule.tsx` 的状态与命令编排。
+5. 建立 Windows CI 与公开发布候选门槛；补 LICENSE、README、CONTRIBUTING、SECURITY、CHANGELOG 和发行政策。
 
-### 阶段 3：发布意图与孤儿文件恢复
+暂缓项：长任务 operation ID、进度与取消；dialog/tree 无障碍；大树/大图性能基线；历史 snapshot/delta 清理意图和陈旧临时文件维护命令。
 
-- 最终成品、认证外部输出和仓库副本在正式发布前登记带 SHA-256 的清理意图。
-- `final_artifacts` / `certification_records` 写入与清理意图移除在同一 SQLite 事务提交；事务失败或进程中断时启动 reconciliation 可回收孤儿文件。
-- 清理器删除前扫描最终成品、认证记录和历史图引用；提交结果不确定时保留已被数据库接管的文件。
-- 认证外部输出改为临时文件 `persist_noclobber`，不再依赖平台相关的 `rename` 覆盖行为。
-- 认证记录在提交前于同一事务回读，避免提交后新连接读取失败造成伪失败。
+## 验证边界
 
-### 阶段 4：历史删除与精简不变量
-
-- 新增测试先复现两个真实缺口：发布子树预检错误放行；删除主链子树会改写无关旁支的 `updated_ms`。
-- 删除预检现在于建立保留检查点之前拒绝包含发布节点的子树，并与正式删除复用同一查询。
-- 删除事务只更新 head 或 fork 起点实际落入删除集合的分支，不再触碰无关旁支元数据。
-- 新增精简事务回归，确认节点父链、`history_edges`、兼容 `delta_path` 和旧文件候选同步改接。
-
-## 本轮阶段 A：工作区导航与设置一致性（待人工验收）
-
-- Artwork 标签栏首项的内容起点与下方页面标题统一为 20px，修复截图中的横向错位。
-- 历史“时间轴”模式增加左侧日期导航；节点按日期分组、日期内倒序，点击后选中并把 mindmap 卡片滚动到画布中央。
-- 设置弹窗统一标题、分区、选择项和开关行的视觉结构，关闭命令改用标准图标按钮，取消/保存统一放到底部操作区。
-- 设置快照增加 `automaticBackupFileCount`，统计未回收、未锁定且启用调度的不同工作文件；每次打开设置时重新读取。
-- 当前阶段只完成静态与定向自动验证，未执行 GUI 自动化或截图验收；时间轴定位、窄窗口布局、浅色/深色设置弹窗需要用户手工检查。
-
-## 本轮阶段 B：已配置仓库丢失保护（已提交/待人工验收）
-
-- 回归确认问题与描述一致：`storage::open` 默认携带 SQLite `CREATE`，状态查询、设置统计或调度线程在空目录上抢先打开时会生成无 schema 的小型数据库，后续校验因此报无法读取。
-- 普通 `storage::open` 改为仅 `READ_WRITE`；数据库不存在时失败且不创建占位文件。Library 内部普通连接同步复用该入口。
-- 新增 `library::open_existing`，状态查询及 Library、历史、认证、清理命令只验证现有仓库；配置目录不存在、被清空或数据库为零字节时明确返回不可用。
-- 设置保存只在首次配置或仓库路径发生变化时调用显式初始化；同一路径的数据库已经丢失时拒绝静默重建，避免修改主题等无关设置时覆盖丢失状态。
-- 3 个新回归覆盖普通连接不建占位库、空已配置仓库不重建、设置仅初始化新选择；Library 仓储 12 个测试全部通过。
-
-## 本轮阶段 C：退出、取消与 WAL 恢复（已提交/待人工验收）
-
-- 回归确认 `BackupState::shutdown` 只等待调度线程，不等待活动手动任务；退出可在任务完成清理前返回，排队调度还可能取得锁后清除取消标志并继续执行。
-- `BackupState` 新增不可逆退出状态。显式退出会禁止新任务、请求取消、停止并等待调度线程，再等待共享操作锁释放；活动任务完成清理前不退出，排队任务只返回取消错误。
-- 回归确认 Windows 上备用数据库迁移在连接仍打开时改名会失败并返回 `os error 32`。现在先 checkpoint 已提交 WAL、关闭连接、清理旧 sidecar，再改名为标准数据库名。
-- 新增真实 WAL 回归：复制主库和未 checkpoint 的已提交 WAL 为备用名称，迁移后数据仍可读取且旧 WAL 被清理。
-- 设置 `settings.json` 已使用同目录临时文件、文件 `sync_all` 和原子替换；新增覆盖已有设置的重复写入回归通过，本阶段无需改实现。
-- 强制终止进程仍可能留下 NamedTempFile 或极短发布窗口中的未引用历史文件，但 SQLite 图、正式恢复输出和认证记录保持原子；后续可把历史 snapshot/delta 扩展到清理意图并增加陈旧临时文件维护命令。
-
-## 本轮阶段 D：窗口顶栏与历史展示拆分（已提交/待人工验收）
-
-- 回归确认截图中的空隙不来自页面 margin：`html/body/#root` 已为满高零边距，间隔位于 Windows 原生装饰栏与 WebView 应用顶栏的边界。
-- 主窗口改用无原生装饰的 48px 应用顶栏，合并品牌、仓库状态、设置和窗口控制，消除两层标题栏之间的分隔空隙；拖动、最小化、最大化/还原与关闭只开放对应的 Tauri window capability。
-- 自定义关闭按钮继续调用标准 window close，仍由 Rust `CloseRequested` 决定隐藏到托盘或真正退出，不绕开现有生命周期。
-- 左侧时间轴条目改为“创建分支 - 节点标题”；只消费现有 `createdOnBranchId` 和 branch DTO，未改变历史数据或后端契约。
-- 将时间轴与 mindmap 纯展示从 `HistoryModule.tsx` 拆到 `HistoryGraph.tsx`；历史状态、命令编排、节点选择与图模型保持原位置，作为超大前端组件拆分的第一步。
-
-## 本轮阶段 E：Library 展示拆分与前端依赖反转（待提交/人工验收）
-
-- 回归确认 P2 的大组件与模块边界问题存在：`LibraryModule.tsx` 共 738 行，同时包含树工作流、弹窗和展示；并反向导入应用层 `ArtworkWorkspace`、清理 API 及 Authenticity DTO，Authenticity 也直接引用 History 分支 DTO。
-- 将新建/重命名和回收站弹窗拆到 `LibraryDialogs.tsx`，命令菜单、空状态和节点概览拆到 `LibraryViews.tsx`；`LibraryModule.tsx` 降至约 570 行，只保留页面状态、树交互和命令编排。
-- `App` 现在注入 Artwork 工作区渲染器与文件清理重试，并把 `CertificationRecord` 转换为 `{ artworkId, branchId, recordId }` 后交给 Library 定位；现有标签切换、跨作品溯源和回收站流程保持不变。
-- 共享清理 DTO 从 `src/app/types.ts` 移到 `src/shared/fileCleanup.ts`；Library 与 Authenticity 不再反向导入应用层 API/类型。
-- Authenticity 新增仅含 `id`、`title`、`headHistoryId` 的最小分支视图，不再直接导入 History DTO；静态搜索确认 `src/modules/*` 之间无直接导入。
-
-## 当前验证
-
-- `npm run build`：通过。
-- Rust lib 测试目标：已真实编译。
-- 6 个新增定向回归：通过（清理哈希/越界、schema v7、Artwork 目录、edge delta、候选证据）。
-- 阶段 3 的 4 个定向回归：通过（仓库文件哈希重试、引用保护、发布意图原子接管、意图缺失时事务回滚）。
-- 阶段 4 的 3 个新增定向回归：通过（发布子树预检、旁支元数据隔离、精简原子改接）；既有 branch edge delta 回归同时通过。
-- 阶段 A `npm run build`：通过；设置默认值定向测试与自动备份文件计数回归：各 1 个通过。
-- 阶段 B：新增 3 个仓库打开/设置初始化回归通过；Library 仓储测试 12 个通过。
-- 阶段 C：退出等待/拒绝排队任务回归 1 个、备用数据库改名/WAL 恢复回归 2 个、设置原子覆盖回归 1 个通过。
-- 阶段 D：`npm run build`、Tauri 配置/能力 JSON 解析、`cargo metadata --no-deps`、`git diff --check` 通过。
-- 阶段 E：`npm run build` 通过；模块反向导入静态检查无结果。
-- `cargo fmt --check`、`cargo metadata --no-deps`、`git diff --check`：通过。
-
-未运行：全量 `cargo test`、GUI 自动化、真实 C2PA 证书/第三方验证器与 TrustMark ONNX 自动化。GUI 自动化按验证策略继续禁止。
-
-## 下一步
-
-### P1
-
-- 人工检查阶段 A：标签栏/标题对齐、时间轴左侧导航与节点跳转、设置弹窗在浅色/深色和窄窗口下的布局，以及调度文件数随分支开关变化。
-- 人工检查阶段 C：在大文件提交或恢复过程中从托盘退出，确认窗口等待操作取消和清理后退出；重新启动后仓库应可正常读取。
-- 人工检查阶段 D：确认顶栏与窗口边缘无空隙，可拖动窗口，最小化、最大化/还原、双击顶栏和关闭到托盘行为正常；检查窄窗口下仓库状态与窗口按钮不重叠。
-- 人工检查阶段 D：在时间轴中确认同名节点显示为“分支 - 标题”，点击后仍能把对应 mindmap 卡片滚动到中央。
-- 人工检查阶段 E：新建分组/Artwork、重命名、回收站恢复/永久删除/清空与失败重试应保持原流程；从识别结果跳到其它 Artwork 的发布记录后应选中对应树节点、分支和记录。
-- 为阶段 1 新 claim/冲突 UI 和阶段 2 取消发布失败重试做一次可丢弃仓库人工验收。
-- 为阶段 3 正常进入发布、认证导出和重启 reconciliation 做一次可丢弃仓库人工验收；故障注入继续由自动测试覆盖。
-- 扩充核心不变量测试：认证发布/查询与前端异步状态。
-- 建立 Windows CI 和公开发布候选门槛。
-
-### P2
-
-- 拆出 Library schema/migration；继续拆分 History 与 Authenticity 大组件，Library 的弹窗/展示拆分已完成第一步。
-- 把 history/backup 跨模块工作流进一步上移应用层。
-- 缓存仓库初始化，避免每个命令执行完整 `integrity_check`。
-- 将历史 snapshot/delta 的发布窗口接入清理意图，并增加陈旧临时文件维护命令，回收强制终止留下的无引用文件。
-- 统一错误码/诊断日志，补仓库维护命令和模型来源/许可证/固定哈希。
-- 补 LICENSE、README、CONTRIBUTING、SECURITY、CHANGELOG、兼容与发行政策。
-
-### P3
-
-- 长任务 operation ID、进度与取消。
-- dialog/tree 无障碍与键盘焦点。
-- 大树、大图性能基线及具名计时常量。
-
-## 建议入口
-
-- 清理队列：`src-tauri/src/cleanup.rs`
-- Library 永久删除/schema：`src-tauri/src/library/repository.rs`
-- 取消发布/认证发布：`src-tauri/src/authenticity/commands.rs`、`publication_repository.rs`
-- 运行互斥：`src-tauri/src/backup/runtime.rs`
-- 清理失败 UI：`src/modules/library/LibraryModule.tsx`、`src/modules/authenticity/AuthenticityModule.tsx`
+- 本阶段继续运行 `cargo fmt --check`、Library 定向测试、`npm run build` 和 `git diff --check`。
+- 不运行全量 `cargo test`、GUI 自动化、真实 C2PA 第三方验证或 TrustMark ONNX 自动化。

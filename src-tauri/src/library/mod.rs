@@ -1,5 +1,6 @@
 mod model;
 mod repository;
+mod schema;
 
 use std::path::{Path, PathBuf};
 
