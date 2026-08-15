@@ -57,6 +57,24 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
 }
 
 pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
+    validate_existing_root(root)?;
+    let database = locate_database(root)?;
+    require_database_file(&database)?;
+
+    let connection = storage::open(root)?;
+    super::schema::validate_and_migrate(&connection)?;
+    create_directories(root)
+}
+
+pub(crate) fn check_existing(root: &Path) -> Result<(), String> {
+    validate_existing_root(root)?;
+    let database = database_path(root);
+    require_database_file(&database)?;
+    let connection = storage::open(root)?;
+    super::schema::validate_current(&connection)
+}
+
+fn validate_existing_root(root: &Path) -> Result<(), String> {
     validate_repository_root(root)?;
     if !root.exists() {
         return Err("已配置的作品仓库目录不存在".into());
@@ -64,8 +82,10 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
     if !root.is_dir() {
         return Err("作品仓库路径不是目录".into());
     }
+    Ok(())
+}
 
-    let database = locate_database(root)?;
+fn require_database_file(database: &Path) -> Result<(), String> {
     if !database.exists()
         || database
             .metadata()
@@ -74,13 +94,10 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
     {
         return Err(format!(
             "已配置的作品仓库缺少数据库 {}，请重新选择仓库或从备份恢复",
-            display_path(&database)
+            display_path(database)
         ));
     }
-
-    let connection = storage::open(root)?;
-    super::schema::validate_and_migrate(&connection)?;
-    create_directories(root)
+    Ok(())
 }
 
 fn locate_database(root: &Path) -> Result<PathBuf, String> {
@@ -1012,9 +1029,7 @@ fn normalize_siblings(
 }
 
 fn open(root: &Path) -> Result<Connection, String> {
-    let connection = storage::open(root)?;
-    super::schema::validate_and_migrate(&connection)?;
-    Ok(connection)
+    storage::open(root)
 }
 
 fn ensure_group_parent(

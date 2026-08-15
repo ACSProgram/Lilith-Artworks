@@ -12,14 +12,14 @@ pub(crate) use model::{
 };
 #[cfg(test)]
 pub(crate) use repository::create_artwork;
-pub(crate) use repository::{initialize, open_existing};
+pub(crate) use repository::{check_existing, initialize, open_existing};
+#[cfg(test)]
+pub(crate) use schema::take_integrity_check_count;
 
 use crate::{app::AppState, backup::BackupState, cleanup};
 
 fn ready_root(state: &AppState) -> Result<PathBuf, String> {
-    let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
-    open_existing(&root)?;
-    Ok(root)
+    state.ready_repository_path()
 }
 
 #[tauri::command]
@@ -36,11 +36,11 @@ pub(crate) fn get_repository_status(
         });
     };
     let database = repository::database_path(&root);
-    match open_existing(Path::new(&root)) {
-        Ok(()) => Ok(RepositoryStatus {
+    match state.ready_repository_path() {
+        Ok(ready_root) => Ok(RepositoryStatus {
             configured: true,
             ready: true,
-            root_path: root.to_string_lossy().into_owned(),
+            root_path: ready_root.to_string_lossy().into_owned(),
             database_path: database.to_string_lossy().into_owned(),
             error: None,
         }),

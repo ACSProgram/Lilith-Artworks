@@ -1,7 +1,15 @@
 use rusqlite::{Connection, OptionalExtension};
 
+#[cfg(test)]
+use std::cell::Cell;
+
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
 pub(super) const SCHEMA_VERSION: i64 = 7;
+
+#[cfg(test)]
+thread_local! {
+    static INTEGRITY_CHECK_COUNT: Cell<usize> = const { Cell::new(0) };
+}
 
 pub(super) fn create(connection: &Connection) -> Result<(), String> {
     connection
@@ -235,32 +243,16 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
 }
 
 pub(super) fn validate_and_migrate(connection: &Connection) -> Result<(), String> {
+    #[cfg(test)]
+    INTEGRITY_CHECK_COUNT.with(|count| count.set(count.get() + 1));
+
     let integrity: String = connection
         .query_row("PRAGMA integrity_check(1)", [], |row| row.get(0))
         .map_err(|error| format!("无法检查作品数据库完整性：{error}"))?;
     if integrity != "ok" {
         return Err(format!("作品数据库完整性检查失败：{integrity}"));
     }
-    let format: Option<String> = connection
-        .query_row(
-            "SELECT value FROM repository_meta WHERE key = 'format'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("无法读取仓库格式：{error}"))?;
-    if format.as_deref() != Some(REPOSITORY_FORMAT) {
-        return Err("所选数据库不是 Lilith Artworks 仓库".into());
-    }
-    let version: Option<i64> = connection
-        .query_row(
-            "SELECT CAST(value AS INTEGER) FROM repository_meta WHERE key = 'schema_version'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|error| format!("无法读取仓库版本：{error}"))?;
-    let mut version = version.ok_or_else(|| "作品仓库版本未知".to_owned())?;
+    let mut version = repository_version(connection)?;
     if version == 1 {
         migrate_v1_to_v2(connection)?;
         version = 2;
@@ -285,10 +277,46 @@ pub(super) fn validate_and_migrate(connection: &Connection) -> Result<(), String
         migrate_v6_to_v7(connection)?;
         version = 7;
     }
+    validate_current_version(version)
+}
+
+pub(super) fn validate_current(connection: &Connection) -> Result<(), String> {
+    validate_current_version(repository_version(connection)?)
+}
+
+fn repository_version(connection: &Connection) -> Result<i64, String> {
+    let format: Option<String> = connection
+        .query_row(
+            "SELECT value FROM repository_meta WHERE key = 'format'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取仓库格式：{error}"))?;
+    if format.as_deref() != Some(REPOSITORY_FORMAT) {
+        return Err("所选数据库不是 Lilith Artworks 仓库".into());
+    }
+    let version: Option<i64> = connection
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM repository_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| format!("无法读取仓库版本：{error}"))?;
+    version.ok_or_else(|| "作品仓库版本未知".to_owned())
+}
+
+fn validate_current_version(version: i64) -> Result<(), String> {
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{version}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn take_integrity_check_count() -> usize {
+    INTEGRITY_CHECK_COUNT.with(|count| count.replace(0))
 }
 
 fn migrate_v1_to_v2(connection: &Connection) -> Result<(), String> {

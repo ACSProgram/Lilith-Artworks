@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
-        RwLock,
+        Mutex, RwLock,
     },
 };
 
@@ -85,6 +85,7 @@ pub(crate) struct AppState {
     settings: RwLock<AppSettings>,
     settings_path: PathBuf,
     warning: RwLock<Option<String>>,
+    validated_repository: Mutex<Option<PathBuf>>,
     exit_requested: AtomicBool,
 }
 
@@ -98,6 +99,7 @@ impl AppState {
             settings: RwLock::new(settings),
             settings_path,
             warning: RwLock::new(warning),
+            validated_repository: Mutex::new(None),
             exit_requested: AtomicBool::new(false),
         }
     }
@@ -106,6 +108,34 @@ impl AppState {
         let settings = self.settings.read().map_err(|_| "设置状态已损坏")?;
         let value = settings.repository_path.trim();
         Ok((!value.is_empty()).then(|| PathBuf::from(value)))
+    }
+
+    pub(crate) fn ready_repository_path(&self) -> Result<PathBuf, String> {
+        let root = self.repository_path()?.ok_or("尚未配置作品仓库")?;
+        let mut validated = self
+            .validated_repository
+            .lock()
+            .map_err(|_| "仓库校验状态已损坏")?;
+        if validated.as_deref() == Some(root.as_path()) {
+            if let Err(error) = library::check_existing(&root) {
+                *validated = None;
+                return Err(error);
+            }
+            return Ok(root);
+        }
+
+        *validated = None;
+        library::open_existing(&root)?;
+        *validated = Some(root.clone());
+        Ok(root)
+    }
+
+    fn set_validated_repository(&self, root: Option<PathBuf>) -> Result<(), String> {
+        *self
+            .validated_repository
+            .lock()
+            .map_err(|_| "仓库校验状态已损坏")? = root;
+        Ok(())
     }
 
     pub(crate) fn close_to_tray(&self) -> bool {
@@ -202,13 +232,14 @@ pub(crate) fn save_app_settings(
     let current_repository = state.repository_path()?;
     let paused = settings.pause_automatic_backups;
     let next = backup_state.run_exclusive(None, || {
-        prepare_repository(
+        let prepared_repository = prepare_repository(
             current_repository.as_deref(),
             settings.repository_path.trim(),
         )?;
         write_json_atomic(&state.settings_path, &settings)?;
         *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
         *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
+        state.set_validated_repository(prepared_repository)?;
         snapshot(state.inner())
     })?;
     backup_state.set_automatic_scheduling(!paused);
@@ -217,16 +248,20 @@ pub(crate) fn save_app_settings(
     Ok(next)
 }
 
-fn prepare_repository(current_repository: Option<&Path>, requested: &str) -> Result<(), String> {
+fn prepare_repository(
+    current_repository: Option<&Path>,
+    requested: &str,
+) -> Result<Option<PathBuf>, String> {
     if requested.is_empty() {
-        return Ok(());
+        return Ok(None);
     }
     let root = Path::new(requested);
     if current_repository == Some(root) {
-        library::open_existing(root)
+        library::open_existing(root)?;
     } else {
-        library::initialize(root)
+        library::initialize(root)?;
     }
+    Ok(Some(root.to_path_buf()))
 }
 
 pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Result<(), String> {
@@ -293,7 +328,8 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
 
 fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
     let automatic_backup_file_count = state
-        .repository_path()?
+        .ready_repository_path()
+        .ok()
         .and_then(|root| history::count_scheduled_files(&root).ok());
     Ok(SettingsSnapshot {
         settings: state.settings.read().map_err(|_| "设置状态已损坏")?.clone(),
@@ -411,5 +447,52 @@ mod tests {
         let new_repository = directory.path().join("new-repository");
         prepare_repository(None, &new_repository.to_string_lossy()).unwrap();
         assert!(crate::storage::database_path(&new_repository).is_file());
+    }
+
+    #[test]
+    fn repository_readiness_caches_integrity_check_and_rechecks_version() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        library::initialize(&root).unwrap();
+        let mut settings = AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        let state = AppState::new(settings, directory.path().join("settings.json"), None);
+        library::take_integrity_check_count();
+
+        assert_eq!(state.ready_repository_path().unwrap(), root);
+        assert_eq!(state.ready_repository_path().unwrap(), root);
+        assert_eq!(library::take_integrity_check_count(), 1);
+
+        crate::storage::open(&root)
+            .unwrap()
+            .execute(
+                "UPDATE repository_meta SET value = '99' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        let error = state.ready_repository_path().unwrap_err();
+        assert!(error.contains("版本不受支持"), "{error}");
+        assert_eq!(library::take_integrity_check_count(), 0);
+
+        crate::storage::open(&root)
+            .unwrap()
+            .execute(
+                "UPDATE repository_meta SET value = '7' WHERE key = 'schema_version'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(state.ready_repository_path().unwrap(), root);
+        assert_eq!(library::take_integrity_check_count(), 1);
+
+        crate::storage::open(&root)
+            .unwrap()
+            .execute(
+                "UPDATE repository_meta SET value = 'other' WHERE key = 'format'",
+                [],
+            )
+            .unwrap();
+        let error = state.ready_repository_path().unwrap_err();
+        assert!(error.contains("不是 Lilith Artworks 仓库"), "{error}");
+        assert_eq!(library::take_integrity_check_count(), 0);
     }
 }

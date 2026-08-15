@@ -11,9 +11,7 @@ use super::{
 };
 
 fn root(state: &AppState) -> Result<std::path::PathBuf, String> {
-    state
-        .repository_path()?
-        .ok_or_else(|| "尚未配置作品仓库".into())
+    state.ready_repository_path()
 }
 
 #[tauri::command]

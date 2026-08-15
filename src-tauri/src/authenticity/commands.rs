@@ -13,7 +13,7 @@ use tempfile::NamedTempFile;
 use crate::{
     app::AppState,
     backup::{self, BackupState},
-    cleanup, library, storage,
+    cleanup, storage,
 };
 
 use super::{
@@ -30,9 +30,7 @@ use super::{
 };
 
 fn root(state: &AppState) -> Result<PathBuf, String> {
-    let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
-    library::open_existing(&root)?;
-    Ok(root)
+    state.ready_repository_path()
 }
 
 #[tauri::command]

@@ -14,8 +14,8 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         if !state.wait_scheduler(Duration::ZERO) {
             break;
         }
-        let root = match app.state::<AppState>().repository_path() {
-            Ok(Some(root)) => root,
+        let root = match app.state::<AppState>().ready_repository_path() {
+            Ok(root) => root,
             _ => {
                 if !state.wait_scheduler(ERROR_RETRY) {
                     break;
