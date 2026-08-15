@@ -3,7 +3,6 @@ import { Fingerprint, GitCommitVertical, ShieldCheck } from "lucide-react";
 import { AuthenticityModule } from "../modules/authenticity/AuthenticityModule";
 import type { CertificationRecord } from "../modules/authenticity/types";
 import { HistoryModule } from "../modules/history/HistoryModule";
-import { historyApi } from "../modules/history/api";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
 import type { CleanupReport } from "../shared/fileCleanup";
 
@@ -44,20 +43,16 @@ export function ArtworkWorkspace({
     );
   }, []);
 
-  const refreshWorkspace = useCallback(async () => {
-    applyWorkspaceHistory(await historyApi.get(artworkId));
-  }, [applyWorkspaceHistory, artworkId]);
-
   const refreshAfterPublication = useCallback(async () => {
-    await refreshWorkspace();
     setHistoryRefreshVersion((current) => current + 1);
-  }, [refreshWorkspace]);
+  }, []);
 
   useEffect(() => {
     setView(initialView);
+    setTitle("");
+    setBranches([]);
     setBranchId(initialBranchId);
-    refreshWorkspace().catch((error) => onError(error instanceof Error ? error.message : String(error)));
-  }, [artworkId, initialBranchId, initialView, onError, refreshWorkspace]);
+  }, [artworkId, initialBranchId, initialView]);
 
   return <div className="artwork-workspace">
     <nav className="artwork-tabs" aria-label="Artwork 工作区">

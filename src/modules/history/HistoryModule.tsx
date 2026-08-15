@@ -2,7 +2,7 @@ import {
   Ban, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
   MoreHorizontal, Pencil, Play, Trash2, X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
 import { formatBytes } from "../../shared/format";
 import {
@@ -10,15 +10,12 @@ import {
 } from "./HistoryControls";
 import type { ConfirmRequest } from "./HistoryControls";
 import { HistoryTimeline, Mindmap } from "./HistoryGraph";
-import { historyApi } from "./api";
 import {
   branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
   isForcedCheckpoint, suggestedRestorePath,
 } from "./historyModel";
-import type {
-  ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode,
-  UpdateBranchBackupRequest,
-} from "./types";
+import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import { useHistoryController } from "./useHistoryController";
 
 interface HistoryModuleProps {
   artworkId: string;
@@ -31,16 +28,6 @@ interface HistoryModuleProps {
 
 type ViewMode = "overview" | "branch";
 
-const IDLE_RUNTIME: BackupRuntimeStatus = {
-  busy: false,
-  activeBranchId: null,
-  operation: null,
-  progressLabel: null,
-  progressCurrent: 0,
-  progressTotal: 0,
-  automaticScheduling: true,
-};
-
 const MINDMAP_NODE_WIDTH_KEY = "lilith-artworks.history-node-min-width-v1";
 const MIN_NODE_WIDTH = 220;
 const MAX_NODE_WIDTH = 420;
@@ -52,16 +39,12 @@ function loadMindmapNodeWidth(): number {
     : 280;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0, onSelectBranch, onHistoryChanged, onError }: HistoryModuleProps) {
-  const [history, setHistory] = useState<ArtworkHistory | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [runtime, setRuntime] = useState(IDLE_RUNTIME);
-  const [localOperation, setLocalOperation] = useState<{ operation: string; label: string } | null>(null);
+  const {
+    history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
+    restoreNode, compactNodes, deleteBranch, deleteSubtree, setCheckpoint,
+    forkBranch, renameNode, cancelOperation,
+  } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [commitNote, setCommitNote] = useState("");
   const [view, setView] = useState<ViewMode>("overview");
@@ -74,42 +57,29 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const [compactSelection, setCompactSelection] = useState<Set<string>>(new Set());
   const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const [mindmapNodeWidth, setMindmapNodeWidth] = useState(loadMindmapNodeWidth);
-  const wasRuntimeBusy = useRef(false);
   const nodeElements = useRef(new Map<string, HTMLButtonElement>());
 
-  const applyHistory = useCallback((next: ArtworkHistory) => {
-    setHistory(next);
-    onHistoryChanged(next);
-    setSelectedNodeId((current) => current && next.nodes.some((node) => node.id === current)
-      ? current : null);
-  }, [onHistoryChanged]);
-
-  const load = useCallback(async () => {
-    applyHistory(await historyApi.get(artworkId));
-  }, [applyHistory, artworkId]);
+  useEffect(() => {
+    setSelectedNodeId(null);
+    setCommitNote("");
+    setView("overview");
+    setForkOpen(false);
+    setEditOpen(false);
+    setActionNode(null);
+    setContext(null);
+    setConfirmRequest(null);
+    setCompactMode(false);
+    setCompactSelection(new Set());
+  }, [artworkId]);
 
   useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    historyApi.get(artworkId).then((next) => {
-      if (!cancelled) {
-        applyHistory(next);
-        setSelectedNodeId(null);
-        setView("overview");
-      }
-    }).catch((error) => !cancelled && onError(errorMessage(error)))
-      .finally(() => !cancelled && setLoading(false));
-    return () => { cancelled = true; };
-  }, [applyHistory, artworkId, onError]);
+    setSelectedNodeId((current) => current && history?.nodes.some((node) => node.id === current)
+      ? current : null);
+  }, [history]);
 
   useEffect(() => {
     window.localStorage.setItem(MINDMAP_NODE_WIDTH_KEY, String(mindmapNodeWidth));
   }, [mindmapNodeWidth]);
-
-  useEffect(() => {
-    if (refreshVersion === 0) return;
-    load().catch((error) => onError(errorMessage(error)));
-  }, [load, onError, refreshVersion]);
 
   useEffect(() => {
     if (!history || (selectedBranchId && history.branches.some((branch) => branch.id === selectedBranchId))) return;
@@ -123,85 +93,26 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     return () => window.removeEventListener("click", close);
   }, []);
 
-  useEffect(() => {
-    let cancelled = false;
-    const poll = async () => {
-      try {
-        const next = await historyApi.runtime();
-        if (cancelled) return;
-        setRuntime(next);
-        if (wasRuntimeBusy.current && !next.busy) await load();
-        wasRuntimeBusy.current = next.busy;
-      } catch {
-        // Commands surface repository errors; polling remains best-effort.
-      }
-    };
-    void poll();
-    const timer = window.setInterval(poll, busy || runtime.busy ? 350 : 3000);
-    return () => { cancelled = true; window.clearInterval(timer); };
-  }, [busy, load, runtime.busy]);
-
   const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
   const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const roots = useMemo(() => buildHistoryTree(history?.nodes ?? []), [history?.nodes]);
   const branchLine = useMemo(() => selectedBranch && history
     ? buildBranchLine(history.nodes, selectedBranch.headHistoryId) : [], [history, selectedBranch]);
   const branchNodeIds = useMemo(() => new Set(branchLine.map((node) => node.id)), [branchLine]);
-  const visibleRuntime: BackupRuntimeStatus = runtime.busy ? runtime : localOperation ? {
-    ...IDLE_RUNTIME,
-    busy: true,
-    operation: localOperation.operation,
-    progressLabel: localOperation.label,
-    progressTotal: 1,
-  } : runtime;
-
-  const runOperation = async (
-    operation: string,
-    label: string,
-    action: () => Promise<void>,
-  ) => {
-    setBusy(true);
-    setLocalOperation({ operation, label });
-    onError(null);
-    try {
-      await action();
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      setBusy(false);
-      setLocalOperation(null);
-      try { setRuntime(await historyApi.runtime()); } catch { /* best-effort */ }
-    }
-  };
-
-  const saveBranch = useCallback(async (request: UpdateBranchBackupRequest) => {
-    onError(null);
-    try {
-      applyHistory(await historyApi.updateBranch(request));
-    } catch (error) {
-      onError(errorMessage(error));
-      throw error;
-    }
-  }, [applyHistory, onError]);
-
   const commit = async () => {
     if (!selectedBranch) return;
-    await runOperation("commit", "正在提交工作文件", async () => {
-      const result = await historyApi.commit(selectedBranch.id, commitNote.trim());
-      setCommitNote("");
-      await load();
-      if (result.historyId) setSelectedNodeId(result.historyId);
-      if (result.unchanged) onError("工作文件内容没有变化，本次检查未创建新节点");
-    });
+    const result = await commitBranch(selectedBranch.id, commitNote.trim());
+    if (!result) return;
+    setCommitNote("");
+    if (result.historyId) setSelectedNodeId(result.historyId);
+    if (result.unchanged) onError("工作文件内容没有变化，本次检查未创建新节点");
   };
 
   const beginRestore = async (node: HistoryNode) => {
     const branch = history?.branches.find((item) => item.id === node.createdOnBranchId) ?? selectedBranch;
     const outputPath = await chooseRestoreOutput(suggestedRestorePath(node, branch));
     if (!outputPath) return;
-    await runOperation("restore", "正在准备恢复历史节点", async () => {
-      await historyApi.restore(node.id, outputPath);
-    });
+    await restoreNode(node.id, outputPath);
   };
 
   const openContext = (event: MouseEvent, node: HistoryNode) => {
@@ -233,29 +144,16 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       const ordered = branchLine
         .filter((node) => compactSelection.has(node.id))
         .reverse();
-      await runOperation("compact", "正在重新整理历史链", async () => {
-        for (const [index, node] of ordered.entries()) {
-          setLocalOperation({ operation: "compact", label: `正在精简节点 ${index + 1}/${ordered.length}` });
-          await historyApi.compact(node.id);
-        }
-        await load();
+      if (await compactNodes(ordered)) {
         setCompactMode(false);
         setCompactSelection(new Set());
-      });
+      }
     } else if (request.kind === "delete-branch") {
-      await runOperation("delete-branch", "正在删除分支", async () => {
-        applyHistory(await historyApi.deleteBranch(request.branch.id));
-      });
+      await deleteBranch(request.branch.id);
     } else if (request.kind === "delete-nodes") {
-      await runOperation("delete", "正在删除节点与后续历史", async () => {
-        await historyApi.deleteSubtree(request.node.id, request.branch.id);
-        await load();
-      });
+      await deleteSubtree(request.node.id, request.branch.id);
     } else {
-      await runOperation("checkpoint", request.enable ? "正在生成检查点" : "正在恢复增量存储", async () => {
-        await historyApi.checkpoint(request.node.id, request.enable);
-        await load();
-      });
+      await setCheckpoint(request.node.id, request.enable);
     }
     setConfirmRequest(null);
     setActionNode(null);
@@ -333,7 +231,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     <header className="history-header">
       <div className="history-title"><span>Artwork 历史</span><h1>{history.artworkTitle}</h1></div>
       <div className="history-header-actions">
-        {visibleRuntime.busy && <OperationProgress runtime={visibleRuntime} onCancel={() => void historyApi.cancel()} />}
+        {visibleRuntime.busy && <OperationProgress runtime={visibleRuntime} onCancel={cancelOperation} />}
         <div className="segmented-control" aria-label="历史视图">
           <button className={view === "overview" ? "active" : ""} onClick={() => { setView("overview"); setCompactMode(false); setCompactSelection(new Set()); }}>总览</button>
           <button className={view === "branch" ? "active" : ""} onClick={() => setView("branch")}>当前分支</button>
@@ -435,16 +333,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     </div>}
 
     {forkOpen && actionNode && <ForkDialog node={actionNode} busy={busy} onClose={() => setForkOpen(false)} onSubmit={async (title, sourcePath) => {
-      await runOperation("fork", "正在创建分支", async () => {
-        applyHistory(await historyApi.fork({ artworkId, fromHistoryId: actionNode.id, title, sourcePath }));
-        setForkOpen(false);
-      });
+      if (await forkBranch({ artworkId, fromHistoryId: actionNode.id, title, sourcePath })) setForkOpen(false);
     }} />}
     {editOpen && actionNode && <EditNodeDialog initialValue={actionNode.title} busy={busy} onClose={() => setEditOpen(false)} onSubmit={async (title) => {
-      await runOperation("rename", "正在保存节点名称", async () => {
-        applyHistory(await historyApi.renameNode({ historyId: actionNode.id, title }));
-        setEditOpen(false);
-      });
+      if (await renameNode({ historyId: actionNode.id, title })) setEditOpen(false);
     }} />}
     {confirmRequest && <ConfirmDialog request={confirmRequest} busy={busy || runtime.busy} onClose={() => setConfirmRequest(null)} onConfirm={() => void executeConfirmed()} />}
   </div>;

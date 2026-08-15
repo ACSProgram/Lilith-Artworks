@@ -4,7 +4,7 @@
 
 按问题只读取一条路径：
 
-- 页面状态、右键菜单、分支进入、精简选择与命令编排：`src/modules/history/HistoryModule.tsx`。
+- 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`。
 - 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
@@ -82,6 +82,7 @@ delete_artwork_branch
 - 总览使用弱强调标出当前分支的祖先路径，并对当前分支 HEAD 标签使用实色强调；节点选中态使用更强的边框、背景和外框，不与当前分支提示混淆。
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
+- `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态轮询和 mutation 回填。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。
 - 窄布局下页面标题、分支选择、提交区和精简工具栏分行排列，长 Artwork 标题使用省略显示；未保存状态使用主题化警告色。
