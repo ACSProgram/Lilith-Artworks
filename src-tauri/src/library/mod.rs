@@ -11,13 +11,13 @@ pub(crate) use model::{
 };
 #[cfg(test)]
 pub(crate) use repository::create_artwork;
-pub(crate) use repository::initialize;
+pub(crate) use repository::{initialize, open_existing};
 
 use crate::{app::AppState, backup::BackupState, cleanup};
 
 fn ready_root(state: &AppState) -> Result<PathBuf, String> {
     let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
-    initialize(&root)?;
+    open_existing(&root)?;
     Ok(root)
 }
 
@@ -35,7 +35,7 @@ pub(crate) fn get_repository_status(
         });
     };
     let database = repository::database_path(&root);
-    match initialize(Path::new(&root)) {
+    match open_existing(Path::new(&root)) {
         Ok(()) => Ok(RepositoryStatus {
             configured: true,
             ready: true,

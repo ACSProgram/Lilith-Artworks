@@ -58,6 +58,33 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
+    validate_repository_root(root)?;
+    if !root.exists() {
+        return Err("已配置的作品仓库目录不存在".into());
+    }
+    if !root.is_dir() {
+        return Err("作品仓库路径不是目录".into());
+    }
+
+    let database = locate_database(root)?;
+    if !database.exists()
+        || database
+            .metadata()
+            .map(|metadata| metadata.len() == 0)
+            .unwrap_or(true)
+    {
+        return Err(format!(
+            "已配置的作品仓库缺少数据库 {}，请重新选择仓库或从备份恢复",
+            display_path(&database)
+        ));
+    }
+
+    let connection = storage::open(root)?;
+    validate_existing(&connection)?;
+    create_directories(root)
+}
+
 fn locate_database(root: &Path) -> Result<PathBuf, String> {
     let preferred = database_path(root);
     if preferred.exists()
@@ -1384,8 +1411,7 @@ fn normalize_siblings(
 }
 
 fn open(root: &Path) -> Result<Connection, String> {
-    let connection = Connection::open(database_path(root)).map_err(database_error)?;
-    configure(&connection)?;
+    let connection = storage::open(root)?;
     validate_existing(&connection)?;
     Ok(connection)
 }
@@ -1444,6 +1470,19 @@ mod tests {
                 artwork,
             }
         }
+    }
+
+    #[test]
+    fn opening_empty_configured_repository_does_not_reinitialize_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        fs::create_dir(&root).unwrap();
+        let database = database_path(&root);
+
+        let error = open_existing(&root).unwrap_err();
+
+        assert!(error.contains("缺少数据库"));
+        assert!(!database.exists());
     }
 
     #[test]

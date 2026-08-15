@@ -31,7 +31,7 @@ use super::{
 
 fn root(state: &AppState) -> Result<PathBuf, String> {
     let root = state.repository_path()?.ok_or("尚未配置作品仓库")?;
-    library::initialize(&root)?;
+    library::open_existing(&root)?;
     Ok(root)
 }
 

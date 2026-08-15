@@ -3,7 +3,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 use uuid::Uuid;
 
 pub(crate) const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
@@ -13,7 +13,9 @@ pub(crate) fn database_path(root: &Path) -> PathBuf {
 }
 
 pub(crate) fn open(root: &Path) -> Result<Connection, String> {
-    let connection = Connection::open(database_path(root)).map_err(database_error)?;
+    let connection =
+        Connection::open_with_flags(database_path(root), OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .map_err(database_error)?;
     configure(&connection)?;
     Ok(connection)
 }
@@ -113,4 +115,20 @@ pub(crate) fn resolve_path(root: &Path, relative: &str) -> Result<PathBuf, Strin
         return Err("仓库存储路径无效".into());
     }
     Ok(root.join(path))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opening_missing_database_does_not_create_placeholder() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        std::fs::create_dir(&root).unwrap();
+        let database = database_path(&root);
+
+        assert!(open(&root).is_err());
+        assert!(!database.exists());
+    }
 }

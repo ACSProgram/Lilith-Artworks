@@ -199,11 +199,13 @@ pub(crate) fn save_app_settings(
     if settings.version != CURRENT_SETTINGS_VERSION {
         return Err("设置版本不受支持".into());
     }
+    let current_repository = state.repository_path()?;
     let paused = settings.pause_automatic_backups;
     let next = backup_state.run_exclusive(None, || {
-        if !settings.repository_path.trim().is_empty() {
-            library::initialize(Path::new(settings.repository_path.trim()))?;
-        }
+        prepare_repository(
+            current_repository.as_deref(),
+            settings.repository_path.trim(),
+        )?;
         write_json_atomic(&state.settings_path, &settings)?;
         *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
         *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
@@ -213,6 +215,18 @@ pub(crate) fn save_app_settings(
     backup_state.wake_scheduler();
     crate::refresh_tray_backup_menu(&app)?;
     Ok(next)
+}
+
+fn prepare_repository(current_repository: Option<&Path>, requested: &str) -> Result<(), String> {
+    if requested.is_empty() {
+        return Ok(());
+    }
+    let root = Path::new(requested);
+    if current_repository == Some(root) {
+        library::open_existing(root)
+    } else {
+        library::initialize(root)
+    }
 }
 
 pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Result<(), String> {
@@ -362,5 +376,22 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(actual.version, CURRENT_SETTINGS_VERSION);
         assert_eq!(actual.window.width, 1320);
+    }
+
+    #[test]
+    fn repository_save_only_initializes_a_new_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing_existing = directory.path().join("missing-existing");
+        fs::create_dir(&missing_existing).unwrap();
+
+        assert!(
+            prepare_repository(Some(&missing_existing), &missing_existing.to_string_lossy())
+                .is_err()
+        );
+        assert!(!crate::storage::database_path(&missing_existing).exists());
+
+        let new_repository = directory.path().join("new-repository");
+        prepare_repository(None, &new_repository.to_string_lossy()).unwrap();
+        assert!(crate::storage::database_path(&new_repository).is_file());
     }
 }
