@@ -3,13 +3,14 @@ import {
   LockKeyhole, Maximize2, MoreVertical, MousePointer2, RotateCcw, ScanSearch, Search,
   ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
-import { useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
 import type {
   AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PublicationPreview,
 } from "./types";
+import { navigatorRect, navigatorScrollTarget, type PreviewViewport } from "./previewViewport";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 interface AuthenticityModuleProps {
@@ -300,14 +301,42 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
 }) {
   const [zoom, setZoom] = useState<number | "fit">("fit");
   const [showOriginal, setShowOriginal] = useState(false);
+  const [viewport, setViewport] = useState<PreviewViewport | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
+  const navigatorDragRef = useRef<number | null>(null);
   const zoomValue = zoom === "fit" ? 1 : zoom;
+  const image = showOriginal ? preview.originalImage : preview.image;
   const changeZoom = (next: number) => setZoom(Math.max(0.25, Math.min(4, next)));
   const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
     changeZoom(zoomValue + (event.deltaY < 0 ? 0.25 : -0.25));
   };
+  const syncViewport = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    setViewport({
+      scrollLeft: canvas.scrollLeft,
+      scrollTop: canvas.scrollTop,
+      scrollWidth: canvas.scrollWidth,
+      scrollHeight: canvas.scrollHeight,
+      clientWidth: canvas.clientWidth,
+      clientHeight: canvas.clientHeight,
+    });
+  }, []);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    syncViewport();
+    const observer = new ResizeObserver(syncViewport);
+    observer.observe(canvas);
+    const frame = requestAnimationFrame(syncViewport);
+    return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
+    };
+  }, [image?.dataUrl, syncViewport, zoom]);
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (zoom === "fit" || event.button !== 0 || !canvasRef.current) return;
     dragRef.current = {
@@ -328,7 +357,34 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
   };
-  const image = showOriginal ? preview.originalImage : preview.image;
+  const navigable = zoom !== "fit" && viewport != null
+    && (viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight);
+  const moveFromNavigator = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas || !viewport) return;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const target = navigatorScrollTarget(
+      viewport,
+      (event.clientX - bounds.left) / bounds.width,
+      (event.clientY - bounds.top) / bounds.height,
+    );
+    canvas.scrollLeft = target.scrollLeft;
+    canvas.scrollTop = target.scrollTop;
+    syncViewport();
+  };
+  const onNavigatorPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    navigatorDragRef.current = event.pointerId;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    moveFromNavigator(event);
+  };
+  const onNavigatorPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (navigatorDragRef.current === event.pointerId) moveFromNavigator(event);
+  };
+  const onNavigatorPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (navigatorDragRef.current === event.pointerId) navigatorDragRef.current = null;
+  };
+  const navigationRect = viewport ? navigatorRect(viewport) : null;
   return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
     <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
       <header>
@@ -342,16 +398,31 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
         </div>
       </header>
-      <div
-        ref={canvasRef}
-        className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}
-        onWheel={onWheel}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        <img src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+      <div className="publication-preview-stage">
+        <div
+          ref={canvasRef}
+          className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}
+          onScroll={syncViewport}
+          onWheel={onWheel}
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        >
+          <img src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+        </div>
+        {navigable && navigationRect && <div
+          className="publication-preview-navigator"
+          title="拖动以定位预览区域"
+          style={{ aspectRatio: `${image.width} / ${image.height}` }}
+          onPointerDown={onNavigatorPointerDown}
+          onPointerMove={onNavigatorPointerMove}
+          onPointerUp={onNavigatorPointerUp}
+          onPointerCancel={onNavigatorPointerUp}
+        >
+          <img src={image.dataUrl} alt="" draggable={false} />
+          <span style={{ left: `${navigationRect.left}%`, top: `${navigationRect.top}%`, width: `${navigationRect.width}%`, height: `${navigationRect.height}%` }} />
+        </div>}
       </div>
       <footer><span>{showOriginal ? "当前显示原始成品，用于快速对比。" : "预览使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
     </section>

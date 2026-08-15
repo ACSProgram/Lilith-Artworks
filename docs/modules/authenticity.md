@@ -55,6 +55,7 @@ publish_branch_artifact
 decode_authenticity
 search_certification_records
 preview_authenticity_image
+preview_branch_artifact
 preview_branch_artifact_output
 preview_certification_record
 export_certification_record
@@ -85,4 +86,6 @@ TrustMark 使用 Q / BCH_SUPER，标识长度为 40 位。水印只写入用户�
 - 只读记录中的输出路径、Manifest 标签和 SHA-256 允许完整换行，不用省略号隐藏校验信息；窄布局下危险区改为纵向排列，长 Artwork 标题在操作按钮前省略。
 - 警告文本使用主题变量，在浅色与深色主题分别保持可读对比度。
 - 框选坐标只相对 `object-fit: contain` 后的实际图片矩形归一化；舞台留黑不进入坐标。图片显示矩形由 `ResizeObserver` 随窗口尺寸同步更新，标签禁用文本选择。识别页开始新拖动时立即清除唯一旧框，并在有效拖动完成后写入新框。
-- PEM 私钥非空检查在点击发布命令时进入统一操作提示，不常驻显示独立警告行，也不因输入为空而禁用发布按钮。
+- PEM 私钥非空检查在生成质量预览时进入统一操作提示，不常驻显示独立警告行，也不因输入为空而禁用预览按钮。
+- 质量预览生成前先检查标题、创作者、证书链和 PEM 私钥；普通滚轮用于浏览放大后的画布，`Ctrl/Command + 滚轮` 执行缩放。图片超出视口时显示导航小图，可点击或拖动视口框快速定位。
+- 仓库最终成品预览和大小估算只接收分支 ID，由后端解析受控路径；发布与再次导出目标拒绝仓库内部路径。文件选择器打开的最终成品、证书、外部预览/识别图片和输出目标会进入临时 filesystem scope，原生命令同时核验 scope 和仓库边界；应用重启后 scope 清空，证书等外部路径必须重新选择。filesystem 插件未向前端授予读写命令权限。

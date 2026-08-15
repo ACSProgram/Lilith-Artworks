@@ -41,7 +41,7 @@ pub(crate) fn preview(
     request.config.branch_id = request.branch_id.clone();
     request.config.trustmark_enabled =
         request.config.trustmark_enabled && !request.config.additional_regions.is_empty();
-    validate_visual_config(&request.config)?;
+    validate_publication_config(&request.config)?;
     let target = publication_repository::publication_target(root, &request.branch_id)
         .map_err(AuthenticityError::Task)?;
     let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
@@ -105,6 +105,8 @@ pub(crate) fn publish(
         .map_err(AuthenticityError::Task)?;
     let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
     let output = absolute_output_path(&request.output_path)?;
+    storage::ensure_outside_repository(root, &output, "发布输出路径")
+        .map_err(AuthenticityError::InvalidInput)?;
     if output.exists() {
         return Err(AuthenticityError::InvalidInput(
             "输出文件已存在；请选择新的文件名".into(),
@@ -303,6 +305,8 @@ pub(crate) fn decode(
     request: DecodeRequest,
 ) -> AuthenticityResult<DecodeResult> {
     let input = canonical_existing_file(&request.input_path, "待识别图片")?;
+    storage::ensure_outside_repository(root, &input, "待识别图片")
+        .map_err(AuthenticityError::InvalidInput)?;
     let image = image::open(&input)?;
     let decoded_region = request.region;
     let watermark_id = if state.model_files_ready() {
@@ -382,12 +386,6 @@ fn validate_publish_request(
     request: &PublishBranchRequest,
     private_key: &str,
 ) -> AuthenticityResult<()> {
-    if request.config.title.trim().is_empty() {
-        return Err(AuthenticityError::InvalidInput("作品标题不能为空".into()));
-    }
-    if request.config.creator.trim().is_empty() {
-        return Err(AuthenticityError::InvalidInput("创作者不能为空".into()));
-    }
     if private_key.trim().is_empty() {
         return Err(AuthenticityError::InvalidInput("请粘贴 PEM 私钥".into()));
     }
@@ -396,11 +394,23 @@ fn validate_publish_request(
             "启用 TrustMark 前请先框选水印区域".into(),
         ));
     }
-    if !Path::new(&request.config.certificate_path).is_file() {
+    validate_publication_config(&request.config)?;
+    Ok(())
+}
+
+fn validate_publication_config(
+    config: &super::model::CertificationConfig,
+) -> AuthenticityResult<()> {
+    if config.title.trim().is_empty() {
+        return Err(AuthenticityError::InvalidInput("作品标题不能为空".into()));
+    }
+    if config.creator.trim().is_empty() {
+        return Err(AuthenticityError::InvalidInput("创作者不能为空".into()));
+    }
+    if !Path::new(&config.certificate_path).is_file() {
         return Err(AuthenticityError::InvalidInput("证书链文件不存在".into()));
     }
-    validate_visual_config(&request.config)?;
-    Ok(())
+    validate_visual_config(config)
 }
 
 fn validate_visual_config(config: &super::model::CertificationConfig) -> AuthenticityResult<()> {

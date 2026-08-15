@@ -8,6 +8,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, GenericImageView, ImageFormat};
 use sha2::Digest;
 use tauri::State;
+use tauri_plugin_fs::FsExt;
 use tempfile::NamedTempFile;
 
 use crate::{app::AppState, cleanup, storage};
@@ -48,8 +49,10 @@ pub(crate) async fn decode_authenticity(
     request: DecodeRequest,
     app_state: State<'_, AppState>,
     authenticity_state: State<'_, AuthenticityState>,
+    window: tauri::WebviewWindow,
 ) -> Result<DecodeResult, AuthenticityError> {
     let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    ensure_dialog_authorized(&window, Path::new(request.input_path.trim()), "待识别图片")?;
     let state = authenticity_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || pipeline::decode(&root, &state, request))
         .await
@@ -72,10 +75,35 @@ pub(crate) fn search_certification_records(
 }
 
 #[tauri::command]
-pub(crate) async fn preview_authenticity_image(path: String) -> AuthenticityResult<PreviewImage> {
-    tauri::async_runtime::spawn_blocking(move || make_preview(PathBuf::from(path)))
-        .await
-        .map_err(|error| AuthenticityError::Task(error.to_string()))?
+pub(crate) async fn preview_authenticity_image(
+    path: String,
+    app_state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
+) -> AuthenticityResult<PreviewImage> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    ensure_dialog_authorized(&window, Path::new(path.trim()), "预览图片")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = external_image_path(&root, &path, "预览图片")?;
+        make_preview(source)
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn preview_branch_artifact(
+    branch_id: String,
+    app_state: State<'_, AppState>,
+) -> AuthenticityResult<PreviewImage> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let source = publication_repository::publication_target(&root, branch_id.trim())
+            .map_err(AuthenticityError::Task)?
+            .artifact_path;
+        make_preview(PathBuf::from(source))
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
 #[tauri::command]
@@ -83,8 +111,14 @@ pub(crate) async fn preview_branch_artifact_output(
     request: PublicationPreviewRequest,
     app_state: State<'_, AppState>,
     authenticity_state: State<'_, AuthenticityState>,
+    window: tauri::WebviewWindow,
 ) -> AuthenticityResult<PublicationPreview> {
     let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    ensure_dialog_authorized(
+        &window,
+        Path::new(request.config.certificate_path.trim()),
+        "证书链",
+    )?;
     let state = authenticity_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || pipeline::preview(&root, &state, request))
         .await
@@ -110,8 +144,14 @@ pub(crate) async fn preview_certification_record(
 pub(crate) async fn export_certification_record(
     request: ExportCertificationRecordRequest,
     app_state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
 ) -> AuthenticityResult<()> {
     let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    ensure_dialog_authorized(
+        &window,
+        Path::new(request.output_path.trim()),
+        "再次导出路径",
+    )?;
     tauri::async_runtime::spawn_blocking(move || {
         let source = repository::record_source_path(&root, request.record_id.trim())
             .map_err(AuthenticityError::Task)?;
@@ -135,6 +175,8 @@ pub(crate) async fn export_certification_record(
                 "导出目标已存在；请选择新的文件名".into(),
             ));
         }
+        storage::ensure_outside_repository(&root, &destination, "再次导出路径")
+            .map_err(AuthenticityError::InvalidInput)?;
         let directory = destination
             .parent()
             .ok_or_else(|| AuthenticityError::InvalidInput("导出目录无效".into()))?;
@@ -154,14 +196,18 @@ pub(crate) async fn export_certification_record(
 #[tauri::command]
 pub(crate) async fn estimate_authenticity_output_size(
     request: EstimateRequest,
+    app_state: State<'_, AppState>,
 ) -> AuthenticityResult<FileSizeEstimate> {
+    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
     tauri::async_runtime::spawn_blocking(move || {
         if !(1..=100).contains(&request.jpeg_quality) {
             return Err(AuthenticityError::InvalidInput(
                 "JPEG 质量必须在 1 到 100 之间".into(),
             ));
         }
-        let path = PathBuf::from(request.input_path);
+        let path = publication_repository::publication_target(&root, request.branch_id.trim())
+            .map_err(AuthenticityError::Task)?
+            .artifact_path;
         let source_bytes = fs::metadata(&path)?.len();
         let source = image::open(path)?;
         let flattened = super::trustmark::flatten_to_rgb(
@@ -178,6 +224,32 @@ pub(crate) async fn estimate_authenticity_output_size(
     })
     .await
     .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+fn external_image_path(root: &Path, value: &str, label: &str) -> AuthenticityResult<PathBuf> {
+    let path = PathBuf::from(value.trim());
+    if !path.is_file() {
+        return Err(AuthenticityError::InvalidInput(format!(
+            "{label}不存在或不是普通文件"
+        )));
+    }
+    let canonical = path.canonicalize()?;
+    storage::ensure_outside_repository(root, &canonical, label)
+        .map_err(AuthenticityError::InvalidInput)?;
+    Ok(canonical)
+}
+
+pub(crate) fn ensure_dialog_authorized(
+    window: &tauri::WebviewWindow,
+    path: &Path,
+    label: &str,
+) -> AuthenticityResult<()> {
+    if path.as_os_str().is_empty() || !window.fs_scope().is_allowed(path) {
+        return Err(AuthenticityError::InvalidInput(format!(
+            "{label}未由文件选择器授权，请重新选择"
+        )));
+    }
+    Ok(())
 }
 
 fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
@@ -213,6 +285,7 @@ pub(crate) fn store_final_artifact(
     let source = source
         .canonicalize()
         .map_err(|error| format!("无法访问最终成品：{error}"))?;
+    storage::ensure_outside_repository(root, &source, "最终成品")?;
     let extension = source
         .extension()
         .and_then(|value| value.to_str())

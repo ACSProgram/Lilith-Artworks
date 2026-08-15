@@ -25,14 +25,16 @@ export const authenticityApi = {
     invokeCommand<PublicationPreview>("preview_branch_artifact_output", { request }),
   cancelPublication: (branchId: string) =>
     invokeCommand<CleanupReport>("cancel_branch_publication", { branchId }),
-  preview: (path: string) =>
+  previewExternal: (path: string) =>
     invokeCommand<PreviewImage>("preview_authenticity_image", { path }),
+  previewArtifact: (branchId: string) =>
+    invokeCommand<PreviewImage>("preview_branch_artifact", { branchId }),
   previewRecord: (recordId: string) =>
     invokeCommand<PreviewImage>("preview_certification_record", { recordId }),
   exportRecord: (recordId: string, outputPath: string) =>
     invokeCommand<void>("export_certification_record", { request: { recordId, outputPath } }),
-  estimate: (inputPath: string, jpegQuality: number, backgroundColor: string) =>
-    invokeCommand<{ jpegBytes: number; sourceBytes: number }>("estimate_authenticity_output_size", { request: { inputPath, jpegQuality, backgroundColor } }),
+  estimate: (branchId: string, jpegQuality: number, backgroundColor: string) =>
+    invokeCommand<{ jpegBytes: number; sourceBytes: number }>("estimate_authenticity_output_size", { request: { branchId, jpegQuality, backgroundColor } }),
   decode: (inputPath: string, region: NormalizedRegion | null) =>
     invokeCommand<DecodeResult>("decode_authenticity", {
       request: { inputPath, region },

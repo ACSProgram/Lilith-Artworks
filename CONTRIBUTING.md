@@ -40,6 +40,7 @@ The normal minimum for TypeScript or Rust changes is:
 
 ```powershell
 npm run build
+npm test
 cargo fmt --check --manifest-path src-tauri/Cargo.toml
 git diff --check
 ```

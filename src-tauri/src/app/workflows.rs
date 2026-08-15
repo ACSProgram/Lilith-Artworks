@@ -146,8 +146,15 @@ pub(crate) async fn enter_branch_publication(
     app_state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
     authenticity_state: State<'_, AuthenticityState>,
+    window: tauri::WebviewWindow,
 ) -> Result<BranchPublication, String> {
     let root = root(app_state.inner())?;
+    authenticity::ensure_dialog_authorized(
+        &window,
+        Path::new(request.artifact_path.trim()),
+        "最终成品",
+    )
+    .map_err(|error| error.to_string())?;
     let state = backup_state.inner().clone();
     let models_ready = authenticity_state.model_files_ready();
     let model_info = authenticity_state.model_info();
@@ -195,8 +202,19 @@ pub(crate) async fn publish_branch_artifact(
     app_state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
     authenticity_state: State<'_, AuthenticityState>,
+    window: tauri::WebviewWindow,
 ) -> Result<PublishResult, AuthenticityError> {
     let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
+    authenticity::ensure_dialog_authorized(
+        &window,
+        Path::new(request.output_path.trim()),
+        "发布输出路径",
+    )?;
+    authenticity::ensure_dialog_authorized(
+        &window,
+        Path::new(request.config.certificate_path.trim()),
+        "证书链",
+    )?;
     let authenticity = authenticity_state.inner().clone();
     let backup = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {

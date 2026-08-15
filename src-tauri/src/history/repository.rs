@@ -579,8 +579,10 @@ pub(crate) fn apply_compaction(
             row.get::<_, Option<String>>(0)
         })
         .map_err(storage::database_error)?;
-    for path in rows.flatten().flatten() {
-        paths.push(path);
+    for row in rows {
+        if let Some(path) = row.map_err(storage::database_error)? {
+            paths.push(path);
+        }
     }
     drop(statement);
     transaction
@@ -692,13 +694,13 @@ pub(crate) fn delete_subtree(
          UNION ALL SELECT delta_path FROM history_edges WHERE child_history_id IN (SELECT id FROM history_delete)
          UNION ALL SELECT delta_path FROM history_nodes WHERE id IN (SELECT id FROM history_delete) AND delta_path IS NOT NULL"
     ).map_err(storage::database_error)?;
-    for path in statement
+    for row in statement
         .query_map([], |row| row.get::<_, Option<String>>(0))
         .map_err(storage::database_error)?
-        .flatten()
-        .flatten()
     {
-        paths.insert(path);
+        if let Some(path) = row.map_err(storage::database_error)? {
+            paths.insert(path);
+        }
     }
     drop(statement);
     let fallback: Option<String> = transaction
@@ -721,21 +723,21 @@ pub(crate) fn delete_subtree(
             ))
         })
         .map_err(storage::database_error)?
-        .flatten()
     {
-        branches.push(row);
+        branches.push(row.map_err(storage::database_error)?);
     }
     drop(branch_statement);
     for (branch_id, head, origin) in branches {
-        let origin_deleted = origin.as_deref().is_some_and(|id| {
-            transaction
+        let origin_deleted = match origin.as_deref() {
+            Some(id) => transaction
                 .query_row(
                     "SELECT EXISTS(SELECT 1 FROM history_delete WHERE id = ?1)",
                     [id],
                     |row| row.get::<_, bool>(0),
                 )
-                .unwrap_or(false)
-        });
+                .map_err(storage::database_error)?,
+            None => false,
+        };
         let Some(head) = head else {
             if origin_deleted {
                 transaction.execute(
@@ -922,8 +924,8 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
             ))
         })
         .map_err(storage::database_error)?
-        .flatten()
     {
+        let row = row.map_err(storage::database_error)?;
         if let Some(path) = row.1 {
             paths.insert(path);
         }
@@ -944,14 +946,14 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
     for path in edge_statement
         .query_map([branch_id], |row| row.get::<_, String>(0))
         .map_err(storage::database_error)?
-        .flatten()
     {
-        paths.insert(path);
+        paths.insert(path.map_err(storage::database_error)?);
     }
     drop(edge_statement);
     loop {
-        let candidate = owned.iter().find(|id| {
-            transaction
+        let mut candidate = None;
+        for id in &owned {
+            let deletable = transaction
                 .query_row(
                     "SELECT NOT EXISTS(SELECT 1 FROM history_nodes child WHERE child.parent_id = ?1)
                             AND NOT EXISTS(
@@ -962,9 +964,13 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
                     params![id.as_str(), branch_id],
                     |row| row.get::<_, bool>(0),
                 )
-                .unwrap_or(false)
-        });
-        let Some(candidate) = candidate.cloned() else {
+                .map_err(storage::database_error)?;
+            if deletable {
+                candidate = Some(id.clone());
+                break;
+            }
+        }
+        let Some(candidate) = candidate else {
             break;
         };
         transaction
@@ -1298,6 +1304,39 @@ mod tests {
         assert_eq!(main_head.as_deref(), Some("root"));
         assert_eq!(fork_state.0.as_deref(), Some("fork-head"));
         assert_eq!(fork_state.1, 777);
+    }
+
+    #[test]
+    fn subtree_deletion_propagates_branch_row_errors() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        fixture.commit_node(&fixture.main_branch_id, "cut", Some("root"), 2);
+        let fork_branch = create_branch(
+            &fixture.root,
+            &fixture.artwork_id,
+            "root",
+            "Fork",
+            &fixture.fork_source,
+        )
+        .unwrap();
+        let connection = storage::open(&fixture.root).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DROP TRIGGER fork_origin_update_matches_artwork;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE branches SET created_from_history_id = X'80' WHERE id = ?1",
+                [&fork_branch],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = delete_subtree(&fixture.root, "cut", &fixture.main_branch_id).unwrap_err();
+
+        assert!(error.contains("数据库操作失败"), "{error}");
     }
 
     #[test]

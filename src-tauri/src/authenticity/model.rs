@@ -88,7 +88,7 @@ pub(crate) struct PublicationPreview {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EstimateRequest {
-    pub(crate) input_path: String,
+    pub(crate) branch_id: String,
     pub(crate) jpeg_quality: u8,
     pub(crate) background_color: String,
 }

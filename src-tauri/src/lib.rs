@@ -165,6 +165,7 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|application| {
             let config_directory = application
@@ -265,6 +266,7 @@ pub fn run() {
             authenticity::decode_authenticity,
             authenticity::search_certification_records,
             authenticity::preview_authenticity_image,
+            authenticity::preview_branch_artifact,
             authenticity::preview_branch_artifact_output,
             authenticity::preview_certification_record,
             authenticity::export_certification_record,

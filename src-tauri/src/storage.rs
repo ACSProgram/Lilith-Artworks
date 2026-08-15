@@ -98,6 +98,34 @@ pub(crate) fn normalize_source_path(
     Ok((display, key))
 }
 
+pub(crate) fn ensure_outside_repository(
+    root: &Path,
+    path: &Path,
+    label: &str,
+) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err(format!("{label}必须使用绝对路径"));
+    }
+    let repository = root
+        .canonicalize()
+        .map_err(|error| format!("无法访问作品仓库：{error}"))?;
+    let existing = path
+        .ancestors()
+        .find(|candidate| candidate.exists())
+        .ok_or_else(|| format!("无法解析{label}"))?;
+    let canonical_existing = existing
+        .canonicalize()
+        .map_err(|error| format!("无法访问{label}：{error}"))?;
+    let suffix = path
+        .strip_prefix(existing)
+        .map_err(|_| format!("无法解析{label}"))?;
+    let resolved = canonical_existing.join(suffix);
+    if resolved.starts_with(repository) {
+        return Err(format!("{label}不能位于作品仓库内部"));
+    }
+    Ok(())
+}
+
 pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> {
     let relative = path
         .strip_prefix(root)
@@ -130,5 +158,28 @@ mod tests {
 
         assert!(open(&root).is_err());
         assert!(!database.exists());
+    }
+
+    #[test]
+    fn rejects_nonexistent_output_below_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        std::fs::create_dir(&root).unwrap();
+
+        let output = root.join("exports").join("signed.jpg");
+        let error = ensure_outside_repository(&root, &output, "发布输出路径").unwrap_err();
+
+        assert!(error.contains("不能位于作品仓库内部"), "{error}");
+    }
+
+    #[test]
+    fn allows_nonexistent_output_beside_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        std::fs::create_dir(&root).unwrap();
+
+        let output = directory.path().join("exports").join("signed.jpg");
+
+        ensure_outside_repository(&root, &output, "发布输出路径").unwrap();
     }
 }

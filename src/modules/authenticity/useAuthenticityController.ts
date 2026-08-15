@@ -12,6 +12,7 @@ import type {
   PreviewImage,
   PublicationPreview,
 } from "./types";
+import { publicationPreviewError, publicationPreviewSignature } from "./publicationValidation";
 
 const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
 
@@ -39,18 +40,6 @@ function saveSharedSigning(config: CertificationConfig) {
     signingAlgorithm: config.signingAlgorithm,
     timestampUrl: config.timestampUrl,
   }));
-}
-
-function visualPreviewSignature(config: CertificationConfig, watermarkId: string): string {
-  return JSON.stringify({
-    branchId: config.branchId,
-    jpegQuality: config.jpegQuality,
-    backgroundColor: config.backgroundColor,
-    trustmarkEnabled: config.trustmarkEnabled,
-    watermarkStrength: config.watermarkStrength,
-    additionalRegions: config.additionalRegions,
-    watermarkId: watermarkId.trim(),
-  });
 }
 
 interface PublicationControllerOptions {
@@ -123,7 +112,7 @@ export function usePublicationController({
     try {
       const next = await authenticityApi.getPublication(branchId);
       const nextPreview = next.artifact
-        ? await authenticityApi.preview(next.artifact.sourcePath)
+        ? await authenticityApi.previewArtifact(branchId)
         : null;
       if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
@@ -159,7 +148,7 @@ export function usePublicationController({
     setSizeEstimate(null);
     const timer = window.setTimeout(() => {
       authenticityApi.estimate(
-        publication.artifact!.sourcePath,
+        publication.branchId,
         config.jpegQuality,
         config.backgroundColor,
       )
@@ -218,7 +207,7 @@ export function usePublicationController({
       await onPublicationChanged?.();
       if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       const nextPreview = next.artifact
-        ? await authenticityApi.preview(next.artifact.sourcePath)
+        ? await authenticityApi.previewArtifact(branchId)
         : null;
       if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
@@ -248,8 +237,13 @@ export function usePublicationController({
       onError("当前分支的发布状态尚未加载完成，请稍后重试。");
       return;
     }
+    const validationError = publicationPreviewError(config, privateKey);
+    if (validationError) {
+      onError(validationError);
+      return;
+    }
     const branchId = selectedBranch.id;
-    const signature = visualPreviewSignature(config, watermarkId);
+    const signature = publicationPreviewSignature(config, watermarkId);
     const requestId = ++outputPreviewRequest.current;
     setOutputPreviewBusy(true);
     setOutputPreview(null);
@@ -263,7 +257,7 @@ export function usePublicationController({
       if (requestId !== outputPreviewRequest.current
         || selectedBranchIdRef.current !== branchId
         || !configRef.current
-        || visualPreviewSignature(configRef.current, watermarkIdRef.current) !== signature) return;
+        || publicationPreviewSignature(configRef.current, watermarkIdRef.current) !== signature) return;
       if (next.watermarkId) setWatermarkId(next.watermarkId);
       setOutputPreview(next);
       setOutputPreviewOpen(true);
@@ -272,7 +266,7 @@ export function usePublicationController({
     } finally {
       if (requestId === outputPreviewRequest.current) setOutputPreviewBusy(false);
     }
-  }, [config, onError, publication, selectedBranch, watermarkId]);
+  }, [config, onError, privateKey, publication, selectedBranch, watermarkId]);
 
   const publish = useCallback(async () => {
     if (!selectedBranch || !config) return;
@@ -447,7 +441,7 @@ export function useIdentificationController({ onError }: IdentificationControlle
     decodeRequest.current += 1;
     setPreviewBusy(true);
     try {
-      const nextPreview = await authenticityApi.preview(selected);
+      const nextPreview = await authenticityApi.previewExternal(selected);
       if (requestId !== previewRequest.current) return;
       setPath(selected);
       setPreview(nextPreview);

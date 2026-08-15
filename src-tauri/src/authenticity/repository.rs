@@ -323,7 +323,13 @@ fn query_records(
 fn certification_record_from_row(row: &Row<'_>) -> rusqlite::Result<CertificationRecord> {
     let regions_json: String = row.get(15)?;
     let additional_regions: Vec<NormalizedRegion> =
-        serde_json::from_str(&regions_json).unwrap_or_default();
+        serde_json::from_str(&regions_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                regions_json.len(),
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(CertificationRecord {
         id: row.get(0)?,
         artwork_id: row.get(1)?,
@@ -346,4 +352,28 @@ fn certification_record_from_row(row: &Row<'_>) -> rusqlite::Result<Certificatio
         validation_state: row.get(18)?,
         created_ms: row.get(19)?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invalid_regions_json_is_not_silently_replaced() {
+        let connection = Connection::open_in_memory().unwrap();
+        let error = connection
+            .query_row(
+                "SELECT 'record', 'artwork', 'Artwork', 'branch', 'Branch',
+                        'history', NULL, 0, 'C:/output.jpg', 'hash', 1,
+                        'Title', 'Creator', '', '', '{', NULL, NULL, NULL, 0",
+                [],
+                certification_record_from_row,
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(error, rusqlite::Error::FromSqlConversionFailure(..)),
+            "{error}"
+        );
+    }
 }

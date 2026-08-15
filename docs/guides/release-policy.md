@@ -12,8 +12,9 @@ Windows CI 必须通过以下项目：
 
 1. `npm ci` 锁定依赖安装；
 2. `npm run build` 的 TypeScript 与 Vite 生产构建；
-3. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
-4. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
+3. `npm test` 的前端纯逻辑与控制器竞态测试；
+4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
+5. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
 
 依赖更新、Tauri 权限、schema、清理队列、路径校验、C2PA 或 TrustMark 变更必须单独说明风险和针对性测试。
 
