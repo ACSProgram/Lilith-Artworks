@@ -2,13 +2,15 @@
 
 ## 上下文入口
 
-- 页面工作流：`src/modules/library/LibraryModule.tsx`
+- 页面选择、菜单、弹窗和渲染：`src/modules/library/LibraryModule.tsx`
+- 树读取、搜索、mutation、回收站和请求代次：`src/modules/library/useLibraryController.ts`
 - 新建/重命名与回收站弹窗：`src/modules/library/LibraryDialogs.tsx`
 - 命令菜单、空状态与节点概览：`src/modules/library/LibraryViews.tsx`
 - 树渲染与拖放：`src/modules/library/LibraryTreeView.tsx`
 - 多选与树计算：`src/modules/library/tree.ts`
-- 前端命令和类型：`src/modules/library/api.ts`、`types.ts`
-- Rust 命令边界：`src-tauri/src/library/mod.rs`
+- 前端命令和类型：`src/modules/library/api.ts`、`types.ts`；`api.ts` 只由 controller 消费
+- Rust 单领域命令边界：`src-tauri/src/library/mod.rs`
+- 创建 Artwork、永久删除和清空回收站的跨领域编排：`src-tauri/src/app/workflows.rs`
 - 仓库格式、schema 与迁移：`src-tauri/src/library/schema.rs`
 - 仓库定位、Library 查询与事务：`src-tauri/src/library/repository.rs`
 
@@ -21,6 +23,7 @@
 - 搜索匹配节点标题与 Artwork 主分支工作文件路径；选择结果会展开完整祖先路径并定位节点。
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
 - Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器和文件清理重试，并把认证记录转换为 `{ artworkId, branchId, recordId }` 导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
+- `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
 
 ## 仓库打开与初始化
 
@@ -38,7 +41,7 @@
 
 - 恢复优先返回原父分组和原排序位置。
 - 原父分组已不存在或仍在回收站时，项目恢复到树根。
-- 永久删除和清空只能从回收站执行。命令在共享运行锁内先把 Artwork 受控目录和带期望 SHA-256 的外部认证导出写入待清理队列，再提交元数据删除；文件失败会返回清单并保留为可重试项。
+- 永久删除和清空只能从回收站执行。应用工作流在共享运行锁内调用 Library 仓储，把 Artwork 受控目录和带期望 SHA-256 的外部认证导出写入待清理队列，再提交元数据删除并运行清理；文件失败会返回清单并保留为可重试项。
 - Artwork 内部的历史节点裁剪不使用项目回收站，仍按历史图规则直接永久删除。
 
 schema v7 增加 `pending_file_cleanup`。仓库文件/目录只保存相对路径并在执行前校验仓库边界；外部文件保存绝对路径与期望 SHA-256，内容变化时拒绝删除。成功项出队，失败项记录错误；应用启动和页面重试均通过应用层清理命令执行。更早 schema 变更见规划归档。

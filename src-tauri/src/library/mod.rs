@@ -2,7 +2,7 @@ mod model;
 mod repository;
 mod schema;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use tauri::State;
 
@@ -12,11 +12,14 @@ pub(crate) use model::{
 };
 #[cfg(test)]
 pub(crate) use repository::create_artwork;
-pub(crate) use repository::{check_existing, initialize, open_existing};
+pub(crate) use repository::{
+    check_existing, create_artwork_and_list, empty_trash, initialize, open_existing,
+    permanently_delete_trash,
+};
 #[cfg(test)]
 pub(crate) use schema::take_integrity_check_count;
 
-use crate::{app::AppState, backup::BackupState, cleanup};
+use crate::app::AppState;
 
 fn ready_root(state: &AppState) -> Result<PathBuf, String> {
     state.ready_repository_path()
@@ -77,23 +80,6 @@ pub(crate) fn create_library_group(
 }
 
 #[tauri::command]
-pub(crate) fn create_library_artwork(
-    state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-    request: CreateArtworkRequest,
-) -> Result<LibraryTree, String> {
-    let tree = repository::create_artwork_and_list(
-        &ready_root(state.inner())?,
-        request.parent_id.as_deref(),
-        &request.title,
-        &request.branch_title,
-        Path::new(&request.source_path),
-    )?;
-    backup_state.wake_scheduler();
-    Ok(tree)
-}
-
-#[tauri::command]
 pub(crate) fn rename_library_node(
     state: State<'_, AppState>,
     id: String,
@@ -123,45 +109,6 @@ pub(crate) fn restore_library_trash(
     id: String,
 ) -> Result<LibraryTree, String> {
     repository::restore_trash(&ready_root(state.inner())?, &id)
-}
-
-#[tauri::command]
-pub(crate) async fn permanently_delete_library_trash(
-    app_state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-    ids: Vec<String>,
-) -> Result<cleanup::CleanupReport, String> {
-    let root = ready_root(app_state.inner())?;
-    let state = backup_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = state.run_exclusive(None, || {
-            let cleanup_ids = repository::permanently_delete_trash(&root, &ids)?;
-            cleanup::run(&root, &cleanup_ids)
-        })?;
-        state.wake_scheduler();
-        Ok(report)
-    })
-    .await
-    .map_err(|error| format!("永久删除任务异常结束：{error}"))?
-}
-
-#[tauri::command]
-pub(crate) async fn empty_library_trash(
-    app_state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-) -> Result<cleanup::CleanupReport, String> {
-    let root = ready_root(app_state.inner())?;
-    let state = backup_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let report = state.run_exclusive(None, || {
-            let cleanup_ids = repository::empty_trash(&root)?;
-            cleanup::run(&root, &cleanup_ids)
-        })?;
-        state.wake_scheduler();
-        Ok(report)
-    })
-    .await
-    .map_err(|error| format!("清空回收站任务异常结束：{error}"))?
 }
 
 #[tauri::command]

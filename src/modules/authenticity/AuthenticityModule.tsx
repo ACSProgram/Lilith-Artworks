@@ -1,17 +1,15 @@
-import { open, save } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle, BadgeCheck, FileImage, Fingerprint, FolderOpen, ImageDown, LoaderCircle,
   LockKeyhole, MousePointer2, RotateCcw, ScanSearch, Search, ShieldCheck, Trash2, X,
 } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
-import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
+import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
-import { authenticityApi } from "./api";
 import type {
-  AuthenticityBranch, BranchPublication, CertificationConfig, CertificationRecord, DecodeResult,
-  NormalizedRegion, PreviewImage,
+  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage,
 } from "./types";
+import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 interface AuthenticityModuleProps {
   mode: "publish" | "identify";
@@ -28,32 +26,8 @@ interface AuthenticityModuleProps {
 
 type ImageTarget = "publish" | "decode";
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function privateKeyPem(value: string): string {
-  const trimmed = value.trim();
-  const pem = trimmed.match(/-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/i);
-  const label = pem?.[1]?.toUpperCase() || "PRIVATE KEY";
-  const body = (pem?.[2] || trimmed).replace(/\s+/g, "");
-  const lines = body.match(/.{1,64}/g)?.join("\n") || "";
-  return `-----BEGIN ${label}-----\n${lines}\n-----END ${label}-----`;
-}
-
 function fileName(path: string): string {
   return path.split(/[\\/]/).pop() || path;
-}
-
-const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
-
-function loadSharedSigning(): Partial<CertificationConfig> {
-  try { return JSON.parse(localStorage.getItem(SHARED_SIGNING_KEY) ?? "{}"); }
-  catch { return {}; }
-}
-
-function saveSharedSigning(config: CertificationConfig) {
-  localStorage.setItem(SHARED_SIGNING_KEY, JSON.stringify({ certificatePath: config.certificatePath, signingAlgorithm: config.signingAlgorithm, timestampUrl: config.timestampUrl }));
 }
 
 export function AuthenticityModule(props: AuthenticityModuleProps) {
@@ -65,185 +39,24 @@ export function AuthenticityModule(props: AuthenticityModuleProps) {
 function PublishView({
   artworkTitle, branches, selectedBranchId, selectedRecordId, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
-  const [publication, setPublication] = useState<BranchPublication | null>(null);
-  const [config, setConfig] = useState<CertificationConfig | null>(null);
-  const [preview, setPreview] = useState<PreviewImage | null>(null);
-  const [privateKey, setPrivateKey] = useState("");
-  const [watermarkId, setWatermarkId] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<CertificationRecord | null>(null);
-  const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
-  const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
-  const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
-  const loadRequest = useRef(0);
-  const estimateRequest = useRef(0);
-  const selectedBranchIdRef = useRef(selectedBranchId);
-  selectedBranchIdRef.current = selectedBranchId;
-  const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
+  const {
+    publication, config, setConfig, preview, privateKey, setPrivateKey, watermarkId,
+    setWatermarkId, busy, result, sizeEstimate, viewingRecord, setViewingRecord,
+    viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
+    selectedBranch, enterPublication, chooseCertificate, publish, cancelPublication,
+    retryCleanup, openRecord, exportRecord,
+  } = usePublicationController({
+    artworkTitle,
+    branches,
+    selectedBranchId,
+    selectedRecordId,
+    onError,
+    onNavigateRecord,
+    onRetryFileCleanup,
+    onPublicationChanged,
+  });
 
-  const load = useCallback(async () => {
-    if (!selectedBranchId) return;
-    const branchId = selectedBranchId;
-    const requestId = ++loadRequest.current;
-    setBusy(true);
-    try {
-      const next = await authenticityApi.getPublication(branchId);
-      const nextPreview = next.artifact ? await authenticityApi.preview(next.artifact.sourcePath) : null;
-      if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
-      setPublication(next);
-      setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
-      setPreview(nextPreview);
-    } catch (error) {
-      if (requestId === loadRequest.current) onError(message(error));
-    } finally {
-      if (requestId === loadRequest.current) setBusy(false);
-    }
-  }, [onError, selectedBranchId]);
-
-  useEffect(() => {
-    setPublication(null);
-    setConfig(null);
-    setPreview(null);
-    setViewingRecord(null);
-    setBusy(Boolean(selectedBranchId));
-    void load();
-    return () => { loadRequest.current += 1; };
-  }, [load, selectedBranchId]);
-  useEffect(() => {
-    if (!publication?.artifact || !config) return;
-    const requestId = ++estimateRequest.current;
-    setSizeEstimate(null);
-    const timer = window.setTimeout(() => {
-      authenticityApi.estimate(publication.artifact!.sourcePath, config.jpegQuality, config.backgroundColor)
-        .then((value) => { if (requestId === estimateRequest.current) setSizeEstimate(value.jpegBytes); })
-        .catch(() => { if (requestId === estimateRequest.current) setSizeEstimate(null); });
-    }, 180);
-    return () => { window.clearTimeout(timer); estimateRequest.current += 1; };
-  }, [config?.backgroundColor, config?.jpegQuality, publication?.artifact]);
-  useEffect(() => { if (config) saveSharedSigning(config); }, [config?.certificatePath, config?.signingAlgorithm, config?.timestampUrl]);
-  useEffect(() => {
-    if (!selectedRecordId || !publication) return;
-    window.requestAnimationFrame(() => document.querySelector(`[data-record-id="${selectedRecordId}"]`)?.scrollIntoView({ block: "center" }));
-  }, [publication, selectedRecordId]);
-  useEffect(() => {
-    let cancelled = false;
-    setViewingPreview(null);
-    if (viewingRecord) {
-      authenticityApi.previewRecord(viewingRecord.id)
-        .then((next) => { if (!cancelled) setViewingPreview(next); })
-        .catch((error) => { if (!cancelled) onError(message(error)); });
-    }
-    return () => { cancelled = true; };
-  }, [onError, viewingRecord]);
-
-  const enterPublication = async () => {
-    if (!selectedBranch) return;
-    const artifactPath = await open({
-      multiple: false,
-      filters: [{ name: "最终成品", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }],
-    });
-    if (typeof artifactPath !== "string") return;
-    setBusy(true);
-    onError(null);
-    try {
-      const next = await authenticityApi.enterPublication(selectedBranch.id, artifactPath);
-      if (selectedBranchIdRef.current !== selectedBranch.id) {
-        await onPublicationChanged?.();
-        return;
-      }
-      setPublication(next);
-      await onPublicationChanged?.();
-      setConfig({ ...next.config, ...loadSharedSigning(), trustmarkEnabled: next.modelsReady && next.config.trustmarkEnabled && next.config.additionalRegions.length > 0 });
-      if (next.artifact) setPreview(await authenticityApi.preview(next.artifact.sourcePath));
-    } catch (error) {
-      onError(message(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const chooseCertificate = async () => {
-    const path = await open({
-      multiple: false,
-      filters: [{ name: "证书链", extensions: ["pem", "crt", "cer"] }],
-    });
-    if (typeof path === "string" && config) setConfig({ ...config, certificatePath: path });
-  };
-
-  const publish = async () => {
-    if (!selectedBranch || !config) return;
-    if (publication?.branchId !== selectedBranch.id || publication.artifact?.branchId !== selectedBranch.id || config.branchId !== selectedBranch.id) {
-      onError("当前分支的发布状态尚未加载完成，请稍后重试。");
-      return;
-    }
-    if (!privateKey.trim()) {
-      onError("请输入 PEM 私钥后再发布。");
-      return;
-    }
-    const outputPath = await save({
-      defaultPath: `${config.title.trim() || artworkTitle}-certified.jpg`,
-      filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
-    });
-    if (!outputPath) return;
-    setBusy(true);
-    setResult(null);
-    onError(null);
-    try {
-      const published = await authenticityApi.publish({
-        branchId: selectedBranch.id,
-        outputPath,
-        privateKeyPem: privateKeyPem(privateKey),
-        config,
-        watermarkId: watermarkId.trim() || null,
-      });
-      setPrivateKey("");
-      if (selectedBranchIdRef.current === selectedBranch.id) {
-        setResult(published.record);
-        await load();
-      }
-      await onPublicationChanged?.();
-    } catch (error) {
-      onError(message(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const cancelPublication = async () => {
-    if (!selectedBranch) return;
-    setBusy(true);
-    try {
-      const report = await authenticityApi.cancelPublication(selectedBranch.id);
-      setCleanupFailures(report.failures);
-      if (report.failures.length > 0) onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
-      setDeleteConfirmOpen(false);
-      setPublication(null);
-      setConfig(null);
-      setPreview(null);
-      await onPublicationChanged?.();
-    }
-    catch (error) { onError(message(error)); }
-    finally { setBusy(false); }
-  };
-
-  const retryCleanup = async () => {
-    if (cleanupFailures.length === 0) return;
-    setBusy(true);
-    onError(null);
-    try {
-      const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
-      setCleanupFailures(report.failures);
-      if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
-    } catch (error) {
-      onError(message(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (viewingRecord) return <RecordView record={viewingRecord} preview={viewingPreview} onClose={() => setViewingRecord(null)} onError={onError} />;
+  if (viewingRecord) return <RecordView record={viewingRecord} preview={viewingPreview} exporting={exporting} onExport={exportRecord} onClose={() => setViewingRecord(null)} />;
 
   return <div className="auth-workspace">
     <header className="auth-header">
@@ -307,7 +120,7 @@ function PublishView({
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
           <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void publish()}>{busy ? <LoaderCircle className="spin" size={17} /> : <ImageDown size={17} />}签名并导出 JPG</button>
         </section>
-        <RecordList records={publication.records} onNavigate={(record) => { setViewingRecord(record); onNavigateRecord(record); }} selectedId={selectedRecordId} />
+        <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
         <section className="publication-danger-zone">
           <div><AlertTriangle size={18} /><span><strong>移除整个分支的发布内容</strong><small>删除最终成品、全部认证记录、认证 JPG 副本及首次导出文件，并解除分支锁定。</small></span></div>
           <button className="danger-button solid" type="button" disabled={busy} onClick={() => setDeleteConfirmOpen(true)}><Trash2 size={15} />取消发布并全部删除</button>
@@ -318,65 +131,10 @@ function PublishView({
 }
 
 function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProps, "onError" | "onNavigateRecord">) {
-  const [path, setPath] = useState("");
-  const [preview, setPreview] = useState<PreviewImage | null>(null);
-  const [region, setRegion] = useState<NormalizedRegion | null>(null);
-  const [result, setResult] = useState<DecodeResult | null>(null);
-  const [query, setQuery] = useState("");
-  const [records, setRecords] = useState<CertificationRecord[]>([]);
-  const [busy, setBusy] = useState(false);
-  const previewRequest = useRef(0);
-  const decodeRequest = useRef(0);
-  const searchRequest = useRef(0);
-
-  const choose = async () => {
-    const selected = await open({ multiple: false, filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }] });
-    if (typeof selected !== "string") return;
-    const requestId = ++previewRequest.current;
-    decodeRequest.current += 1;
-    setBusy(true);
-    try {
-      const nextPreview = await authenticityApi.preview(selected);
-      if (requestId !== previewRequest.current) return;
-      setPath(selected);
-      setPreview(nextPreview);
-      setRegion(null);
-      setResult(null);
-    } catch (error) { if (requestId === previewRequest.current) onError(message(error)); }
-    finally { if (requestId === previewRequest.current) setBusy(false); }
-  };
-
-  const decode = async () => {
-    if (!path) return;
-    const requestId = ++decodeRequest.current;
-    const inputPath = path;
-    const inputRegion = region;
-    setBusy(true);
-    onError(null);
-    try {
-      const next = await authenticityApi.decode(inputPath, inputRegion);
-      if (requestId === decodeRequest.current) setResult(next);
-    }
-    catch (error) { if (requestId === decodeRequest.current) onError(message(error)); }
-    finally { if (requestId === decodeRequest.current) setBusy(false); }
-  };
-
-  const searchRecords = async () => {
-    const requestId = ++searchRequest.current;
-    const requestedQuery = query;
-    setBusy(true);
-    try {
-      const next = await authenticityApi.searchRecords(requestedQuery);
-      if (requestId === searchRequest.current) setRecords(next);
-    }
-    catch (error) { if (requestId === searchRequest.current) onError(message(error)); }
-    finally { if (requestId === searchRequest.current) setBusy(false); }
-  };
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void searchRecords(); }, 220);
-    return () => window.clearTimeout(timer);
-  }, [query]);
+  const {
+    path, preview, region, setRegion, result, query, setQuery, records, busy, searching,
+    choose, decode, searchRecords,
+  } = useIdentificationController({ onError });
 
   return <div className="auth-workspace identify-workspace">
     <header className="auth-header"><div><span>识别与溯源</span><h1>验证发布图片</h1></div></header>
@@ -402,7 +160,7 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
       </section>
       <section className="record-search">
         <header><Search size={17} /><div><strong>搜索导出记录</strong><span>按 ID、标题、创作者或首次输出路径</span></div></header>
-        <div className="record-search-control"><input value={query} maxLength={160} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchRecords(); }} /><button className="secondary-button" disabled={busy} onClick={() => void searchRecords()}><Search size={15} />搜索</button></div>
+        <div className="record-search-control"><input value={query} maxLength={160} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void searchRecords(); }} /><button className="secondary-button" disabled={searching} onClick={() => void searchRecords()}>{searching ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />}搜索</button></div>
         <RecordList records={records} onNavigate={onNavigateRecord} compact />
       </section>
     </div>
@@ -482,22 +240,15 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
   </div>;
 }
 
-function RecordView({ record, preview, onClose, onError }: { record: CertificationRecord; preview: PreviewImage | null; onClose: () => void; onError: (message: string | null) => void }) {
-  const [exporting, setExporting] = useState(false);
-  const exportAgain = async () => {
-    const outputPath = await save({
-      defaultPath: fileName(record.outputPath),
-      filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
-    });
-    if (!outputPath) return;
-    setExporting(true);
-    onError(null);
-    try { await authenticityApi.exportRecord(record.id, outputPath); }
-    catch (error) { onError(message(error)); }
-    finally { setExporting(false); }
-  };
+function RecordView({ record, preview, exporting, onExport, onClose }: {
+  record: CertificationRecord;
+  preview: PreviewImage | null;
+  exporting: boolean;
+  onExport: (record: CertificationRecord) => Promise<void>;
+  onClose: () => void;
+}) {
   return <div className="auth-workspace record-view-mode">
-    <header className="auth-header"><div><span>发布记录 · 只读</span><h1>{record.title}</h1></div><div className="record-view-actions"><button className="secondary-button" type="button" disabled={exporting} onClick={() => void exportAgain()}>{exporting ? <LoaderCircle className="spin" size={15} /> : <ImageDown size={15} />}再次导出</button><button className="secondary-button" type="button" onClick={onClose}><X size={15} />退出查看</button></div></header>
+    <header className="auth-header"><div><span>发布记录 · 只读</span><h1>{record.title}</h1></div><div className="record-view-actions"><button className="secondary-button" type="button" disabled={exporting} onClick={() => void onExport(record)}>{exporting ? <LoaderCircle className="spin" size={15} /> : <ImageDown size={15} />}再次导出</button><button className="secondary-button" type="button" onClick={onClose}><X size={15} />退出查看</button></div></header>
     <div className="publish-layout record-review-layout">
       <section className="auth-preview-panel">
         <header><div><strong>{fileName(record.outputPath)}</strong><span>{preview ? `${preview.width} x ${preview.height} · ` : ""}{formatBytes(record.outputBytes)}</span></div><i><LockKeyhole size={14} />记录已锁定</i></header>

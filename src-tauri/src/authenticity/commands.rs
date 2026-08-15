@@ -10,18 +10,14 @@ use sha2::Digest;
 use tauri::State;
 use tempfile::NamedTempFile;
 
-use crate::{
-    app::AppState,
-    backup::{self, BackupState},
-    cleanup, storage,
-};
+use crate::{app::AppState, cleanup, storage};
 
 use super::{
     error::{AuthenticityError, AuthenticityResult},
     model::{
-        BranchPublication, CertificationRecord, DecodeRequest, DecodeResult,
-        EnterPublicationRequest, EstimateRequest, ExportCertificationRecordRequest,
-        FileSizeEstimate, PreviewImage, PublishBranchRequest, PublishResult,
+        BranchPublication, CertificationRecord, DecodeRequest, DecodeResult, EstimateRequest,
+        ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PublishBranchRequest,
+        PublishResult,
     },
     pipeline,
     publication_repository::{self, NewFinalArtifact},
@@ -31,37 +27,6 @@ use super::{
 
 fn root(state: &AppState) -> Result<PathBuf, String> {
     state.ready_repository_path()
-}
-
-#[tauri::command]
-pub(crate) async fn enter_branch_publication(
-    request: EnterPublicationRequest,
-    app_state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-    authenticity_state: State<'_, AuthenticityState>,
-) -> Result<BranchPublication, String> {
-    let root = root(app_state.inner())?;
-    let state = backup_state.inner().clone();
-    let models_ready = authenticity_state.model_files_ready();
-    let model_info = authenticity_state.model_info();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(Some(&request.branch_id), || {
-            let (_, history_id) = publication_repository::branch_head(&root, &request.branch_id)?;
-            state.report_progress("publish-lock", "正在固化发布检查点", 0, 2);
-            backup::ensure_checkpoint(&root, &history_id)?;
-            state.report_progress("publish-lock", "正在保存最终成品", 1, 2);
-            store_final_artifact(
-                &root,
-                &request.branch_id,
-                &history_id,
-                &request.artifact_path,
-            )?;
-            state.report_progress("publish-lock", "分支已进入发布状态", 2, 2);
-            repository::get_publication(&root, &request.branch_id, models_ready, model_info)
-        })
-    })
-    .await
-    .map_err(|error| format!("进入发布状态的任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -76,52 +41,6 @@ pub(crate) fn get_branch_publication(
         authenticity_state.model_files_ready(),
         authenticity_state.model_info(),
     )
-}
-
-#[tauri::command]
-pub(crate) async fn cancel_branch_publication(
-    branch_id: String,
-    app_state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-) -> Result<cleanup::CleanupReport, String> {
-    let root = root(app_state.inner())?;
-    let state = backup_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(Some(&branch_id), || {
-            let cleanup_ids = publication_repository::remove_artifact(&root, &branch_id)?;
-            cleanup::run(&root, &cleanup_ids)
-        })
-    })
-    .await
-    .map_err(|error| format!("取消发布任务异常结束：{error}"))?
-}
-
-#[tauri::command]
-pub(crate) async fn publish_branch_artifact(
-    request: PublishBranchRequest,
-    app_state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
-    authenticity_state: State<'_, AuthenticityState>,
-) -> Result<PublishResult, AuthenticityError> {
-    let root = root(app_state.inner()).map_err(AuthenticityError::Task)?;
-    let authenticity = authenticity_state.inner().clone();
-    let backup = backup_state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let branch_id = request.branch_id.clone();
-        let published = backup
-            .run_exclusive(Some(&branch_id), || {
-                pipeline::publish(&root, &authenticity, request).map_err(|error| error.to_string())
-            })
-            .map_err(AuthenticityError::Task)?;
-        Ok(PublishResult {
-            record: published.record,
-            width: published.width,
-            height: published.height,
-            watermark_region_count: published.watermark_region_count,
-        })
-    })
-    .await
-    .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
 #[tauri::command]
@@ -268,7 +187,7 @@ fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
     })
 }
 
-fn store_final_artifact(
+pub(crate) fn store_final_artifact(
     root: &Path,
     branch_id: &str,
     history_id: &str,
@@ -364,6 +283,20 @@ fn store_final_artifact(
         return Err(recover_failed_artifact(root, &cleanup_id, error));
     }
     Ok(())
+}
+
+pub(crate) fn publish_artifact(
+    root: &Path,
+    state: &AuthenticityState,
+    request: PublishBranchRequest,
+) -> Result<PublishResult, AuthenticityError> {
+    let published = pipeline::publish(root, state, request)?;
+    Ok(PublishResult {
+        record: published.record,
+        width: published.width,
+        height: published.height,
+        watermark_region_count: published.watermark_region_count,
+    })
 }
 
 fn recover_failed_artifact(root: &Path, cleanup_id: &str, error: String) -> String {

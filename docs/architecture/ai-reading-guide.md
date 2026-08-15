@@ -21,6 +21,8 @@
 ## 边界
 
 - 前端模块之间不互相导入；跨模块流程在 `src/app/` 编排。
+- 原生跨领域 Tauri 流程在 `src-tauri/src/app/workflows.rs` 编排；领域模块只暴露单领域服务。
+- History、Library、Authenticity 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费，页面组件不直接调用命令。
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。

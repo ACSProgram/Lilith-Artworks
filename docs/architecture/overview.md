@@ -12,6 +12,7 @@ src/modules/authenticity 成品、C2PA/TrustMark 发布与识别
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 
 src-tauri/src/app/                     配置、窗口和应用生命周期
+src-tauri/src/app/workflows.rs         跨领域 Tauri 命令与共享运行锁编排
 src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
@@ -23,7 +24,9 @@ src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
-前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史和认证视图。History 的历史读取和命令编排集中在 `src/modules/history/useHistoryController.ts`，工作区只接收历史 DTO、保存当前分支并发出刷新版本信号，不重复调用历史 API。Library 只管理作品树、当前选择和跨作品定位，Authenticity 只接收认证所需的最小分支视图。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
+前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`，页面组件只保留视图选择、弹窗和渲染状态。控制器统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
+
+Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup` 和 `authenticity`；需要组合 checkpoint、调度唤醒、清理队列或共享 `BackupState` 运行锁的 create Artwork、永久清理、fork、分支更新/删除、进入/取消发布和认证发布由 `app/workflows.rs` 编排。前端命令名和 DTO 不因内部所有权变化而改变。
 
 ## 应用生命周期
 
@@ -61,7 +64,7 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 普通数据库连接只使用 SQLite `READ_WRITE` 打开现有 `lilith-artworks.sqlite3`，不得带 `CREATE`。仓库目录和新 schema 创建只从 Library 显式初始化入口进入。`AppState` 缓存当前路径已通过完整校验的事实：首次访问、启动状态读取和设置保存执行完整性检查与迁移，之后所有前台命令和后台调度统一执行轻量 format/version 检查。数据库被外部删除、清空或替换为其他格式/不受支持版本时会清除缓存并报告仓库不可用，不创建占位数据库。
 
-提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试和仓库设置保存共享 `BackupState` 运行锁。前端 busy 状态只负责交互反馈，不承担并发正确性。
+提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁并调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。
 
 ## 增量历史策略
 
@@ -73,4 +76,4 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 分支最终成品是认证输入，不替代备份历史。进入发布状态时先强制固化当前 head，再把成品复制进仓库并锁定分支。每次导出都强制签入 C2PA，TrustMark 可选；成功回读 C2PA 后才记录认证。TrustMark/C2PA 声明 ID 建普通索引以支持全库快速候选匹配；随后仍需比较记录、文件哈希、C2PA 验证状态和 soft binding，不能把模型解码结果单独视为认证成功。
 
-认证模块只通过公开的 backup/history 能力建立检查点，不读取 ChunkFile；history 只通过 `final_artifacts` 是否存在判断分支锁定，不导入认证实现。前端跨 Artwork 的溯源跳转由应用层完成，认证模块不导入 Library。
+进入发布状态由应用工作流先读取认证发布目标，再通过公开 backup 能力建立检查点，最后调用认证服务保存最终成品；认证模块不读取 ChunkFile 或导入 history。history 只通过 `final_artifacts` 是否存在判断分支锁定，不导入认证实现。前端跨 Artwork 的溯源跳转由应用层完成，认证模块不导入 Library。

@@ -4,17 +4,18 @@
 
 - Artwork 级页面切换与跨作品跳转：`src/app/App.tsx`、`src/app/ArtworkWorkspace.tsx`；Library 只接收应用层转换后的导航目标。
 - 发布、局部范围和识别 UI：`src/modules/authenticity/AuthenticityModule.tsx`，样式只读 `src/styles/authenticity.css`。
-- 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`。
+- 发布/识别状态、命令、预览、搜索和请求代次：`src/modules/authenticity/useAuthenticityController.ts`。
+- 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由 controller 消费。
 - 发布/识别流水线：`src-tauri/src/authenticity/pipeline.rs`。
 - C2PA 和 TrustMark 实现：`src-tauri/src/authenticity/c2pa.rs`、`trustmark.rs`。
 - 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`。
-- 强制发布检查点：认证命令调用 `backup::ensure_checkpoint`，不要为认证表查询读取 `chunk_file.rs`。
+- 强制发布检查点和共享运行锁：`src-tauri/src/app/workflows.rs` 调用公开 `backup::ensure_checkpoint` 后进入认证服务；认证模块不导入 backup 或读取 `chunk_file.rs`。
 
 当前未验收项和人工检查清单只读 `docs/planning/current-handoff.md`。
 
 ## 发布状态
 
-分支必须先有一个 head 才能进入发布状态。用户选择最终成品后，命令在统一备份运行锁内完成以下步骤：
+分支必须先有一个 head 才能进入发布状态。用户选择最终成品后，应用工作流在统一备份运行锁内完成以下步骤：
 
 1. 把当前 head 物化并标记为强制检查点。
 2. 流式复制最终成品到临时文件，同步并计算 SHA-256；正式发布前先在 `pending_file_cleanup` 登记带哈希的仓库文件意图。
@@ -66,6 +67,7 @@ TrustMark 使用 Q / BCH_SUPER，标识长度为 40 位。水印只写入用户�
 ## 前端交互约定
 
 - Authenticity 不直接导入 App、Library 或 History。应用层传入只含 `id`、`title`、`headHistoryId` 的认证分支视图，注入清理重试，并把认证记录转换为 Library 导航目标。
+- `useAuthenticityController.ts` 是 `authenticity/api.ts` 的唯一消费者；发布页和识别页只渲染控制器状态。发布状态、成品预览、记录预览、大小估算、识别和记录搜索分别使用请求代次，分支或输入变化后旧响应不会回填当前页面。
 - 当前分支由 `ArtworkWorkspace` 统一持有；历史页和发布页共用同一选择，任一页面切换分支都会同步到另一页面。发布、进入发布和取消发布后刷新 Artwork 工作区分支数据，发布状态与当前内容保持同步。
 - 发布状态、预览和大小估算使用 latest-request-wins；分支切换后旧请求不得覆盖新分支状态。发布命令发出前再次确认当前选择、配置、最终成品和已加载发布状态属于同一分支。
 - PEM 私钥仅以密码输入控件接收，并且发布完成后清空，不写入共享配置。
@@ -74,7 +76,7 @@ TrustMark 使用 Q / BCH_SUPER，标识长度为 40 位。水印只写入用户�
 - 点击导出记录进入只读查看模式。查看页复用发布编辑页的左右分栏和图片预览结构，显示锁定字段、框选范围、发布节点、文件摘要和 C2PA 报告，并提供再次导出和明确的退出入口；任何认证参数均不可编辑。
 - “取消发布并全部删除”是分支发布内容的总删除入口，独立放在导出记录之后的危险区，并使用应用内二次确认；确认后删除最终成品、全部认证记录、仓库副本及记录指向的导出文件。
 - 识别区域支持撤销并恢复整图识别；识别结果继续提供匹配记录与记录搜索。
-- 图片预览、识别和记录搜索均使用请求序号丢弃乱序响应；旧搜索结果不得覆盖更新后的查询。
+- 图片预览、识别和记录搜索均使用独立请求序号丢弃乱序响应；识别 busy 与记录搜索 busy 独立，后台搜索不会解除或阻塞正在进行的图片识别。
 - 发布预览和识别预览的文件标题栏使用固定内容高度，图片舞台独占剩余空间；超大分辨率图片不能拉高标题栏。
 - 只读记录中的输出路径、Manifest 标签和 SHA-256 允许完整换行，不用省略号隐藏校验信息；窄布局下危险区改为纵向排列，长 Artwork 标题在操作按钮前省略。
 - 警告文本使用主题变量，在浅色与深色主题分别保持可读对比度。

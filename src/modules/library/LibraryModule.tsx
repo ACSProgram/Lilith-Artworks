@@ -18,20 +18,14 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from "react";
-import { libraryApi } from "./api";
-import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
+import type { CleanupReport } from "../../shared/fileCleanup";
 import { flattenTree, selectionForClick, visibleTree } from "./tree";
 import { NodeEditor, TrashDialog } from "./LibraryDialogs";
 import type { EditorState } from "./LibraryDialogs";
 import { LibraryTreeView } from "./LibraryTreeView";
 import { CommandMenu, NodeOverview, WorkspaceEmpty } from "./LibraryViews";
-import type {
-  LibraryNode,
-  LibrarySearchResult,
-  LibraryTrashEntry,
-  LibraryTree,
-  MoveLibraryNodesRequest,
-} from "./types";
+import type { LibraryNode, LibrarySearchResult, MoveLibraryNodesRequest } from "./types";
+import { useLibraryController } from "./useLibraryController";
 
 interface LibraryModuleProps {
   repositoryReady: boolean;
@@ -61,63 +55,23 @@ interface ContextState {
   y: number;
 }
 
-const EMPTY_TREE: LibraryTree = { nodes: [], groupCount: 0, artworkCount: 0 };
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, renderArtworkWorkspace }: LibraryModuleProps) {
-  const [tree, setTree] = useState(EMPTY_TREE);
-  const [loading, setLoading] = useState(false);
-  const [operationBusy, setOperationBusy] = useState(false);
-  const expandedStorageKey = "lilith-artworks:library:expanded";
-  const [expandedIds, setExpandedIds] = useState<Set<string>>(() => {
-    try {
-      const value = window.localStorage.getItem(expandedStorageKey);
-      const ids = value ? JSON.parse(value) : [];
-      return new Set(Array.isArray(ids) ? ids.filter((id): id is string => typeof id === "string") : []);
-    } catch {
-      return new Set();
-    }
-  });
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [anchorId, setAnchorId] = useState<string | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [searchResults, setSearchResults] = useState<LibrarySearchResult[]>([]);
-  const [searching, setSearching] = useState(false);
+  const controller = useLibraryController({ repositoryReady, onError, onRetryFileCleanup });
+  const {
+    tree, loading, operationBusy, expandedIds, setExpandedIds, selectedIds, setSelectedIds,
+    anchorId, setAnchorId, activeId, setActiveId, query, setQuery, searchResults,
+    setSearchResults, searching, trashEntries, cleanupFailures, retryCleanup, loadTrash,
+    createGroup, createArtwork, renameNode, trashNodes, moveNodes, restoreTrash,
+    permanentlyDeleteTrash, emptyTrash,
+  } = controller;
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [context, setContext] = useState<ContextState | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
-  const [trashEntries, setTrashEntries] = useState<LibraryTrashEntry[]>([]);
-  const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
   const [traceTarget, setTraceTarget] = useState<{ artworkId: string; branchId: string; recordId: string } | null>(null);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
 
-  const applyCleanupReport = (report: CleanupReport) => {
-    setCleanupFailures(report.failures);
-    if (report.failures.length > 0) {
-      onError(`元数据已删除，但有 ${report.failures.length} 个文件清理失败；可在回收站中重试。`);
-    }
-  };
-
-  const retryCleanup = async () => {
-    if (cleanupFailures.length === 0) return;
-    setOperationBusy(true);
-    onError(null);
-    try {
-      const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
-      applyCleanupReport(report);
-      if (report.failures.length === 0) onError(null);
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      setOperationBusy(false);
-    }
-  };
   const nodeById = useMemo(
     () => new Map(allNodes.map((node) => [node.id, node])),
     [allNodes],
@@ -127,69 +81,6 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     [expandedIds, tree.nodes],
   );
   const activeNode = activeId ? nodeById.get(activeId) ?? null : null;
-
-  useEffect(() => {
-    window.localStorage.setItem(expandedStorageKey, JSON.stringify([...expandedIds]));
-  }, [expandedIds]);
-
-  useEffect(() => {
-    if (!repositoryReady) {
-      setTree(EMPTY_TREE);
-      setSelectedIds(new Set());
-      setActiveId(null);
-      return;
-    }
-    let cancelled = false;
-    setLoading(true);
-    libraryApi
-      .listTree()
-      .then((next) => {
-        if (!cancelled) {
-          setTree(next);
-          setExpandedIds((current) => {
-            const groups = new Set(flattenTree(next.nodes).filter((node) => node.kind === "group").map((node) => node.id));
-            return new Set([...current].filter((id) => groups.has(id)));
-          });
-        }
-      })
-      .catch((error) => {
-        if (!cancelled) onError(errorMessage(error));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [onError, repositoryReady]);
-
-  useEffect(() => {
-    const trimmed = query.trim();
-    if (!repositoryReady || !trimmed) {
-      setSearchResults([]);
-      setSearching(false);
-      return;
-    }
-    let cancelled = false;
-    setSearching(true);
-    const timeout = window.setTimeout(() => {
-      libraryApi
-        .search(trimmed)
-        .then((results) => {
-          if (!cancelled) setSearchResults(results);
-        })
-        .catch((error) => {
-          if (!cancelled) onError(errorMessage(error));
-        })
-        .finally(() => {
-          if (!cancelled) setSearching(false);
-        });
-    }, 180);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(timeout);
-    };
-  }, [onError, query, repositoryReady]);
 
   useEffect(() => {
     if (!context && !newMenuOpen) return;
@@ -207,29 +98,6 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
       window.removeEventListener("keydown", onKeyDown);
     };
   }, [context, newMenuOpen]);
-
-  const applyTree = (next: LibraryTree, preferredActiveId?: string | null) => {
-    const valid = new Set(flattenTree(next.nodes).map((node) => node.id));
-    setTree(next);
-    setSelectedIds((current) => new Set([...current].filter((id) => valid.has(id))));
-    setActiveId((current) => {
-      const candidate = preferredActiveId === undefined ? current : preferredActiveId;
-      return candidate && valid.has(candidate) ? candidate : null;
-    });
-  };
-
-  const runMutation = async (operation: () => Promise<LibraryTree>) => {
-    setOperationBusy(true);
-    onError(null);
-    try {
-      applyTree(await operation());
-    } catch (error) {
-      onError(errorMessage(error));
-      throw error;
-    } finally {
-      setOperationBusy(false);
-    }
-  };
 
   const creationParent = (node: LibraryNode | null): string | null => {
     if (!node) return null;
@@ -261,7 +129,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     if (!window.confirm(`将${label}及其全部内容移到回收站？`)) return;
     setContext(null);
     try {
-      await runMutation(() => libraryApi.trashNodes(ids));
+      await trashNodes(ids);
       setSelectedIds(new Set());
       setActiveId(null);
     } catch {
@@ -270,19 +138,11 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
   };
 
   const openTrash = async () => {
-    setOperationBusy(true);
-    onError(null);
     try {
-      setTrashEntries(await libraryApi.listTrash());
+      await loadTrash();
       setTrashOpen(true);
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      setOperationBusy(false);
-    }
+    } catch { /* Error is surfaced by the controller. */ }
   };
-
-  const reloadTrash = async () => setTrashEntries(await libraryApi.listTrash());
 
   const selectSearchResult = (result: LibrarySearchResult) => {
     setExpandedIds((current) => new Set([...current, ...result.ancestorIds]));
@@ -397,7 +257,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
                 setTraceTarget(null);
               }}
               onMove={(request: MoveLibraryNodesRequest) => {
-                void runMutation(() => libraryApi.moveNodes(request)).catch(() => undefined);
+                void moveNodes(request).catch(() => undefined);
               }}
               onContextMenu={openContext}
             />
@@ -500,16 +360,16 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
           onSubmit={async (values) => {
             try {
               if (editor.mode === "group") {
-                await runMutation(() => libraryApi.createGroup(editor.parentId, values.title));
+                await createGroup(editor.parentId, values.title);
               } else if (editor.mode === "artwork") {
-                await runMutation(() => libraryApi.createArtwork({
+                await createArtwork({
                   parentId: editor.parentId,
                   title: values.title,
                   branchTitle: values.branchTitle,
                   sourcePath: values.sourcePath,
-                }));
+                });
               } else if (editor.node) {
-                await runMutation(() => libraryApi.renameNode(editor.node!.id, values.title));
+                await renameNode(editor.node!.id, values.title);
               }
               setEditor(null);
               if (editor.parentId) setExpandedIds((current) => new Set([...current, editor.parentId!]));
@@ -527,43 +387,16 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
           cleanupFailures={cleanupFailures}
           onClose={() => setTrashOpen(false)}
           onRestore={async (entry) => {
-            setOperationBusy(true);
-            onError(null);
-            try {
-              applyTree(await libraryApi.restoreTrash(entry.id), entry.id);
-              await reloadTrash();
-              setExpandedIds((current) => new Set(current));
-            } catch (error) {
-              onError(errorMessage(error));
-            } finally {
-              setOperationBusy(false);
-            }
+            await restoreTrash(entry.id);
+            setExpandedIds((current) => new Set(current));
           }}
           onDelete={async (entry) => {
             if (!window.confirm(`永久删除“${entry.title}”及其全部内容？此操作无法撤销。`)) return;
-            setOperationBusy(true);
-            onError(null);
-            try {
-              applyCleanupReport(await libraryApi.permanentlyDeleteTrash([entry.id]));
-              await reloadTrash();
-            } catch (error) {
-              onError(errorMessage(error));
-            } finally {
-              setOperationBusy(false);
-            }
+            await permanentlyDeleteTrash([entry.id]);
           }}
           onEmpty={async () => {
             if (!trashEntries.length || !window.confirm("永久删除回收站中的全部项目？此操作无法撤销。")) return;
-            setOperationBusy(true);
-            onError(null);
-            try {
-              applyCleanupReport(await libraryApi.emptyTrash());
-              setTrashEntries([]);
-            } catch (error) {
-              onError(errorMessage(error));
-            } finally {
-              setOperationBusy(false);
-            }
+            await emptyTrash();
           }}
           onRetryCleanup={retryCleanup}
         />

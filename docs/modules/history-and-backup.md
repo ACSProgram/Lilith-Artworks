@@ -9,6 +9,7 @@
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
+- fork、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
 - SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file.rs`。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`。
@@ -73,7 +74,7 @@ delete_history_subtree
 delete_artwork_branch
 ```
 
-认证发布通过公开 `backup::ensure_checkpoint` 固化发布节点；history 不读取成品文件或认证 manifest。完整编译与 GUI 测试状态见当前交接文档。
+应用工作流通过公开 `backup::ensure_checkpoint` 固化 fork 或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。完整编译与 GUI 测试状态见当前交接文档。
 ## 历史图前端布局
 
 - 总览 mindmap 使用可横向滚动的内容画布，支持“紧凑”和“时间轴”排列模式。模式开关位于“历史总览”标题行；同一行的滑条把节点最小宽度调整在 220px 到 420px，并通过 `lilith-artworks.history-node-min-width-v1` 持久化。标题与控制行从滚动容器顶边开始吸顶，不留可透出画布内容的顶部空隙；兄弟节点水平间隔收紧，减少无效横向占用。
