@@ -10,7 +10,10 @@ import { formatBytes } from "../../shared/format";
 import type {
   AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PublicationPreview,
 } from "./types";
-import { navigatorRect, navigatorScrollTarget, type PreviewViewport } from "./previewViewport";
+import {
+  clampPreviewZoom, navigatorRect, navigatorScrollTarget, previewZoomFromButton,
+  previewZoomFromWheel, type PreviewViewport, zoomAnchorScrollTarget,
+} from "./previewViewport";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 interface AuthenticityModuleProps {
@@ -303,19 +306,45 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   const [showOriginal, setShowOriginal] = useState(false);
   const [viewport, setViewport] = useState<PreviewViewport | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
   const navigatorDragRef = useRef<number | null>(null);
-  const zoomValue = zoom === "fit" ? 1 : zoom;
+  const fitZoomRef = useRef(1);
+  const zoomAnchorRef = useRef<{ xRatio: number; yRatio: number; canvasX: number; canvasY: number } | null>(null);
   const image = showOriginal ? preview.originalImage : preview.image;
-  const changeZoom = (next: number) => setZoom(Math.max(0.25, Math.min(4, next)));
+  const measuredZoom = () => {
+    const renderedImage = imageRef.current;
+    return renderedImage && renderedImage.clientWidth > 0 ? renderedImage.clientWidth / image.width : zoom === "fit" ? fitZoomRef.current : zoom;
+  };
+  const changeZoom = (next: number, clientX?: number, clientY?: number) => {
+    const canvas = canvasRef.current;
+    const renderedImage = imageRef.current;
+    if (canvas && renderedImage) {
+      const canvasBounds = canvas.getBoundingClientRect();
+      const imageBounds = renderedImage.getBoundingClientRect();
+      const anchorX = clientX ?? canvasBounds.left + canvasBounds.width / 2;
+      const anchorY = clientY ?? canvasBounds.top + canvasBounds.height / 2;
+      const insideImage = anchorX >= imageBounds.left && anchorX <= imageBounds.right
+        && anchorY >= imageBounds.top && anchorY <= imageBounds.bottom;
+      zoomAnchorRef.current = {
+        xRatio: insideImage ? (anchorX - imageBounds.left) / imageBounds.width : 0.5,
+        yRatio: insideImage ? (anchorY - imageBounds.top) / imageBounds.height : 0.5,
+        canvasX: anchorX - canvasBounds.left,
+        canvasY: anchorY - canvasBounds.top,
+      };
+    }
+    setZoom(clampPreviewZoom(next, fitZoomRef.current));
+  };
   const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    if (!event.ctrlKey && !event.metaKey) return;
     event.preventDefault();
-    changeZoom(zoomValue + (event.deltaY < 0 ? 0.25 : -0.25));
+    changeZoom(previewZoomFromWheel(measuredZoom(), event.deltaY, fitZoomRef.current), event.clientX, event.clientY);
   };
   const syncViewport = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    if (zoom === "fit" && imageRef.current?.clientWidth) {
+      fitZoomRef.current = imageRef.current.clientWidth / image.width;
+    }
     setViewport({
       scrollLeft: canvas.scrollLeft,
       scrollTop: canvas.scrollTop,
@@ -324,7 +353,31 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
       clientWidth: canvas.clientWidth,
       clientHeight: canvas.clientHeight,
     });
-  }, []);
+  }, [image.width, zoom]);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const renderedImage = imageRef.current;
+    if (!canvas || !renderedImage) return;
+    if (zoom === "fit") {
+      canvas.scrollLeft = 0;
+      canvas.scrollTop = 0;
+      zoomAnchorRef.current = null;
+      return;
+    }
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    const target = zoomAnchorScrollTarget(
+      anchor,
+      renderedImage.offsetLeft,
+      renderedImage.offsetTop,
+      renderedImage.clientWidth,
+      renderedImage.clientHeight,
+    );
+    canvas.scrollLeft = target.scrollLeft;
+    canvas.scrollTop = target.scrollTop;
+    zoomAnchorRef.current = null;
+    syncViewport();
+  }, [image.dataUrl, syncViewport, zoom]);
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -353,6 +406,7 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
     if (!drag || drag.pointerId !== event.pointerId || !canvasRef.current) return;
     canvasRef.current.scrollLeft = drag.scrollLeft - (event.clientX - drag.x);
     canvasRef.current.scrollTop = drag.scrollTop - (event.clientY - drag.y);
+    syncViewport();
   };
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
@@ -390,9 +444,9 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
       <header>
         <div><small>发布前检查</small><h2 id="publication-preview-title">最终 JPG 质量预览</h2><span>{preview.image.width} x {preview.image.height} · {formatBytes(preview.outputBytes)}</span></div>
         <div className="preview-zoom-controls">
-          <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(zoomValue - 0.25)}><ZoomOut size={16} /></button>
-          <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => setZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
-          <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(zoomValue + 0.25)}><ZoomIn size={16} /></button>
+          <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, fitZoomRef.current))}><ZoomOut size={16} /></button>
+          <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
+          <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), 1, fitZoomRef.current))}><ZoomIn size={16} /></button>
           <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
           <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} onClick={() => setShowOriginal((current) => !current)}><ImageIcon size={16} /></button>
           <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
@@ -409,7 +463,12 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
         >
-          <img src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+          <div
+            className="publication-preview-content"
+            style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px`, height: `${image.height * zoom}px` }}
+          >
+            <img ref={imageRef} src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+          </div>
         </div>
         {navigable && navigationRect && <div
           className="publication-preview-navigator"

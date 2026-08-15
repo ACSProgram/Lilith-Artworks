@@ -69,6 +69,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             });
             if let Err(error) = result {
                 history::mark_error(&root, &branch_id, &error);
+                log::error!("automatic backup failed for branch {branch_id}: {error}");
                 if !state.wait_scheduler(ERROR_RETRY) {
                     break;
                 }

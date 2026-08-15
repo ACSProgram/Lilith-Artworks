@@ -3,7 +3,7 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
-## Unreleased
+## 0.1.0-rc.1 - 2026-08-15
 
 ### Added
 
@@ -13,6 +13,8 @@ before and after the first stable release.
 - Added frontend tests for tree/history helpers, shared formatting, publication
   preview invalidation, navigator geometry, and latest-request-wins controllers.
 - Added a draggable navigator thumbnail for zoomed publication quality previews.
+- Added rotating native application logs for startup, shutdown, backup, and
+  window lifecycle diagnostics.
 
 ### Changed
 
@@ -36,8 +38,9 @@ before and after the first stable release.
   identification or trace results to publication records.
 - Quality preview generation now rejects incomplete signing parameters before
   encoding, including an empty private key.
-- Plain wheel input now scrolls a zoomed quality preview while modified wheel
-  input controls zoom.
+- Quality preview zoom now starts from the actual fitted scale, responds to
+  wheel increments continuously, preserves the pointer anchor, and uses
+  drag/navigation positioning without visible scrollbars.
 - History deletion and certification record queries now propagate malformed
   database rows instead of silently skipping or replacing them.
 

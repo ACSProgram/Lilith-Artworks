@@ -133,7 +133,7 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
             "pause-automatic" => {
                 let paused = app.state::<app::AppState>().automatic_backups_paused();
                 if let Err(error) = app::settings::set_automatic_backups_paused(app, !paused) {
-                    eprintln!("failed to update automatic backup pause state: {error}");
+                    log::error!("failed to update automatic backup pause state: {error}");
                 }
             }
             "quit" => {
@@ -165,9 +165,18 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                .max_file_size(1_000_000)
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepOne)
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|application| {
+            log::info!("Lilith Artworks starting");
             let config_directory = application
                 .path()
                 .app_config_dir()
@@ -209,6 +218,7 @@ pub fn run() {
                 let _ = window.set_icon(icons.window.clone());
             }
             build_tray(application, runtime_icon.map(|icons| icons.tray))?;
+            log::info!("Lilith Artworks started");
             Ok(())
         })
         .on_window_event(|window, event| match event {
@@ -218,12 +228,13 @@ pub fn run() {
                     return;
                 }
                 if let Err(error) = app::capture_window_settings(window.app_handle()) {
-                    eprintln!("failed to persist window settings: {error}");
+                    log::error!("failed to persist window settings: {error}");
                 }
                 if state.close_to_tray() {
                     api.prevent_close();
                     let _ = window.hide();
                 } else {
+                    log::info!("Lilith Artworks shutting down");
                     window.state::<backup::BackupState>().shutdown();
                     state.request_exit();
                     window.app_handle().exit(0);
