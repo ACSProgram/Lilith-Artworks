@@ -1,20 +1,20 @@
 import {
-  Ban, CalendarDays, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
+  Ban, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
   MoreHorizontal, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent, ReactNode } from "react";
+import type { CSSProperties, MouseEvent } from "react";
 import { formatBytes } from "../../shared/format";
 import {
   BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
 } from "./HistoryControls";
 import type { ConfirmRequest } from "./HistoryControls";
+import { HistoryTimeline, Mindmap } from "./HistoryGraph";
 import { historyApi } from "./api";
 import {
   branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
   isForcedCheckpoint, suggestedRestorePath,
 } from "./historyModel";
-import type { HistoryTreeNode } from "./historyModel";
 import type {
   ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode,
   UpdateBranchBackupRequest,
@@ -385,7 +385,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     </div>}
 
     <div className={`history-main${view === "overview" && mindmapMode === "timeline" ? " with-timeline" : ""}`}>
-      {view === "overview" && mindmapMode === "timeline" && <HistoryTimeline nodes={history.nodes} selectedNodeId={selectedNodeId} onJump={jumpToNode} />}
+      {view === "overview" && mindmapMode === "timeline" && <HistoryTimeline branches={history.branches} nodes={history.nodes} selectedNodeId={selectedNodeId} onJump={jumpToNode} />}
       <section
         className={`history-graph ${view === "overview" ? "mindmap" : "branch-list"}`}
         style={view === "overview" ? { "--mindmap-node-width": `${mindmapNodeWidth}px` } as CSSProperties : undefined}
@@ -457,52 +457,4 @@ function OperationProgress({ runtime, onCancel }: { runtime: BackupRuntimeStatus
     <progress value={runtime.progressCurrent} max={Math.max(runtime.progressTotal, 1)} />
     <button className="icon-button" type="button" title="取消当前操作" onClick={onCancel}><X size={15} /></button>
   </div>;
-}
-
-function Mindmap({ branches, renderNode, mode, branchesByNode }: { branches: HistoryTreeNode[]; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[] }) {
-  return <ul className={`mindmap-root mindmap-${mode}`}>{branches.map((branch) => <MindmapBranch key={branch.node.id} branch={branch} renderNode={renderNode} mode={mode} branchesByNode={branchesByNode} siblingIndex={0} />)}</ul>;
-}
-
-function HistoryTimeline({ nodes, selectedNodeId, onJump }: { nodes: HistoryNode[]; selectedNodeId: string | null; onJump: (nodeId: string) => void }) {
-  const groups = useMemo(() => {
-    const result: Array<{ label: string; nodes: HistoryNode[] }> = [];
-    const sorted = [...nodes].sort((left, right) => right.createdMs - left.createdMs);
-    for (const node of sorted) {
-      const label = new Date(node.createdMs).toLocaleDateString("zh-CN", {
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit",
-      });
-      const current = result[result.length - 1];
-      if (current?.label === label) current.nodes.push(node);
-      else result.push({ label, nodes: [node] });
-    }
-    return result;
-  }, [nodes]);
-
-  return <aside className="history-timeline" aria-label="历史时间轴导航">
-    <header><CalendarDays aria-hidden="true" size={15} /><strong>时间轴</strong><span>{nodes.length}</span></header>
-    <div className="history-timeline-groups">
-      {groups.map((group) => <section className="history-timeline-group" key={group.label}>
-        <h3>{group.label}</h3>
-        <ol>
-          {group.nodes.map((node) => <li key={node.id}>
-            <button className={selectedNodeId === node.id ? "active" : ""} type="button" onClick={() => onJump(node.id)} title={node.title}>
-              <time>{new Date(node.createdMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
-              <i aria-hidden="true" />
-              <span>{node.title}</span>
-            </button>
-          </li>)}
-        </ol>
-      </section>)}
-    </div>
-  </aside>;
-}
-
-function MindmapBranch({ branch, renderNode, mode, branchesByNode, siblingIndex }: { branch: HistoryTreeNode; renderNode: (node: HistoryNode) => ReactNode; mode: "compact" | "timeline"; branchesByNode: ArtworkBranch[]; siblingIndex: number }) {
-  const leafLabels = branchesByNode.filter((item) => item.headHistoryId === branch.node.id).map((item) => item.title);
-  const style = mode === "timeline" ? { "--timeline-index": siblingIndex } as CSSProperties : undefined;
-  const childCount = Math.max(1, branch.children.length);
-  const childListStyle = { "--mindmap-child-count": childCount, "--mindmap-edge-inset": `${50 / childCount}%` } as CSSProperties;
-  return <li style={style}><div className="mindmap-node">{renderNode(branch.node)}</div>{leafLabels.length > 0 && <div className="mindmap-leaf-label">{leafLabels.join(" · ")}</div>}{branch.children.length > 0 && <ul style={childListStyle}>{branch.children.map((child, index) => <MindmapBranch key={child.node.id} branch={child} renderNode={renderNode} mode={mode} branchesByNode={branchesByNode} siblingIndex={index} />)}</ul>}</li>;
 }

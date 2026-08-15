@@ -64,6 +64,7 @@ input, select, textarea { color: var(--text); }
 input::placeholder, textarea::placeholder { color: var(--muted); opacity: .9; }
 input:disabled, select:disabled, textarea:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); opacity: 1; }
 button { color: inherit; }
+*[data-tauri-drag-region] { app-region: drag; }
 .app-shell {
   display: grid;
   grid-template: 48px minmax(0, 1fr) / 280px minmax(0, 1fr);
@@ -79,17 +80,23 @@ button { color: inherit; }
   grid-template-columns: 280px 1fr auto;
   align-items: center;
   min-height: 48px;
-  padding-right: 12px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
+  user-select: none;
 }
 
 .brand-block { display: flex; align-items: center; gap: 10px; padding: 0 16px; }
 .brand-block svg { color: var(--accent); }
 .brand-block strong { font-size: 14px; }
 .repository-state { justify-self: start; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-.repository-state > span { width: 7px; height: 7px; border-radius: 50%; background: #b26935; }
-.repository-state.ready > span { background: #379066; }
+.repository-indicator { width: 7px; height: 7px; border-radius: 50%; background: #b26935; }
+.repository-state.ready > .repository-indicator { background: #379066; }
+.topbar-actions { align-self: stretch; display: flex; align-items: center; }
+.settings-button { margin: 0 8px; app-region: no-drag; }
+.window-controls { align-self: stretch; display: flex; }
+.window-control { display: grid; place-items: center; width: 46px; min-width: 46px; height: 100%; padding: 0; border: 0; border-radius: 0; color: var(--text); background: transparent; cursor: default; app-region: no-drag; }
+.window-control:hover { background: color-mix(in srgb, var(--text) 9%, transparent); }
+.window-control.close:hover { color: #fff; background: #c42b1c; }
 
 .icon-button {
   display: inline-grid;

@@ -5,6 +5,7 @@
 按问题只读取一条路径：
 
 - 页面状态、右键菜单、分支进入、精简选择与命令编排：`src/modules/history/HistoryModule.tsx`。
+- 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
@@ -77,7 +78,7 @@ delete_artwork_branch
 
 - 总览 mindmap 使用可横向滚动的内容画布，支持“紧凑”和“时间轴”排列模式。模式开关位于“历史总览”标题行；同一行的滑条把节点最小宽度调整在 220px 到 420px，并通过 `lilith-artworks.history-node-min-width-v1` 持久化。标题与控制行在画布纵向滚动时保持吸顶；兄弟节点水平间隔收紧，减少无效横向占用。
 - 紧凑模式把同一父节点的子节点横向平铺；时间轴模式按兄弟节点顺序逐列向右、逐级向下错位，并由共同的父级连接线下接，表达分支随时间依次出现的阶梯关系。时间轴不再使用节点时间戳生成任意空白。
-- 时间轴模式在画布左侧按日期分组列出全部节点，日期内按时间倒序排列；点击条目会选中、聚焦并把对应 mindmap 卡片滚动到画布中央，作为大图快速导航入口。
+- 时间轴模式在画布左侧按日期分组列出全部节点，日期内按时间倒序排列；条目使用“创建分支 - 节点标题”区分同名提交，创建分支不在当前 DTO 中时回退为节点标题。点击条目会选中、聚焦并把对应 mindmap 卡片滚动到画布中央，作为大图快速导航入口。
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。

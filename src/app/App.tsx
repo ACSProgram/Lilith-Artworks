@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
-  Archive,
   AlertCircle,
   Clock3,
   FolderOpen,
@@ -15,6 +14,7 @@ import {
 import { LibraryModule } from "../modules/library/LibraryModule";
 import { appApi } from "./api";
 import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
+import { WindowTitleBar } from "./WindowTitleBar";
 
 const EMPTY_STATUS: RepositoryStatus = {
   configured: false,
@@ -120,19 +120,12 @@ export function App() {
 
   return (
     <main className="app-shell">
-      <header className="topbar">
-        <div className="brand-block">
-          <Archive aria-hidden="true" size={20} />
-          <strong>Lilith Artworks</strong>
-        </div>
-        <div className={`repository-state ${repository.ready ? "ready" : ""}`}>
-          <span aria-hidden="true" />
-          {repositoryLabel}
-        </div>
-        <button className="icon-button" type="button" title="设置" onClick={openSettings}>
-          <Settings aria-hidden="true" size={18} />
-        </button>
-      </header>
+      <WindowTitleBar
+        repositoryLabel={repositoryLabel}
+        repositoryReady={repository.ready}
+        onOpenSettings={openSettings}
+        onError={setMessage}
+      />
 
       {busy && !snapshot ? (
         <section className="workspace full-workspace">
