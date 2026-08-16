@@ -12,7 +12,7 @@
 
 Windows CI 必须通过以下项目：
 
-1. `npm ci` 锁定依赖安装；
+1. `npm ci` 锁定依赖安装；仓库 `.npmrc` 和锁文件固定使用 npm 官方 registry，审计与实际构建不得使用不同下载源；
 2. `npm run build` 的 TypeScript 与 Vite 生产构建；
 3. `npm test` 的前端纯逻辑与控制器竞态测试；
 4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
@@ -49,7 +49,7 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 ## 产物与发布
 
 - Windows 发行产物为 Tauri NSIS 安装包；版本必须与 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 一致。
-- 发布说明从 `CHANGELOG.md` 生成，并列出 schema 版本、已知限制和人工验收结果。
+- 发布说明由 `tools/release/write-release-notes.mjs` 从 `CHANGELOG.md` 的当前版本段生成，并列出 schema 版本、已知限制和人工验收结果；标签前必须把版本从 `Unreleased` 落为带日期的小节。
 - 公布安装包前记录 SHA-256；正式版安装包和主程序必须完成 Authenticode 签名、可信时间戳和签名复核。候选版若暂时未签名，发布说明必须显著披露。
 - 发布资产应同时包含校验和、目标依赖许可包、SBOM 和构建来源证明；release workflow 必须由标签触发并在干净 Windows 环境构建。
 - `.github/workflows/release.yml` 校验标签、版本、标识和 schema，构建后静默安装 NSIS 并断言版本及法律资源，生成 CycloneDX SBOM、SHA-256 和 GitHub artifact attestation，最后创建草稿 release。候选版缺少签名输入时披露未签名，正式版缺少签名输入时直接失败。签名输入为 `WINDOWS_CERTIFICATE_BASE64`、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_TIMESTAMP_URL`。

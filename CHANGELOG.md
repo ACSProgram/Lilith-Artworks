@@ -5,6 +5,8 @@ before and after the first stable release.
 
 ## Unreleased
 
+## 0.1.0-rc.2 - 2026-08-16
+
 ### Changed
 
 - Bumped all release metadata to `0.1.0-rc.2`, upgraded Vitest to 3.2.6,
