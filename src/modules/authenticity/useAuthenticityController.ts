@@ -93,6 +93,9 @@ export function usePublicationController({
   const viewingRequest = useRef(0);
   const outputPreviewRequest = useRef(0);
   const activeOperation = useRef(false);
+  const activeOperationKind = useRef<"preview" | "publish" | null>(null);
+  const cancellationNotice = useRef<"preview" | "publish" | null>(null);
+  const completedCancellation = useRef<"preview" | "publish" | null>(null);
   const operationCancelRequested = useRef(false);
   const selectedBranchIdRef = useRef(selectedBranchId);
   const configRef = useRef(config);
@@ -301,10 +304,14 @@ export function usePublicationController({
     const signature = publicationPreviewSignature(config, watermarkId);
     const requestId = ++outputPreviewRequest.current;
     operationCancelRequested.current = false;
+    cancellationNotice.current = null;
+    completedCancellation.current = null;
     activeOperation.current = true;
+    activeOperationKind.current = "preview";
     setOutputPreviewBusy(true);
     setOutputPreview(null);
     onError(null);
+    let cancelled = false;
     try {
       const next = await authenticityApi.previewPublication({
         branchId,
@@ -322,26 +329,51 @@ export function usePublicationController({
       if (requestId === outputPreviewRequest.current && !operationCancelRequested.current) {
         onError(message(error));
       }
+      cancelled = operationCancelRequested.current;
     } finally {
       activeOperation.current = false;
+      activeOperationKind.current = null;
       if (requestId === outputPreviewRequest.current) setOutputPreviewBusy(false);
       setCancelling(false);
+      operationCancelRequested.current = false;
+      if (cancelled && cancellationNotice.current === "preview") {
+        cancellationNotice.current = null;
+        onError("质量预览已取消。");
+      } else if (cancelled) {
+        completedCancellation.current = "preview";
+      } else {
+        cancellationNotice.current = null;
+      }
     }
   }, [config, onError, privateKey, publication, selectedBranch, watermarkId]);
 
   const cancelAuthenticityOperation = useCallback(async () => {
+    const operationKind = activeOperationKind.current;
     operationCancelRequested.current = true;
     setCancelling(true);
     try {
       const accepted = await authenticityApi.cancelOperation();
-      if (!accepted) {
+      if (accepted && operationKind) {
+        if (completedCancellation.current === operationKind) {
+          completedCancellation.current = null;
+          onError(operationKind === "preview" ? "质量预览已取消。" : "签名发布已取消。");
+        } else if (activeOperationKind.current === operationKind) {
+          cancellationNotice.current = operationKind;
+        }
+      } else {
         activeOperation.current = false;
+        activeOperationKind.current = null;
+        operationCancelRequested.current = false;
+        cancellationNotice.current = null;
+        completedCancellation.current = null;
         setOutputPreviewBusy(false);
         setPublishing(false);
         setCancelling(false);
       }
     } catch (error) {
       operationCancelRequested.current = false;
+      cancellationNotice.current = null;
+      completedCancellation.current = null;
       setCancelling(false);
       onError(message(error));
     }
@@ -370,10 +402,14 @@ export function usePublicationController({
     setPublishing(true);
     setCancelling(false);
     operationCancelRequested.current = false;
+    cancellationNotice.current = null;
+    completedCancellation.current = null;
     activeOperation.current = true;
+    activeOperationKind.current = "publish";
     setResult(null);
     setPublishMetrics(null);
     onError(null);
+    let cancelled = false;
     try {
       const published = await authenticityApi.publish({
         branchId,
@@ -396,11 +432,22 @@ export function usePublicationController({
     } catch (error) {
       setOutputPreviewOpen(false);
       if (!operationCancelRequested.current) onError(message(error));
+      cancelled = operationCancelRequested.current;
     } finally {
       activeOperation.current = false;
+      activeOperationKind.current = null;
       setPublishing(false);
       setCancelling(false);
       if (selectedBranchIdRef.current === branchId) setBusy(false);
+      operationCancelRequested.current = false;
+      if (cancelled && cancellationNotice.current === "publish") {
+        cancellationNotice.current = null;
+        onError("签名发布已取消。");
+      } else if (cancelled) {
+        completedCancellation.current = "publish";
+      } else {
+        cancellationNotice.current = null;
+      }
     }
   }, [artworkTitle, config, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
 

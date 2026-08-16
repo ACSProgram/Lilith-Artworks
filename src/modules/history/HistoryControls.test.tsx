@@ -71,7 +71,7 @@ describe("BranchSettings", () => {
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       sourcePath: "C:\\work\\replacement.psd",
     }));
-    expect((screen.getByLabelText("工作文件") as HTMLTextAreaElement).value)
+    expect(screen.getByLabelText("工作文件").textContent)
       .toBe("C:\\work\\artwork.psd");
   });
 });

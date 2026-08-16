@@ -136,7 +136,10 @@ function PublishView({
             </>}
           </div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code>{publishMetrics && <small>{publishMetrics.renditionCacheHit ? "已复用质量预览编码" : `重新渲染 ${publishMetrics.renderMs} ms · 编码 ${publishMetrics.encodeMs} ms`} · C2PA/时间戳 {publishMetrics.signingMs} ms</small>}</div></div>}
-          <button className={`${outputPreviewBusy ? "secondary-button" : "primary-button"} publish-command`} type="button" disabled={busy || cancelling} onClick={() => void (outputPreviewBusy ? cancelAuthenticityOperation() : generateOutputPreview())}>{outputPreviewBusy ? (cancelling ? <LoaderCircle className="spin" size={17} /> : <X size={17} />) : <Eye size={17} />}{outputPreviewBusy ? (cancelling ? "正在取消预览" : "取消质量预览") : "生成质量预览"}</button>
+          {outputPreviewBusy ? <div className="output-preview-progress" role="status" aria-live="polite">
+            <div><LoaderCircle className="spin" aria-hidden="true" size={18} /><span><strong>{cancelling ? "正在取消质量预览" : "正在生成质量预览"}</strong><small>{cancelling ? "等待当前处理阶段安全结束" : "正在渲染并编码正式 JPG 预览"}</small></span></div>
+            <button className="secondary-button" type="button" disabled={cancelling} onClick={() => void cancelAuthenticityOperation()}><X aria-hidden="true" size={16} />取消</button>
+          </div> : <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void generateOutputPreview()}><Eye aria-hidden="true" size={17} />生成质量预览</button>}
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
         {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={publishing} cancelling={cancelling} onBack={() => setOutputPreviewOpen(false)} onCancel={() => void cancelAuthenticityOperation()} onPublish={() => void publish()} />}

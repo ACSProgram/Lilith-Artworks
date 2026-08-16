@@ -1,6 +1,6 @@
 import {
   Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
-  MoreHorizontal, Pencil, Play, Trash2, X,
+  ListCollapse, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
@@ -209,6 +209,15 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
           setSelectedNodeId(node.id);
         }
       }}
+      onDoubleClick={() => {
+        if (compactMode || view !== "overview") return;
+        const containingBranches = branchesContainingNode(history, node.id);
+        if (containingBranches.length === 1) {
+          onSelectBranch(containingBranches[0].id);
+          setSelectedNodeId(node.id);
+          setContext(null);
+        }
+      }}
       onContextMenu={(event) => openContext(event, node)}
     >
       <CircleDot size={16} />
@@ -255,7 +264,6 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     </header>
 
     {selectedBranch && <section className="branch-band">
-      <div className="branch-identity"><GitBranch size={18} /><div className="branch-path"><span>{selectedBranch.title}</span><strong>{selectedBranch.sourcePath}</strong></div></div>
       <BranchSettings branch={selectedBranch} disabled={busy || runtime.busy} onSave={saveBranch} />
       <div className="branch-status-actions">
         <BranchScheduleStatus branch={selectedBranch} />
@@ -276,13 +284,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
       {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={() => {
-        if (view === "overview") setView("branch");
         beginCompactMode();
-      }}><MoreHorizontal size={16} />{view === "overview" ? "按当前分支进入精简" : "进入精简模式"}</button>}
+      }}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
     </section>
 
-    {view === "branch" && compactMode && <div className="compact-mode-bar">
-      <MoreHorizontal size={16} /><div><strong>精简模式</strong><span>选择普通中间节点，程序会自动重建增量并整理历史链</span></div>
+    {compactMode && <div className="compact-mode-bar">
+      <ListCollapse aria-hidden="true" size={16} /><div><strong>精简 {selectedBranch?.title}</strong><span>选择当前分支上的普通中间节点</span></div>
       <strong className="compact-count">{compactSelection.size} 个已选</strong>
       <button className="primary-button" type="button" disabled={!compactSelection.size || busy || runtime.busy} onClick={() => {
         const first = branchLine.find((node) => compactSelection.has(node.id));

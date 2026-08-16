@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AuthenticityModule, PublicationPreviewDialog } from "./AuthenticityModule";
 import type { BranchPublication, PublicationPreview } from "./types";
@@ -7,6 +7,8 @@ const api = vi.hoisted(() => ({
   getPublication: vi.fn(),
   previewArtifact: vi.fn(),
   estimate: vi.fn(),
+  previewPublication: vi.fn(),
+  cancelOperation: vi.fn(),
 }));
 
 vi.mock("./api", () => ({ authenticityApi: api }));
@@ -29,6 +31,13 @@ class PreloadedImageMock {
   decode() {
     return Promise.resolve();
   }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 const preview: PublicationPreview = {
@@ -100,6 +109,7 @@ describe("PublicationPreviewDialog", () => {
       return 1;
     });
     vi.stubGlobal("cancelAnimationFrame", vi.fn());
+    api.cancelOperation.mockResolvedValue(true);
   });
 
   it("keeps cancellation reachable when the stored artifact preview is damaged", async () => {
@@ -123,7 +133,43 @@ describe("PublicationPreviewDialog", () => {
     expect(screen.getByRole("alertdialog", { name: "删除本地发布数据" })).toBeTruthy();
   });
 
+  it("shows preview generation separately from its cancel action", async () => {
+    const pending = deferred<PublicationPreview>();
+    const onError = vi.fn();
+    api.getPublication.mockResolvedValue({
+      ...brokenPreviewPublication,
+      config: { ...brokenPreviewPublication.config, certificatePath: "C:/certificate.pem" },
+    });
+    api.previewArtifact.mockResolvedValue(preview.image);
+    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 8 });
+    api.previewPublication.mockReturnValue(pending.promise);
+    render(<AuthenticityModule
+      mode="publish"
+      artworkTitle="Artwork"
+      branches={[{ id: "branch-1", title: "Main", headHistoryId: "history-1" }]}
+      selectedBranchId="branch-1"
+      onSelectBranch={vi.fn()}
+      onError={onError}
+      onNavigateRecord={vi.fn()}
+      onRetryFileCleanup={vi.fn().mockResolvedValue({ failures: [] })}
+    />);
+
+    fireEvent.change(await screen.findByPlaceholderText("输入后仅在本次发布使用"), {
+      target: { value: "private-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "生成质量预览" }));
+
+    expect(await screen.findByText("正在生成质量预览")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(api.cancelOperation).toHaveBeenCalledOnce());
+    expect(screen.getByText("正在取消质量预览")).toBeTruthy();
+
+    await act(async () => { pending.reject(new Error("认证任务已取消")); });
+    await waitFor(() => expect(onError).toHaveBeenCalledWith("质量预览已取消。"));
+  });
+
   afterEach(() => {
+    cleanup();
     vi.unstubAllGlobals();
   });
 

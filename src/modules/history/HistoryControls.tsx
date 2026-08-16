@@ -1,7 +1,7 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, FileOutput, GitFork,
-  LoaderCircle, Trash2, X,
+  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, FileOutput, FilePenLine,
+  GitBranch, GitFork, LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
@@ -152,48 +152,56 @@ export function BranchSettings({
   }, [branch.id, branch.sourcePath, dirty, disabled, enabled, interval, onSave, sourcePath, title, valid]);
 
   return <div className="branch-settings">
-    <div className="branch-settings-heading">
-      <strong>分支设置</strong>
-      <SaveIndicator state={saveState} />
+    <div className="branch-primary">
+      <GitBranch aria-hidden="true" size={18} />
+      <div className="branch-summary">
+        <div className="branch-title-row">
+          <label className="branch-title-field">
+            <span>当前分支</span>
+            <input
+              aria-label="名称"
+              value={title}
+              maxLength={160}
+              disabled={disabled}
+              onChange={(event) => setTitle(event.target.value)}
+            />
+          </label>
+          <SaveIndicator state={saveState} />
+        </div>
+        <div className="branch-source-file">
+          <span>工作文件</span>
+          <strong aria-label="工作文件" title={sourcePath}>{sourcePath}</strong>
+          <button className="icon-button" type="button" title="修改工作文件" disabled={disabled || branch.finalArtifactLocked} onClick={async () => {
+            const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
+            if (typeof value === "string") setSourcePath(value);
+          }}><FilePenLine aria-hidden="true" size={15} /></button>
+        </div>
+      </div>
     </div>
-    <label className="branch-title-field">
-      <span>名称</span>
-      <input
-        value={title}
-        maxLength={160}
-        disabled={disabled}
-        onChange={(event) => setTitle(event.target.value)}
-      />
-    </label>
-    <label className="branch-path-field">
-      <span>工作文件</span>
-      <div className="path-control"><textarea value={sourcePath} readOnly rows={2} title={sourcePath} /><button className="icon-button" type="button" title="修改工作文件" disabled={disabled || branch.finalArtifactLocked} onClick={async () => {
-        const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
-        if (typeof value === "string") setSourcePath(value);
-      }}><FileOutput size={15} /></button></div>
-    </label>
-    <label className="switch-field">
-      <span className="switch-copy"><strong>自动备份</strong><small>{enabled ? "按间隔运行" : "当前已关闭"}</small></span>
-      <input
-        className="switch-input"
-        type="checkbox"
-        checked={enabled}
-        disabled={disabled || branch.finalArtifactLocked}
-        onChange={(event) => setEnabled(event.target.checked)}
-      />
-    </label>
-    <label className="interval-field">
-      <span>间隔</span>
-      <input
-        type="number"
-        min={1}
-        max={10_080}
-        value={interval}
-        disabled={disabled || !enabled || branch.finalArtifactLocked}
-        onChange={(event) => setInterval(Number(event.target.value))}
-      />
-      <span>分钟</span>
-    </label>
+    <div className="branch-backup-controls">
+      <label className="switch-field">
+        <span className="switch-copy"><strong>自动备份</strong><small>{enabled ? "按间隔运行" : "当前已关闭"}</small></span>
+        <input
+          className="switch-input"
+          type="checkbox"
+          checked={enabled}
+          disabled={disabled || branch.finalArtifactLocked}
+          onChange={(event) => setEnabled(event.target.checked)}
+        />
+      </label>
+      <label className="interval-field">
+        <span>间隔</span>
+        <input
+          type="number"
+          min={1}
+          max={10_080}
+          value={interval}
+          disabled={disabled || !enabled || branch.finalArtifactLocked}
+          onChange={(event) => setInterval(Number(event.target.value))}
+        />
+        <span>分钟</span>
+      </label>
+    </div>
   </div>;
 }
 

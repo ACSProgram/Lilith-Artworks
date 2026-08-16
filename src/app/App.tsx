@@ -318,25 +318,31 @@ export function App() {
               <button className="icon-button" type="button" title="关闭设置" onClick={() => setSettingsOpen(false)}><X aria-hidden="true" size={18} /></button>
             </header>
 
-            <div className="settings-section">
+            <div className="settings-content">
+            <div className="settings-section settings-section-wide">
               <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
-              <div className="path-control">
-                <input aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
-                <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
+              <div className="settings-path-field">
+                <label htmlFor="repository-path">仓库位置</label>
+                <div className="path-control">
+                  <input id="repository-path" aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
+                  <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
+                </div>
               </div>
-              <div className="settings-preference-row">
-                <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
-                <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
-                <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
-                  <ShieldCheck aria-hidden="true" size={15} />开始检查
-                </button>
-              </div>
-              <div className="settings-preference-row">
-                <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
-                <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
-                <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
-                  <DatabaseBackup aria-hidden="true" size={15} />创建备份
-                </button>
+              <div className="settings-preference-list settings-repository-actions">
+                <div className="settings-preference-row">
+                  <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
+                  <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
+                    <ShieldCheck aria-hidden="true" size={15} />开始检查
+                  </button>
+                </div>
+                <div className="settings-preference-row">
+                  <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
+                  <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
+                    <DatabaseBackup aria-hidden="true" size={15} />创建备份
+                  </button>
+                </div>
               </div>
               {visibleSettingsRuntime && (
                 <SettingsOperationProgress
@@ -347,7 +353,7 @@ export function App() {
               )}
             </div>
 
-            <div className="settings-section">
+            <div className="settings-section settings-section-left">
               <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
               <div className="settings-preference-list">
                 <label className="settings-preference-row">
@@ -379,7 +385,7 @@ export function App() {
               </div>
             </div>
 
-            <div className="settings-section">
+            <div className="settings-section settings-section-left">
               <div className="settings-section-title"><MonitorCog aria-hidden="true" size={17} /><h3>应用行为</h3></div>
               <div className="settings-preference-list">
                 <label className="settings-preference-row">
@@ -409,6 +415,7 @@ export function App() {
                   <button className="secondary-button" type="button" onClick={() => void appApi.openLegalDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />查看许可</button>
                 </div>
               </div>
+            </div>
             </div>
 
             <footer>

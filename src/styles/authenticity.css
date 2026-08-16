@@ -83,6 +83,12 @@
 .model-info dd { margin: 0; overflow-wrap: anywhere; }
 .trustmark-section .auth-warning { color: var(--warning); }
 .publish-command { width: calc(100% - 32px); margin: 14px 16px 18px; }
+.output-preview-progress { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; margin: 14px 16px 18px; padding: 9px 10px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.output-preview-progress > div { display: grid; grid-template-columns: 22px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+.output-preview-progress > div > svg { color: var(--accent); }
+.output-preview-progress strong, .output-preview-progress small { display: block; }
+.output-preview-progress strong { font-size: 11px; }
+.output-preview-progress small { margin-top: 2px; color: var(--muted); font-size: 9px; }
 .output-settings { grid-template-columns: minmax(0, 1fr) minmax(150px, .65fr); align-items: end; }
 .output-settings > header, .output-settings .range-field { grid-column: 1 / -1; }
 .output-settings .size-preview { min-height: 48px; }

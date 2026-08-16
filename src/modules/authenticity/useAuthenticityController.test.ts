@@ -264,5 +264,6 @@ describe("usePublicationController", () => {
     expect(result.current.outputPreviewBusy).toBe(false);
     expect(result.current.cancelling).toBe(false);
     expect(onError).not.toHaveBeenCalledWith("认证任务已取消");
+    expect(onError).toHaveBeenCalledWith("质量预览已取消。");
   });
 });
