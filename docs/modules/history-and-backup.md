@@ -39,7 +39,9 @@ fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_
 
 提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件。工作文件与 head 的 SHA-256 相同时，worker 仍会打开受控 snapshot、核对数据库摘要并逐块验证内容；文件缺失、格式损坏、块损坏或摘要不匹配时，使用本次已经生成的 snapshot 以新路径发布并更新原 head 节点，验证通过后才把任务记为内容未变化。有效 snapshot 不重写，修复也不创建新历史节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
-恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线；建立 checkpoint 与创建分支属于同一个共享运行锁操作。
+恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。恢复、精简物化和检查点会先完整读取链起点 snapshot，逐块校验，并在每次应用 delta 后把生成 snapshot 的原始内容摘要与对应 `history_nodes.sha256` 对照；已有检查点也必须通过同一校验才能提前返回。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线；建立 checkpoint 与创建分支属于同一个共享运行锁操作。
+
+设置页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。当前仍没有在线整仓复制命令；在该能力和恢复演练完成前，灾备政策是完全退出应用后复制整个仓库目录（数据库与 `artworks/` 必须属于同一份副本），恢复也只能在应用退出时整体替换，并在删除旧副本前运行完整性扫描。
 
 ## 调度
 
@@ -76,6 +78,7 @@ set_history_checkpoint
 compact_history_node
 delete_history_subtree
 delete_artwork_branch
+scrub_repository_integrity
 ```
 
 应用工作流通过公开 `backup::ensure_checkpoint` 固化 fork 或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。完整编译与 GUI 测试状态见当前交接文档。

@@ -9,6 +9,7 @@ import {
   Palette,
   PanelLeftClose,
   Settings,
+  ShieldCheck,
   X,
 } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
@@ -104,14 +105,31 @@ export function App() {
 
   const save = async () => {
     if (!draft) return;
+    const repositoryChanged = draft.repositoryPath.trim() !== repository.rootPath;
     setBusy(true);
     setMessage(null);
+    if (repositoryChanged) setRepository(EMPTY_STATUS);
     try {
       const next = await appApi.saveSettings(draft);
       setSnapshot(next);
       setDraft(next.settings);
       setRepository(await appApi.getRepositoryStatus());
       setSettingsOpen(false);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const scrubRepository = async () => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const report = await appApi.scrubRepositoryIntegrity();
+      setMessage(
+        `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录。`,
+      );
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
@@ -134,6 +152,7 @@ export function App() {
         </section>
       ) : (
         <LibraryModule
+          key={repository.ready ? repository.rootPath : "repository-unavailable"}
           repositoryReady={repository.ready}
           onConfigure={openSettings}
           onError={setMessage}
@@ -184,6 +203,13 @@ export function App() {
               <div className="path-control">
                 <input aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
                 <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
+              </div>
+              <div className="settings-preference-row">
+                <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
+                <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
+                <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={busy || !repository.ready}>
+                  <ShieldCheck aria-hidden="true" size={15} />开始检查
+                </button>
               </div>
             </div>
 

@@ -5,7 +5,7 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Mutex, RwLock,
+        Arc, Mutex, RwLock,
     },
 };
 
@@ -82,13 +82,15 @@ impl Default for ContentSettings {
     }
 }
 
+#[derive(Clone)]
 pub(crate) struct AppState {
-    settings: RwLock<AppSettings>,
+    settings: Arc<RwLock<AppSettings>>,
     settings_path: PathBuf,
     log_directory: PathBuf,
-    warning: RwLock<Option<String>>,
-    validated_repository: Mutex<Option<PathBuf>>,
-    exit_requested: AtomicBool,
+    warning: Arc<RwLock<Option<String>>>,
+    validated_repository: Arc<Mutex<Option<PathBuf>>>,
+    repository_operation: Arc<Mutex<()>>,
+    exit_requested: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -99,12 +101,13 @@ impl AppState {
         warning: Option<String>,
     ) -> Self {
         Self {
-            settings: RwLock::new(settings),
+            settings: Arc::new(RwLock::new(settings)),
             settings_path,
             log_directory,
-            warning: RwLock::new(warning),
-            validated_repository: Mutex::new(None),
-            exit_requested: AtomicBool::new(false),
+            warning: Arc::new(RwLock::new(warning)),
+            validated_repository: Arc::new(Mutex::new(None)),
+            repository_operation: Arc::new(Mutex::new(())),
+            exit_requested: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -132,6 +135,29 @@ impl AppState {
         library::open_existing(&root)?;
         *validated = Some(root.clone());
         Ok(root)
+    }
+
+    pub(crate) fn with_ready_repository<T>(
+        &self,
+        operation: impl FnOnce(&Path) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _lease = self
+            .repository_operation
+            .lock()
+            .map_err(|_| "仓库操作锁已损坏")?;
+        let root = self.ready_repository_path()?;
+        operation(&root)
+    }
+
+    fn with_repository_switch<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, String>,
+    ) -> Result<T, String> {
+        let _lease = self
+            .repository_operation
+            .lock()
+            .map_err(|_| "仓库操作锁已损坏")?;
+        operation()
     }
 
     fn set_validated_repository(&self, root: Option<PathBuf>) -> Result<(), String> {
@@ -261,18 +287,20 @@ pub(crate) fn save_app_settings(
     if settings.version != CURRENT_SETTINGS_VERSION {
         return Err("设置版本不受支持".into());
     }
-    let current_repository = state.repository_path()?;
     let paused = settings.pause_automatic_backups;
     let next = backup_state.run_exclusive(None, || {
-        let prepared_repository = prepare_repository(
-            current_repository.as_deref(),
-            settings.repository_path.trim(),
-        )?;
-        write_json_atomic(&state.settings_path, &settings)?;
-        *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
-        *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
-        state.set_validated_repository(prepared_repository)?;
-        snapshot(state.inner())
+        state.with_repository_switch(|| {
+            let current_repository = state.repository_path()?;
+            let prepared_repository = prepare_repository(
+                current_repository.as_deref(),
+                settings.repository_path.trim(),
+            )?;
+            write_json_atomic(&state.settings_path, &settings)?;
+            *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
+            *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
+            state.set_validated_repository(prepared_repository)?;
+            snapshot(state.inner())
+        })
     })?;
     backup_state.set_automatic_scheduling(!paused);
     backup_state.wake_scheduler();
@@ -433,6 +461,8 @@ fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String>
 
 #[cfg(test)]
 mod tests {
+    use std::{sync::mpsc, thread, time::Duration};
+
     use super::*;
 
     #[test]
@@ -532,5 +562,57 @@ mod tests {
         let error = state.ready_repository_path().unwrap_err();
         assert!(error.contains("不是 Lilith Artworks 仓库"), "{error}");
         assert_eq!(library::take_integrity_check_count(), 0);
+    }
+
+    #[test]
+    fn repository_switch_waits_for_an_active_repository_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("first");
+        let second_root = directory.path().join("second");
+        library::initialize(&first_root).unwrap();
+        library::initialize(&second_root).unwrap();
+        let mut settings = AppSettings::default();
+        settings.repository_path = first_root.to_string_lossy().into_owned();
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let active = state.clone();
+        let active_thread = thread::spawn(move || {
+            active
+                .with_ready_repository(|_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        entered_rx.recv().unwrap();
+
+        let (switched_tx, switched_rx) = mpsc::channel();
+        let switching = state.clone();
+        let switching_thread = thread::spawn(move || {
+            switching
+                .with_repository_switch(|| {
+                    switching.settings.write().unwrap().repository_path =
+                        second_root.to_string_lossy().into_owned();
+                    switched_tx.send(()).unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+
+        assert!(matches!(
+            switched_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        release_tx.send(()).unwrap();
+        switched_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        active_thread.join().unwrap();
+        switching_thread.join().unwrap();
     }
 }

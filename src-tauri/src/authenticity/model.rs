@@ -196,6 +196,7 @@ pub(crate) struct CertificationMatch {
 
 pub(crate) struct ManifestSummary {
     pub(crate) present: bool,
+    pub(crate) validation_accepted: bool,
     pub(crate) validation_state: Option<String>,
     pub(crate) validation_status: Vec<ValidationItem>,
     pub(crate) record_id: Option<String>,

@@ -26,6 +26,7 @@ pub(crate) fn restore(
         .as_deref()
         .ok_or("恢复链起点缺少 snapshot")?;
     let mut current_path = storage::resolve_path(root, snapshot_relative)?;
+    validate_snapshot(&current_path, first, "恢复链起点")?;
     let total = chain.len() as u64;
     let temp_directory = root.join("temp");
     let mut temporaries = Vec::new();
@@ -42,9 +43,10 @@ pub(crate) fn restore(
             .map_err(|error| format!("无法读取恢复 delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建恢复临时文件：{error}"))?;
-        delta
+        let restored = delta
             .apply(&base, &mut base_file, next.as_file_mut())
             .map_err(|error| format!("无法应用恢复 delta：{error}"))?;
+        validate_digest(&restored, &chain[index + 1], "恢复链节点")?;
         next.as_file()
             .sync_all()
             .map_err(|error| format!("无法同步恢复临时文件：{error}"))?;
@@ -91,6 +93,7 @@ pub(crate) fn materialize_snapshot(
             .as_deref()
             .ok_or("恢复链起点缺少 snapshot")?,
     )?;
+    validate_snapshot(&current_path, first, "物化链起点")?;
     let total = chain.len() as u64;
     let temp_directory = root.join("temp");
     let mut temporaries = Vec::new();
@@ -107,9 +110,10 @@ pub(crate) fn materialize_snapshot(
             .map_err(|error| format!("无法读取 delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建临时 snapshot：{error}"))?;
-        delta
+        let restored = delta
             .apply(&base, &mut base_file, next.as_file_mut())
             .map_err(|error| format!("无法应用 delta：{error}"))?;
+        validate_digest(&restored, &chain[index + 1], "物化链节点")?;
         next.as_file()
             .sync_all()
             .map_err(|error| format!("无法同步临时 snapshot：{error}"))?;
@@ -139,6 +143,22 @@ pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), Str
     ensure_checkpoint_with_progress(root, history_id, || false, |_, _, _| {})
 }
 
+pub(crate) fn scrub_history(
+    root: &Path,
+    cancelled: impl Fn() -> bool,
+    progress: impl Fn(u64, u64),
+) -> Result<u64, String> {
+    let node_ids = history::all_node_ids(root)?;
+    let total = node_ids.len() as u64;
+    for (index, history_id) in node_ids.iter().enumerate() {
+        ensure_not_cancelled(&cancelled)?;
+        let snapshot = materialize_snapshot(root, history_id, &cancelled, |_, _, _| {})?;
+        drop(snapshot);
+        progress(index as u64 + 1, total);
+    }
+    Ok(total)
+}
+
 pub(crate) fn ensure_checkpoint_with_progress(
     root: &Path,
     history_id: &str,
@@ -147,7 +167,9 @@ pub(crate) fn ensure_checkpoint_with_progress(
 ) -> Result<(), String> {
     ensure_not_cancelled(&cancelled)?;
     let target = history::load_node(root, history_id)?;
-    if target.snapshot_path.is_some() {
+    if let Some(relative) = target.snapshot_path.as_deref() {
+        let path = storage::resolve_path(root, relative)?;
+        validate_snapshot(&path, &target, "检查点")?;
         history::mark_checkpoint(root, history_id)?;
         progress("检查点已就绪", 1, 1);
         return Ok(());
@@ -161,6 +183,7 @@ pub(crate) fn ensure_checkpoint_with_progress(
             .as_deref()
             .ok_or("恢复链起点缺少 snapshot")?,
     )?;
+    validate_snapshot(&current_path, first, "检查点恢复链起点")?;
     let total = chain.len().max(1) as u64;
     progress("正在准备检查点历史链", 0, total);
     let temp_directory = root.join("temp");
@@ -181,9 +204,10 @@ pub(crate) fn ensure_checkpoint_with_progress(
             .map_err(|error| format!("无法读取 checkpoint delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建 checkpoint 临时文件：{error}"))?;
-        delta
+        let restored = delta
             .apply(&base, &mut base_file, next.as_file_mut())
             .map_err(|error| format!("无法应用 checkpoint delta：{error}"))?;
+        validate_digest(&restored, &chain[index + 1], "检查点恢复链节点")?;
         next.as_file()
             .sync_all()
             .map_err(|error| format!("无法同步 checkpoint：{error}"))?;
@@ -214,6 +238,37 @@ pub(crate) fn ensure_checkpoint_with_progress(
     }
     progress("检查点已就绪", total, total);
     Ok(())
+}
+
+fn validate_snapshot(
+    path: &Path,
+    record: &history::HistoryRecord,
+    label: &str,
+) -> Result<(), String> {
+    let mut file =
+        File::open(path).map_err(|error| format!("无法打开{label} snapshot：{error}"))?;
+    let snapshot =
+        ChunkFile::open(&mut file).map_err(|error| format!("无法读取{label} snapshot：{error}"))?;
+    validate_digest(&snapshot, record, label)?;
+    snapshot
+        .copy_original(&mut file, &mut std::io::sink())
+        .map_err(|error| format!("{label} snapshot 完整性校验失败：{error}"))
+}
+
+fn validate_digest(
+    snapshot: &ChunkFile,
+    record: &history::HistoryRecord,
+    label: &str,
+) -> Result<(), String> {
+    if snapshot
+        .file_digest()
+        .to_hex()
+        .eq_ignore_ascii_case(&record.sha256)
+    {
+        Ok(())
+    } else {
+        Err(format!("{label} snapshot 摘要与历史数据库不匹配"))
+    }
 }
 
 fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {

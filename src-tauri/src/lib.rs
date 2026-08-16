@@ -261,6 +261,7 @@ pub fn run() {
             app::settings::open_settings_directory,
             app::cleanup_commands::retry_pending_file_cleanup,
             app::workflows::acknowledge_backup_disable_notices,
+            app::workflows::scrub_repository_integrity,
             library::get_repository_status,
             library::list_library_tree,
             library::search_library,

@@ -8,7 +8,7 @@ mod worker;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use commands::*;
-pub(crate) use restore::ensure_checkpoint;
+pub(crate) use restore::{ensure_checkpoint, scrub_history};
 pub(crate) use runtime::BackupState;
 
 #[derive(Debug, Clone, Serialize, Default)]

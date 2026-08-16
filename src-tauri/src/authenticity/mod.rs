@@ -5,6 +5,7 @@ mod model;
 mod pipeline;
 mod publication_repository;
 mod repository;
+mod scrub;
 mod state;
 mod trustmark;
 
@@ -15,4 +16,5 @@ pub(crate) use model::{
 };
 pub(crate) use publication_repository::{branch_head, remove_artifact};
 pub(crate) use repository::get_publication;
+pub(crate) use scrub::scrub_controlled_files;
 pub(crate) use state::AuthenticityState;

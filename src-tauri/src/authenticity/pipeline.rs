@@ -107,6 +107,10 @@ pub(crate) fn publish(
     mut request: PublishBranchRequest,
 ) -> AuthenticityResult<PublishedOutput> {
     let private_key = Zeroizing::new(std::mem::take(&mut request.private_key_pem));
+    request.config.title = request.config.title.trim().to_owned();
+    request.config.creator = request.config.creator.trim().to_owned();
+    request.config.rights_statement = request.config.rights_statement.trim().to_owned();
+    request.config.authentication_content = request.config.authentication_content.trim().to_owned();
     request.config.trustmark_enabled =
         request.config.trustmark_enabled && !request.config.additional_regions.is_empty();
     validate_publish_request(&request, &private_key)?;
@@ -179,6 +183,25 @@ pub(crate) fn publish(
     if !manifest.present {
         return Err(AuthenticityError::Task(
             "签名完成后未能回读 C2PA 清单".into(),
+        ));
+    }
+    if !manifest.validation_accepted {
+        return Err(AuthenticityError::Task(
+            "签名后的 C2PA 清单未通过完整性验证".into(),
+        ));
+    }
+    if manifest.record_id.as_deref() != Some(record_id.as_str())
+        || manifest.title.as_deref() != Some(request.config.title.trim())
+        || manifest.creator.as_deref() != Some(request.config.creator.trim())
+        || manifest.rights_statement.as_deref() != Some(request.config.rights_statement.trim())
+        || manifest.authentication_content.as_deref()
+            != Some(request.config.authentication_content.trim())
+        || (request.config.trustmark_enabled
+            && manifest.watermark_id.as_deref() != Some(identifier.as_str()))
+        || (!request.config.trustmark_enabled && manifest.watermark_id.is_some())
+    {
+        return Err(AuthenticityError::Task(
+            "签名后的 C2PA 声明与本次发布参数不匹配".into(),
         ));
     }
     let output_path = storage::display_path(&output);

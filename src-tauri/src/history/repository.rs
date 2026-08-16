@@ -218,6 +218,19 @@ pub(crate) fn load_node(root: &Path, history_id: &str) -> Result<HistoryRecord, 
     load_node_from(&connection, history_id)
 }
 
+pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
+    let connection = storage::open(root)?;
+    let mut statement = connection
+        .prepare("SELECT id FROM history_nodes ORDER BY created_ms, id")
+        .map_err(storage::database_error)?;
+    let ids = statement
+        .query_map([], |row| row.get(0))
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    Ok(ids)
+}
+
 fn load_node_from(
     connection: &rusqlite::Connection,
     history_id: &str,

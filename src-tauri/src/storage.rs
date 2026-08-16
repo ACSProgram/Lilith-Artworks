@@ -1,9 +1,12 @@
 use std::{
+    fs::File,
+    io::Read,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OpenFlags};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 pub(crate) const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
@@ -70,6 +73,51 @@ pub(crate) fn validate_sha256(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+pub(crate) fn validate_uuid(value: &str, label: &str) -> Result<(), String> {
+    Uuid::parse_str(value)
+        .map(|_| ())
+        .map_err(|_| format!("{label}不是有效 UUID"))
+}
+
+pub(crate) fn validate_repository_relative_path(value: &str) -> Result<(), String> {
+    let path = Path::new(value);
+    if value.is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|part| !matches!(part, Component::Normal(_)))
+    {
+        return Err("仓库存储路径无效".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn verify_file_sha256(
+    path: &Path,
+    expected_sha256: &str,
+    label: &str,
+) -> Result<(), String> {
+    validate_sha256(expected_sha256)?;
+    let mut file = File::open(path).map_err(|error| format!("无法读取{label}：{error}"))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("无法校验{label}：{error}"))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let actual = hex::encode_upper(hasher.finalize());
+    if actual.eq_ignore_ascii_case(expected_sha256) {
+        Ok(())
+    } else {
+        Err(format!("{label}已损坏或被替换，SHA-256 与仓库记录不匹配"))
+    }
+}
+
 pub(crate) fn normalize_source_path(
     root: &Path,
     source_path: &Path,
@@ -134,15 +182,8 @@ pub(crate) fn relative_path(root: &Path, path: &Path) -> Result<String, String> 
 }
 
 pub(crate) fn resolve_path(root: &Path, relative: &str) -> Result<PathBuf, String> {
-    let path = Path::new(relative);
-    if path.is_absolute()
-        || path
-            .components()
-            .any(|part| matches!(part, Component::ParentDir))
-    {
-        return Err("仓库存储路径无效".into());
-    }
-    Ok(root.join(path))
+    validate_repository_relative_path(relative)?;
+    Ok(root.join(relative))
 }
 
 #[cfg(test)]
@@ -181,5 +222,22 @@ mod tests {
         let output = directory.path().join("exports").join("signed.jpg");
 
         ensure_outside_repository(&root, &output, "发布输出路径").unwrap();
+    }
+
+    #[test]
+    fn detects_replaced_controlled_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("controlled.bin");
+        std::fs::write(&path, b"replacement").unwrap();
+
+        let error = verify_file_sha256(&path, &"A".repeat(64), "受控文件").unwrap_err();
+
+        assert!(error.contains("已损坏或被替换"), "{error}");
+    }
+
+    #[test]
+    fn rejects_parent_repository_path_components() {
+        assert!(validate_repository_relative_path("../outside.bin").is_err());
+        assert!(validate_repository_relative_path("artworks/inside.bin").is_ok());
     }
 }

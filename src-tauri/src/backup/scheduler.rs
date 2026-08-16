@@ -14,15 +14,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         if !state.wait_scheduler(Duration::ZERO) {
             break;
         }
-        let root = match app.state::<AppState>().ready_repository_path() {
-            Ok(root) => root,
-            _ => {
-                if !state.wait_scheduler(ERROR_RETRY) {
-                    break;
-                }
-                continue;
-            }
-        };
+        let app_state = app.state::<AppState>().inner().clone();
         if app.state::<AppState>().automatic_backups_paused() {
             state.set_automatic_scheduling(false);
             if !state.wait_scheduler(IDLE_RECHECK) {
@@ -31,7 +23,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             continue;
         }
         state.set_automatic_scheduling(true);
-        let branches = match history::list_scheduled(&root) {
+        let branches = match app_state.with_ready_repository(history::list_scheduled) {
             Ok(branches) => branches,
             Err(_) => {
                 if !state.wait_scheduler(ERROR_RETRY) {
@@ -67,19 +59,30 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         }
         if let Some(branch_id) = due {
             let result = state.run_exclusive(Some(&branch_id), || {
-                worker::run_backup(&root, &branch_id, "", "automatic", || state.cancelled())
+                app_state.with_ready_repository(|root| {
+                    let result =
+                        worker::run_backup(root, &branch_id, "", "automatic", || state.cancelled());
+                    if let Err(error) = result.as_ref() {
+                        let disabled = storage::now_ms()
+                            .and_then(|failed_ms| {
+                                history::mark_automatic_backup_error(
+                                    root,
+                                    &branch_id,
+                                    error,
+                                    failed_ms,
+                                )
+                            })
+                            .unwrap_or(false);
+                        if disabled {
+                            log::error!("automatic backup disabled after repeated failures for branch {branch_id}: {error}");
+                        } else {
+                            log::error!("automatic backup failed for branch {branch_id}: {error}");
+                        }
+                    }
+                    result
+                })
             });
-            if let Err(error) = result {
-                let disabled = storage::now_ms()
-                    .and_then(|failed_ms| {
-                        history::mark_automatic_backup_error(&root, &branch_id, &error, failed_ms)
-                    })
-                    .unwrap_or(false);
-                if disabled {
-                    log::error!("automatic backup disabled after repeated failures for branch {branch_id}: {error}");
-                } else {
-                    log::error!("automatic backup failed for branch {branch_id}: {error}");
-                }
+            if result.is_err() {
                 if !state.wait_scheduler(ERROR_RETRY) {
                     break;
                 }

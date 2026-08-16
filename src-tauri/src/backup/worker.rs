@@ -343,6 +343,31 @@ mod tests {
             restore_and_read(&root, directory.path(), &first_id),
             vec![b'A'; 96 * 1024]
         );
+        assert_eq!(
+            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn repository_scrub_rejects_a_damaged_delta() {
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let delta_relative = history::load_node(&root, second.history_id.as_deref().unwrap())
+            .unwrap()
+            .delta_path
+            .unwrap();
+        fs::write(
+            storage::resolve_path(&root, &delta_relative).unwrap(),
+            b"damaged delta",
+        )
+        .unwrap();
+
+        let error = super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap_err();
+
+        assert!(error.contains("delta"), "{error}");
     }
 
     #[test]
@@ -421,5 +446,37 @@ mod tests {
             restore_and_read(&root, directory.path(), &first_id),
             vec![b'A'; 96 * 1024]
         );
+    }
+
+    #[test]
+    fn restore_and_checkpoint_reject_a_replaced_snapshot() {
+        let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
+        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first_id = first.history_id.unwrap();
+        let relative = history::load_node(&root, &first_id)
+            .unwrap()
+            .snapshot_path
+            .unwrap();
+        fs::write(
+            storage::resolve_path(&root, &relative).unwrap(),
+            b"replacement",
+        )
+        .unwrap();
+
+        let output = directory.path().join("replaced-restored.bin");
+        let restore_error = super::super::restore::restore(
+            &root,
+            &first_id,
+            output.to_str().unwrap(),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap_err();
+        let checkpoint_error =
+            super::super::restore::ensure_checkpoint(&root, &first_id).unwrap_err();
+
+        assert!(restore_error.contains("snapshot"), "{restore_error}");
+        assert!(checkpoint_error.contains("snapshot"), "{checkpoint_error}");
+        assert!(!output.exists());
     }
 }

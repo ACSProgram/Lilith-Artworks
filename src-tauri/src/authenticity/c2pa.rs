@@ -6,7 +6,7 @@ use std::{
 
 use c2pa::{
     assertions::SoftBinding, create_signer, crypto::raw_signature::SigningAlg, Builder,
-    BuilderIntent, ClaimGeneratorInfo, Reader,
+    BuilderIntent, ClaimGeneratorInfo, Reader, ValidationState,
 };
 use serde_json::{json, Value};
 
@@ -183,6 +183,7 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         Err(c2pa::Error::JumbfNotFound | c2pa::Error::JumbfBoxNotFound) => {
             return Ok(ManifestSummary {
                 present: false,
+                validation_accepted: false,
                 validation_state: None,
                 validation_status: Vec::new(),
                 record_id: None,
@@ -196,6 +197,11 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         }
         Err(error) => return Err(error.into()),
     };
+    let validation_state = reader.validation_state();
+    let validation_accepted = matches!(
+        validation_state,
+        ValidationState::Valid | ValidationState::Trusted
+    );
     let validation_status = reader
         .validation_status()
         .unwrap_or_default()
@@ -233,7 +239,8 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         });
     Ok(ManifestSummary {
         present: manifest.is_some(),
-        validation_state: Some(format!("{:?}", reader.validation_state())),
+        validation_accepted,
+        validation_state: Some(format!("{validation_state:?}")),
         validation_status,
         record_id,
         watermark_id,

@@ -10,6 +10,7 @@ pub(crate) struct BranchPublicationTarget {
     pub(crate) history_id: String,
     pub(crate) artifact_id: String,
     pub(crate) artifact_path: String,
+    pub(crate) source_sha256: String,
     pub(crate) media_type: String,
 }
 
@@ -89,7 +90,7 @@ pub(crate) fn publication_target(
 ) -> Result<BranchPublicationTarget, String> {
     let mut target = storage::open(root)?
         .query_row(
-            "SELECT f.history_id, f.id, f.source_path, f.media_type
+            "SELECT f.history_id, f.id, f.source_path, f.source_sha256, f.media_type
              FROM branches b
              JOIN library_nodes artwork ON artwork.id = b.artwork_id
              JOIN final_artifacts f ON f.branch_id = b.id
@@ -100,7 +101,8 @@ pub(crate) fn publication_target(
                     history_id: row.get(0)?,
                     artifact_id: row.get(1)?,
                     artifact_path: row.get(2)?,
-                    media_type: row.get(3)?,
+                    source_sha256: row.get(3)?,
+                    media_type: row.get(4)?,
                 })
             },
         )
@@ -109,6 +111,11 @@ pub(crate) fn publication_target(
         .ok_or_else(|| "分支尚未进入发布状态".to_owned())?;
     target.artifact_path =
         storage::display_path(&storage::resolve_path(root, &target.artifact_path)?);
+    storage::verify_file_sha256(
+        Path::new(&target.artifact_path),
+        &target.source_sha256,
+        "仓库最终成品",
+    )?;
     Ok(target)
 }
 

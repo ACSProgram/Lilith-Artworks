@@ -51,6 +51,7 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
         create_directories(root)?;
     } else {
         super::schema::validate_and_migrate(&connection)?;
+        super::schema::validate_repository_semantics(&connection)?;
         create_directories(root)?;
     }
     Ok(())
@@ -63,6 +64,7 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
 
     let connection = storage::open(root)?;
     super::schema::validate_and_migrate(&connection)?;
+    super::schema::validate_repository_semantics(&connection)?;
     create_directories(root)
 }
 
@@ -613,40 +615,11 @@ fn permanently_delete_trash_root(
             .map_err(database_error)?;
         rows
     };
-    let external_outputs = {
-        let mut statement = transaction
-            .prepare(
-                "SELECT record.output_path, record.output_sha256
-                 FROM certification_records record
-                 JOIN branches branch ON branch.id = record.branch_id
-                 WHERE branch.artwork_id IN (
-                   SELECT id FROM library_nodes
-                   WHERE trash_root_id = ?1 AND kind = 'artwork'
-                 )",
-            )
-            .map_err(database_error)?;
-        let rows = statement
-            .query_map([id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(database_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(database_error)?;
-        rows
-    };
     let mut cleanup_ids = Vec::new();
     for artwork_id in artwork_ids {
         cleanup_ids.push(cleanup::enqueue_repository_directory(
             transaction,
             &format!("artworks/{artwork_id}"),
-            "permanent_artwork_deletion",
-        )?);
-    }
-    for (output_path, output_sha256) in external_outputs {
-        cleanup_ids.push(cleanup::enqueue_external_file(
-            transaction,
-            &output_path,
-            &output_sha256,
             "permanent_artwork_deletion",
         )?);
     }
@@ -1118,6 +1091,36 @@ mod tests {
     }
 
     #[test]
+    fn opening_repository_rejects_invalid_ids_and_traversal_paths() {
+        let fixture = Fixture::new();
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "INSERT INTO pending_file_cleanup
+                 (id, path_kind, path, reason, created_ms)
+                 VALUES ('not-a-uuid', 'repository_file', 'artworks/file.bin', 'test', 0)",
+                [],
+            )
+            .unwrap();
+        drop(connection);
+
+        let id_error = open_existing(&fixture.root).unwrap_err();
+        assert!(id_error.contains("不是有效 UUID"), "{id_error}");
+
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "UPDATE pending_file_cleanup SET id = ?1, path = '../outside.bin'",
+                [storage::new_id()],
+            )
+            .unwrap();
+        drop(connection);
+
+        let path_error = open_existing(&fixture.root).unwrap_err();
+        assert!(path_error.contains("仓库存储路径无效"), "{path_error}");
+    }
+
+    #[test]
     fn discovers_and_renames_alternate_repository_database() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
@@ -1141,14 +1144,18 @@ mod tests {
         let alternate = root.join("legacy.sqlite3");
         let preferred_wal = sqlite_sidecar_path(&preferred, "-wal");
         let alternate_wal = sqlite_sidecar_path(&alternate, "-wal");
+        let group_id = storage::new_id();
 
         let connection = storage::open(&root).unwrap();
         connection
-            .execute_batch(
-                "PRAGMA wal_autocheckpoint = 0;
-                 INSERT INTO library_nodes
+            .execute_batch("PRAGMA wal_autocheckpoint = 0;")
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO library_nodes
                    (id, parent_id, kind, title, position, created_ms, updated_ms)
-                 VALUES ('wal-group', NULL, 'group', 'Recovered from WAL', 0, 1, 1);",
+                 VALUES (?1, NULL, 'group', 'Recovered from WAL', 0, 1, 1)",
+                [&group_id],
             )
             .unwrap();
         assert!(preferred_wal.is_file());
@@ -1163,8 +1170,8 @@ mod tests {
         let recovered: i64 = storage::open(&root)
             .unwrap()
             .query_row(
-                "SELECT COUNT(*) FROM library_nodes WHERE id = 'wal-group'",
-                [],
+                "SELECT COUNT(*) FROM library_nodes WHERE id = ?1",
+                [&group_id],
                 |row| row.get(0),
             )
             .unwrap();
@@ -1398,6 +1405,8 @@ mod tests {
     #[test]
     fn permanently_deletes_published_artwork_without_foreign_key_failure() {
         let fixture = Fixture::new();
+        let external_output = fixture.root.parent().unwrap().join("published-output.jpg");
+        fs::write(&external_output, b"published output").unwrap();
         let connection = open(&fixture.root).unwrap();
         connection
             .execute(
@@ -1430,6 +1439,24 @@ mod tests {
                 params![fixture.artwork.branch_id, "B".repeat(64)],
             )
             .unwrap();
+        connection
+            .execute(
+                "INSERT INTO certification_records
+                 (id, final_artifact_id, branch_id, history_id, watermark_id,
+                  trustmark_enabled, output_path, stored_path, output_sha256,
+                  output_bytes, title, creator, rights_statement,
+                  authentication_content, regions_json, created_ms)
+                 VALUES ('published-record', 'published-artifact', ?1,
+                         'published-history', NULL, 0, ?2,
+                         'artworks/published-record.jpg', ?3, 16,
+                         'Title', '', '', '', '[]', 1)",
+                params![
+                    fixture.artwork.branch_id,
+                    storage::display_path(&external_output),
+                    "C".repeat(64)
+                ],
+            )
+            .unwrap();
         drop(connection);
         trash_nodes(
             &fixture.root,
@@ -1437,11 +1464,12 @@ mod tests {
         )
         .unwrap();
 
-        permanently_delete_trash(
+        let cleanup_ids = permanently_delete_trash(
             &fixture.root,
             std::slice::from_ref(&fixture.artwork.artwork_id),
         )
         .unwrap();
+        let report = crate::cleanup::run(&fixture.root, &cleanup_ids).unwrap();
 
         let connection = open(&fixture.root).unwrap();
         let remaining: i64 = connection
@@ -1452,5 +1480,15 @@ mod tests {
             )
             .unwrap();
         assert_eq!(remaining, 0);
+        assert!(report.failures.is_empty());
+        assert!(external_output.is_file());
+        let external_cleanup_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pending_file_cleanup WHERE path_kind = 'external_file'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(external_cleanup_count, 0);
     }
 }

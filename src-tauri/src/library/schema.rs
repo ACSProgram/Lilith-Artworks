@@ -1,5 +1,7 @@
 use rusqlite::{Connection, OptionalExtension};
 
+use crate::storage;
+
 #[cfg(test)]
 use std::cell::Cell;
 
@@ -293,6 +295,85 @@ pub(super) fn validate_and_migrate(connection: &Connection) -> Result<(), String
 
 pub(super) fn validate_current(connection: &Connection) -> Result<(), String> {
     validate_current_version(repository_version(connection)?)
+}
+
+pub(super) fn validate_repository_semantics(connection: &Connection) -> Result<(), String> {
+    let mut foreign_keys = connection
+        .prepare("PRAGMA foreign_key_check")
+        .map_err(storage::database_error)?;
+    if foreign_keys.exists([]).map_err(storage::database_error)? {
+        return Err("作品数据库外键完整性检查失败".into());
+    }
+    drop(foreign_keys);
+
+    let mut ids = connection
+        .prepare(
+            "SELECT 'library_nodes.id', id FROM library_nodes
+             UNION ALL SELECT 'artworks.id', id FROM artworks
+             UNION ALL SELECT 'branches.id', id FROM branches
+             UNION ALL SELECT 'history_nodes.id', id FROM history_nodes
+             UNION ALL SELECT 'final_artifacts.id', id FROM final_artifacts
+             UNION ALL SELECT 'certification_records.id', id FROM certification_records
+             UNION ALL SELECT 'pending_file_cleanup.id', id FROM pending_file_cleanup",
+        )
+        .map_err(storage::database_error)?;
+    let id_rows = ids
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?;
+    for row in id_rows {
+        let (label, id) = row.map_err(storage::database_error)?;
+        storage::validate_uuid(&id, &label)?;
+    }
+    drop(ids);
+
+    let mut paths = connection
+        .prepare(
+            "SELECT 'history_nodes.snapshot_path', snapshot_path FROM history_nodes
+               WHERE snapshot_path IS NOT NULL
+             UNION ALL SELECT 'history_nodes.delta_path', delta_path FROM history_nodes
+               WHERE delta_path IS NOT NULL
+             UNION ALL SELECT 'history_edges.delta_path', delta_path FROM history_edges
+             UNION ALL SELECT 'final_artifacts.source_path', source_path FROM final_artifacts
+             UNION ALL SELECT 'certification_records.stored_path', stored_path
+               FROM certification_records
+             UNION ALL SELECT 'pending_file_cleanup.path', path FROM pending_file_cleanup
+               WHERE path_kind <> 'external_file'",
+        )
+        .map_err(storage::database_error)?;
+    let path_rows = paths
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?;
+    for row in path_rows {
+        let (label, path) = row.map_err(storage::database_error)?;
+        storage::validate_repository_relative_path(&path)
+            .map_err(|error| format!("{label} 无效：{error}"))?;
+    }
+    drop(paths);
+
+    let mut hashes = connection
+        .prepare(
+            "SELECT 'history_nodes.sha256', sha256 FROM history_nodes
+             UNION ALL SELECT 'final_artifacts.source_sha256', source_sha256 FROM final_artifacts
+             UNION ALL SELECT 'certification_records.output_sha256', output_sha256
+               FROM certification_records
+             UNION ALL SELECT 'pending_file_cleanup.expected_sha256', expected_sha256
+               FROM pending_file_cleanup WHERE expected_sha256 IS NOT NULL",
+        )
+        .map_err(storage::database_error)?;
+    let hash_rows = hashes
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?;
+    for row in hash_rows {
+        let (label, hash) = row.map_err(storage::database_error)?;
+        storage::validate_sha256(&hash).map_err(|error| format!("{label} 无效：{error}"))?;
+    }
+    Ok(())
 }
 
 fn repository_version(connection: &Connection) -> Result<i64, String> {

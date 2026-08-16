@@ -40,3 +40,9 @@ export interface RepositoryStatus {
   databasePath: string;
   error: string | null;
 }
+
+export interface RepositoryScrubReport {
+  historyNodes: number;
+  finalArtifacts: number;
+  certificationRecords: number;
+}
