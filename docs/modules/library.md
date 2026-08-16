@@ -24,6 +24,7 @@
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
 - Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器和文件清理重试，并把认证记录转换为 `{ artworkId, branchId, recordId }` 导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
 - `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
+- `src/app/App.repositorySwitch.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互仍按当前交接清单人工验收。
 
 ## 仓库打开与初始化
 
