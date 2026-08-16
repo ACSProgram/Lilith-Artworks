@@ -1,12 +1,12 @@
 import {
-  Ban, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
+  Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
   MoreHorizontal, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
 import { formatBytes } from "../../shared/format";
 import {
-  BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
+  BranchScheduleStatus, BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
 } from "./HistoryControls";
 import type { ConfirmRequest } from "./HistoryControls";
 import { HistoryTimeline, Mindmap } from "./HistoryGraph";
@@ -258,13 +258,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="branch-identity"><GitBranch size={18} /><div className="branch-path"><span>{selectedBranch.title}</span><strong>{selectedBranch.sourcePath}</strong></div></div>
       <BranchSettings branch={selectedBranch} disabled={busy || runtime.busy} onSave={saveBranch} />
       <div className="branch-status-actions">
-        <div className={`branch-schedule${selectedBranch.lastError ? " error" : ""}`}>
-          {selectedBranch.finalArtifactLocked ? <><Ban size={16} />成品已锁定 · 已发布 {selectedBranch.publishedCount} 条</>
-            : selectedBranch.lastError && !selectedBranch.backupEnabled ? <>自动备份已关闭（连续 {selectedBranch.consecutiveBackupFailures} 次失败） · {selectedBranch.lastError}</>
-              : selectedBranch.lastError ? <>备份失败，将按策略重试 · {selectedBranch.lastError}</>
-              : selectedBranch.backupEnabled ? <><Check size={16} />每 {selectedBranch.backupIntervalMinutes} 分钟自动备份 · {selectedBranch.lastSuccessMs ? `最近成功 ${new Date(selectedBranch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}</>
-                : "自动备份已关闭"}
-        </div>
+        <BranchScheduleStatus branch={selectedBranch} />
         {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={busy || runtime.busy} onClick={() => {
           const origin = history.nodes.find((node) => node.id === selectedBranch.createdFromHistoryId);
           if (origin) setConfirmRequest({ kind: "delete-branch", node: origin, branch: selectedBranch });

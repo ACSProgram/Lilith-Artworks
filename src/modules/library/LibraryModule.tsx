@@ -34,7 +34,13 @@ interface LibraryModuleProps {
   onError: (message: string | null) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
   onAcknowledgeBackupDisableNotices: (artworkIds: string[]) => Promise<void>;
+  onOpenBackupDisableNotice: () => Promise<BackupDisableNoticeTarget | null>;
   renderArtworkWorkspace: (props: LibraryArtworkWorkspaceProps) => ReactNode;
+}
+
+export interface BackupDisableNoticeTarget {
+  artworkId: string;
+  branchId: string;
 }
 
 export interface ArtworkTraceTarget {
@@ -52,13 +58,21 @@ export interface LibraryArtworkWorkspaceProps {
   onNavigateRecord: (target: ArtworkTraceTarget) => void;
 }
 
+interface LibraryWorkspaceTarget {
+  artworkId: string;
+  branchId: string;
+  recordId: string | null;
+  initialView: "history" | "publish";
+  navigationKey: number;
+}
+
 interface ContextState {
   node: LibraryNode | null;
   x: number;
   y: number;
 }
 
-export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices, renderArtworkWorkspace }: LibraryModuleProps) {
+export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices, onOpenBackupDisableNotice, renderArtworkWorkspace }: LibraryModuleProps) {
   const controller = useLibraryController({ repositoryReady, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices });
   const {
     tree, loading, operationBusy, expandedIds, setExpandedIds, selectedIds, setSelectedIds,
@@ -71,7 +85,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
   const [context, setContext] = useState<ContextState | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
-  const [traceTarget, setTraceTarget] = useState<(ArtworkTraceTarget & { navigationKey: number }) | null>(null);
+  const [workspaceTarget, setWorkspaceTarget] = useState<LibraryWorkspaceTarget | null>(null);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
 
@@ -158,9 +172,53 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     setSelectedIds(new Set([result.id]));
     setAnchorId(result.id);
     setActiveId(result.id);
-    setTraceTarget(null);
+    setWorkspaceTarget(null);
     setQuery("");
     setSearchResults([]);
+  };
+
+  const navigateToArtwork = (
+    target: Omit<LibraryWorkspaceTarget, "navigationKey">,
+    missingMessage: string,
+  ) => {
+    const node = nodeById.get(target.artworkId);
+    if (!node) {
+      onError(missingMessage);
+      return;
+    }
+    setExpandedIds((current) => {
+      const ancestors: string[] = [];
+      let parentId = node.parentId;
+      while (parentId) {
+        ancestors.push(parentId);
+        parentId = nodeById.get(parentId)?.parentId ?? null;
+      }
+      return new Set([...current, ...ancestors]);
+    });
+    setSelectedIds(new Set([target.artworkId]));
+    setAnchorId(target.artworkId);
+    setActiveId(target.artworkId);
+    setWorkspaceTarget((current) => ({
+      ...target,
+      navigationKey: (current?.navigationKey ?? 0) + 1,
+    }));
+  };
+
+  const openBackupDisableNotice = async () => {
+    try {
+      const target = await onOpenBackupDisableNotice();
+      if (!target) {
+        onError("待处理的自动备份关闭通知已经清除。");
+        return;
+      }
+      navigateToArtwork({
+        ...target,
+        recordId: null,
+        initialView: "history",
+      }, "自动备份通知所属 Artwork 当前不在作品树中。");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    }
   };
 
   return (
@@ -239,7 +297,10 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
         {backupNoticeCount > 0 && <div className="backup-disable-alert" role="alert">
           <TriangleAlert aria-hidden="true" size={16} />
           <span><strong>{backupNoticeCount} 个分支的自动备份已关闭</strong><small>连续 5 次读取或备份失败，请检查工作文件路径后手动重新启用。</small></span>
-          <button type="button" disabled={operationBusy} onClick={() => void acknowledgeBackupDisableNotices(backupNoticeArtworkIds)}>知道了</button>
+          <div className="backup-disable-alert-actions">
+            <button type="button" disabled={operationBusy} onClick={() => void openBackupDisableNotice()}>查看分支设置</button>
+            <button type="button" disabled={operationBusy} onClick={() => void acknowledgeBackupDisableNotices(backupNoticeArtworkIds)}>知道了</button>
+          </div>
         </div>}
 
         <div className="tree-scroll">
@@ -269,7 +330,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
                 setSelectedIds(next.ids);
                 setAnchorId(next.anchorId);
                 setActiveId(node.id);
-                setTraceTarget(null);
+                setWorkspaceTarget(null);
               }}
               onMove={(request: MoveLibraryNodesRequest) => {
                 void moveNodes(request).catch(() => undefined);
@@ -299,32 +360,15 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
         ) : activeNode?.kind === "artwork" && selectedIds.size === 1 ? (
           renderArtworkWorkspace({
             artworkId: activeNode.id,
-            initialView: traceTarget?.artworkId === activeNode.id ? "publish" : "history",
-            initialBranchId: traceTarget?.artworkId === activeNode.id ? traceTarget.branchId : null,
-            initialRecordId: traceTarget?.artworkId === activeNode.id ? traceTarget.recordId : null,
-            navigationKey: traceTarget?.artworkId === activeNode.id ? traceTarget.navigationKey : 0,
+            initialView: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.initialView : "history",
+            initialBranchId: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.branchId : null,
+            initialRecordId: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.recordId : null,
+            navigationKey: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.navigationKey : 0,
             onNavigateRecord: (target) => {
-              const node = nodeById.get(target.artworkId);
-              if (!node) {
-                onError("匹配记录所属 Artwork 当前不在作品树中。");
-                return;
-              }
-              setExpandedIds((current) => {
-                const ancestors: string[] = [];
-                let parentId = node.parentId;
-                while (parentId) {
-                  ancestors.push(parentId);
-                  parentId = nodeById.get(parentId)?.parentId ?? null;
-                }
-                return new Set([...current, ...ancestors]);
-              });
-              setSelectedIds(new Set([target.artworkId]));
-              setAnchorId(target.artworkId);
-              setActiveId(target.artworkId);
-              setTraceTarget((current) => ({
+              navigateToArtwork({
                 ...target,
-                navigationKey: (current?.navigationKey ?? 0) + 1,
-              }));
+                initialView: "publish",
+              }, "匹配记录所属 Artwork 当前不在作品树中。");
             },
           })
         ) : activeNode ? (

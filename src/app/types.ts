@@ -53,3 +53,19 @@ export interface RepositoryBackupReport extends RepositoryScrubReport {
   fileCount: number;
   totalBytes: number;
 }
+
+export interface BackupRuntimeStatus {
+  busy: boolean;
+  activeBranchId: string | null;
+  operation: string | null;
+  progressLabel: string | null;
+  progressCurrent: number;
+  progressTotal: number;
+  automaticScheduling: boolean;
+  completionRevision: number;
+}
+
+export interface BackupDisableNoticeTarget {
+  artworkId: string;
+  branchId: string;
+}

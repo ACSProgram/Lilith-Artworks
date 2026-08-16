@@ -9,8 +9,8 @@ use rusqlite::{params, OptionalExtension};
 use crate::storage;
 
 use super::{
-    ArtworkBranch, ArtworkHistory, BranchDeletion, BranchRecord, CompactionTarget, HistoryCommit,
-    HistoryDeletion, HistoryNode, HistoryRecord, ScheduledBranch,
+    ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,
+    CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode, HistoryRecord, ScheduledBranch,
 };
 
 pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, String> {
@@ -1114,6 +1114,29 @@ pub(crate) fn acknowledge_backup_disable_notices(
     Ok(())
 }
 
+pub(crate) fn next_backup_disable_notice_target(
+    root: &Path,
+) -> Result<Option<BackupDisableNoticeTarget>, String> {
+    storage::open(root)?
+        .query_row(
+            "SELECT b.artwork_id, b.id
+             FROM branches b
+             JOIN library_nodes n ON n.id = b.artwork_id
+             WHERE b.backup_disable_notice_pending <> 0 AND n.trashed_ms IS NULL
+             ORDER BY b.updated_ms DESC, b.id
+             LIMIT 1",
+            [],
+            |row| {
+                Ok(BackupDisableNoticeTarget {
+                    artwork_id: row.get(0)?,
+                    branch_id: row.get(1)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage::database_error)
+}
+
 pub(crate) fn storage_path_referenced(root: &Path, path: &str) -> Result<bool, String> {
     storage::open(root)?
         .query_row(
@@ -1350,6 +1373,13 @@ mod tests {
         assert_eq!(state.3, 5);
         assert!(!state.4);
         assert!(state.5);
+        assert_eq!(
+            next_backup_disable_notice_target(&fixture.root).unwrap(),
+            Some(BackupDisableNoticeTarget {
+                artwork_id: fixture.artwork_id.clone(),
+                branch_id: fixture.main_branch_id.clone(),
+            })
+        );
 
         update_branch(
             &fixture.root,
@@ -1408,6 +1438,10 @@ mod tests {
             )
             .unwrap();
         assert!(!pending);
+        assert_eq!(
+            next_backup_disable_notice_target(&fixture.root).unwrap(),
+            None
+        );
     }
 
     #[test]

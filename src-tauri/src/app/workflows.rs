@@ -76,7 +76,7 @@ pub(crate) async fn create_repository_backup(
     window: tauri::WebviewWindow,
 ) -> Result<backup::RepositoryBackupReport, String> {
     let destination_parent = std::path::PathBuf::from(destination_parent.trim());
-    authenticity::ensure_dialog_authorized(&window, &destination_parent, "灾备保存目录")
+    authenticity::ensure_dialog_authorized(&window, &destination_parent, "备份保存目录")
         .map_err(|error| error.to_string())?;
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
@@ -95,7 +95,7 @@ pub(crate) async fn create_repository_backup(
         })
     })
     .await
-    .map_err(|error| format!("仓库灾备任务异常结束：{error}"))?
+    .map_err(|error| format!("创建备份任务异常结束：{error}"))?
 }
 
 #[tauri::command]
@@ -106,6 +106,13 @@ pub(crate) fn acknowledge_backup_disable_notices(
     app_state.with_ready_repository(|root| {
         history::acknowledge_backup_disable_notices(root, &artwork_ids)
     })
+}
+
+#[tauri::command]
+pub(crate) fn get_backup_disable_notice_target(
+    app_state: State<'_, AppState>,
+) -> Result<Option<history::BackupDisableNoticeTarget>, String> {
+    app_state.with_ready_repository(history::next_backup_disable_notice_target)
 }
 
 #[tauri::command]

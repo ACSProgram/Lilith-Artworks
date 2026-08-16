@@ -116,12 +116,23 @@
 .save-state.error { color: var(--danger); }
 .save-state.dirty { color: var(--warning); }
 
-.branch-status-actions { display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 8px; min-width: 0; }
-.branch-status-actions .branch-schedule { max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.branch-status-actions { position: relative; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 8px; min-width: 0; }
+.branch-status-actions .branch-schedule { max-width: 100%; }
 .branch-schedule { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .branch-schedule svg { color: var(--accent); }
 .branch-schedule.error { color: var(--danger); }
 .branch-schedule:has(.lucide-ban) { color: var(--danger); font-weight: 700; }
+.branch-schedule-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.branch-error-details { position: relative; flex: 0 0 auto; }
+.branch-error-details > summary { display: grid; place-items: center; width: 24px; height: 24px; list-style: none; color: var(--danger); cursor: pointer; }
+.branch-error-details > summary::-webkit-details-marker { display: none; }
+.branch-error-details[open] > summary svg { transform: rotate(180deg); }
+.branch-error-popover { position: absolute; z-index: 15; top: calc(100% + 7px); right: 0; width: min(440px, calc(100vw - 32px)); padding: 10px; border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border)); border-radius: 6px; color: var(--text); background: var(--surface); box-shadow: 0 14px 36px rgb(0 0 0 / 20%); white-space: normal; }
+.branch-error-popover header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.branch-error-popover header strong { font-size: 11px; }
+.branch-error-popover .icon-button { width: 26px; height: 26px; color: var(--muted); }
+.branch-error-popover pre { max-height: 180px; margin: 8px 0 0; overflow: auto; padding: 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--surface-subtle); font-family: Consolas, monospace; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
+.branch-error-popover > small { display: block; margin-top: 7px; color: var(--danger); font-size: 9px; }
 
 .history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .commit-block { display: grid; gap: 5px; width: min(560px, 62%); }

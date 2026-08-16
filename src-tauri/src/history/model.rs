@@ -97,6 +97,13 @@ pub(crate) struct ScheduledBranch {
     pub(crate) retry_at_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupDisableNoticeTarget {
+    pub(crate) artwork_id: String,
+    pub(crate) branch_id: String,
+}
+
 pub(crate) struct HistoryCommit<'a> {
     pub(crate) id: &'a str,
     pub(crate) branch_id: &'a str,

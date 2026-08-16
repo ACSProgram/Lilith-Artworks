@@ -1,6 +1,6 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BranchSettings } from "./HistoryControls";
+import { BranchScheduleStatus, BranchSettings } from "./HistoryControls";
 import type { ArtworkBranch } from "./types";
 
 const branch = (backupEnabled: boolean): ArtworkBranch => ({
@@ -48,5 +48,30 @@ describe("BranchSettings", () => {
       backupEnabled: false,
       backupIntervalMinutes: 10,
     });
+  });
+});
+
+describe("BranchScheduleStatus", () => {
+  it("keeps the status summary short and exposes the complete error for copying", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const failedBranch = {
+      ...branch(true),
+      lastError: "无法读取工作文件元数据：系统找不到指定的路径，且该错误需要完整保留用于诊断。",
+      consecutiveBackupFailures: 2,
+    };
+
+    render(<BranchScheduleStatus branch={failedBranch} />);
+
+    expect(screen.getByText("备份失败，将按策略重试")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看备份失败详情" }));
+    expect(screen.getByText(failedBranch.lastError)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "复制备份失败详情" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(failedBranch.lastError));
+    expect(await screen.findByTitle("已复制")).toBeTruthy();
   });
 });

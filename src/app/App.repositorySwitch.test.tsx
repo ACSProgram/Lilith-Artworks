@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SettingsSnapshot } from "./types";
 import type { LibraryTree } from "../modules/library/types";
@@ -9,8 +9,11 @@ const appApi = vi.hoisted(() => ({
   getRepositoryStatus: vi.fn(),
   retryFileCleanup: vi.fn(),
   acknowledgeBackupDisableNotices: vi.fn(),
+  getBackupDisableNoticeTarget: vi.fn(),
   scrubRepositoryIntegrity: vi.fn(),
   createRepositoryBackup: vi.fn(),
+  getBackupRuntimeStatus: vi.fn(),
+  cancelBackupOperation: vi.fn(),
   openSettingsDirectory: vi.fn(),
   openLogDirectory: vi.fn(),
   openLegalDirectory: vi.fn(),
@@ -88,7 +91,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
   automaticBackupFileCount: 1,
 });
 
-const tree = (title: string, sourcePath: string): LibraryTree => ({
+const tree = (title: string, sourcePath: string, backupDisableNoticeCount = 0): LibraryTree => ({
   nodes: [{
     id: "shared-artwork-id",
     parentId: null,
@@ -100,7 +103,7 @@ const tree = (title: string, sourcePath: string): LibraryTree => ({
     artwork: {
       description: "",
       branchCount: 1,
-      backupDisableNoticeCount: 0,
+      backupDisableNoticeCount,
       primaryBranch: {
         id: "shared-branch-id",
         title: "Main",
@@ -120,6 +123,18 @@ describe("App repository switching", () => {
     vi.clearAllMocks();
     appApi.retryFileCleanup.mockResolvedValue({ failures: [] });
     appApi.acknowledgeBackupDisableNotices.mockResolvedValue(undefined);
+    appApi.getBackupDisableNoticeTarget.mockResolvedValue(null);
+    appApi.getBackupRuntimeStatus.mockResolvedValue({
+      busy: false,
+      activeBranchId: null,
+      operation: null,
+      progressLabel: null,
+      progressCurrent: 0,
+      progressTotal: 0,
+      automaticScheduling: true,
+      completionRevision: 0,
+    });
+    appApi.cancelBackupOperation.mockResolvedValue(true);
     appApi.createRepositoryBackup.mockResolvedValue({
       backupPath: "C:\\backups\\Lilith-Artworks-backup-1",
       repositoryPath: "C:\\backups\\Lilith-Artworks-backup-1\\repository",
@@ -222,12 +237,82 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "创建副本" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     await waitFor(() => {
       expect(appApi.createRepositoryBackup).toHaveBeenCalledWith("C:\\backups");
     });
-    expect(await screen.findByText(/灾备副本已校验：4 个文件、2 个历史节点/)).toBeTruthy();
+    expect(await screen.findByText(/备份已校验：4 个文件、2 个历史节点/)).toBeTruthy();
+  });
+
+  it("shows repository backup progress and exposes cancellation", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    const backupRequest = deferred<{
+      backupPath: string;
+      repositoryPath: string;
+      fileCount: number;
+      totalBytes: number;
+      historyNodes: number;
+      finalArtifacts: number;
+      certificationRecords: number;
+    }>();
+    let backupStarted = false;
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.getBackupRuntimeStatus.mockImplementation(async () => backupStarted ? {
+      busy: true,
+      activeBranchId: null,
+      operation: "repository-backup",
+      progressLabel: "正在复制仓库文件",
+      progressCurrent: 512,
+      progressTotal: 1024,
+      automaticScheduling: true,
+      completionRevision: 0,
+    } : {
+      busy: false,
+      activeBranchId: null,
+      operation: null,
+      progressLabel: null,
+      progressCurrent: 0,
+      progressTotal: 0,
+      automaticScheduling: true,
+      completionRevision: 0,
+    });
+    appApi.createRepositoryBackup.mockImplementation(() => {
+      backupStarted = true;
+      return backupRequest.promise;
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    dialog.open.mockResolvedValue("C:\\backups");
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
+
+    expect(await screen.findByText("正在复制仓库文件")).toBeTruthy();
+    expect(screen.getByText("50%")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "取消当前操作" }));
+    await waitFor(() => expect(appApi.cancelBackupOperation).toHaveBeenCalledOnce());
+
+    await act(async () => {
+      backupRequest.resolve({
+        backupPath: "C:\\backups\\Lilith-Artworks-backup-1",
+        repositoryPath: "C:\\backups\\Lilith-Artworks-backup-1\\repository",
+        fileCount: 4,
+        totalBytes: 1024,
+        historyNodes: 2,
+        finalArtifacts: 0,
+        certificationRecords: 0,
+      });
+      await backupRequest.promise;
+    });
   });
 
   it("shows release identity and opens the bundled legal directory", async () => {
@@ -251,5 +336,40 @@ describe("App repository switching", () => {
     expect(screen.getByText(/Copyright 2026 ACSProgram/)).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "查看许可" }));
     await waitFor(() => expect(appApi.openLegalDirectory).toHaveBeenCalledOnce());
+  });
+
+  it("opens the affected branch without acknowledging its backup notice", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.getBackupDisableNoticeTarget.mockResolvedValue({
+      artworkId: "shared-artwork-id",
+      branchId: "failed-branch-id",
+    });
+    libraryApi.listTree.mockResolvedValue(tree(
+      "Repository artwork",
+      "C:\\work\\A.psd",
+      1,
+    ));
+
+    render(<App />);
+    await screen.findByText("1 个分支的自动备份已关闭");
+    fireEvent.click(screen.getByRole("button", { name: "查看分支设置" }));
+
+    await waitFor(() => {
+      expect(appApi.getBackupDisableNoticeTarget).toHaveBeenCalledOnce();
+      expect(screen.getByTestId("selected-branch").textContent).toBe("failed-branch-id");
+    });
+    expect(appApi.acknowledgeBackupDisableNotices).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "知道了" }));
+    await waitFor(() => expect(appApi.acknowledgeBackupDisableNotices)
+      .toHaveBeenCalledWith(["shared-artwork-id"]));
   });
 });

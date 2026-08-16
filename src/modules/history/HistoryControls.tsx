@@ -1,11 +1,70 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, Check, CircleDot, FileOutput, GitFork, LoaderCircle, Trash2, X,
+  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, FileOutput, GitFork,
+  LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
+
+export function BranchScheduleStatus({ branch }: { branch: ArtworkBranch }) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+
+  useEffect(() => setCopyState("idle"), [branch.id, branch.lastError]);
+
+  const copyError = async () => {
+    if (!branch.lastError) return;
+    try {
+      await navigator.clipboard.writeText(branch.lastError);
+      setCopyState("copied");
+    } catch {
+      setCopyState("failed");
+    }
+  };
+
+  const status = branch.finalArtifactLocked
+    ? `成品已锁定 · 已发布 ${branch.publishedCount} 条`
+    : branch.lastError && !branch.backupEnabled
+      ? `自动备份已关闭（连续 ${branch.consecutiveBackupFailures} 次失败）`
+      : branch.lastError
+        ? "备份失败，将按策略重试"
+        : branch.backupEnabled
+          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份 · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
+          : "自动备份已关闭";
+
+  return <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
+    {branch.finalArtifactLocked
+      ? <Ban aria-hidden="true" size={16} />
+      : branch.lastError
+        ? <AlertTriangle aria-hidden="true" size={16} />
+        : branch.backupEnabled
+          ? <Check aria-hidden="true" size={16} />
+          : null}
+    <span className="branch-schedule-summary">{status}</span>
+    {branch.lastError && <details className="branch-error-details">
+      <summary className="icon-button" role="button" aria-label="查看备份失败详情" title="查看备份失败详情">
+        <ChevronDown aria-hidden="true" size={14} />
+      </summary>
+      <div className="branch-error-popover">
+        <header>
+          <strong>备份失败详情</strong>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="复制备份失败详情"
+            title={copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
+            onClick={() => void copyError()}
+          >
+            {copyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+          </button>
+        </header>
+        <pre>{branch.lastError}</pre>
+        {copyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
+      </div>
+    </details>}
+  </div>;
+}
 
 export function BranchSettings({
   branch,

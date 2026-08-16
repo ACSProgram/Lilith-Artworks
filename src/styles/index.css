@@ -150,7 +150,8 @@ button { color: inherit; }
 .backup-disable-alert strong, .backup-disable-alert small { display: block; }
 .backup-disable-alert strong { font-size: 10px; line-height: 1.4; }
 .backup-disable-alert small { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.45; }
-.backup-disable-alert button { grid-column: 2; justify-self: start; padding: 3px 0; border: 0; color: var(--danger); background: transparent; font-size: 9px; font-weight: 650; cursor: pointer; }
+.backup-disable-alert-actions { grid-column: 2; display: flex; flex-wrap: wrap; gap: 5px 12px; }
+.backup-disable-alert button { padding: 3px 0; border: 0; color: var(--danger); background: transparent; font-size: 9px; font-weight: 650; cursor: pointer; }
 .tree-empty, .tree-loading { padding: 14px 8px; color: var(--muted); font-size: 11px; text-align: center; }
 .tree-loading { display: flex; justify-content: center; align-items: center; gap: 7px; }
 .sidebar-footer { display: flex; align-items: center; min-height: 34px; margin: 8px -4px -4px; padding: 5px 4px 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }
@@ -237,6 +238,12 @@ button { color: inherit; }
 .settings-row-copy strong, .settings-row-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .settings-row-copy strong { font-size: 12px; }
 .settings-row-copy small { margin-top: 3px; color: var(--muted); font-size: 10px; font-weight: 400; }
+.settings-operation-progress { display: grid; grid-template: auto 5px / minmax(0, 1fr) 32px; align-items: center; gap: 6px 9px; margin-top: 10px; padding: 9px 10px 9px 12px; border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--accent) 7%, var(--surface)); }
+.settings-operation-progress > div { display: grid; grid-template-columns: 17px minmax(0, 1fr) auto; align-items: center; gap: 7px; min-width: 0; color: var(--muted); font-size: 10px; }
+.settings-operation-progress span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-operation-progress strong { color: inherit; font-size: 10px; font-variant-numeric: tabular-nums; }
+.settings-operation-progress progress { grid-column: 1; width: 100%; height: 5px; border: 0; accent-color: var(--accent); }
+.settings-operation-progress > .icon-button { grid-column: 2; grid-row: 1 / span 2; width: 32px; height: 32px; color: var(--muted); }
 .switch-input { position: relative; width: 36px !important; height: 20px !important; margin: 0; appearance: none; border: 1px solid var(--border); border-radius: 10px; background: var(--border); cursor: pointer; transition: background 140ms ease, border-color 140ms ease; }
 .switch-input::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: var(--surface); box-shadow: 0 1px 3px rgb(0 0 0 / 22%); transition: transform 140ms ease; }
 .switch-input:checked { border-color: var(--accent); background: var(--accent); }

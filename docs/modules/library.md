@@ -22,7 +22,7 @@
 - 新建 Artwork 必须同时填写标题、初始分支标题并选择现有工作文件。Rust 负责绝对路径、普通文件、仓库外路径和同 Artwork 分支路径唯一性检查。
 - 搜索匹配节点标题与 Artwork 主分支工作文件路径；选择结果会展开完整祖先路径并定位节点。
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
-- Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器和文件清理重试，并把认证记录转换为 `{ artworkId, branchId, recordId }` 导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
+- Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器、文件清理重试和自动备份关闭通知的目标查询，并把认证记录或待处理分支转换为应用层导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
 - `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
 - `src/app/App.repositorySwitch.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互仍按当前交接清单人工验收。
 
@@ -49,7 +49,7 @@
 
 schema v9 在分支上保存连续自动备份失败次数、下一次重试时间和待确认的自动备份关闭通知；schema v8 将认证记录的仓库副本路径提升为非空约束；没有仓库副本的旧认证记录在迁移时移除。schema v7 增加 `pending_file_cleanup`：仓库文件/目录只保存相对路径并在执行前校验仓库边界；仅发布创建失败等应用仍拥有外部临时结果的流程登记外部文件，取消发布不删除用户的首次导出文件。成功项出队，失败项记录错误；应用启动和页面重试均通过应用层清理命令执行。更早 schema 变更见规划归档。
 
-清理命令仍由应用层拥有；Library 通过注入回调重试失败项。作品树的 Artwork 摘要包含自动备份关闭通知计数；应用层提供确认命令，前端持续刷新摘要以显示后台调度产生的新通知。跨 Library、Authenticity 和应用层复用的清理结果 DTO 位于 `src/shared/fileCleanup.ts`，不再反向导入 `src/app/types.ts`。
+清理命令仍由应用层拥有；Library 通过注入回调重试失败项。作品树的 Artwork 摘要包含自动备份关闭通知计数；应用层提供确认命令和 `get_backup_disable_notice_target` 导航查询，后者通过 History 公开仓储能力稳定选择一个仍在作品树中的待处理分支。告警中的“查看分支设置”只打开对应 Artwork 的历史页并选择该分支，不确认通知；“知道了”继续独立确认当前全部 Artwork 通知。前端持续刷新摘要以显示后台调度产生的新通知。跨 Library、Authenticity 和应用层复用的清理结果 DTO 位于 `src/shared/fileCleanup.ts`，不再反向导入 `src/app/types.ts`。
 
 ## 当前命令
 

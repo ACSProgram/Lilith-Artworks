@@ -17,7 +17,12 @@ import {
 import { LibraryModule } from "../modules/library/LibraryModule";
 import { ArtworkWorkspace } from "./ArtworkWorkspace";
 import { appApi } from "./api";
-import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
+import type {
+  AppSettings,
+  BackupRuntimeStatus,
+  RepositoryStatus,
+  SettingsSnapshot,
+} from "./types";
 import { WindowTitleBar } from "./WindowTitleBar";
 import packageInfo from "../../package.json";
 
@@ -28,6 +33,19 @@ const EMPTY_STATUS: RepositoryStatus = {
   databasePath: "",
   error: null,
 };
+
+const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
+  busy: false,
+  activeBranchId: null,
+  operation: null,
+  progressLabel: null,
+  progressCurrent: 0,
+  progressTotal: 0,
+  automaticScheduling: false,
+  completionRevision: 0,
+};
+
+type SettingsOperation = "repository-scrub" | "repository-backup";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -40,6 +58,9 @@ export function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
+  const [settingsOperation, setSettingsOperation] = useState<SettingsOperation | null>(null);
+  const [backupRuntime, setBackupRuntime] = useState(IDLE_BACKUP_RUNTIME);
+  const [cancelPending, setCancelPending] = useState(false);
 
   const load = async () => {
     setBusy(true);
@@ -84,6 +105,25 @@ export function App() {
     document.documentElement.dataset.density = draft?.content.density ?? "comfortable";
   }, [draft?.content.density, draft?.theme]);
 
+  useEffect(() => {
+    if (!settingsOpen && !settingsOperation) return;
+    let disposed = false;
+    const poll = async () => {
+      try {
+        const next = await appApi.getBackupRuntimeStatus();
+        if (!disposed) setBackupRuntime(next);
+      } catch {
+        // Runtime polling is best-effort; the command result still reports failures.
+      }
+    };
+    void poll();
+    const timer = window.setInterval(() => void poll(), 350);
+    return () => {
+      disposed = true;
+      window.clearInterval(timer);
+    };
+  }, [settingsOpen, settingsOperation]);
+
   const repositoryLabel = useMemo(() => {
     if (repository.ready) return "仓库就绪";
     if (repository.configured) return "仓库不可用";
@@ -126,7 +166,19 @@ export function App() {
   };
 
   const scrubRepository = async () => {
-    setBusy(true);
+    let runtime: BackupRuntimeStatus;
+    try {
+      runtime = await appApi.getBackupRuntimeStatus();
+    } catch (error) {
+      setMessage(errorMessage(error));
+      return;
+    }
+    setBackupRuntime(runtime);
+    if (runtime.busy) {
+      setMessage("已有备份操作正在运行，请等待完成或先取消当前操作。");
+      return;
+    }
+    setSettingsOperation("repository-scrub");
     setMessage(null);
     try {
       const report = await appApi.scrubRepositoryIntegrity();
@@ -136,7 +188,8 @@ export function App() {
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
-      setBusy(false);
+      setSettingsOperation(null);
+      setCancelPending(false);
     }
   };
 
@@ -144,22 +197,64 @@ export function App() {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "选择仓库灾备保存位置",
+      title: "选择备份保存位置",
     });
     if (typeof selected !== "string") return;
-    setBusy(true);
+    let runtime: BackupRuntimeStatus;
+    try {
+      runtime = await appApi.getBackupRuntimeStatus();
+    } catch (error) {
+      setMessage(errorMessage(error));
+      return;
+    }
+    setBackupRuntime(runtime);
+    if (runtime.busy) {
+      setMessage("已有备份操作正在运行，请等待完成或先取消当前操作。");
+      return;
+    }
+    setSettingsOperation("repository-backup");
     setMessage(null);
     try {
       const report = await appApi.createRepositoryBackup(selected);
       setMessage(
-        `灾备副本已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点。恢复时选择 ${report.repositoryPath}`,
+        `备份已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点。恢复时选择 ${report.repositoryPath}`,
       );
     } catch (error) {
       setMessage(errorMessage(error));
     } finally {
-      setBusy(false);
+      setSettingsOperation(null);
+      setCancelPending(false);
     }
   };
+
+  const cancelSettingsOperation = async () => {
+    setCancelPending(true);
+    try {
+      const requested = await appApi.cancelBackupOperation();
+      if (!requested) setMessage("操作尚未进入可取消阶段，请稍后重试。");
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setCancelPending(false);
+    }
+  };
+
+  const runtimeMatchesSettings = backupRuntime.busy
+    && (backupRuntime.operation === "repository-scrub"
+      || backupRuntime.operation === "repository-backup");
+  const visibleSettingsRuntime = runtimeMatchesSettings
+    ? backupRuntime
+    : settingsOperation
+      ? {
+        ...IDLE_BACKUP_RUNTIME,
+        busy: true,
+        operation: settingsOperation,
+        progressLabel: settingsOperation === "repository-backup"
+          ? "正在准备创建备份"
+          : "正在准备完整性检查",
+      }
+      : null;
+  const settingsBusy = busy || settingsOperation !== null || backupRuntime.busy;
 
   return (
     <main className="app-shell">
@@ -182,6 +277,7 @@ export function App() {
           onError={setMessage}
           onRetryFileCleanup={appApi.retryFileCleanup}
           onAcknowledgeBackupDisableNotices={appApi.acknowledgeBackupDisableNotices}
+          onOpenBackupDisableNotice={appApi.getBackupDisableNoticeTarget}
           renderArtworkWorkspace={(workspace) => (
             <ArtworkWorkspace
               key={workspace.artworkId}
@@ -231,17 +327,24 @@ export function App() {
               <div className="settings-preference-row">
                 <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
                 <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
-                <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={busy || !repository.ready}>
+                <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
                   <ShieldCheck aria-hidden="true" size={15} />开始检查
                 </button>
               </div>
               <div className="settings-preference-row">
                 <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
-                <span className="settings-row-copy"><strong>整仓灾备</strong><small>复制数据库与全部仓库文件，并在发布前校验副本</small></span>
-                <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={busy || !repository.ready}>
-                  <DatabaseBackup aria-hidden="true" size={15} />创建副本
+                <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
+                <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
+                  <DatabaseBackup aria-hidden="true" size={15} />创建备份
                 </button>
               </div>
+              {visibleSettingsRuntime && (
+                <SettingsOperationProgress
+                  runtime={visibleSettingsRuntime}
+                  cancelPending={cancelPending}
+                  onCancel={() => void cancelSettingsOperation()}
+                />
+              )}
             </div>
 
             <div className="settings-section">
@@ -304,7 +407,7 @@ export function App() {
 
             <footer>
               <button className="secondary-button" type="button" onClick={() => setSettingsOpen(false)}>取消</button>
-              <button className="primary-button" type="button" onClick={save} disabled={busy}>
+              <button className="primary-button" type="button" onClick={save} disabled={settingsBusy}>
                 {busy && <LoaderCircle className="spin" aria-hidden="true" size={16} />}
                 保存
               </button>
@@ -313,5 +416,40 @@ export function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function SettingsOperationProgress({
+  runtime,
+  cancelPending,
+  onCancel,
+}: {
+  runtime: BackupRuntimeStatus;
+  cancelPending: boolean;
+  onCancel: () => void;
+}) {
+  const hasTotal = runtime.progressTotal > 0;
+  const percent = hasTotal
+    ? Math.round(runtime.progressCurrent / runtime.progressTotal * 100)
+    : 0;
+  return (
+    <div className="settings-operation-progress" role="status" aria-live="polite">
+      <div>
+        <LoaderCircle className="spin" aria-hidden="true" size={15} />
+        <span>{runtime.progressLabel ?? "正在处理"}</span>
+        <strong>{hasTotal ? `${percent}%` : "准备中"}</strong>
+      </div>
+      <progress value={runtime.progressCurrent} max={Math.max(runtime.progressTotal, 1)} />
+      <button
+        className="icon-button"
+        type="button"
+        title="取消当前操作"
+        aria-label="取消当前操作"
+        disabled={cancelPending}
+        onClick={onCancel}
+      >
+        {cancelPending ? <LoaderCircle className="spin" aria-hidden="true" size={15} /> : <X aria-hidden="true" size={15} />}
+      </button>
+    </div>
   );
 }

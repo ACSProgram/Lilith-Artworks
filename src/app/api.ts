@@ -2,6 +2,8 @@ import { invokeCommand } from "../shared/tauri";
 import type { CleanupReport } from "../shared/fileCleanup";
 import type {
   AppSettings,
+  BackupDisableNoticeTarget,
+  BackupRuntimeStatus,
   RepositoryBackupReport,
   RepositoryScrubReport,
   RepositoryStatus,
@@ -20,8 +22,14 @@ export const appApi = {
     invokeCommand<CleanupReport>("retry_pending_file_cleanup", { ids }),
   acknowledgeBackupDisableNotices: (artworkIds: string[]) =>
     invokeCommand<void>("acknowledge_backup_disable_notices", { artworkIds }),
+  getBackupDisableNoticeTarget: () =>
+    invokeCommand<BackupDisableNoticeTarget | null>("get_backup_disable_notice_target"),
   scrubRepositoryIntegrity: () =>
     invokeCommand<RepositoryScrubReport>("scrub_repository_integrity"),
   createRepositoryBackup: (destinationParent: string) =>
     invokeCommand<RepositoryBackupReport>("create_repository_backup", { destinationParent }),
+  getBackupRuntimeStatus: () =>
+    invokeCommand<BackupRuntimeStatus>("get_backup_runtime_status"),
+  cancelBackupOperation: () =>
+    invokeCommand<boolean>("cancel_backup_operation"),
 };

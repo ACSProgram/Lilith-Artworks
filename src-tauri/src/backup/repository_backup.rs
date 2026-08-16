@@ -58,6 +58,22 @@ struct StagingDirectory {
     published: bool,
 }
 
+impl StagingDirectory {
+    fn cleanup(&mut self) -> Result<(), String> {
+        match fs::remove_dir_all(&self.path) {
+            Ok(()) => {
+                self.published = true;
+                Ok(())
+            }
+            Err(_) if !self.path.exists() => {
+                self.published = true;
+                Ok(())
+            }
+            Err(error) => Err(format!("临时备份清理失败：{error}")),
+        }
+    }
+}
+
 impl Drop for StagingDirectory {
     fn drop(&mut self) {
         if !self.published {
@@ -77,6 +93,7 @@ pub(crate) fn create_repository_backup(
     progress("正在固定数据库一致性视图", 0, 0);
     checkpoint_database(root)?;
 
+    progress("正在扫描仓库文件", 0, 0);
     let source_files = collect_repository_files(root)?;
     let source_bytes = source_files.iter().try_fold(0_u64, |total, path| {
         let bytes = path
@@ -87,6 +104,7 @@ pub(crate) fn create_repository_backup(
             .checked_add(bytes)
             .ok_or_else(|| "仓库文件总大小超出支持范围".to_owned())
     })?;
+    progress("仓库文件扫描完成", 1, 1);
 
     let backup_id = uuid::Uuid::new_v4().simple().to_string();
     let created_ms = storage::now_ms()?;
@@ -96,113 +114,137 @@ pub(crate) fn create_repository_backup(
         &backup_id[..8]
     ));
     if staging_path.exists() || final_path.exists() {
-        return Err("灾备输出目录已存在，请重新选择保存位置".into());
+        return Err("备份输出目录已存在，请重新选择保存位置".into());
     }
-    fs::create_dir(&staging_path).map_err(|error| format!("无法创建灾备临时目录：{error}"))?;
+    fs::create_dir(&staging_path).map_err(|error| format!("无法创建备份临时目录：{error}"))?;
     let mut staging = StagingDirectory {
         path: staging_path.clone(),
         published: false,
     };
-    let repository_copy = staging_path.join(REPOSITORY_DIRECTORY);
-    fs::create_dir(&repository_copy).map_err(|error| format!("无法创建灾备仓库目录：{error}"))?;
+    let result: Result<RepositoryBackupReport, String> = (|| {
+        let repository_copy = staging_path.join(REPOSITORY_DIRECTORY);
+        fs::create_dir(&repository_copy)
+            .map_err(|error| format!("无法创建备份仓库目录：{error}"))?;
 
-    let mut copied_bytes = 0_u64;
-    progress("正在复制仓库文件", 0, source_bytes);
-    for source in &source_files {
-        ensure_not_cancelled(&cancelled)?;
-        let relative = source
-            .strip_prefix(root)
-            .map_err(|_| "无法计算仓库文件相对路径")?;
-        let target = repository_copy.join(relative);
-        if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|error| format!("无法创建灾备子目录：{error}"))?;
+        let mut copied_bytes = 0_u64;
+        progress("正在复制仓库文件", 0, source_bytes);
+        for source in &source_files {
+            ensure_not_cancelled(&cancelled)?;
+            let relative = source
+                .strip_prefix(root)
+                .map_err(|_| "无法计算仓库文件相对路径")?;
+            let target = repository_copy.join(relative);
+            if let Some(parent) = target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("无法创建备份子目录：{error}"))?;
+            }
+            copy_file_stable(source, &target, &cancelled, |bytes| {
+                copied_bytes = copied_bytes.saturating_add(bytes);
+                progress("正在复制仓库文件", copied_bytes, source_bytes);
+            })?;
         }
-        copy_file_stable(source, &target, &cancelled, |bytes| {
-            copied_bytes = copied_bytes.saturating_add(bytes);
-            progress("正在复制仓库文件", copied_bytes, source_bytes);
-        })?;
-    }
 
-    ensure_not_cancelled(&cancelled)?;
-    progress("正在校验灾备副本", 0, 0);
-    library::open_existing(&repository_copy)?;
-    let history_nodes = restore::scrub_history(&repository_copy, &cancelled, |current, total| {
-        progress("正在校验灾备历史链", current, total)
-    })?;
-    let (final_artifacts, certification_records) =
-        authenticity::scrub_controlled_files(&repository_copy, &cancelled, |current, total| {
-            progress("正在校验灾备发布文件", current, total)
-        })?;
-    checkpoint_database(&repository_copy)?;
-    remove_database_sidecars(&repository_copy)?;
-
-    let copied_files = collect_repository_files(&repository_copy)?;
-    let mut manifest_files = Vec::with_capacity(copied_files.len());
-    let mut total_bytes = 0_u64;
-    for (index, path) in copied_files.iter().enumerate() {
         ensure_not_cancelled(&cancelled)?;
+        progress("正在校验备份", 0, 0);
+        library::open_existing(&repository_copy)?;
+        let history_nodes =
+            restore::scrub_history(&repository_copy, &cancelled, |current, total| {
+                progress("正在校验备份历史链", current, total)
+            })?;
+        let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
+            &repository_copy,
+            &cancelled,
+            |current, total| progress("正在校验备份发布文件", current, total),
+        )?;
+        checkpoint_database(&repository_copy)?;
+        remove_database_sidecars(&repository_copy)?;
+
+        let copied_files = collect_repository_files(&repository_copy)?;
+        let mut manifest_files = Vec::with_capacity(copied_files.len());
+        let mut total_bytes = 0_u64;
+        for (index, path) in copied_files.iter().enumerate() {
+            ensure_not_cancelled(&cancelled)?;
+            progress(
+                "正在生成备份校验清单",
+                index as u64,
+                copied_files.len() as u64,
+            );
+            let bytes = path
+                .metadata()
+                .map_err(|error| format!("无法读取备份文件大小：{error}"))?
+                .len();
+            total_bytes = total_bytes
+                .checked_add(bytes)
+                .ok_or_else(|| "备份文件总大小超出支持范围".to_owned())?;
+            manifest_files.push(ManifestFile {
+                path: storage::relative_path(&repository_copy, path)?,
+                bytes,
+                sha256: sha256_file(path, &cancelled)?,
+            });
+        }
         progress(
-            "正在生成灾备校验清单",
-            index as u64,
+            "正在生成备份校验清单",
+            copied_files.len() as u64,
             copied_files.len() as u64,
         );
-        let bytes = path
-            .metadata()
-            .map_err(|error| format!("无法读取灾备文件大小：{error}"))?
-            .len();
-        total_bytes = total_bytes
-            .checked_add(bytes)
-            .ok_or_else(|| "灾备文件总大小超出支持范围".to_owned())?;
-        manifest_files.push(ManifestFile {
-            path: storage::relative_path(&repository_copy, path)?,
-            bytes,
-            sha256: sha256_file(path, &cancelled)?,
-        });
+
+        let manifest = RepositoryBackupManifest {
+            format: BACKUP_FORMAT.into(),
+            format_version: BACKUP_FORMAT_VERSION,
+            created_ms,
+            repository_directory: REPOSITORY_DIRECTORY.into(),
+            file_count: manifest_files.len() as u64,
+            total_bytes,
+            history_nodes,
+            final_artifacts,
+            certification_records,
+            files: manifest_files,
+        };
+        write_manifest(&staging_path, &manifest)?;
+        verify_backup_bundle(&staging_path, &cancelled)?;
+        ensure_not_cancelled(&cancelled)?;
+
+        progress("正在发布备份", 0, 1);
+        fs::rename(&staging_path, &final_path).map_err(|error| format!("无法发布备份：{error}"))?;
+        progress("备份发布完成", 1, 1);
+
+        Ok(RepositoryBackupReport {
+            backup_path: storage::display_path(&final_path),
+            repository_path: storage::display_path(&final_path.join(REPOSITORY_DIRECTORY)),
+            file_count: manifest.file_count,
+            total_bytes: manifest.total_bytes,
+            history_nodes,
+            final_artifacts,
+            certification_records,
+        })
+    })();
+
+    match result {
+        Ok(report) => {
+            staging.published = true;
+            Ok(report)
+        }
+        Err(error) => {
+            progress("正在清理临时备份", 0, 1);
+            match staging.cleanup() {
+                Ok(()) => {
+                    progress("临时备份已清理", 1, 1);
+                    Err(format!("{error}；临时备份已清理"))
+                }
+                Err(cleanup_error) => Err(format!("{error}；{cleanup_error}")),
+            }
+        }
     }
-    progress(
-        "正在生成灾备校验清单",
-        copied_files.len() as u64,
-        copied_files.len() as u64,
-    );
-
-    let manifest = RepositoryBackupManifest {
-        format: BACKUP_FORMAT.into(),
-        format_version: BACKUP_FORMAT_VERSION,
-        created_ms,
-        repository_directory: REPOSITORY_DIRECTORY.into(),
-        file_count: manifest_files.len() as u64,
-        total_bytes,
-        history_nodes,
-        final_artifacts,
-        certification_records,
-        files: manifest_files,
-    };
-    write_manifest(&staging_path, &manifest)?;
-    verify_backup_bundle(&staging_path, &cancelled)?;
-    ensure_not_cancelled(&cancelled)?;
-
-    fs::rename(&staging_path, &final_path).map_err(|error| format!("无法发布灾备副本：{error}"))?;
-    staging.published = true;
-
-    Ok(RepositoryBackupReport {
-        backup_path: storage::display_path(&final_path),
-        repository_path: storage::display_path(&final_path.join(REPOSITORY_DIRECTORY)),
-        file_count: manifest.file_count,
-        total_bytes: manifest.total_bytes,
-        history_nodes,
-        final_artifacts,
-        certification_records,
-    })
 }
 
 fn validate_destination(root: &Path, destination_parent: &Path) -> Result<(), String> {
     if !destination_parent.is_absolute() {
-        return Err("灾备保存目录必须使用绝对路径".into());
+        return Err("备份保存目录必须使用绝对路径".into());
     }
     if !destination_parent.is_dir() {
-        return Err("灾备保存目录不存在或不是目录".into());
+        return Err("备份保存目录不存在或不是目录".into());
     }
-    storage::ensure_outside_repository(root, destination_parent, "灾备保存目录")
+    storage::ensure_outside_repository(root, destination_parent, "备份保存目录")
 }
 
 fn checkpoint_database(root: &Path) -> Result<(), String> {
@@ -213,7 +255,7 @@ fn checkpoint_database(root: &Path) -> Result<(), String> {
         })
         .map_err(storage::database_error)?;
     if busy != 0 {
-        return Err("数据库仍有活动连接，无法建立一致性灾备副本".into());
+        return Err("数据库仍有活动连接，无法建立一致性备份".into());
     }
     Ok(())
 }
@@ -286,7 +328,7 @@ fn copy_file_stable(
         .write(true)
         .create_new(true)
         .open(target)
-        .map_err(|error| format!("无法创建灾备文件：{error}"))?;
+        .map_err(|error| format!("无法创建备份文件：{error}"))?;
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let mut copied = 0_u64;
     loop {
@@ -299,13 +341,13 @@ fn copy_file_stable(
         }
         output
             .write_all(&buffer[..read])
-            .map_err(|error| format!("无法写入灾备文件：{error}"))?;
+            .map_err(|error| format!("无法写入备份文件：{error}"))?;
         copied = copied.saturating_add(read as u64);
         on_progress(read as u64);
     }
     output
         .sync_all()
-        .map_err(|error| format!("无法同步灾备文件：{error}"))?;
+        .map_err(|error| format!("无法同步备份文件：{error}"))?;
     let after = source
         .metadata()
         .map_err(|error| format!("无法复核仓库文件属性：{error}"))?;
@@ -313,7 +355,7 @@ fn copy_file_stable(
         || before.len() != after.len()
         || before.modified().ok() != after.modified().ok()
     {
-        return Err("仓库文件在灾备复制期间发生变化，本次操作已取消".into());
+        return Err("仓库文件在备份期间发生变化，本次操作已取消".into());
     }
     Ok(())
 }
@@ -323,21 +365,21 @@ fn remove_database_sidecars(root: &Path) -> Result<(), String> {
         let path = root.join(format!("{}{suffix}", storage::DATABASE_NAME));
         if path.exists() {
             fs::remove_file(&path)
-                .map_err(|error| format!("无法清理灾备数据库临时文件：{error}"))?;
+                .map_err(|error| format!("无法清理备份数据库临时文件：{error}"))?;
         }
     }
     Ok(())
 }
 
 fn sha256_file(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String, String> {
-    let mut file = File::open(path).map_err(|error| format!("无法读取灾备文件：{error}"))?;
+    let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     loop {
         ensure_not_cancelled(cancelled)?;
         let read = file
             .read(&mut buffer)
-            .map_err(|error| format!("无法校验灾备文件：{error}"))?;
+            .map_err(|error| format!("无法校验备份文件：{error}"))?;
         if read == 0 {
             break;
         }
@@ -348,29 +390,29 @@ fn sha256_file(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String, Str
 
 fn write_manifest(bundle: &Path, manifest: &RepositoryBackupManifest) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(manifest)
-        .map_err(|error| format!("无法生成灾备校验清单：{error}"))?;
+        .map_err(|error| format!("无法生成备份校验清单：{error}"))?;
     let mut file = OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(bundle.join(MANIFEST_NAME))
-        .map_err(|error| format!("无法创建灾备校验清单：{error}"))?;
+        .map_err(|error| format!("无法创建备份校验清单：{error}"))?;
     file.write_all(&bytes)
-        .map_err(|error| format!("无法写入灾备校验清单：{error}"))?;
+        .map_err(|error| format!("无法写入备份校验清单：{error}"))?;
     file.sync_all()
-        .map_err(|error| format!("无法同步灾备校验清单：{error}"))
+        .map_err(|error| format!("无法同步备份校验清单：{error}"))
 }
 
 fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<(), String> {
     let manifest: RepositoryBackupManifest = serde_json::from_slice(
         &fs::read(bundle.join(MANIFEST_NAME))
-            .map_err(|error| format!("无法读取灾备校验清单：{error}"))?,
+            .map_err(|error| format!("无法读取备份校验清单：{error}"))?,
     )
-    .map_err(|error| format!("无法解析灾备校验清单：{error}"))?;
+    .map_err(|error| format!("无法解析备份校验清单：{error}"))?;
     if manifest.format != BACKUP_FORMAT
         || manifest.format_version != BACKUP_FORMAT_VERSION
         || manifest.repository_directory != REPOSITORY_DIRECTORY
     {
-        return Err("灾备校验清单格式不受支持".into());
+        return Err("备份校验清单格式不受支持".into());
     }
     let repository = bundle.join(REPOSITORY_DIRECTORY);
     let actual_files = collect_repository_files(&repository)?;
@@ -384,7 +426,7 @@ fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<
         .map(|file| file.path.clone())
         .collect::<HashSet<_>>();
     if actual_paths != expected_paths || manifest.file_count != manifest.files.len() as u64 {
-        return Err("灾备文件集合与校验清单不匹配".into());
+        return Err("备份文件集合与校验清单不匹配".into());
     }
     let mut total_bytes = 0_u64;
     for entry in &manifest.files {
@@ -392,26 +434,26 @@ fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<
         let path = storage::resolve_path(&repository, &entry.path)?;
         let bytes = path
             .metadata()
-            .map_err(|error| format!("无法读取灾备文件属性：{error}"))?
+            .map_err(|error| format!("无法读取备份文件属性：{error}"))?
             .len();
         if bytes != entry.bytes
             || !sha256_file(&path, cancelled)?.eq_ignore_ascii_case(&entry.sha256)
         {
-            return Err(format!("灾备文件校验失败：{}", entry.path));
+            return Err(format!("备份文件校验失败：{}", entry.path));
         }
         total_bytes = total_bytes
             .checked_add(bytes)
-            .ok_or_else(|| "灾备文件总大小超出支持范围".to_owned())?;
+            .ok_or_else(|| "备份文件总大小超出支持范围".to_owned())?;
     }
     if total_bytes != manifest.total_bytes {
-        return Err("灾备文件总大小与校验清单不匹配".into());
+        return Err("备份文件总大小与校验清单不匹配".into());
     }
     Ok(())
 }
 
 fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
     if cancelled() {
-        Err("灾备操作已取消".into())
+        Err("备份操作已取消".into())
     } else {
         Ok(())
     }
@@ -498,6 +540,7 @@ mod tests {
         .unwrap_err();
 
         assert!(error.contains("已取消"), "{error}");
+        assert!(error.contains("临时备份已清理"), "{error}");
         assert_eq!(fs::read_dir(destination).unwrap().count(), 0);
     }
 
