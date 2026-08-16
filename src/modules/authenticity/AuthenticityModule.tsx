@@ -296,7 +296,7 @@ function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { br
   </div>;
 }
 
-function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
+export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   preview: PublicationPreview;
   busy: boolean;
   onBack: () => void;
@@ -336,7 +336,6 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
     setImageSwitching(true);
     await decodeImage((next ? preview.originalImage : preview.image).dataUrl);
     setShowOriginal(next);
-    setZoom("fit");
     setImageSwitching(false);
   };
   const measuredZoom = () => {
