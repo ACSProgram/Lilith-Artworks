@@ -31,12 +31,14 @@ interface LibraryControllerOptions {
   repositoryReady: boolean;
   onError: (message: string | null) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
+  onAcknowledgeBackupDisableNotices: (artworkIds: string[]) => Promise<void>;
 }
 
 export function useLibraryController({
   repositoryReady,
   onError,
   onRetryFileCleanup,
+  onAcknowledgeBackupDisableNotices,
 }: LibraryControllerOptions) {
   const [tree, setTree] = useState(EMPTY_TREE);
   const [loading, setLoading] = useState(false);
@@ -106,6 +108,19 @@ export function useLibraryController({
   }, [applyTree, onError, repositoryReady]);
 
   useEffect(() => {
+    if (!repositoryReady) return;
+    const timer = window.setInterval(() => {
+      const repositoryId = repositoryRequest.current;
+      libraryApi.listTree()
+        .then((next) => {
+          if (repositoryId === repositoryRequest.current) applyTree(next);
+        })
+        .catch(() => {});
+    }, 30_000);
+    return () => window.clearInterval(timer);
+  }, [applyTree, repositoryReady]);
+
+  useEffect(() => {
     const trimmed = query.trim();
     const repositoryId = repositoryRequest.current;
     const requestId = ++searchRequest.current;
@@ -172,6 +187,22 @@ export function useLibraryController({
       setOperationBusy(false);
     }
   }, [applyCleanupReport, cleanupFailures, onError, onRetryFileCleanup]);
+
+  const acknowledgeBackupDisableNotices = useCallback(async (artworkIds: string[]) => {
+    if (artworkIds.length === 0) return;
+    const repositoryId = repositoryRequest.current;
+    setOperationBusy(true);
+    onError(null);
+    try {
+      await onAcknowledgeBackupDisableNotices(artworkIds);
+      const next = await libraryApi.listTree();
+      if (repositoryId === repositoryRequest.current) applyTree(next);
+    } catch (error) {
+      if (repositoryId === repositoryRequest.current) onError(errorMessage(error));
+    } finally {
+      if (repositoryId === repositoryRequest.current) setOperationBusy(false);
+    }
+  }, [applyTree, onAcknowledgeBackupDisableNotices, onError]);
 
   const loadTrash = useCallback(async () => {
     const repositoryId = repositoryRequest.current;
@@ -271,6 +302,7 @@ export function useLibraryController({
     trashEntries,
     cleanupFailures,
     retryCleanup,
+    acknowledgeBackupDisableNotices,
     loadTrash,
     createGroup,
     createArtwork,

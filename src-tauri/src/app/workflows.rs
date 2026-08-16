@@ -17,6 +17,14 @@ fn root(state: &AppState) -> Result<std::path::PathBuf, String> {
 }
 
 #[tauri::command]
+pub(crate) fn acknowledge_backup_disable_notices(
+    artwork_ids: Vec<String>,
+    app_state: State<'_, AppState>,
+) -> Result<(), String> {
+    history::acknowledge_backup_disable_notices(&root(app_state.inner())?, &artwork_ids)
+}
+
+#[tauri::command]
 pub(crate) fn create_library_artwork(
     request: library::CreateArtworkRequest,
     app_state: State<'_, AppState>,

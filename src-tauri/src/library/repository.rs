@@ -767,7 +767,9 @@ fn list_tree_with_connection(connection: &Connection) -> Result<LibraryTree, Str
     let mut branch_statement = connection
         .prepare(
             "SELECT b.artwork_id, b.id, b.title, b.source_path,
-                    (SELECT COUNT(*) FROM branches counted WHERE counted.artwork_id = b.artwork_id)
+                    (SELECT COUNT(*) FROM branches counted WHERE counted.artwork_id = b.artwork_id),
+                    (SELECT COUNT(*) FROM branches notices WHERE notices.artwork_id = b.artwork_id
+                       AND notices.backup_disable_notice_pending <> 0)
              FROM branches b
              WHERE b.id = (
                SELECT first.id FROM branches first
@@ -786,6 +788,7 @@ fn list_tree_with_connection(connection: &Connection) -> Result<LibraryTree, Str
                     source_path: row.get(3)?,
                 },
                 row.get::<_, u64>(4)?,
+                row.get::<_, u64>(5)?,
             ))
         })
         .map_err(database_error)?
@@ -793,7 +796,9 @@ fn list_tree_with_connection(connection: &Connection) -> Result<LibraryTree, Str
         .map_err(database_error)?;
     let branch_by_artwork = branch_rows
         .into_iter()
-        .map(|(artwork_id, branch, count)| (artwork_id, (branch, count)))
+        .map(|(artwork_id, branch, count, notice_count)| {
+            (artwork_id, (branch, count, notice_count))
+        })
         .collect::<HashMap<_, _>>();
 
     let mut statement = connection
@@ -842,8 +847,9 @@ fn list_tree_with_connection(connection: &Connection) -> Result<LibraryTree, Str
             let primary = branch_by_artwork.get(&node.id);
             node.artwork = Some(ArtworkSummary {
                 description: descriptions.get(&node.id).cloned().unwrap_or_default(),
-                branch_count: primary.map_or(0, |(_, count)| *count),
-                primary_branch: primary.map(|(branch, _)| branch.clone()),
+                branch_count: primary.map_or(0, |(_, count, _)| *count),
+                backup_disable_notice_count: primary.map_or(0, |(_, _, count)| *count),
+                primary_branch: primary.map(|(branch, _, _)| branch.clone()),
             });
         }
     }

@@ -36,6 +36,7 @@ pub(crate) struct LibraryNode {
 pub(crate) struct ArtworkSummary {
     pub(crate) description: String,
     pub(crate) branch_count: u64,
+    pub(crate) backup_disable_notice_count: u64,
     pub(crate) primary_branch: Option<PrimaryBranch>,
 }
 

@@ -16,7 +16,7 @@ use super::{
     trustmark::{identifier_from_soft_binding, soft_binding_value, SOFT_BINDING_ALGORITHM},
 };
 
-pub(crate) const ASSERTION_LABEL: &str = "art.lilith.artworks.claim";
+pub(crate) const ASSERTION_LABEL: &str = "com.lilith.artworks.claim";
 
 pub(crate) fn sign_jpeg(
     config: &CertificationConfig,

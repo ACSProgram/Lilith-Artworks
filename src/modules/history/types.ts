@@ -16,6 +16,9 @@ export interface ArtworkBranch {
   lastCheckMs: number | null;
   lastSuccessMs: number | null;
   lastError: string | null;
+  consecutiveBackupFailures: number;
+  backupRetryAtMs: number | null;
+  backupDisableNoticePending: boolean;
   finalArtifactLocked: boolean;
   publishedCount: number;
 }

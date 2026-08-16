@@ -28,6 +28,7 @@ export interface AppSettings {
 export interface SettingsSnapshot {
   settings: AppSettings;
   settingsPath: string;
+  logDirectory: string;
   warning: string | null;
   automaticBackupFileCount: number | null;
 }

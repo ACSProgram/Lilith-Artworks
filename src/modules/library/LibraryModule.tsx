@@ -7,6 +7,7 @@ import {
   Plus,
   Search,
   Settings,
+  TriangleAlert,
   Trash2,
   X,
 } from "lucide-react";
@@ -32,6 +33,7 @@ interface LibraryModuleProps {
   onConfigure: () => void;
   onError: (message: string | null) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
+  onAcknowledgeBackupDisableNotices: (artworkIds: string[]) => Promise<void>;
   renderArtworkWorkspace: (props: LibraryArtworkWorkspaceProps) => ReactNode;
 }
 
@@ -56,14 +58,14 @@ interface ContextState {
   y: number;
 }
 
-export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, renderArtworkWorkspace }: LibraryModuleProps) {
-  const controller = useLibraryController({ repositoryReady, onError, onRetryFileCleanup });
+export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices, renderArtworkWorkspace }: LibraryModuleProps) {
+  const controller = useLibraryController({ repositoryReady, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices });
   const {
     tree, loading, operationBusy, expandedIds, setExpandedIds, selectedIds, setSelectedIds,
     anchorId, setAnchorId, activeId, setActiveId, query, setQuery, searchResults,
     setSearchResults, searching, trashEntries, cleanupFailures, retryCleanup, loadTrash,
     createGroup, createArtwork, renameNode, trashNodes, moveNodes, restoreTrash,
-    permanentlyDeleteTrash, emptyTrash,
+    permanentlyDeleteTrash, emptyTrash, acknowledgeBackupDisableNotices,
   } = controller;
   const [newMenuOpen, setNewMenuOpen] = useState(false);
   const [context, setContext] = useState<ContextState | null>(null);
@@ -82,6 +84,12 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     [expandedIds, tree.nodes],
   );
   const activeNode = activeId ? nodeById.get(activeId) ?? null : null;
+  const backupNoticeArtworkIds = useMemo(() => allNodes
+    .filter((node) => (node.artwork?.backupDisableNoticeCount ?? 0) > 0)
+    .map((node) => node.id), [allNodes]);
+  const backupNoticeCount = useMemo(() => allNodes.reduce(
+    (count, node) => count + (node.artwork?.backupDisableNoticeCount ?? 0), 0,
+  ), [allNodes]);
 
   useEffect(() => {
     if (!context && !newMenuOpen) return;
@@ -227,6 +235,12 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
             </div>
           )}
         </div>
+
+        {backupNoticeCount > 0 && <div className="backup-disable-alert" role="alert">
+          <TriangleAlert aria-hidden="true" size={16} />
+          <span><strong>{backupNoticeCount} 个分支的自动备份已关闭</strong><small>连续 5 次读取或备份失败，请检查工作文件路径后手动重新启用。</small></span>
+          <button type="button" disabled={operationBusy} onClick={() => void acknowledgeBackupDisableNotices(backupNoticeArtworkIds)}>知道了</button>
+        </div>}
 
         <div className="tree-scroll">
           {loading ? (

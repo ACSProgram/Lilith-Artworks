@@ -69,8 +69,16 @@ pub(crate) fn preview(
     JpegEncoder::new_with_quality(&mut encoded, request.config.jpeg_quality)
         .encode_image(&rendition)?;
     let output_bytes = encoded.len() as u64;
-    let mut original_encoded = Cursor::new(Vec::new());
-    source.write_to(&mut original_encoded, image::ImageFormat::Png)?;
+    let (original_media_type, original_bytes) = match target.media_type.as_str() {
+        "image/jpeg" | "image/png" | "image/webp" => {
+            (target.media_type.as_str(), fs::read(&input)?)
+        }
+        _ => {
+            let mut encoded = Cursor::new(Vec::new());
+            source.write_to(&mut encoded, image::ImageFormat::Png)?;
+            ("image/png", encoded.into_inner())
+        }
+    };
     Ok(PublicationPreview {
         image: PreviewImage {
             data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(encoded)),
@@ -80,8 +88,9 @@ pub(crate) fn preview(
         },
         original_image: PreviewImage {
             data_url: format!(
-                "data:image/png;base64,{}",
-                STANDARD.encode(original_encoded.into_inner())
+                "data:{};base64,{}",
+                original_media_type,
+                STANDARD.encode(original_bytes)
             ),
             width,
             height,

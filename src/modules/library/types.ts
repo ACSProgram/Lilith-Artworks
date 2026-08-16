@@ -9,6 +9,7 @@ export interface PrimaryBranch {
 export interface ArtworkSummary {
   description: string;
   branchCount: number;
+  backupDisableNoticeCount: number;
   primaryBranch: PrimaryBranch | null;
 }
 

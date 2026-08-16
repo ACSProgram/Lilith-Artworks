@@ -28,6 +28,9 @@ const branch: ArtworkBranch = {
   lastCheckMs: null,
   lastSuccessMs: null,
   lastError: null,
+  consecutiveBackupFailures: 0,
+  backupRetryAtMs: null,
+  backupDisableNoticePending: false,
   finalArtifactLocked: false,
   publishedCount: 0,
 };

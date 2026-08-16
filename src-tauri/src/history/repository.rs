@@ -30,6 +30,8 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
             "SELECT b.id, b.title, b.source_path, b.head_history_id,
                     b.created_from_history_id, b.backup_enabled, b.backup_interval_minutes,
                     b.last_check_ms, b.last_success_ms, b.last_error,
+                    b.consecutive_backup_failures, b.backup_retry_at_ms,
+                    b.backup_disable_notice_pending,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
                     (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id)
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
@@ -48,8 +50,11 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 last_check_ms: row.get(7)?,
                 last_success_ms: row.get(8)?,
                 last_error: row.get(9)?,
-                final_artifact_locked: row.get::<_, bool>(10)?,
-                published_count: row.get(11)?,
+                consecutive_backup_failures: row.get(10)?,
+                backup_retry_at_ms: row.get(11)?,
+                backup_disable_notice_pending: row.get::<_, i64>(12)? != 0,
+                final_artifact_locked: row.get::<_, bool>(13)?,
+                published_count: row.get(14)?,
             })
         })
         .map_err(storage::database_error)?
@@ -167,7 +172,12 @@ pub(crate) fn update_branch(
     let changed = connection
         .execute(
             "UPDATE branches SET title = ?2, backup_enabled = ?3,
-                    backup_interval_minutes = ?4, updated_ms = ?5 WHERE id = ?1",
+                    backup_interval_minutes = ?4,
+                    consecutive_backup_failures = CASE WHEN ?3 <> 0 THEN 0 ELSE consecutive_backup_failures END,
+                    backup_retry_at_ms = CASE WHEN ?3 <> 0 THEN NULL ELSE backup_retry_at_ms END,
+                    last_error = CASE WHEN ?3 <> 0 THEN NULL ELSE last_error END,
+                    backup_disable_notice_pending = CASE WHEN ?3 <> 0 THEN 0 ELSE backup_disable_notice_pending END,
+                    updated_ms = ?5 WHERE id = ?1",
             params![
                 branch_id,
                 title.trim(),
@@ -353,7 +363,8 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<St
     transaction
         .execute(
             "UPDATE branches SET head_history_id = ?2, last_check_ms = ?3, last_success_ms = ?3,
-                last_error = NULL, updated_ms = ?3 WHERE id = ?1",
+                last_error = NULL, consecutive_backup_failures = 0, backup_retry_at_ms = NULL,
+                updated_ms = ?3 WHERE id = ?1",
             params![commit.branch_id, commit.id, commit.created_ms],
         )
         .map_err(storage::database_error)?;
@@ -393,7 +404,8 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<St
 
 pub(crate) fn mark_unchanged(root: &Path, branch_id: &str, checked_ms: i64) -> Result<(), String> {
     storage::open(root)?.execute(
-        "UPDATE branches SET last_check_ms = ?2, last_success_ms = ?2, last_error = NULL, updated_ms = ?2 WHERE id = ?1",
+        "UPDATE branches SET last_check_ms = ?2, last_success_ms = ?2, last_error = NULL,
+            consecutive_backup_failures = 0, backup_retry_at_ms = NULL, updated_ms = ?2 WHERE id = ?1",
         params![branch_id, checked_ms]
     ).map_err(storage::database_error)?;
     Ok(())
@@ -1008,6 +1020,48 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
     })
 }
 
+pub(crate) fn mark_automatic_backup_error(
+    root: &Path,
+    branch_id: &str,
+    error: &str,
+    failed_ms: i64,
+) -> Result<bool, String> {
+    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let (previous_failures, interval_minutes): (u32, u32) = transaction
+        .query_row(
+            "SELECT consecutive_backup_failures, backup_interval_minutes FROM branches WHERE id = ?1",
+            [branch_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(storage::database_error)?;
+    let failures = previous_failures.saturating_add(1);
+    let disabled = failures >= MAX_CONSECUTIVE_FAILURES;
+    let retry_minutes = match failures {
+        1 => 1,
+        2 => interval_minutes.div_ceil(4),
+        3 => interval_minutes.div_ceil(2),
+        _ => interval_minutes,
+    };
+    let retry_at_ms = (!disabled)
+        .then(|| failed_ms.saturating_add(i64::from(retry_minutes).saturating_mul(60_000)));
+    transaction
+        .execute(
+            "UPDATE branches
+             SET last_error = ?2, consecutive_backup_failures = ?3,
+                 backup_retry_at_ms = ?4,
+                 backup_enabled = CASE WHEN ?5 <> 0 THEN 0 ELSE backup_enabled END,
+                 backup_disable_notice_pending = CASE WHEN ?5 <> 0 THEN 1 ELSE backup_disable_notice_pending END,
+                 updated_ms = ?6
+             WHERE id = ?1",
+            params![branch_id, error, failures, retry_at_ms, i64::from(disabled), failed_ms],
+        )
+        .map_err(storage::database_error)?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(disabled)
+}
+
 pub(crate) fn mark_error(root: &Path, branch_id: &str, error: &str) {
     if let Ok(connection) = storage::open(root) {
         let _ = connection.execute(
@@ -1015,6 +1069,25 @@ pub(crate) fn mark_error(root: &Path, branch_id: &str, error: &str) {
             params![branch_id, error],
         );
     }
+}
+
+pub(crate) fn acknowledge_backup_disable_notices(
+    root: &Path,
+    artwork_ids: &[String],
+) -> Result<(), String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    for artwork_id in artwork_ids {
+        transaction
+            .execute(
+                "UPDATE branches SET backup_disable_notice_pending = 0
+             WHERE artwork_id = ?1 AND backup_disable_notice_pending <> 0",
+                [artwork_id],
+            )
+            .map_err(storage::database_error)?;
+    }
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(())
 }
 
 pub(crate) fn storage_path_referenced(root: &Path, path: &str) -> Result<bool, String> {
@@ -1034,7 +1107,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes
+            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
@@ -1047,6 +1120,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
                 id: row.get(0)?,
                 last_check_ms: row.get(1)?,
                 interval_minutes: row.get(2)?,
+                retry_at_ms: row.get(3)?,
             })
         })
         .map_err(storage::database_error)?
@@ -1152,23 +1226,77 @@ mod tests {
     }
 
     #[test]
-    fn backup_error_preserves_last_successful_check_for_retry() {
+    fn automatic_backup_failures_follow_interval_and_eventually_disable() {
         let fixture = HistoryFixture::new();
         mark_unchanged(&fixture.root, &fixture.main_branch_id, 100).unwrap();
+        update_branch(&fixture.root, &fixture.main_branch_id, "Main", true, 120).unwrap();
 
-        mark_error(&fixture.root, &fixture.main_branch_id, "temporary failure");
-
-        let state: (Option<i64>, Option<i64>, Option<String>) = storage::open(&fixture.root)
-            .unwrap()
-            .query_row(
-                "SELECT last_check_ms, last_success_ms, last_error FROM branches WHERE id = ?1",
-                [&fixture.main_branch_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        let expected_delays = [1_i64, 30, 60, 120];
+        for (index, delay_minutes) in expected_delays.into_iter().enumerate() {
+            let failed_ms = 1_000 + index as i64;
+            assert!(!mark_automatic_backup_error(
+                &fixture.root,
+                &fixture.main_branch_id,
+                "temporary failure",
+                failed_ms,
             )
-            .unwrap();
+            .unwrap());
+            let retry_at: i64 = storage::open(&fixture.root)
+                .unwrap()
+                .query_row(
+                    "SELECT backup_retry_at_ms FROM branches WHERE id = ?1",
+                    [&fixture.main_branch_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(retry_at, failed_ms + delay_minutes * 60_000);
+        }
+        assert!(mark_automatic_backup_error(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "persistent failure",
+            2_000,
+        )
+        .unwrap());
+
+        let state: (Option<i64>, Option<i64>, Option<String>, u32, bool, bool) =
+            storage::open(&fixture.root)
+                .unwrap()
+                .query_row(
+                    "SELECT last_check_ms, last_success_ms, last_error,
+                        consecutive_backup_failures, backup_enabled,
+                        backup_disable_notice_pending
+                 FROM branches WHERE id = ?1",
+                    [&fixture.main_branch_id],
+                    |row| {
+                        Ok((
+                            row.get(0)?,
+                            row.get(1)?,
+                            row.get(2)?,
+                            row.get(3)?,
+                            row.get(4)?,
+                            row.get(5)?,
+                        ))
+                    },
+                )
+                .unwrap();
         assert_eq!(state.0, Some(100));
         assert_eq!(state.1, Some(100));
-        assert_eq!(state.2.as_deref(), Some("temporary failure"));
+        assert_eq!(state.2.as_deref(), Some("persistent failure"));
+        assert_eq!(state.3, 5);
+        assert!(!state.4);
+        assert!(state.5);
+
+        acknowledge_backup_disable_notices(&fixture.root, &[fixture.artwork_id.clone()]).unwrap();
+        let pending: bool = storage::open(&fixture.root)
+            .unwrap()
+            .query_row(
+                "SELECT backup_disable_notice_pending FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!pending);
     }
 
     #[test]

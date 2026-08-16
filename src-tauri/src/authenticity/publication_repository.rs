@@ -10,6 +10,7 @@ pub(crate) struct BranchPublicationTarget {
     pub(crate) history_id: String,
     pub(crate) artifact_id: String,
     pub(crate) artifact_path: String,
+    pub(crate) media_type: String,
 }
 
 pub(crate) struct NewFinalArtifact<'a> {
@@ -88,7 +89,7 @@ pub(crate) fn publication_target(
 ) -> Result<BranchPublicationTarget, String> {
     let mut target = storage::open(root)?
         .query_row(
-            "SELECT f.history_id, f.id, f.source_path
+            "SELECT f.history_id, f.id, f.source_path, f.media_type
              FROM branches b
              JOIN library_nodes artwork ON artwork.id = b.artwork_id
              JOIN final_artifacts f ON f.branch_id = b.id
@@ -99,6 +100,7 @@ pub(crate) fn publication_target(
                     history_id: row.get(0)?,
                     artifact_id: row.get(1)?,
                     artifact_path: row.get(2)?,
+                    media_type: row.get(3)?,
                 })
             },
         )

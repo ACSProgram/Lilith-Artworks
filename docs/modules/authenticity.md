@@ -27,7 +27,7 @@
 
 C2PA 是每次认证导出的强制基础，不能关闭。发布版固定输出 JPEG，并包含：
 
-- `art.lilith.artworks.claim` 自定义声明；
+- `com.lilith.artworks.claim` 自定义声明；
 - `stds.schema-org.CreativeWork`；
 - 最终成品的 `parentOf` ingredient；
 - `c2pa.transcoded` action；
@@ -41,7 +41,7 @@ TrustMark 可关闭。启用时使用 Q/BCH_SUPER 模型和 40 位二进制 ID�
 
 ## 导出记录与识别
 
-每条导出记录固定关联分支、发布节点和最终成品，保存时间、首次输出路径、仓库内认证 JPG 副本、大小/SHA-256、内容声明、TrustMark ID、范围 JSON、C2PA manifest JSON 和验证状态。记录 ID 在签名前生成，并始终写入 `art.lilith.artworks.claim.recordId`；因此关闭 TrustMark 的仅 C2PA 发布也能稳定回查本地记录。所有记录必须有仓库副本，查看和再次导出只读取该副本，不依赖首次输出路径；副本缺失时明确报告不可用。再次导出在后端使用不覆盖发布，目标已存在时明确拒绝。记录可按 ID、标题、创作者或首次输出路径搜索。
+每条导出记录固定关联分支、发布节点和最终成品，保存时间、首次输出路径、仓库内认证 JPG 副本、大小/SHA-256、内容声明、TrustMark ID、范围 JSON、C2PA manifest JSON 和验证状态。记录 ID 在签名前生成，并始终写入 `com.lilith.artworks.claim.recordId`；因此关闭 TrustMark 的仅 C2PA 发布也能稳定回查本地记录。所有记录必须有仓库副本，查看和再次导出只读取该副本，不依赖首次输出路径；副本缺失时明确报告不可用。再次导出在后端使用不覆盖发布，目标已存在时明确拒绝。记录可按 ID、标题、创作者或首次输出路径搜索。
 
 识别始终读取 C2PA；模型可用时还会对整图或用户框选区域解码 TrustMark。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
 

@@ -2,6 +2,7 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Mutex, RwLock,
@@ -84,6 +85,7 @@ impl Default for ContentSettings {
 pub(crate) struct AppState {
     settings: RwLock<AppSettings>,
     settings_path: PathBuf,
+    log_directory: PathBuf,
     warning: RwLock<Option<String>>,
     validated_repository: Mutex<Option<PathBuf>>,
     exit_requested: AtomicBool,
@@ -93,11 +95,13 @@ impl AppState {
     pub(crate) fn new(
         settings: AppSettings,
         settings_path: PathBuf,
+        log_directory: PathBuf,
         warning: Option<String>,
     ) -> Self {
         Self {
             settings: RwLock::new(settings),
             settings_path,
+            log_directory,
             warning: RwLock::new(warning),
             validated_repository: Mutex::new(None),
             exit_requested: AtomicBool::new(false),
@@ -166,6 +170,7 @@ impl AppState {
 pub(crate) struct SettingsSnapshot {
     settings: AppSettings,
     settings_path: String,
+    log_directory: String,
     warning: Option<String>,
     automatic_backup_file_count: Option<usize>,
 }
@@ -216,6 +221,33 @@ pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
 #[tauri::command]
 pub(crate) fn get_app_settings(state: State<'_, AppState>) -> Result<SettingsSnapshot, String> {
     snapshot(state.inner())
+}
+
+#[tauri::command]
+pub(crate) fn open_log_directory(state: State<'_, AppState>) -> Result<(), String> {
+    open_directory(&state.log_directory, "日志")
+}
+
+#[tauri::command]
+pub(crate) fn open_settings_directory(state: State<'_, AppState>) -> Result<(), String> {
+    let directory = state.settings_path.parent().ok_or("设置文件路径无效")?;
+    open_directory(directory, "设置")
+}
+
+fn open_directory(path: &Path, label: &str) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|error| format!("无法创建{label}目录：{error}"))?;
+    let mut command = if cfg!(target_os = "windows") {
+        Command::new("explorer.exe")
+    } else if cfg!(target_os = "macos") {
+        Command::new("open")
+    } else {
+        Command::new("xdg-open")
+    };
+    command
+        .arg(path)
+        .spawn()
+        .map_err(|error| format!("无法打开{label}目录：{error}"))?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -334,6 +366,7 @@ fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
     Ok(SettingsSnapshot {
         settings: state.settings.read().map_err(|_| "设置状态已损坏")?.clone(),
         settings_path: state.settings_path.to_string_lossy().into_owned(),
+        log_directory: state.log_directory.to_string_lossy().into_owned(),
         warning: state
             .warning
             .read()
@@ -456,7 +489,12 @@ mod tests {
         library::initialize(&root).unwrap();
         let mut settings = AppSettings::default();
         settings.repository_path = root.to_string_lossy().into_owned();
-        let state = AppState::new(settings, directory.path().join("settings.json"), None);
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
         library::take_integrity_check_count();
 
         assert_eq!(state.ready_repository_path().unwrap(), root);
@@ -477,7 +515,7 @@ mod tests {
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '7' WHERE key = 'schema_version'",
+                "UPDATE repository_meta SET value = '9' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();

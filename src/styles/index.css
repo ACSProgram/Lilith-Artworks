@@ -112,7 +112,7 @@ button { color: inherit; }
 .icon-button:hover:not(:disabled) { background: var(--surface-subtle); }
 .icon-button:disabled { opacity: .4; cursor: default; }
 
-.library-sidebar { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-width: 0; border-right: 1px solid var(--border); background: var(--surface); padding: 12px; }
+.library-sidebar { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr) auto; min-width: 0; border-right: 1px solid var(--border); background: var(--surface); padding: 12px; }
 .sidebar-heading { display: flex; align-items: center; justify-content: space-between; height: 34px; font-size: 13px; font-weight: 650; }
 .sidebar-heading > div { display: flex; align-items: center; gap: 7px; }
 .sidebar-heading small { color: var(--muted); font-size: 11px; font-weight: 500; }
@@ -143,7 +143,14 @@ button { color: inherit; }
 .tree-chevron.open { transform: rotate(90deg); }
 .tree-chevron-spacer { width: 16px; }
 .tree-row-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.library-tree-row small { padding-right: 7px; color: var(--muted); font-size: 10px; }
+.library-tree-row small { display: inline-flex; align-items: center; gap: 4px; padding-right: 7px; color: var(--muted); font-size: 10px; }
+.library-tree-row small.backup-warning { color: var(--danger); }
+.backup-disable-alert { display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 7px; margin: 0 0 10px; padding: 9px; border: 1px solid color-mix(in srgb, var(--danger) 48%, var(--border)); border-radius: 6px; color: var(--danger); background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.backup-disable-alert > span { min-width: 0; }
+.backup-disable-alert strong, .backup-disable-alert small { display: block; }
+.backup-disable-alert strong { font-size: 10px; line-height: 1.4; }
+.backup-disable-alert small { margin-top: 3px; color: var(--muted); font-size: 9px; line-height: 1.45; }
+.backup-disable-alert button { grid-column: 2; justify-self: start; padding: 3px 0; border: 0; color: var(--danger); background: transparent; font-size: 9px; font-weight: 650; cursor: pointer; }
 .tree-empty, .tree-loading { padding: 14px 8px; color: var(--muted); font-size: 11px; text-align: center; }
 .tree-loading { display: flex; justify-content: center; align-items: center; gap: 7px; }
 .sidebar-footer { display: flex; align-items: center; min-height: 34px; margin: 8px -4px -4px; padding: 5px 4px 0; border-top: 1px solid var(--border); color: var(--muted); font-size: 10px; }

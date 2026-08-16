@@ -165,6 +165,9 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(
             tauri_plugin_log::Builder::new()
                 .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
@@ -182,8 +185,17 @@ pub fn run() {
                 .app_config_dir()
                 .map_err(|error| format!("无法定位应用设置目录：{error}"))?;
             let settings_path: PathBuf = config_directory.join("settings.json");
+            let log_directory = application
+                .path()
+                .app_log_dir()
+                .map_err(|error| format!("无法定位应用日志目录：{error}"))?;
             let (settings, warning) = app::load_settings(&settings_path);
-            application.manage(app::AppState::new(settings, settings_path, warning));
+            application.manage(app::AppState::new(
+                settings,
+                settings_path,
+                log_directory,
+                warning,
+            ));
             let backup_state = backup::BackupState::default();
             backup_state.start_scheduler(application.handle().clone())?;
             application.manage(backup_state);
@@ -245,7 +257,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app::settings::get_app_settings,
             app::settings::save_app_settings,
+            app::settings::open_log_directory,
+            app::settings::open_settings_directory,
             app::cleanup_commands::retry_pending_file_cleanup,
+            app::workflows::acknowledge_backup_disable_notices,
             library::get_repository_status,
             library::list_library_tree,
             library::search_library,

@@ -30,6 +30,7 @@ tauri = { version = "2.11", features = ["tray-icon", "image-ico"] }
 tauri-plugin-dialog = "2.4"
 tauri-plugin-fs = "2.5"
 tauri-plugin-log = "2.9"
+tauri-plugin-single-instance = "2.4"
 tempfile = "3"
 thiserror = "2"
 trustmark = "0.2.2"

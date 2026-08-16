@@ -52,10 +52,12 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         let mut due = None;
         let mut next_due = None;
         for branch in branches {
-            let due_at = branch.last_check_ms.map_or(now, |checked| {
-                checked
-                    .saturating_add(i64::from(branch.interval_minutes) * 60_000)
-                    .saturating_add(jitter_ms(&branch.id))
+            let due_at = branch.retry_at_ms.unwrap_or_else(|| {
+                branch.last_check_ms.map_or(now, |checked| {
+                    checked
+                        .saturating_add(i64::from(branch.interval_minutes) * 60_000)
+                        .saturating_add(jitter_ms(&branch.id))
+                })
             });
             if due_at <= now {
                 due = Some(branch.id);
@@ -68,8 +70,16 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 worker::run_backup(&root, &branch_id, "", "automatic", || state.cancelled())
             });
             if let Err(error) = result {
-                history::mark_error(&root, &branch_id, &error);
-                log::error!("automatic backup failed for branch {branch_id}: {error}");
+                let disabled = storage::now_ms()
+                    .and_then(|failed_ms| {
+                        history::mark_automatic_backup_error(&root, &branch_id, &error, failed_ms)
+                    })
+                    .unwrap_or(false);
+                if disabled {
+                    log::error!("automatic backup disabled after repeated failures for branch {branch_id}: {error}");
+                } else {
+                    log::error!("automatic backup failed for branch {branch_id}: {error}");
+                }
                 if !state.wait_scheduler(ERROR_RETRY) {
                     break;
                 }

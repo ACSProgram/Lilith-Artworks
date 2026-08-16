@@ -1,4 +1,4 @@
-import { ChevronRight, FileImage, Folder, FolderOpen, Library } from "lucide-react";
+import { ChevronRight, FileImage, Folder, FolderOpen, Library, TriangleAlert } from "lucide-react";
 import {
   useMemo,
   useRef,
@@ -183,7 +183,10 @@ function TreeRow({
           </>
         )}
         <span className="tree-row-title">{node.title}</span>
-        {node.kind === "artwork" && <small>{node.artwork?.branchCount ?? 0}</small>}
+        {node.kind === "artwork" && <small className={(node.artwork?.backupDisableNoticeCount ?? 0) > 0 ? "backup-warning" : ""}>
+          {(node.artwork?.backupDisableNoticeCount ?? 0) > 0 && <TriangleAlert aria-hidden="true" size={12} />}
+          {node.artwork?.branchCount ?? 0}
+        </small>}
       </button>
       {expanded && node.children.length > 0 && (
         <TreeBranch

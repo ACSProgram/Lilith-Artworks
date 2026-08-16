@@ -22,6 +22,9 @@ pub(crate) struct ArtworkBranch {
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) last_success_ms: Option<i64>,
     pub(crate) last_error: Option<String>,
+    pub(crate) consecutive_backup_failures: u32,
+    pub(crate) backup_retry_at_ms: Option<i64>,
+    pub(crate) backup_disable_notice_pending: bool,
     pub(crate) final_artifact_locked: bool,
     pub(crate) published_count: u32,
 }
@@ -90,6 +93,7 @@ pub(crate) struct ScheduledBranch {
     pub(crate) id: String,
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) interval_minutes: u32,
+    pub(crate) retry_at_ms: Option<i64>,
 }
 
 pub(crate) struct HistoryCommit<'a> {

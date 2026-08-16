@@ -4,7 +4,7 @@ use rusqlite::{Connection, OptionalExtension};
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 8;
+pub(super) const SCHEMA_VERSION: i64 = 9;
 
 #[cfg(test)]
 thread_local! {
@@ -21,7 +21,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '8');
+               ('schema_version', '9');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -61,6 +61,9 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                last_check_ms INTEGER,
                last_success_ms INTEGER,
                last_error TEXT,
+               consecutive_backup_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_backup_failures >= 0),
+               backup_retry_at_ms INTEGER,
+               backup_disable_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (backup_disable_notice_pending IN (0, 1)),
                created_ms INTEGER NOT NULL,
                updated_ms INTEGER NOT NULL,
                UNIQUE (artwork_id, source_path_key)
@@ -280,6 +283,10 @@ pub(super) fn validate_and_migrate(connection: &Connection) -> Result<(), String
     if version == 7 {
         migrate_v7_to_v8(connection)?;
         version = 8;
+    }
+    if version == 8 {
+        migrate_v8_to_v9(connection)?;
+        version = 9;
     }
     validate_current_version(version)
 }
@@ -527,6 +534,21 @@ fn migrate_v7_to_v8(connection: &Connection) -> Result<(), String> {
              COMMIT;",
         )
         .map_err(|error| format!("无法把作品仓库迁移到版本 8：{error}"))
+}
+
+fn migrate_v8_to_v9(connection: &Connection) -> Result<(), String> {
+    connection
+        .execute_batch(
+            "BEGIN IMMEDIATE;
+             ALTER TABLE branches ADD COLUMN consecutive_backup_failures INTEGER NOT NULL DEFAULT 0
+               CHECK (consecutive_backup_failures >= 0);
+             ALTER TABLE branches ADD COLUMN backup_retry_at_ms INTEGER;
+             ALTER TABLE branches ADD COLUMN backup_disable_notice_pending INTEGER NOT NULL DEFAULT 0
+               CHECK (backup_disable_notice_pending IN (0, 1));
+             UPDATE repository_meta SET value = '9' WHERE key = 'schema_version';
+             COMMIT;",
+        )
+        .map_err(|error| format!("无法把作品仓库迁移到版本 9：{error}"))
 }
 
 #[cfg(test)]

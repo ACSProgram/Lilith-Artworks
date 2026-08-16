@@ -260,7 +260,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="branch-status-actions">
         <div className={`branch-schedule${selectedBranch.lastError ? " error" : ""}`}>
           {selectedBranch.finalArtifactLocked ? <><Ban size={16} />成品已锁定 · 已发布 {selectedBranch.publishedCount} 条</>
-            : selectedBranch.lastError ? <>备份失败，约 1 分钟后重试 · {selectedBranch.lastError}</>
+            : selectedBranch.lastError && !selectedBranch.backupEnabled ? <>自动备份已关闭（连续 {selectedBranch.consecutiveBackupFailures} 次失败） · {selectedBranch.lastError}</>
+              : selectedBranch.lastError ? <>备份失败，将按策略重试 · {selectedBranch.lastError}</>
               : selectedBranch.backupEnabled ? <><Check size={16} />每 {selectedBranch.backupIntervalMinutes} 分钟自动备份 · {selectedBranch.lastSuccessMs ? `最近成功 ${new Date(selectedBranch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}</>
                 : "自动备份已关闭"}
         </div>

@@ -138,6 +138,7 @@ export function App() {
           onConfigure={openSettings}
           onError={setMessage}
           onRetryFileCleanup={appApi.retryFileCleanup}
+          onAcknowledgeBackupDisableNotices={appApi.acknowledgeBackupDisableNotices}
           renderArtworkWorkspace={(workspace) => (
             <ArtworkWorkspace
               key={workspace.artworkId}
@@ -220,6 +221,16 @@ export function App() {
                   <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
                   <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
                 </label>
+                <div className="settings-preference-row">
+                  <span className="settings-row-icon"><Settings aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>配置文件夹</strong><small title={snapshot?.settingsPath}>{snapshot?.settingsPath ?? "设置目录尚未就绪"}</small></span>
+                  <button className="secondary-button" type="button" onClick={() => void appApi.openSettingsDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                </div>
+                <div className="settings-preference-row">
+                  <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
+                  <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                </div>
               </div>
             </div>
 

@@ -3,7 +3,7 @@ import {
   LockKeyhole, Maximize2, MoreVertical, MousePointer2, RotateCcw, ScanSearch, Search,
   ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PointerEvent as ReactPointerEvent } from "react";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
@@ -311,7 +311,34 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   const navigatorDragRef = useRef<number | null>(null);
   const fitZoomRef = useRef(1);
   const zoomAnchorRef = useRef<{ xRatio: number; yRatio: number; canvasX: number; canvasY: number } | null>(null);
+  const decodedImagesRef = useRef(new Map<string, Promise<void>>());
+  const [imageSwitching, setImageSwitching] = useState(false);
   const image = showOriginal ? preview.originalImage : preview.image;
+  const decodeImage = useCallback((dataUrl: string) => {
+    const cached = decodedImagesRef.current.get(dataUrl);
+    if (cached) return cached;
+    const promise = new Promise<void>((resolve) => {
+      const preload = new Image();
+      preload.decoding = "async";
+      preload.onload = () => { void preload.decode().catch(() => undefined).finally(resolve); };
+      preload.onerror = () => resolve();
+      preload.src = dataUrl;
+    });
+    decodedImagesRef.current.set(dataUrl, promise);
+    return promise;
+  }, []);
+  useEffect(() => {
+    const timer = window.setTimeout(() => { void decodeImage(preview.originalImage.dataUrl); }, 120);
+    return () => window.clearTimeout(timer);
+  }, [decodeImage, preview.originalImage.dataUrl]);
+  const toggleOriginal = async () => {
+    const next = !showOriginal;
+    setImageSwitching(true);
+    await decodeImage((next ? preview.originalImage : preview.image).dataUrl);
+    setShowOriginal(next);
+    setZoom("fit");
+    setImageSwitching(false);
+  };
   const measuredZoom = () => {
     const renderedImage = imageRef.current;
     return renderedImage && renderedImage.clientWidth > 0 ? renderedImage.clientWidth / image.width : zoom === "fit" ? fitZoomRef.current : zoom;
@@ -442,13 +469,13 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
     <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
       <header>
-        <div><small>发布前检查</small><h2 id="publication-preview-title">最终 JPG 质量预览</h2><span>{preview.image.width} x {preview.image.height} · {formatBytes(preview.outputBytes)}</span></div>
+        <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.image.width} x {preview.image.height} · {formatBytes(preview.outputBytes)}</span></div>
         <div className="preview-zoom-controls">
           <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, fitZoomRef.current))}><ZoomOut size={16} /></button>
           <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
           <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), 1, fitZoomRef.current))}><ZoomIn size={16} /></button>
           <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
-          <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} onClick={() => setShowOriginal((current) => !current)}><ImageIcon size={16} /></button>
+          <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} disabled={imageSwitching} onClick={() => void toggleOriginal()}><ImageIcon size={16} /></button>
           <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
         </div>
       </header>
@@ -462,12 +489,13 @@ function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerCancel={onPointerUp}
+          onDragStart={(event) => event.preventDefault()}
         >
           <div
             className="publication-preview-content"
             style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px`, height: `${image.height * zoom}px` }}
           >
-            <img ref={imageRef} src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "最终 JPG 全分辨率质量预览"} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+            <img ref={imageRef} src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "导出预览"} draggable={false} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
           </div>
         </div>
         {navigable && navigationRect && <div
