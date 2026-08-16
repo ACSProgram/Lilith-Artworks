@@ -132,16 +132,25 @@ pub(crate) async fn preview_branch_artifact_output(
         "证书链",
     )?;
     let state = authenticity_state.inner().clone();
+    let operation = state.begin_operation("发布质量预览")?;
     let app_state = app_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app_state
             .with_ready_repository(|root| {
-                pipeline::preview(root, &state, request).map_err(|error| error.to_string())
+                pipeline::preview(root, &state, &operation, request)
+                    .map_err(|error| error.to_string())
             })
             .map_err(AuthenticityError::Task)
     })
     .await
     .map_err(|error| AuthenticityError::Task(error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) fn cancel_authenticity_operation(
+    authenticity_state: State<'_, AuthenticityState>,
+) -> AuthenticityResult<bool> {
+    authenticity_state.request_cancel()
 }
 
 #[tauri::command]
@@ -420,9 +429,10 @@ pub(crate) fn store_final_artifact(
 pub(crate) fn publish_artifact(
     root: &Path,
     state: &AuthenticityState,
+    operation: &super::state::AuthenticityOperation,
     request: PublishBranchRequest,
 ) -> Result<PublishResult, AuthenticityError> {
-    let published = pipeline::publish(root, state, request)?;
+    let published = pipeline::publish(root, state, operation, request)?;
     Ok(PublishResult {
         record: published.record,
         width: published.width,

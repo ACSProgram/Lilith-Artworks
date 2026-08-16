@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   previewArtifact: vi.fn(),
   estimate: vi.fn(),
   previewPublication: vi.fn(),
+  cancelOperation: vi.fn(),
   publish: vi.fn(),
 }));
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
@@ -19,8 +20,9 @@ vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 const config = (branchId: string): CertificationConfig => ({
@@ -137,6 +139,7 @@ describe("usePublicationController", () => {
     vi.clearAllMocks();
     api.previewArtifact.mockResolvedValue(previewImage);
     api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.cancelOperation.mockResolvedValue(true);
   });
 
   afterEach(() => cleanup());
@@ -238,5 +241,28 @@ describe("usePublicationController", () => {
       previewCacheToken: "cache-token",
     }));
     expect(result.current.watermarkId).toBe("");
+  });
+
+  it("cancels an active quality preview without surfacing cancellation as an error", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    const pending = deferred<PublicationPreview>();
+    api.previewPublication.mockReturnValue(pending.promise);
+    const onError = vi.fn();
+    const { result } = renderHook(() => usePublicationController(options("first", onError)));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+    act(() => result.current.setPrivateKey("private-key"));
+
+    let previewTask!: Promise<void>;
+    act(() => { previewTask = result.current.generateOutputPreview(); });
+    await waitFor(() => expect(result.current.outputPreviewBusy).toBe(true));
+    await act(async () => { await result.current.cancelAuthenticityOperation(); });
+    expect(api.cancelOperation).toHaveBeenCalledOnce();
+    expect(result.current.cancelling).toBe(true);
+
+    pending.reject(new Error("认证任务已取消"));
+    await act(async () => { await previewTask; });
+    expect(result.current.outputPreviewBusy).toBe(false);
+    expect(result.current.cancelling).toBe(false);
+    expect(onError).not.toHaveBeenCalledWith("认证任务已取消");
   });
 });

@@ -23,6 +23,8 @@ export const authenticityApi = {
     invokeCommand<PublishResult>("publish_branch_artifact", { request }),
   previewPublication: (request: PublicationPreviewRequest) =>
     invokeCommand<PublicationPreview>("preview_branch_artifact_output", { request }),
+  cancelOperation: () =>
+    invokeCommand<boolean>("cancel_authenticity_operation"),
   cancelPublication: (branchId: string) =>
     invokeCommand<CleanupReport>("cancel_branch_publication", { branchId }),
   previewExternal: (path: string) =>

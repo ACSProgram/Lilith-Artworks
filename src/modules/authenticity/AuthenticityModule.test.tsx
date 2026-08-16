@@ -128,7 +128,7 @@ describe("PublicationPreviewDialog", () => {
   });
 
   it("preserves the numeric zoom while switching between the export and original images", async () => {
-    render(<PublicationPreviewDialog preview={preview} busy={false} onBack={vi.fn()} onPublish={vi.fn()} />);
+    render(<PublicationPreviewDialog preview={preview} busy={false} cancelling={false} onBack={vi.fn()} onCancel={vi.fn()} onPublish={vi.fn()} />);
 
     fireEvent.click(screen.getByTitle("放大"));
     expect(screen.getByTitle("按预览像素显示").textContent).toBe("110%");
@@ -140,5 +140,14 @@ describe("PublicationPreviewDialog", () => {
     fireEvent.click(screen.getByTitle("显示压缩预览"));
     await waitFor(() => expect((screen.getByTitle("显示原图") as HTMLButtonElement).disabled).toBe(false));
     expect(screen.getByTitle("按预览像素显示").textContent).toBe("110%");
+  });
+
+  it("exposes cancellation while signing is active", () => {
+    const onCancel = vi.fn();
+    render(<PublicationPreviewDialog preview={preview} busy cancelling={false} onBack={vi.fn()} onCancel={onCancel} onPublish={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "取消签名" }));
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(screen.getByText("正在写入 C2PA；时间戳服务最长等待 30 秒。")).toBeTruthy();
   });
 });

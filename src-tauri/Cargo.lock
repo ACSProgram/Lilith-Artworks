@@ -3114,6 +3114,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.20",
  "trustmark",
+ "ureq 3.4.0",
  "uuid",
  "zeroize",
  "zstd",

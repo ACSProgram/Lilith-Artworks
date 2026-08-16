@@ -49,9 +49,10 @@ function PublishView({
     publication, config, setConfig, preview, artifactPreviewBusy, artifactPreviewError,
     outputPreview, outputPreviewOpen,
     setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey,
-    busy, result, publishMetrics, sizeEstimate, viewingRecord, setViewingRecord,
+    publishing, cancelling, busy, result, publishMetrics, sizeEstimate, viewingRecord, setViewingRecord,
     viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
-    selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview, publish, cancelPublication,
+    selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview,
+    cancelAuthenticityOperation, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
   } = usePublicationController({
     artworkTitle,
@@ -135,10 +136,10 @@ function PublishView({
             </>}
           </div>
           {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code>{publishMetrics && <small>{publishMetrics.renditionCacheHit ? "已复用质量预览编码" : `重新渲染 ${publishMetrics.renderMs} ms · 编码 ${publishMetrics.encodeMs} ms`} · C2PA/时间戳 {publishMetrics.signingMs} ms</small>}</div></div>}
-          <button className="primary-button publish-command" type="button" disabled={busy || outputPreviewBusy} onClick={() => void generateOutputPreview()}>{outputPreviewBusy ? <LoaderCircle className="spin" size={17} /> : <Eye size={17} />}{outputPreviewBusy ? "正在渲染并编码" : "生成质量预览"}</button>
+          <button className={`${outputPreviewBusy ? "secondary-button" : "primary-button"} publish-command`} type="button" disabled={busy || cancelling} onClick={() => void (outputPreviewBusy ? cancelAuthenticityOperation() : generateOutputPreview())}>{outputPreviewBusy ? (cancelling ? <LoaderCircle className="spin" size={17} /> : <X size={17} />) : <Eye size={17} />}{outputPreviewBusy ? (cancelling ? "正在取消预览" : "取消质量预览") : "生成质量预览"}</button>
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
-        {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={busy} onBack={() => setOutputPreviewOpen(false)} onPublish={() => void publish()} />}
+        {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={publishing} cancelling={cancelling} onBack={() => setOutputPreviewOpen(false)} onCancel={() => void cancelAuthenticityOperation()} onPublish={() => void publish()} />}
       </div> : config && artifactPreviewError ? <>
         <section className="publication-gate">
           <div className="gate-icon"><FileImage size={24} /></div>
@@ -306,10 +307,12 @@ function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { br
   </div>;
 }
 
-export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
+export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, onCancel, onPublish }: {
   preview: PublicationPreview;
   busy: boolean;
+  cancelling: boolean;
   onBack: () => void;
+  onCancel: () => void;
   onPublish: () => void;
 }) {
   const [zoom, setZoom] = useState<number | "fit">("fit");
@@ -516,7 +519,7 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           <span style={{ left: `${navigationRect.left}%`, top: `${navigationRect.top}%`, width: `${navigationRect.width}%`, height: `${navigationRect.height}%` }} />
         </div>}
       </div>
-      <footer><span>{busy ? "正在写入 C2PA 并等待可选时间戳服务；窗口仍可响应。" : showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}{busy ? "签名/时间戳处理中" : "签名并发布"}</button></div></footer>
+      <footer><span>{busy ? (cancelling ? "正在安全取消；已开始的原子发布收尾不会中断。" : "正在写入 C2PA；时间戳服务最长等待 30 秒。") : showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className={busy ? "secondary-button" : "primary-button"} type="button" disabled={cancelling} onClick={busy ? onCancel : onPublish}>{busy ? (cancelling ? <LoaderCircle className="spin" size={16} /> : <X size={16} />) : <ImageDown size={16} />}{busy ? (cancelling ? "正在取消" : "取消签名") : "签名并发布"}</button></div></footer>
     </section>
   </div>;
 }

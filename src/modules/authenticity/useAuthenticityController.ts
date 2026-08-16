@@ -74,6 +74,8 @@ export function usePublicationController({
   const [outputPreview, setOutputPreview] = useState<PublicationPreview | null>(null);
   const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
   const [outputPreviewBusy, setOutputPreviewBusy] = useState(false);
+  const [publishing, setPublishing] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [watermarkId, setWatermarkId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -90,6 +92,8 @@ export function usePublicationController({
   const estimateRequest = useRef(0);
   const viewingRequest = useRef(0);
   const outputPreviewRequest = useRef(0);
+  const activeOperation = useRef(false);
+  const operationCancelRequested = useRef(false);
   const selectedBranchIdRef = useRef(selectedBranchId);
   const configRef = useRef(config);
   const watermarkIdRef = useRef(watermarkId);
@@ -167,6 +171,8 @@ export function usePublicationController({
     setOutputPreview(null);
     setOutputPreviewOpen(false);
     setOutputPreviewBusy(false);
+    setPublishing(false);
+    setCancelling(false);
     outputPreviewRequest.current += 1;
     setViewingRecord(null);
     setResult(null);
@@ -176,6 +182,10 @@ export function usePublicationController({
     void load();
     return () => { loadRequest.current += 1; };
   }, [load, selectedBranchId]);
+
+  useEffect(() => () => {
+    if (activeOperation.current) void authenticityApi.cancelOperation();
+  }, [selectedBranchId]);
 
   useEffect(() => {
     if (config && (!config.trustmarkEnabled || config.additionalRegions.length === 0)) {
@@ -290,6 +300,8 @@ export function usePublicationController({
     const branchId = selectedBranch.id;
     const signature = publicationPreviewSignature(config, watermarkId);
     const requestId = ++outputPreviewRequest.current;
+    operationCancelRequested.current = false;
+    activeOperation.current = true;
     setOutputPreviewBusy(true);
     setOutputPreview(null);
     onError(null);
@@ -307,11 +319,33 @@ export function usePublicationController({
       setOutputPreview(next);
       setOutputPreviewOpen(true);
     } catch (error) {
-      if (requestId === outputPreviewRequest.current) onError(message(error));
+      if (requestId === outputPreviewRequest.current && !operationCancelRequested.current) {
+        onError(message(error));
+      }
     } finally {
+      activeOperation.current = false;
       if (requestId === outputPreviewRequest.current) setOutputPreviewBusy(false);
+      setCancelling(false);
     }
   }, [config, onError, privateKey, publication, selectedBranch, watermarkId]);
+
+  const cancelAuthenticityOperation = useCallback(async () => {
+    operationCancelRequested.current = true;
+    setCancelling(true);
+    try {
+      const accepted = await authenticityApi.cancelOperation();
+      if (!accepted) {
+        activeOperation.current = false;
+        setOutputPreviewBusy(false);
+        setPublishing(false);
+        setCancelling(false);
+      }
+    } catch (error) {
+      operationCancelRequested.current = false;
+      setCancelling(false);
+      onError(message(error));
+    }
+  }, [onError]);
 
   const publish = useCallback(async () => {
     if (!selectedBranch || !config) return;
@@ -333,6 +367,10 @@ export function usePublicationController({
     if (!outputPath) return;
     const branchId = selectedBranch.id;
     setBusy(true);
+    setPublishing(true);
+    setCancelling(false);
+    operationCancelRequested.current = false;
+    activeOperation.current = true;
     setResult(null);
     setPublishMetrics(null);
     onError(null);
@@ -357,8 +395,11 @@ export function usePublicationController({
       await onPublicationChanged?.();
     } catch (error) {
       setOutputPreviewOpen(false);
-      onError(message(error));
+      if (!operationCancelRequested.current) onError(message(error));
     } finally {
+      activeOperation.current = false;
+      setPublishing(false);
+      setCancelling(false);
       if (selectedBranchIdRef.current === branchId) setBusy(false);
     }
   }, [artworkTitle, config, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
@@ -439,6 +480,8 @@ export function usePublicationController({
     outputPreviewOpen,
     setOutputPreviewOpen,
     outputPreviewBusy,
+    publishing,
+    cancelling,
     privateKey,
     setPrivateKey,
     watermarkId,
@@ -459,6 +502,7 @@ export function usePublicationController({
     retryArtifactPreview,
     chooseCertificate,
     generateOutputPreview,
+    cancelAuthenticityOperation,
     publish,
     cancelPublication,
     retryCleanup,

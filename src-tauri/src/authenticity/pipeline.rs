@@ -26,7 +26,7 @@ use super::{
     },
     publication_repository,
     repository::{self, NewCertificationRecord},
-    state::AuthenticityState,
+    state::{AuthenticityOperation, AuthenticityState},
     trustmark,
 };
 
@@ -68,8 +68,10 @@ struct CachedRendition {
 pub(crate) fn preview(
     root: &Path,
     state: &AuthenticityState,
+    operation: &AuthenticityOperation,
     mut request: PublicationPreviewRequest,
 ) -> AuthenticityResult<PublicationPreview> {
+    ensure_not_cancelled(operation)?;
     request.config.branch_id = request.branch_id.clone();
     request.config.trustmark_enabled =
         request.config.trustmark_enabled && !request.config.additional_regions.is_empty();
@@ -88,11 +90,14 @@ pub(crate) fn preview(
         identifier.as_deref(),
     )?;
     let source = image_resource::open(&input)?;
+    ensure_not_cancelled(operation)?;
     let (width, height) = source.dimensions();
     let source_bytes = fs::metadata(&input)?.len();
     let original_image = png_thumbnail_preview(&source, source_bytes)?;
+    ensure_not_cancelled(operation)?;
     let cached = if let Some(cached) = load_cached_rendition(
         root,
+        operation,
         &cache_token,
         &target.source_sha256,
         identifier.as_deref(),
@@ -103,6 +108,7 @@ pub(crate) fn preview(
         render_cached_rendition(
             root,
             state,
+            operation,
             source,
             &request.config,
             identifier.as_deref(),
@@ -110,8 +116,10 @@ pub(crate) fn preview(
             &target.source_sha256,
         )?
     };
+    ensure_not_cancelled(operation)?;
     let compressed = image_resource::open(&cached.path)?;
     let image = jpeg_thumbnail_preview(&compressed, cached.output_bytes)?;
+    ensure_not_cancelled(operation)?;
     Ok(PublicationPreview {
         image,
         original_image,
@@ -163,6 +171,7 @@ fn cache_paths(root: &Path, token: &str) -> AuthenticityResult<(PathBuf, PathBuf
 
 fn load_cached_rendition(
     root: &Path,
+    operation: &AuthenticityOperation,
     token: &str,
     source_sha256: &str,
     watermark_id: Option<&str>,
@@ -172,13 +181,15 @@ fn load_cached_rendition(
         return Ok(None);
     }
     let loaded = (|| -> AuthenticityResult<CachedRendition> {
+        ensure_not_cancelled(operation)?;
         let metadata: RenditionCacheMetadata =
             serde_json::from_reader(File::open(&metadata_path)?)?;
         if metadata.token != token
             || !metadata.source_sha256.eq_ignore_ascii_case(source_sha256)
             || metadata.watermark_id.as_deref() != watermark_id
             || metadata.output_bytes != fs::metadata(&jpeg_path)?.len()
-            || !sha256_file(&jpeg_path)?.eq_ignore_ascii_case(&metadata.jpeg_sha256)
+            || !sha256_file_cancelable(&jpeg_path, operation)?
+                .eq_ignore_ascii_case(&metadata.jpeg_sha256)
         {
             return Err(AuthenticityError::Task("发布预览缓存校验失败".into()));
         }
@@ -211,17 +222,20 @@ fn load_cached_rendition(
 fn render_cached_rendition(
     root: &Path,
     state: &AuthenticityState,
+    operation: &AuthenticityOperation,
     source: image::DynamicImage,
     config: &super::model::CertificationConfig,
     watermark_id: Option<&str>,
     token: &str,
     source_sha256: &str,
 ) -> AuthenticityResult<CachedRendition> {
+    ensure_not_cancelled(operation)?;
     let (width, height) = source.dimensions();
     let render_started = Instant::now();
     let background = trustmark::parse_background(&config.background_color)?;
     let flattened = trustmark::flatten_to_rgb(&source, background);
     drop(source);
+    ensure_not_cancelled(operation)?;
     let rendition = if let Some(identifier) = watermark_id {
         trustmark::encode_regions(
             state,
@@ -233,6 +247,7 @@ fn render_cached_rendition(
     } else {
         flattened
     };
+    ensure_not_cancelled(operation)?;
     let render_ms = elapsed_ms(render_started);
     let encode_started = Instant::now();
     let (jpeg_path, metadata_path) = cache_paths(root, token)?;
@@ -243,10 +258,12 @@ fn render_cached_rendition(
     JpegEncoder::new_with_quality(encoded.as_file_mut(), config.jpeg_quality)
         .encode_image(&rendition)?;
     drop(rendition);
+    ensure_not_cancelled(operation)?;
     encoded.as_file_mut().flush()?;
     encoded.as_file().sync_all()?;
     let output_bytes = encoded.as_file().metadata()?.len();
-    let jpeg_sha256 = sha256_file(encoded.path())?;
+    let jpeg_sha256 = sha256_file_cancelable(encoded.path(), operation)?;
+    ensure_not_cancelled(operation)?;
     replace_cache_file(encoded, &jpeg_path)?;
     let metadata = RenditionCacheMetadata {
         token: token.to_owned(),
@@ -324,8 +341,10 @@ fn jpeg_thumbnail_preview(
 pub(crate) fn publish(
     root: &Path,
     state: &AuthenticityState,
+    operation: &AuthenticityOperation,
     mut request: PublishBranchRequest,
 ) -> AuthenticityResult<PublishedOutput> {
+    ensure_not_cancelled(operation)?;
     let private_key = Zeroizing::new(std::mem::take(&mut request.private_key_pem));
     request.config.title = request.config.title.trim().to_owned();
     request.config.creator = request.config.creator.trim().to_owned();
@@ -380,6 +399,7 @@ pub(crate) fn publish(
     let cached = if request.preview_cache_token.as_deref() == Some(cache_token.as_str()) {
         load_cached_rendition(
             root,
+            operation,
             &cache_token,
             &target.source_sha256,
             rendition_identifier.as_deref(),
@@ -394,6 +414,7 @@ pub(crate) fn publish(
         render_cached_rendition(
             root,
             state,
+            operation,
             source,
             &request.config,
             rendition_identifier.as_deref(),
@@ -401,6 +422,7 @@ pub(crate) fn publish(
             &target.source_sha256,
         )?
     };
+    ensure_not_cancelled(operation)?;
     let identifier = match rendition_identifier {
         Some(identifier) => identifier,
         None => trustmark::resolve_identifier(None)?,
@@ -416,12 +438,15 @@ pub(crate) fn publish(
         &input,
         &cached.path,
         &signed_path,
+        operation.cancellation_flag(),
     )?;
+    ensure_not_cancelled(operation)?;
     let signing_ms = elapsed_ms(signing_started);
     let manifest = c2pa::read_manifest(&signed_path)?;
+    ensure_not_cancelled(operation)?;
     validate_signed_manifest(&manifest, &request.config, &record_id, &identifier)?;
     let output_path = storage::display_path(&output);
-    let output_sha256 = sha256_file(&signed_path)?;
+    let output_sha256 = sha256_file_cancelable(&signed_path, operation)?;
     let output_bytes = fs::metadata(&signed_path)?.len();
     let created_ms = storage::now_ms().map_err(AuthenticityError::Task)?;
     let stored_destination =
@@ -429,6 +454,9 @@ pub(crate) fn publish(
             .map_err(AuthenticityError::Task)?;
     let stored_relative =
         storage::relative_path(root, &stored_destination).map_err(AuthenticityError::Task)?;
+    ensure_not_cancelled(operation)?;
+    // After cleanup intents are committed, finish the atomic publish/recovery sequence.
+    // Interrupting that sequence would expose a partial-success result to the caller.
     let cleanup_ids = {
         let mut connection = storage::open(root).map_err(AuthenticityError::Task)?;
         let transaction = connection
@@ -729,11 +757,21 @@ fn absolute_output_path(value: &str) -> AuthenticityResult<PathBuf> {
     }
 }
 
-pub(crate) fn sha256_file(path: &Path) -> AuthenticityResult<String> {
+fn sha256_file_cancelable(
+    path: &Path,
+    operation: &AuthenticityOperation,
+) -> AuthenticityResult<String> {
+    sha256_file_with_check(path, || operation.cancelled())
+}
+
+fn sha256_file_with_check(path: &Path, cancelled: impl Fn() -> bool) -> AuthenticityResult<String> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; 64 * 1024];
     loop {
+        if cancelled() {
+            return Err(AuthenticityError::Task("认证任务已取消".into()));
+        }
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -741,6 +779,14 @@ pub(crate) fn sha256_file(path: &Path) -> AuthenticityResult<String> {
         hasher.update(&buffer[..read]);
     }
     Ok(hex::encode_upper(hasher.finalize()))
+}
+
+fn ensure_not_cancelled(operation: &AuthenticityOperation) -> AuthenticityResult<()> {
+    if operation.cancelled() {
+        Err(AuthenticityError::Task("认证任务已取消".into()))
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -826,6 +872,7 @@ mod tests {
             &source_path,
             &unsigned,
             &signed,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         )
         .unwrap();
         fs::remove_file(unsigned).unwrap();
@@ -977,10 +1024,12 @@ mod tests {
         let source_sha256 = "A".repeat(64);
         let token = rendition_cache_token(&source_sha256, &config, None).unwrap();
         let source = image::DynamicImage::ImageRgb8(image::RgbImage::new(32, 24));
+        let operation = state.begin_operation("缓存测试").unwrap();
 
         let rendered = render_cached_rendition(
             directory.path(),
             &state,
+            &operation,
             source,
             &config,
             None,
@@ -990,18 +1039,49 @@ mod tests {
         .unwrap();
         assert!(!rendered.cache_hit);
 
-        let reused = load_cached_rendition(directory.path(), &token, &source_sha256, None)
-            .unwrap()
-            .unwrap();
+        let reused =
+            load_cached_rendition(directory.path(), &operation, &token, &source_sha256, None)
+                .unwrap()
+                .unwrap();
         assert!(reused.cache_hit);
         assert_eq!(reused.output_bytes, rendered.output_bytes);
 
         fs::write(&reused.path, b"replaced").unwrap();
         assert!(
-            load_cached_rendition(directory.path(), &token, &source_sha256, None,)
+            load_cached_rendition(directory.path(), &operation, &token, &source_sha256, None,)
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn cancelled_rendition_does_not_publish_cache_files() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("temp")).unwrap();
+        let state = fixture_state();
+        let operation = state.begin_operation("取消缓存测试").unwrap();
+        state.request_cancel().unwrap();
+        let config = fixture_config();
+
+        let result = render_cached_rendition(
+            directory.path(),
+            &state,
+            &operation,
+            image::DynamicImage::new_rgb8(32, 24),
+            &config,
+            None,
+            &"C".repeat(64),
+            &"D".repeat(64),
+        );
+
+        assert!(matches!(
+            result,
+            Err(error) if error.to_string().contains("已取消")
+        ));
+        assert!(fs::read_dir(directory.path().join("temp"))
+            .unwrap()
+            .next()
+            .is_none());
     }
 
     #[test]

@@ -298,6 +298,7 @@ pub fn run() {
             authenticity::preview_authenticity_image,
             authenticity::preview_branch_artifact,
             authenticity::preview_branch_artifact_output,
+            authenticity::cancel_authenticity_operation,
             authenticity::preview_certification_record,
             authenticity::export_certification_record,
             authenticity::estimate_authenticity_output_size,

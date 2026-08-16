@@ -2,11 +2,16 @@ use std::{
     fs::{self, File},
     path::Path,
     str::FromStr,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
+    time::{Duration, Instant},
 };
 
 use c2pa::{
     assertions::SoftBinding, create_signer, crypto::raw_signature::SigningAlg, Builder,
-    BuilderIntent, ClaimGeneratorInfo, Reader, ValidationState,
+    BuilderIntent, ClaimGeneratorInfo, Context, Reader, Signer, ValidationState,
 };
 use serde_json::{json, Value};
 
@@ -17,6 +22,103 @@ use super::{
 };
 
 pub(crate) const ASSERTION_LABEL: &str = "com.lilith.artworks.claim";
+const TIMESTAMP_TIMEOUT: Duration = Duration::from_secs(30);
+const CANCELLATION_POLL: Duration = Duration::from_millis(100);
+
+struct BoundedSigner {
+    inner: c2pa::BoxedSigner,
+    cancelled: Arc<AtomicBool>,
+    timestamp_timed_out: Arc<AtomicBool>,
+}
+
+impl Signer for BoundedSigner {
+    fn sign(&self, data: &[u8]) -> c2pa::Result<Vec<u8>> {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Err(c2pa::Error::OperationCancelled);
+        }
+        self.inner.sign(data)
+    }
+
+    fn alg(&self) -> SigningAlg {
+        self.inner.alg()
+    }
+
+    fn certs(&self) -> c2pa::Result<Vec<Vec<u8>>> {
+        self.inner.certs()
+    }
+
+    fn reserve_size(&self) -> usize {
+        self.inner.reserve_size()
+    }
+
+    fn time_authority_url(&self) -> Option<String> {
+        self.inner.time_authority_url()
+    }
+
+    fn timestamp_request_headers(&self) -> Option<Vec<(String, String)>> {
+        self.inner.timestamp_request_headers()
+    }
+
+    fn timestamp_request_body(&self, message: &[u8]) -> c2pa::Result<Vec<u8>> {
+        self.inner.timestamp_request_body(message)
+    }
+
+    fn send_timestamp_request(&self, message: &[u8]) -> Option<c2pa::Result<Vec<u8>>> {
+        let url = self.time_authority_url()?;
+        let body = match self.timestamp_request_body(message) {
+            Ok(body) => body,
+            Err(error) => return Some(Err(error)),
+        };
+        let headers = self.timestamp_request_headers();
+        let message = message.to_vec();
+        let (sender, receiver) = mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let config = ureq::Agent::config_builder()
+                .max_redirects(0)
+                .timeout_global(Some(TIMESTAMP_TIMEOUT))
+                .build();
+            let context = Context::new().with_resolver(ureq::Agent::new_with_config(config));
+            let result = c2pa::crypto::time_stamp::default_rfc3161_request(
+                &url, headers, &body, &message, &context,
+            )
+            .map_err(c2pa::Error::from);
+            let _ = sender.send(result);
+        });
+
+        Some(wait_for_timestamp(
+            receiver,
+            &self.cancelled,
+            &self.timestamp_timed_out,
+            TIMESTAMP_TIMEOUT,
+        ))
+    }
+}
+
+fn wait_for_timestamp(
+    receiver: mpsc::Receiver<c2pa::Result<Vec<u8>>>,
+    cancelled: &AtomicBool,
+    timed_out: &AtomicBool,
+    timeout: Duration,
+) -> c2pa::Result<Vec<u8>> {
+    let started = Instant::now();
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(c2pa::Error::OperationCancelled);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            timed_out.store(true, Ordering::SeqCst);
+            return Err(c2pa::Error::CoseTimeStampGeneration);
+        }
+        match receiver.recv_timeout(remaining.min(CANCELLATION_POLL)) {
+            Ok(result) => return result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(c2pa::Error::ThreadReceiveError);
+            }
+        }
+    }
+}
 
 pub(crate) fn sign_jpeg(
     config: &CertificationConfig,
@@ -26,6 +128,7 @@ pub(crate) fn sign_jpeg(
     source_path: &Path,
     unsigned_jpeg: &Path,
     signed_jpeg: &Path,
+    cancelled: Arc<AtomicBool>,
 ) -> AuthenticityResult<()> {
     let algorithm = supported_signing_algorithm(&config.signing_algorithm)?;
     let certificate = fs::read(&config.certificate_path)?;
@@ -35,7 +138,12 @@ pub(crate) fn sign_jpeg(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_owned);
-    let signer = create_signer::from_keys(&certificate, private_key, algorithm, timestamp_url)?;
+    let timestamp_timed_out = Arc::new(AtomicBool::new(false));
+    let signer = BoundedSigner {
+        inner: create_signer::from_keys(&certificate, private_key, algorithm, timestamp_url)?,
+        cancelled: cancelled.clone(),
+        timestamp_timed_out: timestamp_timed_out.clone(),
+    };
     let definition = json!({
         "title": config.title,
         "format": "image/jpeg",
@@ -148,7 +256,20 @@ pub(crate) fn sign_jpeg(
         "action": "c2pa.transcoded",
         "parameters": { "from": "source artwork", "to": "image/jpeg", "quality": config.jpeg_quality }
     }))?;
-    builder.sign_file(signer.as_ref(), unsigned_jpeg, signed_jpeg)?;
+    if cancelled.load(Ordering::SeqCst) {
+        return Err(AuthenticityError::Task("认证任务已取消".into()));
+    }
+    if let Err(error) = builder.sign_file(&signer, unsigned_jpeg, signed_jpeg) {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(AuthenticityError::Task("认证任务已取消".into()));
+        }
+        if timestamp_timed_out.load(Ordering::SeqCst) {
+            return Err(AuthenticityError::Task(
+                "时间戳服务在 30 秒内未响应，发布已取消".into(),
+            ));
+        }
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -270,7 +391,15 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
 
 #[cfg(test)]
 mod tests {
-    use super::supported_signing_algorithm;
+    use std::{
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
+        time::Duration,
+    };
+
+    use super::{supported_signing_algorithm, wait_for_timestamp, TIMESTAMP_TIMEOUT};
 
     #[test]
     fn ps256_is_rejected_before_signing() {
@@ -283,5 +412,30 @@ mod tests {
         for algorithm in ["es256", "ES384", "ed25519"] {
             supported_signing_algorithm(algorithm).unwrap();
         }
+    }
+
+    #[test]
+    fn timestamp_wait_has_a_bounded_timeout() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let cancelled = AtomicBool::new(false);
+        let timed_out = AtomicBool::new(false);
+
+        let result = wait_for_timestamp(receiver, &cancelled, &timed_out, Duration::from_millis(5));
+
+        assert!(result.unwrap_err().to_string().contains("time stamp"));
+        assert!(timed_out.load(Ordering::SeqCst));
+        assert_eq!(TIMESTAMP_TIMEOUT, Duration::from_secs(30));
+    }
+
+    #[test]
+    fn timestamp_wait_observes_cancellation_before_timeout() {
+        let (_sender, receiver) = mpsc::sync_channel(1);
+        let cancelled = AtomicBool::new(true);
+        let timed_out = AtomicBool::new(false);
+
+        let result = wait_for_timestamp(receiver, &cancelled, &timed_out, Duration::from_secs(1));
+
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert!(!timed_out.load(Ordering::SeqCst));
     }
 }

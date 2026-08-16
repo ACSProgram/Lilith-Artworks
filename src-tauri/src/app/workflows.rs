@@ -331,6 +331,7 @@ pub(crate) async fn publish_branch_artifact(
         Path::new(request.config.certificate_path.trim()),
         "证书链",
     )?;
+    let operation = authenticity_state.begin_operation("认证签名发布")?;
     let authenticity = authenticity_state.inner().clone();
     let backup = backup_state.inner().clone();
     let app_state = app_state.inner().clone();
@@ -339,7 +340,7 @@ pub(crate) async fn publish_branch_artifact(
         backup
             .run_exclusive(Some(&branch_id), || {
                 app_state.with_ready_repository(|root| {
-                    authenticity::publish_artifact(root, &authenticity, request)
+                    authenticity::publish_artifact(root, &authenticity, &operation, request)
                         .map_err(|error| error.to_string())
                 })
             })

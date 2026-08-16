@@ -30,6 +30,9 @@ before and after the first stable release.
 
 - Publication preview source switching now resets the fitted view and avoids
   unnecessary re-encoding for repository-owned JPEG, PNG, and WebP files.
+- Publication quality preview and C2PA signing now expose real cooperative
+  cancellation, clean temporary work before publication, and bound optional
+  RFC 3161 timestamp requests to 30 seconds.
 
 ## 0.1.0-rc.1 - 2026-08-15
 

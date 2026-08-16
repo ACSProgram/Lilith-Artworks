@@ -34,6 +34,7 @@ tauri-plugin-single-instance = "2.4"
 tempfile = "3"
 thiserror = "2"
 trustmark = "0.2.2"
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 zstd = "0.13"
