@@ -85,6 +85,10 @@ const outputPreview = (watermarkId: string): PublicationPreview => ({
   sourceHeight: previewImage.height,
   outputBytes: previewImage.sourceBytes,
   watermarkId,
+  cacheToken: "cache-token",
+  cacheHit: false,
+  renderMs: 12,
+  encodeMs: 8,
 });
 
 const record = (branchId: string): CertificationRecord => ({
@@ -208,11 +212,16 @@ describe("usePublicationController", () => {
 
   it("clears the TrustMark ID after a successful publication", async () => {
     api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.previewPublication.mockResolvedValue(outputPreview("1".repeat(40)));
     api.publish.mockResolvedValue({
       record: record("first"),
       width: previewImage.width,
       height: previewImage.height,
       watermarkRegionCount: 1,
+      renditionCacheHit: true,
+      renderMs: 0,
+      encodeMs: 0,
+      signingMs: 25,
     });
     dialog.save.mockResolvedValue("C:/output.jpg");
     const { result } = renderHook(() => usePublicationController(options("first")));
@@ -222,8 +231,12 @@ describe("usePublicationController", () => {
       result.current.setWatermarkId("1".repeat(40));
     });
 
+    await act(async () => { await result.current.generateOutputPreview(); });
     await act(async () => { await result.current.publish(); });
-    expect(api.publish).toHaveBeenCalledWith(expect.objectContaining({ watermarkId: "1".repeat(40) }));
+    expect(api.publish).toHaveBeenCalledWith(expect.objectContaining({
+      watermarkId: "1".repeat(40),
+      previewCacheToken: "cache-token",
+    }));
     expect(result.current.watermarkId).toBe("");
   });
 });

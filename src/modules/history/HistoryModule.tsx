@@ -184,7 +184,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     const publishedCount = history.branches.filter((branch) => branch.headHistoryId === node.id).reduce((sum, branch) => sum + branch.publishedCount, 0);
     const forks = history.branches.filter((branch) =>
       branch.createdFromHistoryId === node.id && branch.headHistoryId !== node.id);
-    const selectable = compactMode && view === "branch" && branchNodeIds.has(node.id) && canCompact(node, history);
+    const selectable = compactMode && branchNodeIds.has(node.id) && canCompact(node, history);
     const selectedForCompact = compactSelection.has(node.id);
     const selected = selectedNodeId === node.id;
     const onSelectedBranch = Boolean(selectedBranch && branchNodeIds.has(node.id));
@@ -275,7 +275,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         </div>
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
-      {view === "branch" && !compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !branchLine.some((node) => canCompact(node, history))} onClick={beginCompactMode}><MoreHorizontal size={16} />进入精简模式</button>}
+      {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={() => {
+        if (view === "overview") setView("branch");
+        beginCompactMode();
+      }}><MoreHorizontal size={16} />{view === "overview" ? "按当前分支进入精简" : "进入精简模式"}</button>}
     </section>
 
     {view === "branch" && compactMode && <div className="compact-mode-bar">

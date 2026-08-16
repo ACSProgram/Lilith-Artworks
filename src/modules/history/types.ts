@@ -51,6 +51,7 @@ export interface UpdateBranchBackupRequest {
   expectedBackupEnabled: boolean;
   backupEnabled: boolean;
   backupIntervalMinutes: number;
+  sourcePath?: string;
 }
 
 export interface RenameHistoryNodeRequest {

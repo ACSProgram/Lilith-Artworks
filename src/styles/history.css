@@ -86,6 +86,10 @@
 .branch-settings-heading { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; min-height: 18px; }
 .branch-settings-heading > strong { color: var(--muted); font-size: 10px; font-weight: 600; text-transform: uppercase; }
 .branch-title-field, .interval-field { display: grid; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; }
+.branch-path-field { grid-column: 1 / -1; display: grid; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; }
+.branch-path-field .path-control { grid-template-columns: minmax(0, 1fr) 32px; align-items: stretch; }
+.branch-path-field textarea { min-width: 0; resize: none; overflow-wrap: anywhere; padding: 7px 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); font-size: 11px; line-height: 1.35; }
+.branch-path-field .icon-button { width: 32px; height: 100%; min-height: 48px; border: 1px solid var(--control-border); }
 .branch-title-field input, .interval-field input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
 .branch-title-field input:disabled, .interval-field input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
 .interval-field { grid-template-columns: 54px auto; }
@@ -141,7 +145,7 @@
 .commit-control input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
 .commit-control input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
 .commit-feedback { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 9px; }
-.branch-title-field input:focus, .interval-field input:focus, .commit-control input:focus, .history-header-actions select:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.branch-title-field input:focus, .branch-path-field textarea:focus, .interval-field input:focus, .commit-control input:focus, .history-header-actions select:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
 
 .compact-mode-bar {
   display: flex;

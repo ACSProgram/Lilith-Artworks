@@ -78,6 +78,7 @@ export function BranchSettings({
   const [title, setTitle] = useState(branch.title);
   const [enabled, setEnabled] = useState(branch.backupEnabled);
   const [interval, setInterval] = useState(branch.backupIntervalMinutes);
+  const [sourcePath, setSourcePath] = useState(branch.sourcePath);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const requestVersion = useRef(0);
   const persisted = useRef({
@@ -85,6 +86,7 @@ export function BranchSettings({
     title: branch.title,
     enabled: branch.backupEnabled,
     interval: branch.backupIntervalMinutes,
+    sourcePath: branch.sourcePath,
   });
 
   useEffect(() => {
@@ -97,11 +99,15 @@ export function BranchSettings({
     setInterval((current) => branchChanged || current === previous.interval
       ? branch.backupIntervalMinutes
       : current);
+    setSourcePath((current) => branchChanged || current === previous.sourcePath
+      ? branch.sourcePath
+      : current);
     persisted.current = {
       id: branch.id,
       title: branch.title,
       enabled: branch.backupEnabled,
       interval: branch.backupIntervalMinutes,
+      sourcePath: branch.sourcePath,
     };
     requestVersion.current += 1;
     if (branchChanged) setSaveState("saved");
@@ -109,13 +115,15 @@ export function BranchSettings({
     branch.backupEnabled,
     branch.backupIntervalMinutes,
     branch.id,
+    branch.sourcePath,
     branch.title,
   ]);
 
   const valid = title.trim().length > 0 && interval >= 1 && interval <= 10_080;
   const dirty = title.trim() !== branch.title
     || enabled !== branch.backupEnabled
-    || interval !== branch.backupIntervalMinutes;
+    || interval !== branch.backupIntervalMinutes
+    || sourcePath !== branch.sourcePath;
 
   useEffect(() => {
     if (!dirty || !valid || disabled) {
@@ -132,14 +140,16 @@ export function BranchSettings({
         expectedBackupEnabled: branch.backupEnabled,
         backupEnabled: enabled,
         backupIntervalMinutes: interval,
+        ...(sourcePath !== branch.sourcePath ? { sourcePath } : {}),
       }).then(() => {
         if (requestVersion.current === version) setSaveState("saved");
       }).catch(() => {
+        setSourcePath(branch.sourcePath);
         if (requestVersion.current === version) setSaveState("error");
       });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [branch.id, dirty, disabled, enabled, interval, onSave, title, valid]);
+  }, [branch.id, branch.sourcePath, dirty, disabled, enabled, interval, onSave, sourcePath, title, valid]);
 
   return <div className="branch-settings">
     <div className="branch-settings-heading">
@@ -154,6 +164,13 @@ export function BranchSettings({
         disabled={disabled}
         onChange={(event) => setTitle(event.target.value)}
       />
+    </label>
+    <label className="branch-path-field">
+      <span>工作文件</span>
+      <div className="path-control"><textarea value={sourcePath} readOnly rows={2} title={sourcePath} /><button className="icon-button" type="button" title="修改工作文件" disabled={disabled || branch.finalArtifactLocked} onClick={async () => {
+        const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
+        if (typeof value === "string") setSourcePath(value);
+      }}><FileOutput size={15} /></button></div>
     </label>
     <label className="switch-field">
       <span className="switch-copy"><strong>自动备份</strong><small>{enabled ? "按间隔运行" : "当前已关闭"}</small></span>

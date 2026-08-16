@@ -3,10 +3,13 @@ use std::{
     fs::{self, File},
     io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
+    time::Instant,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use image::{codecs::jpeg::JpegEncoder, GenericImageView};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tempfile::{tempdir_in, NamedTempFile};
 use zeroize::Zeroizing;
@@ -32,9 +35,35 @@ pub(crate) struct PublishedOutput {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) watermark_region_count: u32,
+    pub(crate) rendition_cache_hit: bool,
+    pub(crate) render_ms: u64,
+    pub(crate) encode_ms: u64,
+    pub(crate) signing_ms: u64,
 }
 
 const PUBLICATION_PREVIEW_EDGE: u32 = 2400;
+static PREVIEW_CACHE_SESSION: OnceLock<String> = OnceLock::new();
+
+#[derive(Deserialize, Serialize)]
+struct RenditionCacheMetadata {
+    token: String,
+    source_sha256: String,
+    jpeg_sha256: String,
+    watermark_id: Option<String>,
+    width: u32,
+    height: u32,
+    output_bytes: u64,
+}
+
+struct CachedRendition {
+    path: PathBuf,
+    width: u32,
+    height: u32,
+    output_bytes: u64,
+    cache_hit: bool,
+    render_ms: u64,
+    encode_ms: u64,
+}
 
 pub(crate) fn preview(
     root: &Path,
@@ -48,45 +77,213 @@ pub(crate) fn preview(
     let target = publication_repository::publication_target(root, &request.branch_id)
         .map_err(AuthenticityError::Task)?;
     let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
-    let source = image_resource::open(&input)?;
-    let (width, height) = source.dimensions();
-    let source_bytes = fs::metadata(&input)?.len();
-    let original_image = png_thumbnail_preview(&source, source_bytes)?;
-    let background = trustmark::parse_background(&request.config.background_color)?;
-    let flattened = trustmark::flatten_to_rgb(&source, background);
-    drop(source);
     let identifier = request
         .config
         .trustmark_enabled
         .then(|| trustmark::resolve_identifier(request.watermark_id.as_deref()))
         .transpose()?;
-    let rendition = if let Some(identifier) = identifier.as_deref() {
-        trustmark::encode_regions(
-            state,
-            flattened,
-            identifier,
-            request.config.watermark_strength,
-            &request.config.additional_regions,
-        )?
+    let cache_token = rendition_cache_token(
+        &target.source_sha256,
+        &request.config,
+        identifier.as_deref(),
+    )?;
+    let source = image_resource::open(&input)?;
+    let (width, height) = source.dimensions();
+    let source_bytes = fs::metadata(&input)?.len();
+    let original_image = png_thumbnail_preview(&source, source_bytes)?;
+    let cached = if let Some(cached) = load_cached_rendition(
+        root,
+        &cache_token,
+        &target.source_sha256,
+        identifier.as_deref(),
+    )? {
+        drop(source);
+        cached
     } else {
-        flattened
+        render_cached_rendition(
+            root,
+            state,
+            source,
+            &request.config,
+            identifier.as_deref(),
+            &cache_token,
+            &target.source_sha256,
+        )?
     };
-    let mut encoded = NamedTempFile::new_in(root.join("temp"))?;
-    JpegEncoder::new_with_quality(encoded.as_file_mut(), request.config.jpeg_quality)
-        .encode_image(&rendition)?;
-    encoded.as_file_mut().flush()?;
-    let output_bytes = encoded.as_file().metadata()?.len();
-    drop(rendition);
-    let compressed = image_resource::open(encoded.path())?;
-    let image = jpeg_thumbnail_preview(&compressed, output_bytes)?;
+    let compressed = image_resource::open(&cached.path)?;
+    let image = jpeg_thumbnail_preview(&compressed, cached.output_bytes)?;
     Ok(PublicationPreview {
         image,
         original_image,
         source_width: width,
         source_height: height,
-        output_bytes,
+        output_bytes: cached.output_bytes,
         watermark_id: identifier,
+        cache_token,
+        cache_hit: cached.cache_hit,
+        render_ms: cached.render_ms,
+        encode_ms: cached.encode_ms,
     })
+}
+
+fn rendition_cache_token(
+    source_sha256: &str,
+    config: &super::model::CertificationConfig,
+    watermark_id: Option<&str>,
+) -> AuthenticityResult<String> {
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "sourceSha256": source_sha256,
+        "branchId": config.branch_id,
+        "trustmarkEnabled": config.trustmark_enabled,
+        "jpegQuality": config.jpeg_quality,
+        "backgroundColor": config.background_color,
+        "watermarkStrength": config.watermark_strength,
+        "additionalRegions": config.additional_regions,
+        "watermarkId": watermark_id,
+    }))?;
+    Ok(hex::encode_upper(Sha256::digest(payload)))
+}
+
+fn preview_cache_directory(root: &Path) -> AuthenticityResult<PathBuf> {
+    let session = PREVIEW_CACHE_SESSION.get_or_init(storage::new_id);
+    let directory = root
+        .join("temp")
+        .join(format!("authenticity-preview-{session}"));
+    fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
+fn cache_paths(root: &Path, token: &str) -> AuthenticityResult<(PathBuf, PathBuf)> {
+    let directory = preview_cache_directory(root)?;
+    Ok((
+        directory.join(format!("{token}.jpg")),
+        directory.join(format!("{token}.json")),
+    ))
+}
+
+fn load_cached_rendition(
+    root: &Path,
+    token: &str,
+    source_sha256: &str,
+    watermark_id: Option<&str>,
+) -> AuthenticityResult<Option<CachedRendition>> {
+    let (jpeg_path, metadata_path) = cache_paths(root, token)?;
+    if !jpeg_path.is_file() || !metadata_path.is_file() {
+        return Ok(None);
+    }
+    let loaded = (|| -> AuthenticityResult<CachedRendition> {
+        let metadata: RenditionCacheMetadata =
+            serde_json::from_reader(File::open(&metadata_path)?)?;
+        if metadata.token != token
+            || !metadata.source_sha256.eq_ignore_ascii_case(source_sha256)
+            || metadata.watermark_id.as_deref() != watermark_id
+            || metadata.output_bytes != fs::metadata(&jpeg_path)?.len()
+            || !sha256_file(&jpeg_path)?.eq_ignore_ascii_case(&metadata.jpeg_sha256)
+        {
+            return Err(AuthenticityError::Task("发布预览缓存校验失败".into()));
+        }
+        let dimensions = image::ImageReader::open(&jpeg_path)?
+            .with_guessed_format()?
+            .into_dimensions()?;
+        if dimensions != (metadata.width, metadata.height) {
+            return Err(AuthenticityError::Task("发布预览缓存尺寸不匹配".into()));
+        }
+        Ok(CachedRendition {
+            path: jpeg_path.clone(),
+            width: metadata.width,
+            height: metadata.height,
+            output_bytes: metadata.output_bytes,
+            cache_hit: true,
+            render_ms: 0,
+            encode_ms: 0,
+        })
+    })();
+    match loaded {
+        Ok(cached) => Ok(Some(cached)),
+        Err(_) => {
+            let _ = fs::remove_file(jpeg_path);
+            let _ = fs::remove_file(metadata_path);
+            Ok(None)
+        }
+    }
+}
+
+fn render_cached_rendition(
+    root: &Path,
+    state: &AuthenticityState,
+    source: image::DynamicImage,
+    config: &super::model::CertificationConfig,
+    watermark_id: Option<&str>,
+    token: &str,
+    source_sha256: &str,
+) -> AuthenticityResult<CachedRendition> {
+    let (width, height) = source.dimensions();
+    let render_started = Instant::now();
+    let background = trustmark::parse_background(&config.background_color)?;
+    let flattened = trustmark::flatten_to_rgb(&source, background);
+    drop(source);
+    let rendition = if let Some(identifier) = watermark_id {
+        trustmark::encode_regions(
+            state,
+            flattened,
+            identifier,
+            config.watermark_strength,
+            &config.additional_regions,
+        )?
+    } else {
+        flattened
+    };
+    let render_ms = elapsed_ms(render_started);
+    let encode_started = Instant::now();
+    let (jpeg_path, metadata_path) = cache_paths(root, token)?;
+    let directory = jpeg_path
+        .parent()
+        .ok_or_else(|| AuthenticityError::Task("发布预览缓存目录无效".into()))?;
+    let mut encoded = NamedTempFile::new_in(directory)?;
+    JpegEncoder::new_with_quality(encoded.as_file_mut(), config.jpeg_quality)
+        .encode_image(&rendition)?;
+    drop(rendition);
+    encoded.as_file_mut().flush()?;
+    encoded.as_file().sync_all()?;
+    let output_bytes = encoded.as_file().metadata()?.len();
+    let jpeg_sha256 = sha256_file(encoded.path())?;
+    replace_cache_file(encoded, &jpeg_path)?;
+    let metadata = RenditionCacheMetadata {
+        token: token.to_owned(),
+        source_sha256: source_sha256.to_owned(),
+        jpeg_sha256,
+        watermark_id: watermark_id.map(str::to_owned),
+        width,
+        height,
+        output_bytes,
+    };
+    let mut metadata_temp = NamedTempFile::new_in(directory)?;
+    serde_json::to_writer(metadata_temp.as_file_mut(), &metadata)?;
+    metadata_temp.as_file_mut().flush()?;
+    metadata_temp.as_file().sync_all()?;
+    replace_cache_file(metadata_temp, &metadata_path)?;
+    Ok(CachedRendition {
+        path: jpeg_path,
+        width,
+        height,
+        output_bytes,
+        cache_hit: false,
+        render_ms,
+        encode_ms: elapsed_ms(encode_started),
+    })
+}
+
+fn replace_cache_file(temp: NamedTempFile, destination: &Path) -> AuthenticityResult<()> {
+    if destination.exists() {
+        fs::remove_file(destination)?;
+    }
+    temp.persist(destination)
+        .map_err(|error| AuthenticityError::Io(error.error))?;
+    Ok(())
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 fn png_thumbnail_preview(
@@ -169,40 +366,58 @@ pub(crate) fn publish(
         .ok_or_else(|| AuthenticityError::InvalidInput("输出目录无效".into()))?;
     fs::create_dir_all(parent)?;
     let temp_dir = tempdir_in(parent)?;
-    let unsigned_path = temp_dir.path().join("rendition.jpg");
     let signed_path = temp_dir.path().join("signed.jpg");
-    let source = image_resource::open(&input)?;
-    let (width, height) = source.dimensions();
-    let background = trustmark::parse_background(&request.config.background_color)?;
-    let flattened = trustmark::flatten_to_rgb(&source, background);
-    drop(source);
-    let identifier = trustmark::resolve_identifier(request.watermark_id.as_deref())?;
-    let rendition = if request.config.trustmark_enabled {
-        trustmark::encode_regions(
-            state,
-            flattened,
-            &identifier,
-            request.config.watermark_strength,
-            &request.config.additional_regions,
+    let rendition_identifier = request
+        .config
+        .trustmark_enabled
+        .then(|| trustmark::resolve_identifier(request.watermark_id.as_deref()))
+        .transpose()?;
+    let cache_token = rendition_cache_token(
+        &target.source_sha256,
+        &request.config,
+        rendition_identifier.as_deref(),
+    )?;
+    let cached = if request.preview_cache_token.as_deref() == Some(cache_token.as_str()) {
+        load_cached_rendition(
+            root,
+            &cache_token,
+            &target.source_sha256,
+            rendition_identifier.as_deref(),
         )?
     } else {
-        flattened
+        None
     };
-    let mut unsigned_file = File::create(&unsigned_path)?;
-    JpegEncoder::new_with_quality(&mut unsigned_file, request.config.jpeg_quality)
-        .encode_image(&rendition)?;
-    drop(unsigned_file);
+    let cached = if let Some(cached) = cached {
+        cached
+    } else {
+        let source = image_resource::open(&input)?;
+        render_cached_rendition(
+            root,
+            state,
+            source,
+            &request.config,
+            rendition_identifier.as_deref(),
+            &cache_token,
+            &target.source_sha256,
+        )?
+    };
+    let identifier = match rendition_identifier {
+        Some(identifier) => identifier,
+        None => trustmark::resolve_identifier(None)?,
+    };
 
     let record_id = storage::new_id();
+    let signing_started = Instant::now();
     c2pa::sign_jpeg(
         &request.config,
         private_key.as_bytes(),
         &record_id,
         &identifier,
         &input,
-        &unsigned_path,
+        &cached.path,
         &signed_path,
     )?;
+    let signing_ms = elapsed_ms(signing_started);
     let manifest = c2pa::read_manifest(&signed_path)?;
     validate_signed_manifest(&manifest, &request.config, &record_id, &identifier)?;
     let output_path = storage::display_path(&output);
@@ -283,13 +498,17 @@ pub(crate) fn publish(
     };
     Ok(PublishedOutput {
         record,
-        width,
-        height,
+        width: cached.width,
+        height: cached.height,
         watermark_region_count: if request.config.trustmark_enabled {
             request.config.additional_regions.len() as u32
         } else {
             0
         },
+        rendition_cache_hit: cached.cache_hit,
+        render_ms: cached.render_ms,
+        encode_ms: cached.encode_ms,
+        signing_ms,
     })
 }
 
@@ -747,5 +966,60 @@ mod tests {
         assert_eq!(jpeg.source_bytes, 456);
         assert!(png.data_url.starts_with("data:image/png;base64,"));
         assert!(jpeg.data_url.starts_with("data:image/jpeg;base64,"));
+    }
+
+    #[test]
+    fn rendition_cache_reuses_valid_bytes_and_rejects_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        fs::create_dir(directory.path().join("temp")).unwrap();
+        let state = fixture_state();
+        let config = fixture_config();
+        let source_sha256 = "A".repeat(64);
+        let token = rendition_cache_token(&source_sha256, &config, None).unwrap();
+        let source = image::DynamicImage::ImageRgb8(image::RgbImage::new(32, 24));
+
+        let rendered = render_cached_rendition(
+            directory.path(),
+            &state,
+            source,
+            &config,
+            None,
+            &token,
+            &source_sha256,
+        )
+        .unwrap();
+        assert!(!rendered.cache_hit);
+
+        let reused = load_cached_rendition(directory.path(), &token, &source_sha256, None)
+            .unwrap()
+            .unwrap();
+        assert!(reused.cache_hit);
+        assert_eq!(reused.output_bytes, rendered.output_bytes);
+
+        fs::write(&reused.path, b"replaced").unwrap();
+        assert!(
+            load_cached_rendition(directory.path(), &token, &source_sha256, None,)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rendition_cache_token_changes_with_pixel_settings_and_identifier() {
+        let source_sha256 = "B".repeat(64);
+        let config = fixture_config();
+        let initial =
+            rendition_cache_token(&source_sha256, &config, Some(FIXTURE_WATERMARK_ID)).unwrap();
+        let mut changed = config.clone();
+        changed.jpeg_quality -= 1;
+
+        assert_ne!(
+            initial,
+            rendition_cache_token(&source_sha256, &changed, Some(FIXTURE_WATERMARK_ID)).unwrap()
+        );
+        assert_ne!(
+            initial,
+            rendition_cache_token(&source_sha256, &config, Some(&"0".repeat(40))).unwrap()
+        );
     }
 }

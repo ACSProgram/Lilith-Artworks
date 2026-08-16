@@ -11,6 +11,7 @@ import type {
   NormalizedRegion,
   PreviewImage,
   PublicationPreview,
+  PublishResult,
 } from "./types";
 import { publicationPreviewError, publicationPreviewSignature } from "./publicationValidation";
 
@@ -77,6 +78,7 @@ export function usePublicationController({
   const [watermarkId, setWatermarkId] = useState("");
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState<CertificationRecord | null>(null);
+  const [publishMetrics, setPublishMetrics] = useState<PublishResult | null>(null);
   const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
   const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
   const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
@@ -168,6 +170,7 @@ export function usePublicationController({
     outputPreviewRequest.current += 1;
     setViewingRecord(null);
     setResult(null);
+    setPublishMetrics(null);
     setWatermarkId("");
     setBusy(Boolean(selectedBranchId));
     void load();
@@ -331,6 +334,7 @@ export function usePublicationController({
     const branchId = selectedBranch.id;
     setBusy(true);
     setResult(null);
+    setPublishMetrics(null);
     onError(null);
     try {
       const published = await authenticityApi.publish({
@@ -339,11 +343,13 @@ export function usePublicationController({
         privateKeyPem: privateKeyPem(privateKey),
         config,
         watermarkId: watermarkId.trim() || null,
+        previewCacheToken: outputPreview?.cacheToken ?? null,
       });
       setPrivateKey("");
       setWatermarkId("");
       if (selectedBranchIdRef.current === branchId) {
         setResult(published.record);
+        setPublishMetrics(published);
         setOutputPreviewOpen(false);
         setOutputPreview(null);
         await load();
@@ -355,7 +361,7 @@ export function usePublicationController({
     } finally {
       if (selectedBranchIdRef.current === branchId) setBusy(false);
     }
-  }, [artworkTitle, config, load, onError, onPublicationChanged, privateKey, publication, selectedBranch, watermarkId]);
+  }, [artworkTitle, config, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
 
   const cancelPublication = useCallback(async () => {
     if (!selectedBranch) return;
@@ -378,6 +384,7 @@ export function usePublicationController({
         setPrivateKey("");
         setWatermarkId("");
         setResult(null);
+        setPublishMetrics(null);
         setViewingRecord(null);
       }
       await onPublicationChanged?.();
@@ -438,6 +445,7 @@ export function usePublicationController({
     setWatermarkId,
     busy,
     result,
+    publishMetrics,
     sizeEstimate,
     viewingRecord,
     setViewingRecord,

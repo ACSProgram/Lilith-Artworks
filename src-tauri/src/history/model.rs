@@ -63,6 +63,7 @@ pub(crate) struct UpdateBranchBackupRequest {
     pub(crate) expected_backup_enabled: bool,
     pub(crate) backup_enabled: bool,
     pub(crate) backup_interval_minutes: u32,
+    pub(crate) source_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -43,6 +43,7 @@ pub(crate) struct PublishBranchRequest {
     pub(crate) private_key_pem: String,
     pub(crate) config: CertificationConfig,
     pub(crate) watermark_id: Option<String>,
+    pub(crate) preview_cache_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +86,10 @@ pub(crate) struct PublicationPreview {
     pub(crate) source_height: u32,
     pub(crate) output_bytes: u64,
     pub(crate) watermark_id: Option<String>,
+    pub(crate) cache_token: String,
+    pub(crate) cache_hit: bool,
+    pub(crate) render_ms: u64,
+    pub(crate) encode_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -167,6 +172,10 @@ pub(crate) struct PublishResult {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) watermark_region_count: u32,
+    pub(crate) rendition_cache_hit: bool,
+    pub(crate) render_ms: u64,
+    pub(crate) encode_ms: u64,
+    pub(crate) signing_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

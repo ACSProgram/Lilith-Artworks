@@ -48,6 +48,10 @@ const preview: PublicationPreview = {
   sourceHeight: 3200,
   outputBytes: 7,
   watermarkId: null,
+  cacheToken: "cache-token",
+  cacheHit: false,
+  renderMs: 12,
+  encodeMs: 8,
 };
 
 const brokenPreviewPublication: BranchPublication = {

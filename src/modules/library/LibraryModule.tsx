@@ -341,9 +341,9 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
         </div>
 
         <footer className="sidebar-footer">
-          <span>{tree.groupCount} 个分组</span>
+          <span>{tree.groupCount} 个分组 · {tree.artworkCount} 个作品</span>
           {selectedIds.size > 1 && <strong>已选择 {selectedIds.size} 项</strong>}
-          <button type="button" title="回收站" disabled={!repositoryReady || operationBusy} onClick={() => void openTrash()}>
+          <button type="button" title={`回收站${trashEntries.length ? ` · ${trashEntries.length} 个项目` : ""}`} aria-label={`打开回收站${trashEntries.length ? `，${trashEntries.length} 个项目` : ""}`} disabled={!repositoryReady || operationBusy} onClick={() => void openTrash()}>
             <Trash2 aria-hidden="true" size={16} />
           </button>
         </footer>

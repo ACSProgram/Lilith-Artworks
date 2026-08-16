@@ -164,15 +164,22 @@ pub(crate) fn update_branch(
     expected_enabled: bool,
     enabled: bool,
     interval_minutes: u32,
+    source_path: Option<&str>,
 ) -> Result<(), String> {
     storage::validate_title(title, "分支标题")?;
     if !(1..=10_080).contains(&interval_minutes) {
         return Err("自动备份间隔必须在 1 到 10080 分钟之间".into());
     }
-    let connection = storage::open(root)?;
-    let changed = connection
+    let normalized_source = source_path
+        .map(|value| storage::normalize_source_path(root, Path::new(value.trim())))
+        .transpose()?;
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let changed = transaction
         .execute(
             "UPDATE branches SET title = ?2,
+                    source_path = COALESCE(?7, source_path),
+                    source_path_key = COALESCE(?8, source_path_key),
                     backup_enabled = CASE WHEN backup_enabled = ?3 THEN ?4 ELSE backup_enabled END,
                     backup_interval_minutes = ?5,
                     consecutive_backup_failures = CASE
@@ -194,14 +201,25 @@ pub(crate) fn update_branch(
                 i64::from(expected_enabled),
                 i64::from(enabled),
                 interval_minutes,
-                storage::now_ms()?
+                storage::now_ms()?,
+                normalized_source.as_ref().map(|value| &value.0),
+                normalized_source.as_ref().map(|value| &value.1),
             ],
         )
-        .map_err(storage::database_error)?;
+        .map_err(|error| {
+            if error
+                .to_string()
+                .contains("branches.artwork_id, branches.source_path_key")
+            {
+                "同一 Artwork 的每个分支必须使用不同的工作文件路径".into()
+            } else {
+                storage::database_error(error)
+            }
+        })?;
     if changed == 0 {
         Err("找不到分支".into())
     } else {
-        Ok(())
+        transaction.commit().map_err(storage::database_error)
     }
 }
 
@@ -1299,9 +1317,52 @@ mod tests {
             true,
             false,
             10,
+            None,
         )
         .unwrap();
         assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
+    }
+
+    #[test]
+    fn branch_source_path_update_is_validated_and_atomic() {
+        let fixture = HistoryFixture::new();
+        let replacement = fixture._directory.path().join("replacement.psd");
+        fs::write(&replacement, b"replacement").unwrap();
+
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            true,
+            true,
+            10,
+            replacement.to_str(),
+        )
+        .unwrap();
+        assert_eq!(
+            load_branch(&fixture.root, &fixture.main_branch_id)
+                .unwrap()
+                .source_path,
+            storage::display_path(&replacement.canonicalize().unwrap())
+        );
+
+        let missing = fixture._directory.path().join("missing.psd");
+        assert!(update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Should not persist",
+            true,
+            true,
+            10,
+            missing.to_str(),
+        )
+        .is_err());
+        let preserved = list(&fixture.root, &fixture.artwork_id).unwrap();
+        assert_eq!(preserved.branches[0].title, "Main");
+        assert_eq!(
+            preserved.branches[0].source_path,
+            storage::display_path(&replacement.canonicalize().unwrap())
+        );
     }
 
     #[test]
@@ -1315,6 +1376,7 @@ mod tests {
             true,
             true,
             120,
+            None,
         )
         .unwrap();
 
@@ -1388,6 +1450,7 @@ mod tests {
             true,
             true,
             60,
+            None,
         )
         .unwrap();
         let stale_update: (String, bool, u32, bool) = storage::open(&fixture.root)
@@ -1412,6 +1475,7 @@ mod tests {
             false,
             true,
             60,
+            None,
         )
         .unwrap();
         let reenabled: (bool, u32, bool) = storage::open(&fixture.root)

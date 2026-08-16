@@ -1,7 +1,10 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { BranchScheduleStatus, BranchSettings } from "./HistoryControls";
 import type { ArtworkBranch } from "./types";
+
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
 const branch = (backupEnabled: boolean): ArtworkBranch => ({
   id: "branch-1",
@@ -23,6 +26,8 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
 
 describe("BranchSettings", () => {
   afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
     vi.useRealTimers();
   });
 
@@ -48,6 +53,26 @@ describe("BranchSettings", () => {
       backupEnabled: false,
       backupIntervalMinutes: 10,
     });
+  });
+
+  it("restores the persisted path when a path update fails", async () => {
+    vi.useFakeTimers();
+    const onSave = vi.fn().mockRejectedValue(new Error("invalid path"));
+    dialog.open.mockResolvedValue("C:\\work\\replacement.psd");
+    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+
+    await act(async () => { fireEvent.click(screen.getByTitle("修改工作文件")); await Promise.resolve(); });
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      sourcePath: "C:\\work\\replacement.psd",
+    }));
+    expect((screen.getByLabelText("工作文件") as HTMLTextAreaElement).value)
+      .toBe("C:\\work\\artwork.psd");
   });
 });
 

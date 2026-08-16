@@ -187,7 +187,7 @@ mod tests {
             .unwrap()
             .is_some());
 
-        history::update_branch(&root, &artwork.branch_id, "Main", true, false, 10).unwrap();
+        history::update_branch(&root, &artwork.branch_id, "Main", true, false, 10, None).unwrap();
         let result = run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id);
 
         assert!(matches!(result, Err(AutomaticBackupError::NotScheduled)));

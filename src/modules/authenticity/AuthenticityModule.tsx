@@ -49,7 +49,7 @@ function PublishView({
     publication, config, setConfig, preview, artifactPreviewBusy, artifactPreviewError,
     outputPreview, outputPreviewOpen,
     setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey,
-    busy, result, sizeEstimate, viewingRecord, setViewingRecord,
+    busy, result, publishMetrics, sizeEstimate, viewingRecord, setViewingRecord,
     viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
     selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
@@ -134,8 +134,8 @@ function PublishView({
               <p>预览首次自动生成随机 ID，调整后保持一致并在发布时复用。仅在 {config.additionalRegions.length} 个框选区域嵌入水印。</p>
             </>}
           </div>
-          {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code></div></div>}
-          <button className="primary-button publish-command" type="button" disabled={busy || outputPreviewBusy} onClick={() => void generateOutputPreview()}>{outputPreviewBusy ? <LoaderCircle className="spin" size={17} /> : <Eye size={17} />}生成质量预览</button>
+          {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code>{publishMetrics && <small>{publishMetrics.renditionCacheHit ? "已复用质量预览编码" : `重新渲染 ${publishMetrics.renderMs} ms · 编码 ${publishMetrics.encodeMs} ms`} · C2PA/时间戳 {publishMetrics.signingMs} ms</small>}</div></div>}
+          <button className="primary-button publish-command" type="button" disabled={busy || outputPreviewBusy} onClick={() => void generateOutputPreview()}>{outputPreviewBusy ? <LoaderCircle className="spin" size={17} /> : <Eye size={17} />}{outputPreviewBusy ? "正在渲染并编码" : "生成质量预览"}</button>
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
         {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={busy} onBack={() => setOutputPreviewOpen(false)} onPublish={() => void publish()} />}
@@ -168,7 +168,6 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
           <header><div><strong>{fileName(path)}</strong><span>{preview.width} x {preview.height}</span></div><button className="text-button" type="button" onClick={() => void choose()}>更换图片</button></header>
           <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} />
           <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" type="button" title="取消区域并识别整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>
-          {region && <button className="text-button scope-reset" type="button" onClick={() => setRegion(null)}>改用整图</button>}
           <button className="primary-button" type="button" disabled={busy} onClick={() => void decode()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ScanSearch size={16} />}开始识别</button>
         </>}
       </section>
@@ -475,7 +474,7 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
     <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
       <header>
-        <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.sourceWidth} x {preview.sourceHeight} · {formatBytes(preview.outputBytes)}</span></div>
+        <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.sourceWidth} x {preview.sourceHeight} · {formatBytes(preview.outputBytes)} · {preview.cacheHit ? "复用缓存" : `渲染 ${preview.renderMs} ms / 编码 ${preview.encodeMs} ms`}</span></div>
         <div className="preview-zoom-controls">
           <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, fitZoomRef.current))}><ZoomOut size={16} /></button>
           <button className="zoom-value" type="button" title="按预览像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
@@ -517,7 +516,7 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           <span style={{ left: `${navigationRect.left}%`, top: `${navigationRect.top}%`, width: `${navigationRect.width}%`, height: `${navigationRect.height}%` }} />
         </div>}
       </div>
-      <footer><span>{showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
+      <footer><span>{busy ? "正在写入 C2PA 并等待可选时间戳服务；窗口仍可响应。" : showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}{busy ? "签名/时间戳处理中" : "签名并发布"}</button></div></footer>
     </section>
   </div>;
 }

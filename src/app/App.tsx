@@ -319,7 +319,7 @@ export function App() {
             </header>
 
             <div className="settings-section">
-              <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>作品仓库</h3></div>
+              <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
               <div className="path-control">
                 <input aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
                 <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
@@ -345,6 +345,17 @@ export function App() {
                   onCancel={() => void cancelSettingsOperation()}
                 />
               )}
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
+              <div className="settings-preference-list">
+                <label className="settings-preference-row">
+                  <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
+                  <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
+                </label>
+              </div>
             </div>
 
             <div className="settings-section">
@@ -376,11 +387,6 @@ export function App() {
                   <span className="settings-row-copy"><strong>关闭时驻留托盘</strong><small>{draft.closeToTray ? "已启用" : "已关闭"}</small></span>
                   <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
                 </label>
-                <label className="settings-preference-row">
-                  <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
-                  <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
-                </label>
                 <div className="settings-preference-row">
                   <span className="settings-row-icon"><Settings aria-hidden="true" size={17} /></span>
                   <span className="settings-row-copy"><strong>配置文件夹</strong><small title={snapshot?.settingsPath}>{snapshot?.settingsPath ?? "设置目录尚未就绪"}</small></span>
@@ -395,7 +401,7 @@ export function App() {
             </div>
 
             <div className="settings-section">
-              <div className="settings-section-title"><Info aria-hidden="true" size={17} /><h3>About / Legal</h3></div>
+              <div className="settings-section-title"><Info aria-hidden="true" size={17} /><h3>关于与法律</h3></div>
               <div className="settings-preference-list">
                 <div className="settings-preference-row">
                   <span className="settings-row-icon"><Info aria-hidden="true" size={17} /></span>

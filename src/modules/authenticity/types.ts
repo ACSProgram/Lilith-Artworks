@@ -91,6 +91,7 @@ export interface PublishBranchRequest {
   privateKeyPem: string;
   config: CertificationConfig;
   watermarkId: string | null;
+  previewCacheToken?: string | null;
 }
 
 export interface PublicationPreviewRequest {
@@ -106,6 +107,10 @@ export interface PublicationPreview {
   sourceHeight: number;
   outputBytes: number;
   watermarkId: string | null;
+  cacheToken: string;
+  cacheHit: boolean;
+  renderMs: number;
+  encodeMs: number;
 }
 
 export interface PublishResult {
@@ -113,6 +118,10 @@ export interface PublishResult {
   width: number;
   height: number;
   watermarkRegionCount: number;
+  renditionCacheHit: boolean;
+  renderMs: number;
+  encodeMs: number;
+  signingMs: number;
 }
 
 export interface ValidationItem {
