@@ -46,11 +46,12 @@ function PublishView({
   artworkTitle, branches, selectedBranchId, selectedRecordId, recordNavigationKey, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const {
-    publication, config, setConfig, preview, outputPreview, outputPreviewOpen,
+    publication, config, setConfig, preview, artifactPreviewBusy, artifactPreviewError,
+    outputPreview, outputPreviewOpen,
     setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey,
     busy, result, sizeEstimate, viewingRecord, setViewingRecord,
     viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
-    selectedBranch, enterPublication, chooseCertificate, generateOutputPreview, publish, cancelPublication,
+    selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
   } = usePublicationController({
     artworkTitle,
@@ -138,8 +139,18 @@ function PublishView({
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
         {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={busy} onBack={() => setOutputPreviewOpen(false)} onPublish={() => void publish()} />}
-        {deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
-      </div> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取发布状态</div>}
+      </div> : config && artifactPreviewError ? <>
+        <section className="publication-gate">
+          <div className="gate-icon"><FileImage size={24} /></div>
+          <div><h2>分支已进入发布状态，成品预览暂不可用</h2><p>发布元数据和取消入口仍然可用。修复或恢复成品文件后可单独重试预览。</p></div>
+          <button className="secondary-button" type="button" disabled={artifactPreviewBusy} onClick={() => void retryArtifactPreview()}>
+            {artifactPreviewBusy ? <LoaderCircle className="spin" size={16} /> : <RotateCcw size={16} />}重试预览
+          </button>
+          <small>{artifactPreviewError}</small>
+        </section>
+        <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
+      </> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />{publication?.artifact ? "读取成品预览" : "读取发布状态"}</div>}
+    {selectedBranch && deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
   </div>;
 }
 

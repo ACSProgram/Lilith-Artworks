@@ -68,6 +68,8 @@ export function usePublicationController({
   const [publication, setPublication] = useState<BranchPublication | null>(null);
   const [config, setConfig] = useState<CertificationConfig | null>(null);
   const [preview, setPreview] = useState<PreviewImage | null>(null);
+  const [artifactPreviewBusy, setArtifactPreviewBusy] = useState(false);
+  const [artifactPreviewError, setArtifactPreviewError] = useState<string | null>(null);
   const [outputPreview, setOutputPreview] = useState<PublicationPreview | null>(null);
   const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
   const [outputPreviewBusy, setOutputPreviewBusy] = useState(false);
@@ -82,6 +84,7 @@ export function usePublicationController({
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
   const loadRequest = useRef(0);
+  const artifactPreviewRequest = useRef(0);
   const estimateRequest = useRef(0);
   const viewingRequest = useRef(0);
   const outputPreviewRequest = useRef(0);
@@ -104,6 +107,26 @@ export function usePublicationController({
     });
   }, []);
 
+  const loadArtifactPreview = useCallback(async (branchId: string) => {
+    const requestId = ++artifactPreviewRequest.current;
+    setArtifactPreviewBusy(true);
+    setArtifactPreviewError(null);
+    setPreview(null);
+    try {
+      const next = await authenticityApi.previewArtifact(branchId);
+      if (requestId !== artifactPreviewRequest.current
+        || selectedBranchIdRef.current !== branchId) return;
+      setPreview(next);
+    } catch (error) {
+      if (requestId === artifactPreviewRequest.current
+        && selectedBranchIdRef.current === branchId) {
+        setArtifactPreviewError(message(error));
+      }
+    } finally {
+      if (requestId === artifactPreviewRequest.current) setArtifactPreviewBusy(false);
+    }
+  }, []);
+
   const load = useCallback(async () => {
     if (!selectedBranchId) return;
     const branchId = selectedBranchId;
@@ -111,12 +134,17 @@ export function usePublicationController({
     setBusy(true);
     try {
       const next = await authenticityApi.getPublication(branchId);
-      const nextPreview = next.artifact
-        ? await authenticityApi.previewArtifact(branchId)
-        : null;
       if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
-      setPreview(nextPreview);
+      setBusy(false);
+      if (next.artifact) {
+        await loadArtifactPreview(branchId);
+      } else {
+        artifactPreviewRequest.current += 1;
+        setArtifactPreviewBusy(false);
+        setArtifactPreviewError(null);
+        setPreview(null);
+      }
     } catch (error) {
       if (requestId === loadRequest.current && selectedBranchIdRef.current === branchId) {
         onError(message(error));
@@ -124,23 +152,33 @@ export function usePublicationController({
     } finally {
       if (requestId === loadRequest.current) setBusy(false);
     }
-  }, [applyPublication, onError, selectedBranchId]);
+  }, [applyPublication, loadArtifactPreview, onError, selectedBranchId]);
 
   useEffect(() => {
     loadRequest.current += 1;
+    artifactPreviewRequest.current += 1;
     setPublication(null);
     setConfig(null);
     setPreview(null);
+    setArtifactPreviewBusy(false);
+    setArtifactPreviewError(null);
     setOutputPreview(null);
     setOutputPreviewOpen(false);
     setOutputPreviewBusy(false);
     outputPreviewRequest.current += 1;
     setViewingRecord(null);
     setResult(null);
+    setWatermarkId("");
     setBusy(Boolean(selectedBranchId));
     void load();
     return () => { loadRequest.current += 1; };
   }, [load, selectedBranchId]);
+
+  useEffect(() => {
+    if (config && (!config.trustmarkEnabled || config.additionalRegions.length === 0)) {
+      setWatermarkId("");
+    }
+  }, [config?.additionalRegions.length, config?.trustmarkEnabled]);
 
   useEffect(() => {
     if (!publication?.artifact || !config) return;
@@ -204,20 +242,24 @@ export function usePublicationController({
     onError(null);
     try {
       const next = await authenticityApi.enterPublication(branchId, artifactPath);
-      await onPublicationChanged?.();
-      if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
-      const nextPreview = next.artifact
-        ? await authenticityApi.previewArtifact(branchId)
-        : null;
       if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
-      setPreview(nextPreview);
+      setBusy(false);
+      await Promise.all([
+        next.artifact ? loadArtifactPreview(branchId) : Promise.resolve(),
+        onPublicationChanged?.() ?? Promise.resolve(),
+      ]);
     } catch (error) {
       if (requestId === loadRequest.current) onError(message(error));
     } finally {
       if (requestId === loadRequest.current) setBusy(false);
     }
-  }, [applyPublication, onError, onPublicationChanged, selectedBranch]);
+  }, [applyPublication, loadArtifactPreview, onError, onPublicationChanged, selectedBranch]);
+
+  const retryArtifactPreview = useCallback(async () => {
+    if (!selectedBranch || publication?.branchId !== selectedBranch.id || !publication.artifact) return;
+    await loadArtifactPreview(selectedBranch.id);
+  }, [loadArtifactPreview, publication, selectedBranch]);
 
   const chooseCertificate = useCallback(async () => {
     const path = await open({
@@ -299,6 +341,7 @@ export function usePublicationController({
         watermarkId: watermarkId.trim() || null,
       });
       setPrivateKey("");
+      setWatermarkId("");
       if (selectedBranchIdRef.current === branchId) {
         setResult(published.record);
         setOutputPreviewOpen(false);
@@ -383,6 +426,8 @@ export function usePublicationController({
     config,
     setConfig,
     preview,
+    artifactPreviewBusy,
+    artifactPreviewError,
     outputPreview,
     outputPreviewOpen,
     setOutputPreviewOpen,
@@ -403,6 +448,7 @@ export function usePublicationController({
     cleanupFailures,
     selectedBranch,
     enterPublication,
+    retryArtifactPreview,
     chooseCertificate,
     generateOutputPreview,
     publish,
