@@ -4,9 +4,11 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 ## 当前状态
 
-`v0.1.0-rc.1` 的源码与 Windows 安装包已经公开，定位为供评估和问题发现使用的发布预览版，不是正式版，也不建议承载唯一副本或不可替代的作品数据。当前开发分支版本已升为 `0.1.0-rc.2`；`rc.2` 尚未发布，不能移动或复用 `rc.1` 标签与资产。
+`v0.1.0-rc.2` 的源码与 Windows 安装包已经公开。它仍是供评估和内部测试使用的发布预览版，不是正式版，可能存在缺陷、稳定性问题或安全缺口；不要用它承载唯一副本、不可替代的作品数据或生产工作流。已发布的 `rc.1` 与 `rc.2` 标签和资产均保持不可变。
 
-作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现。正式版阻断项、风险分级和验收计划见[当前任务交接与人工验收](docs/planning/current-handoff.md)。当前功能包括：
+**数据兼容性警告：** RC2 使用 repository schema v9 和新的应用标识 `com.lilith.artworks`。RC1 及更早候选版的作品仓库、设置和应用数据与 RC2 不兼容，本版本不提供迁移支持。请为 RC2 创建新仓库，不要直接打开、覆盖或复用旧版本数据；如需保留旧数据，请继续使用创建它的原版本并另行备份。
+
+作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现。RC2 已完成内容见 [RC2 发布与验收归档](docs/planning/archive/rc2-release-2026-08-16.md)，正式版后续风险和工作入口见[当前任务交接](docs/planning/current-handoff.md)。当前功能包括：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -26,7 +28,8 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 ## 文档入口
 
 - [AI 阅读引导](docs/architecture/ai-reading-guide.md)
-- [当前任务交接与人工验收](docs/planning/current-handoff.md)
+- [当前任务交接](docs/planning/current-handoff.md)
+- [RC2 发布与验收归档](docs/planning/archive/rc2-release-2026-08-16.md)
 - [规划归档](docs/planning/archive/README.md)
 - [系统架构](docs/architecture/overview.md)
 - [验证策略](docs/guides/validation.md)

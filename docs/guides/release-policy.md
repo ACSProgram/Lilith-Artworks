@@ -18,7 +18,7 @@ Windows CI 必须通过以下项目：
 4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
 5. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
 
-CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；RustSec 仅精确忽略 `RUSTSEC-2023-0071`，因为 PS256 已在前后端禁用并有直接回归测试，其余漏洞仍使作业失败。
+CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；Rust 依赖审计固定使用 `rustsec/audit-check@v2.0.0`，仅精确忽略 `RUSTSEC-2023-0071`，因为 PS256 已在前后端禁用并有直接回归测试，其余漏洞仍使作业失败。
 
 正式候选版还必须通过：
 

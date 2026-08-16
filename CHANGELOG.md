@@ -5,7 +5,19 @@ before and after the first stable release.
 
 ## Unreleased
 
+### Fixed
+
+- Replaced the broken Python-based Rust audit wrapper with RustSec's maintained
+  `audit-check` action in Windows CI and release builds.
+
 ## 0.1.0-rc.2 - 2026-08-16
+
+### Compatibility
+
+- Repository schema v9, settings, and the new `com.lilith.artworks` application
+  identity are not compatible with RC1 or earlier candidate data. RC2 supports
+  newly created repositories only and does not provide an upgrade path for old
+  repositories or settings.
 
 ### Changed
 
@@ -21,6 +33,9 @@ before and after the first stable release.
 - Added persistent automatic-backup retry state and branch notices under
   repository schema v9.
 - Added Tauri single-instance handling and native settings/log-folder actions.
+- Reorganized the settings dialog and history workspace, including a compact
+  branch header, full-height timeline, overview compaction, and branch selection
+  without leaving the overview.
 - Corrected the public preview status, security-reporting fallback, and
   third-party licensing language. The bundle configuration now includes the
   project license, third-party notices, and the unmodified Adobe TrustMark
@@ -33,6 +48,9 @@ before and after the first stable release.
 - Publication quality preview and C2PA signing now expose real cooperative
   cancellation, clean temporary work before publication, and bound optional
   RFC 3161 timestamp requests to 30 seconds.
+- Quality preview generation now shows explicit progress and reports confirmed
+  cancellation. Deferred size-estimate failures are contained instead of
+  escaping as unhandled frontend test errors.
 
 ## 0.1.0-rc.1 - 2026-08-15
 

@@ -11,7 +11,7 @@ starting work so completed architecture work is not reopened accidentally.
 
 The supported development environment is Windows with:
 
-- Node.js 20 and npm;
+- Node.js 24 and npm;
 - the stable Rust toolchain with `rustfmt`;
 - the Microsoft C++ build tools required by Tauri;
 - WebView2;

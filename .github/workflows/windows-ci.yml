@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  checks: write
 
 concurrency:
   group: windows-ci-${{ github.ref }}
@@ -37,12 +38,11 @@ jobs:
         run: npm audit --audit-level=high --registry=https://registry.npmjs.org
 
       - name: Audit Rust dependencies
-        uses: actions-rust-lang/audit@v1
+        uses: rustsec/audit-check@v2.0.0
         with:
-          workingDirectory: src-tauri
+          token: ${{ secrets.GITHUB_TOKEN }}
+          working-directory: src-tauri
           ignore: RUSTSEC-2023-0071
-          denyWarnings: false
-          createIssues: false
 
       - name: Generate source dependency SBOM
         uses: anchore/sbom-action@v0.24.0
