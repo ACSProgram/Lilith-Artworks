@@ -1,4 +1,4 @@
-use std::{fs, fs::File, path::Path, time::SystemTime};
+use std::{fs, fs::File, io, path::Path, time::SystemTime};
 
 use tempfile::NamedTempFile;
 
@@ -74,10 +74,18 @@ pub(crate) fn run_backup(
         .as_deref()
         .map(|id| history::load_node(root, id))
         .transpose()?;
-    if head
+    if let Some(head) = head
         .as_ref()
-        .is_some_and(|node| node.sha256.eq_ignore_ascii_case(&digest))
+        .filter(|node| node.sha256.eq_ignore_ascii_case(&digest))
     {
+        if let Err(validation_error) = validate_head_snapshot(root, head) {
+            ensure_not_cancelled(&cancelled)?;
+            log::warn!(
+                "HEAD snapshot {} failed validation and will be rebuilt: {validation_error}",
+                head.id
+            );
+            repair_head_snapshot(root, &artwork_directory, head, snapshot_temp)?;
+        }
         history::mark_unchanged(root, branch_id, checked_ms)?;
         return Ok(BackupCommitResult {
             created: false,
@@ -182,6 +190,67 @@ pub(crate) fn run_backup(
     })
 }
 
+fn validate_head_snapshot(root: &Path, head: &history::HistoryRecord) -> Result<(), String> {
+    let relative = head
+        .snapshot_path
+        .as_deref()
+        .ok_or("当前 HEAD 缺少完整 snapshot")?;
+    let path = storage::resolve_path(root, relative)?;
+    let mut file =
+        File::open(&path).map_err(|error| format!("无法打开当前 HEAD snapshot：{error}"))?;
+    let snapshot = ChunkFile::open(&mut file)
+        .map_err(|error| format!("无法读取当前 HEAD snapshot：{error}"))?;
+    if !snapshot
+        .file_digest()
+        .to_hex()
+        .eq_ignore_ascii_case(&head.sha256)
+    {
+        return Err("当前 HEAD snapshot 摘要与历史数据库不匹配".into());
+    }
+    snapshot
+        .copy_original(&mut file, &mut io::sink())
+        .map_err(|error| format!("当前 HEAD snapshot 完整性校验失败：{error}"))
+}
+
+fn repair_head_snapshot(
+    root: &Path,
+    artwork_directory: &Path,
+    head: &history::HistoryRecord,
+    snapshot_temp: NamedTempFile,
+) -> Result<(), String> {
+    let repaired_path = artwork_directory.join("snapshots").join(format!(
+        "{}-repair-{}.lbc",
+        head.id,
+        storage::new_id()
+    ));
+    let repaired_relative = storage::relative_path(root, &repaired_path)?;
+    let repaired_size = snapshot_temp
+        .as_file()
+        .metadata()
+        .map_err(|error| format!("无法读取修复 snapshot 大小：{error}"))?
+        .len();
+    publish_temp(snapshot_temp, &repaired_path, "修复 snapshot")?;
+    if let Err(error) =
+        history::set_snapshot(root, &head.id, &repaired_relative, repaired_size, true)
+    {
+        let _ = fs::remove_file(&repaired_path);
+        return Err(format!("无法登记修复 snapshot：{error}"));
+    }
+    if let Some(previous_relative) = head.snapshot_path.as_deref() {
+        if previous_relative != repaired_relative
+            && matches!(
+                history::storage_path_referenced(root, previous_relative),
+                Ok(false)
+            )
+        {
+            if let Ok(previous_path) = storage::resolve_path(root, previous_relative) {
+                let _ = fs::remove_file(previous_path);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
     if cancelled() {
         Err("备份操作已取消".into())
@@ -217,8 +286,13 @@ mod tests {
 
     use super::*;
 
-    #[test]
-    fn commits_delta_and_restores_parent_bytes() {
+    fn create_fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+        String,
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         let source = directory.path().join("artwork.bin");
@@ -228,27 +302,124 @@ mod tests {
             .unwrap();
         library::initialize(&root).unwrap();
         let artwork = library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+        (
+            directory,
+            root,
+            source,
+            artwork.artwork_id,
+            artwork.branch_id,
+        )
+    }
 
-        let first = run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap();
-        let first_id = first.history_id.unwrap();
-        fs::File::create(&source)
-            .unwrap()
-            .write_all(&[vec![b'A'; 48 * 1024], vec![b'B'; 48 * 1024]].concat())
-            .unwrap();
-        let second = run_backup(&root, &artwork.branch_id, "Second", "manual", || false).unwrap();
-        assert!(second.created);
-
-        let nodes = history::list(&root, &artwork.artwork_id).unwrap().nodes;
-        assert_eq!(nodes.len(), 2);
-        let output = directory.path().join("restored.bin");
+    fn restore_and_read(root: &Path, directory: &Path, history_id: &str) -> Vec<u8> {
+        let output = directory.join(format!("{history_id}-restored.bin"));
         super::super::restore::restore(
-            &root,
-            &first_id,
+            root,
+            history_id,
             output.to_str().unwrap(),
             || false,
             |_, _, _| {},
         )
         .unwrap();
-        assert_eq!(fs::read(output).unwrap(), vec![b'A'; 96 * 1024]);
+        fs::read(output).unwrap()
+    }
+
+    #[test]
+    fn commits_delta_and_restores_parent_bytes() {
+        let (directory, root, source, artwork_id, branch_id) = create_fixture();
+
+        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first_id = first.history_id.unwrap();
+        fs::File::create(&source)
+            .unwrap()
+            .write_all(&[vec![b'A'; 48 * 1024], vec![b'B'; 48 * 1024]].concat())
+            .unwrap();
+        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        assert!(second.created);
+
+        let nodes = history::list(&root, &artwork_id).unwrap().nodes;
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &first_id),
+            vec![b'A'; 96 * 1024]
+        );
+    }
+
+    #[test]
+    fn unchanged_backup_keeps_a_valid_head_snapshot() {
+        let (_directory, root, _source, _artwork_id, branch_id) = create_fixture();
+        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first_id = first.history_id.unwrap();
+        let original_path = history::load_node(&root, &first_id).unwrap().snapshot_path;
+
+        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+
+        assert!(!second.created);
+        assert!(second.unchanged);
+        assert_eq!(
+            history::load_node(&root, &first_id).unwrap().snapshot_path,
+            original_path
+        );
+    }
+
+    #[test]
+    fn unchanged_backup_repairs_a_missing_head_snapshot() {
+        let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
+        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first_id = first.history_id.unwrap();
+        let original_relative = history::load_node(&root, &first_id)
+            .unwrap()
+            .snapshot_path
+            .unwrap();
+        fs::remove_file(storage::resolve_path(&root, &original_relative).unwrap()).unwrap();
+
+        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let repaired = history::load_node(&root, &first_id).unwrap();
+
+        assert!(!second.created);
+        assert!(second.unchanged);
+        assert_ne!(
+            repaired.snapshot_path.as_deref(),
+            Some(original_relative.as_str())
+        );
+        assert!(
+            storage::resolve_path(&root, repaired.snapshot_path.as_deref().unwrap())
+                .unwrap()
+                .is_file()
+        );
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &first_id),
+            vec![b'A'; 96 * 1024]
+        );
+    }
+
+    #[test]
+    fn unchanged_backup_repairs_a_corrupt_head_snapshot() {
+        let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
+        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first_id = first.history_id.unwrap();
+        let original_relative = history::load_node(&root, &first_id)
+            .unwrap()
+            .snapshot_path
+            .unwrap();
+        let original_path = storage::resolve_path(&root, &original_relative).unwrap();
+        let mut damaged = fs::read(&original_path).unwrap();
+        *damaged.last_mut().unwrap() ^= 0xff;
+        fs::write(&original_path, damaged).unwrap();
+
+        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let repaired = history::load_node(&root, &first_id).unwrap();
+
+        assert!(!second.created);
+        assert!(second.unchanged);
+        assert_ne!(
+            repaired.snapshot_path.as_deref(),
+            Some(original_relative.as_str())
+        );
+        assert!(!original_path.exists());
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &first_id),
+            vec![b'A'; 96 * 1024]
+        );
     }
 }

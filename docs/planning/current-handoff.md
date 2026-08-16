@@ -28,7 +28,7 @@
 
 ## P1：下一个公开候选版之前必须完成
 
-- [ ] **P1-01 备份可恢复性与仓库灾备。** `backup/worker.rs` 在内容摘要未变化时不校验 HEAD snapshot，`backup/restore.rs` 创建检查点也只判断路径存在于数据库；缺失或损坏的 `.lbc` 会被报告为成功。使用前必须校验受控文件与数据库摘要，能够修复或明确阻止操作；增加可中断的全库 scrub。SQLite 元数据是当前单点故障，还需实现共享锁下的一致性仓库备份与恢复演练，或先建立经过实测的退出应用后整仓备份政策。
+- [ ] **P1-01 备份可恢复性与仓库灾备。** `backup/worker.rs` 已在内容摘要未变化时核对 HEAD snapshot 与数据库摘要并逐块校验，缺失、格式损坏、块损坏或摘要不匹配时会用本次生成的 snapshot 修复原 head，且已有有效、缺失和损坏三类回归测试。`backup/restore.rs` 创建检查点仍只判断路径存在于数据库；其余恢复入口也需统一在使用前校验受控文件与数据库摘要，并增加可中断的全库 scrub。SQLite 元数据仍是单点故障，还需实现共享锁下的一致性仓库备份与恢复演练，或先建立经过实测的退出应用后整仓备份政策。
 - [ ] **P1-02 仓库身份、路径与并发隔离。** ready 仓库 A 切换到 ready 仓库 B 时，前端只依赖布尔 `ready`，旧树和旧 Artwork 最长可保留到轮询，甚至向新仓库发送旧 ID。后端部分 mutation 也可在捕获旧 root 后跨越仓库切换。引入 repository generation/lease，切换时原子清空并使旧请求失效；所有持久化 ID 必须验证为 UUID 或单一安全路径组件，打开仓库时做语义校验，覆盖克隆仓库同 ID 与 `..` 路径测试。
 - [ ] **P1-03 受控文件摘要与 C2PA 不变量。** 最终成品、认证仓库副本和历史恢复在使用前没有统一对照数据库中持久化的 SHA-256；仓库文件被替换后仍可能签名、预览或再次导出。发布后还只确认存在 active manifest，没有要求验证状态合格或逐项核对 record ID、TrustMark ID 和本次声明。发布、预览、再导出、恢复与 scrub 必须统一校验，并对 C2PA 结果 fail closed，向用户报告“受控文件缺失、损坏、被替换或声明不匹配”。
 - [ ] **P1-04 删除语义与外部文件保护。** 永久删除 Artwork 当前会删除仓库外首次发布的用户 JPG，而 UI 只提示删除“全部内容”。默认应保留外部导出；若确需删除，必须逐路径列出并单独显式选择。增加发布、取消发布、Artwork 永久删除和哈希不匹配的端到端测试。
@@ -38,7 +38,7 @@
 - [ ] **P1-08 版本、迁移与旧标识。** 增加 v8→v9 自动迁移测试和迁移前备份；现有 v4→v5、v7→v8 会删除认证记录，必须明确最低支持版本、导出/提示和数据保留策略。在 `rc.1` 仓库副本上完成升级、外键与完整性检查，明确 `art.lilith.artworks` 设置/日志/C2PA label 到 `com.lilith.artworks` 的一次性迁移或不兼容策略，并实测安装升级与卸载。发布前把 package、Cargo、Tauri 和锁文件统一升到 `0.1.0-rc.2`，不得移动 `rc.1` 标签。
 - [ ] **P1-09 依赖与构建基线。** 将 Vitest 升到 3.2.6 或更高版本；把已 EOL 的 Node 20 CI 升到受支持的 Node 24 LTS；为 `rsa`/PS256 给出禁用、替换或书面风险接受。CI 增加官方 npm audit、RustSec、许可与 SBOM 门槛，并按 Windows 实际目标分类仅限其他平台的 Rust 告警。
 - [ ] **P1-10 许可、安全渠道与可信产物。** 当前配置已开始打包根 GPL、第三方摘要和 Adobe 原始模型许可，但完整的 Windows 目标许可闭包、项目版权持有人、About/Legal 入口仍缺失。正式候选版需生成包含版本、版权和正文的许可包，启用并实测私密漏洞报告，从不可变标签在干净 CI 构建，签名并时间戳主程序和安装包，发布 checksum、SBOM、许可包和 provenance，且由 CI 解包断言法律文件存在。
-- [ ] **P1-11 发布测试矩阵。** 为缺失 HEAD 自愈、压缩炸弹/超大 delta、仓库路径穿越、受控文件替换、C2PA 声明匹配、调度取消、真实 C2PA/TrustMark fixture、schema v1-v9、`foreign_key_check`、清理崩溃点和安装包资源增加自动测试。任何数据可靠性修复在故障注入和恢复演练通过前不得标记完成。
+- [ ] **P1-11 发布测试矩阵。** 缺失和损坏 HEAD snapshot 的自愈已有定向测试；仍需为压缩炸弹/超大 delta、仓库路径穿越、受控文件替换、C2PA 声明匹配、调度取消、真实 C2PA/TrustMark fixture、schema v1-v9、`foreign_key_check`、清理崩溃点和安装包资源增加自动测试。任何数据可靠性修复在故障注入和恢复演练通过前不得标记完成。
 
 ## P2：`0.1.0` 正式版之前必须完成
 
@@ -97,6 +97,7 @@
 
 - `npm run build` 通过。
 - `npm test` 通过：7 个测试文件、19 个用例；新增导出预览在原图与导出图之间往返切换时保留数值缩放的交互回归测试。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib backup::worker::tests` 通过：4 个定向用例，覆盖有效 HEAD 不重写、缺失/损坏 HEAD 自愈及恢复字节校验。
 - `cargo fmt --check --manifest-path src-tauri/Cargo.toml` 通过。
 - `npm run tauri -- info` 成功加载当前 Tauri 配置；`tauri.conf.json` 也通过 JSON 解析。
 - `git diff --check` 通过；仅有仓库既有的 LF→CRLF 工作区提示。
