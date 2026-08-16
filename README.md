@@ -4,7 +4,9 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 
 ## 当前状态
 
-作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现，当前进入 Windows 公开候选前的人工回归阶段。当前包含：
+`v0.1.0-rc.1` 的源码与 Windows 安装包已经公开，定位为供评估和问题发现使用的发布预览版，不是正式版，也不建议承载唯一副本或不可替代的作品数据。当前开发分支包含该标签之后的 schema、应用标识和行为调整；这些改动必须使用新的候选版本发布，不能继续复用 `rc.1` 的版本号或资产。
+
+作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现。正式版阻断项、风险分级和验收计划见[当前任务交接与人工验收](docs/planning/current-handoff.md)。当前功能包括：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -33,13 +35,11 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - [安全策略](SECURITY.md)
 - [变更日志](CHANGELOG.md)
 
-项目严格禁止代理执行 GUI 自动化和截图测试。引入 ONNX/C2PA 后也不执行全量 Rust 编译，具体规则以验证策略为准。
-
-验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。Windows CI 运行前端生产构建、Rust 格式检查和完整库测试；桌面 GUI、真实 C2PA 第三方回读与 TrustMark 实图检查仍由维护者人工完成。不要由自动化流程创建 Git 提交；每个阶段由维护者验收后自行提交。
+验证命令和重依赖边界以 [验证策略](docs/guides/validation.md) 为准。Windows CI 运行前端生产构建与测试、Rust 格式检查和完整库测试；桌面 GUI、真实 C2PA 第三方回读与 TrustMark 实图检查仍由维护者人工完成。
 
 ## 许可证
 
-本项目源码以 [GNU General Public License v3.0](LICENSE) 发布（copyleft：任何人分发本项目或其衍生作品时必须同样以 GPL 开源）。
+本仓库中由项目贡献者创作的代码以 [GNU General Public License v3.0 only](LICENSE) 发布。分发完整应用时，需要同时满足 GPL-3.0-only 和随包第三方材料各自适用的许可与告知义务。
 
-- **第三方组件**不并入 GPL，各自保留原始许可，见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）为 MIT License（Copyright Adobe），条款见 `src-tauri/resources/models/LICENSE`。
+- **第三方软件**保留各自版权和许可条款；当前人工维护的摘要及正式版仍需补齐的许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）沿用 Adobe 提供的 MIT License；原始许可文本见 [`src-tauri/resources/models/LICENSE`](src-tauri/resources/models/LICENSE)。

@@ -7,8 +7,17 @@ development line and the newest published `0.1.x` build, if one exists.
 
 ## Reporting a vulnerability
 
-Do not open a public issue for a suspected vulnerability. Use the repository's
-private GitHub security advisory channel and include:
+Prefer the repository's GitHub **Report a vulnerability** form when it is
+available. The direct form is:
+https://github.com/ACSProgram/Lilith-Artworks/security/advisories/new
+
+If that private form is unavailable, do not publish vulnerability details.
+Open a minimal public issue titled `[Security contact request]` containing only
+the affected version and a way for the maintainer to contact you. The
+maintainer will arrange a private channel before reproduction details or files
+are exchanged.
+
+In the private report, include:
 
 - the affected version or commit;
 - reproduction steps and required files;
@@ -19,8 +28,12 @@ private GitHub security advisory channel and include:
 Do not include real signing keys, private artwork, or a user's repository in the
 report. Use a minimal temporary repository and disposable credentials.
 
-The maintainers should acknowledge a complete report within seven days. Fix
+The maintainers aim to acknowledge a complete report within seven days. Fix
 timing depends on severity and whether coordinated disclosure is required.
+
+Before a formal release, maintainers must enable and test GitHub private
+vulnerability reporting or replace the fallback above with another verified
+private channel.
 
 ## Security-sensitive areas
 

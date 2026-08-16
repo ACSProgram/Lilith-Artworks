@@ -34,10 +34,14 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["resources/icon.ico"],
+    "licenseFile": "../LICENSE",
     "resources": {
+      "../LICENSE": "licenses/LICENSE",
+      "../THIRD_PARTY_NOTICES.md": "licenses/THIRD_PARTY_NOTICES.md",
       "resources/icon.ico": "resources/icon.ico",
       "resources/models/decoder_Q.onnx": "resources/models/decoder_Q.onnx",
       "resources/models/encoder_Q.onnx": "resources/models/encoder_Q.onnx",
+      "resources/models/LICENSE": "resources/models/LICENSE",
       "resources/models/README.md": "resources/models/README.md"
     },
     "shortDescription": "作品历史、分支与真实性管理工具",

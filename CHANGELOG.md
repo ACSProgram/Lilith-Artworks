@@ -3,6 +3,26 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
+## Unreleased
+
+### Changed
+
+- Changed the application identifier and C2PA label from
+  `art.lilith.artworks` to `com.lilith.artworks`; the next published build must
+  use a new release-candidate version rather than reuse `0.1.0-rc.1`.
+- Added persistent automatic-backup retry state and branch notices under
+  repository schema v9.
+- Added Tauri single-instance handling and native settings/log-folder actions.
+- Corrected the public preview status, security-reporting fallback, and
+  third-party licensing language. The bundle configuration now includes the
+  project license, third-party notices, and the unmodified Adobe TrustMark
+  model license.
+
+### Fixed
+
+- Publication preview source switching now resets the fitted view and avoids
+  unnecessary re-encoding for repository-owned JPEG, PNG, and WebP files.
+
 ## 0.1.0-rc.1 - 2026-08-15
 
 ### Added
@@ -43,8 +63,3 @@ before and after the first stable release.
   drag/navigation positioning without visible scrollbars.
 - History deletion and certification record queries now propagate malformed
   database rows instead of silently skipping or replacing them.
-
-## 0.1.0 - Unreleased
-
-Initial local-first Artwork library, branch history, backup, publication,
-C2PA/TrustMark, identification, and recovery implementation.
