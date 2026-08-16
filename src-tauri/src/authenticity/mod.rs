@@ -1,6 +1,7 @@
 mod c2pa;
 mod commands;
 mod error;
+mod image_resource;
 mod model;
 mod pipeline;
 mod publication_repository;

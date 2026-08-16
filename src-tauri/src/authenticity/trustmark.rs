@@ -28,9 +28,8 @@ pub(crate) fn resolve_identifier(requested: Option<&str>) -> AuthenticityResult<
 }
 
 pub(crate) fn flatten_to_rgb(image: &DynamicImage, background: Rgb<u8>) -> RgbImage {
-    let rgba = image.to_rgba8();
-    let mut output = RgbImage::new(rgba.width(), rgba.height());
-    for (x, y, pixel) in rgba.enumerate_pixels() {
+    let mut output = RgbImage::new(image.width(), image.height());
+    for (x, y, pixel) in image.pixels() {
         let alpha = pixel[3] as u16;
         let inverse = 255 - alpha;
         output.put_pixel(

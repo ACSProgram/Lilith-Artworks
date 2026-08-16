@@ -39,7 +39,7 @@ pub(crate) fn restore(
             .map_err(|error| format!("无法读取恢复 snapshot：{error}"))?;
         let mut delta_file = File::open(storage::resolve_path(root, delta_path)?)
             .map_err(|error| format!("无法打开恢复 delta：{error}"))?;
-        let delta = ChunkFileDelta::open(&mut delta_file)
+        let mut delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory)
             .map_err(|error| format!("无法读取恢复 delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建恢复临时文件：{error}"))?;
@@ -106,7 +106,7 @@ pub(crate) fn materialize_snapshot(
         let delta_path = child.delta_path.as_deref().ok_or("恢复链缺少反向 delta")?;
         let mut delta_file = File::open(storage::resolve_path(root, delta_path)?)
             .map_err(|error| format!("无法打开 delta：{error}"))?;
-        let delta = ChunkFileDelta::open(&mut delta_file)
+        let mut delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory)
             .map_err(|error| format!("无法读取 delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建临时 snapshot：{error}"))?;
@@ -200,7 +200,7 @@ pub(crate) fn ensure_checkpoint_with_progress(
             .ok_or("checkpoint 恢复链缺少 delta")?;
         let mut delta_file = File::open(storage::resolve_path(root, delta_relative)?)
             .map_err(|error| format!("无法打开 checkpoint delta：{error}"))?;
-        let delta = ChunkFileDelta::open(&mut delta_file)
+        let mut delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory)
             .map_err(|error| format!("无法读取 checkpoint delta：{error}"))?;
         let mut next = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建 checkpoint 临时文件：{error}"))?;

@@ -327,10 +327,6 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
     decodedImagesRef.current.set(dataUrl, promise);
     return promise;
   }, []);
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void decodeImage(preview.originalImage.dataUrl); }, 120);
-    return () => window.clearTimeout(timer);
-  }, [decodeImage, preview.originalImage.dataUrl]);
   const toggleOriginal = async () => {
     const next = !showOriginal;
     setImageSwitching(true);
@@ -468,10 +464,10 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
   return <div className="dialog-backdrop publication-preview-backdrop" onMouseDown={() => { if (!busy) onBack(); }}>
     <section className="publication-preview-dialog" role="dialog" aria-modal="true" aria-labelledby="publication-preview-title" onMouseDown={(event) => event.stopPropagation()}>
       <header>
-        <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.image.width} x {preview.image.height} · {formatBytes(preview.outputBytes)}</span></div>
+        <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.sourceWidth} x {preview.sourceHeight} · {formatBytes(preview.outputBytes)}</span></div>
         <div className="preview-zoom-controls">
           <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, fitZoomRef.current))}><ZoomOut size={16} /></button>
-          <button className="zoom-value" type="button" title="按原始像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
+          <button className="zoom-value" type="button" title="按预览像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
           <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), 1, fitZoomRef.current))}><ZoomIn size={16} /></button>
           <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
           <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} disabled={imageSwitching} onClick={() => void toggleOriginal()}><ImageIcon size={16} /></button>
@@ -510,7 +506,7 @@ export function PublicationPreviewDialog({ preview, busy, onBack, onPublish }: {
           <span style={{ left: `${navigationRect.left}%`, top: `${navigationRect.top}%`, width: `${navigationRect.width}%`, height: `${navigationRect.height}%` }} />
         </div>}
       </div>
-      <footer><span>{showOriginal ? "当前显示原始成品，用于快速对比。" : "预览使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
+      <footer><span>{showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className="primary-button" type="button" disabled={busy} onClick={onPublish}>{busy ? <LoaderCircle className="spin" size={16} /> : <ImageDown size={16} />}签名并发布</button></div></footer>
     </section>
   </div>;
 }

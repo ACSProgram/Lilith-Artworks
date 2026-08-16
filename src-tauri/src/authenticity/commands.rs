@@ -15,6 +15,7 @@ use crate::{app::AppState, cleanup, storage};
 
 use super::{
     error::{AuthenticityError, AuthenticityResult},
+    image_resource,
     model::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult, EstimateRequest,
         ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PublicationPreview,
@@ -231,18 +232,20 @@ pub(crate) async fn estimate_authenticity_output_size(
                 let source_bytes = fs::metadata(&path)
                     .map_err(|error| error.to_string())?
                     .len();
-                let source = image::open(path).map_err(|error| error.to_string())?;
+                let source =
+                    image_resource::open(Path::new(&path)).map_err(|error| error.to_string())?;
                 let flattened = super::trustmark::flatten_to_rgb(
                     &source,
                     super::trustmark::parse_background(&request.background_color)
                         .map_err(|error| error.to_string())?,
                 );
-                let mut output = Vec::new();
+                drop(source);
+                let mut output = CountingWriter::default();
                 JpegEncoder::new_with_quality(&mut output, request.jpeg_quality)
                     .encode_image(&flattened)
                     .map_err(|error| error.to_string())?;
                 Ok(FileSizeEstimate {
-                    jpeg_bytes: output.len() as u64,
+                    jpeg_bytes: output.bytes,
                     source_bytes,
                 })
             })
@@ -282,9 +285,10 @@ fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
     if !path.is_file() {
         return Err(AuthenticityError::InvalidInput("预览图片不存在".into()));
     }
-    let source = image::open(&path)?;
+    let source = image_resource::open(&path)?;
     let (width, height) = source.dimensions();
     let preview = source.thumbnail(1600, 1600);
+    drop(source);
     let mut encoded = Cursor::new(Vec::new());
     preview.write_to(&mut encoded, ImageFormat::Png)?;
     Ok(PreviewImage {
@@ -296,6 +300,22 @@ fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
         height,
         source_bytes: fs::metadata(path)?.len(),
     })
+}
+
+#[derive(Default)]
+struct CountingWriter {
+    bytes: u64,
+}
+
+impl Write for CountingWriter {
+    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
+        self.bytes = self.bytes.saturating_add(buffer.len() as u64);
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 pub(crate) fn store_final_artifact(

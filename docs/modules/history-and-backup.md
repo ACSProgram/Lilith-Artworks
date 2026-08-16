@@ -31,6 +31,8 @@
 
 `backup/chunk_file.rs` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。
 
+delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或旧版未压缩 payload 都流式写入仓库 `temp/` 中的自动删除文件；允许的解压字节数由 delta 头声明的目标逻辑大小、数据记录数和操作数推导，超出声明范围按格式错误拒绝。该边界随真实工作文件大小增长，不对 PSD 或其它工作文件设置固定总字节上限；4 GiB 目标的回归测试用于防止安全校验误伤正常大文件。恢复应用阶段只在内存中保存块索引和操作元数据，块内容从临时 payload 或基础 snapshot 流式复制并逐块验哈希。
+
 fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
 删除 fork 分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。SQLite 事务提交后仍逐项查询当前图是否引用该路径，只删除已经无引用的 snapshot/delta，避免共享祖先或其它分支仍使用的文件被误删。

@@ -35,6 +35,8 @@ const preview: PublicationPreview = {
     height: 800,
     sourceBytes: 8,
   },
+  sourceWidth: 4000,
+  sourceHeight: 3200,
   outputBytes: 7,
   watermarkId: null,
 };
@@ -58,14 +60,14 @@ describe("PublicationPreviewDialog", () => {
     render(<PublicationPreviewDialog preview={preview} busy={false} onBack={vi.fn()} onPublish={vi.fn()} />);
 
     fireEvent.click(screen.getByTitle("放大"));
-    expect(screen.getByTitle("按原始像素显示").textContent).toBe("110%");
+    expect(screen.getByTitle("按预览像素显示").textContent).toBe("110%");
 
     fireEvent.click(screen.getByTitle("显示原图"));
     await waitFor(() => expect((screen.getByTitle("显示压缩预览") as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.getByTitle("按原始像素显示").textContent).toBe("110%");
+    expect(screen.getByTitle("按预览像素显示").textContent).toBe("110%");
 
     fireEvent.click(screen.getByTitle("显示压缩预览"));
     await waitFor(() => expect((screen.getByTitle("显示原图") as HTMLButtonElement).disabled).toBe(false));
-    expect(screen.getByTitle("按原始像素显示").textContent).toBe("110%");
+    expect(screen.getByTitle("按预览像素显示").textContent).toBe("110%");
   });
 });

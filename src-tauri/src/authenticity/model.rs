@@ -81,6 +81,8 @@ pub(crate) struct PreviewImage {
 pub(crate) struct PublicationPreview {
     pub(crate) image: PreviewImage,
     pub(crate) original_image: PreviewImage,
+    pub(crate) source_width: u32,
+    pub(crate) source_height: u32,
     pub(crate) output_bytes: u64,
     pub(crate) watermark_id: Option<String>,
 }

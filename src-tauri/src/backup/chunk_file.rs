@@ -2,11 +2,14 @@ use std::{
     collections::{HashMap, HashSet},
     error::Error,
     fmt,
+    fs::File,
     io::{self, Cursor, Read, Seek, SeekFrom, Write},
     mem::size_of,
+    path::Path,
 };
 
 use sha2::{Digest, Sha256};
+use tempfile::{tempfile, tempfile_in};
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"LBCHUNK\0";
 const DELTA_MAGIC: [u8; 8] = *b"LBDELTA\0";
@@ -17,6 +20,7 @@ const FORMAT_FLAGS: u16 = 0;
 const MAX_ALLOWED_CHUNK_SIZE: usize = 16 * 1024 * 1024;
 const STREAM_BUFFER_SIZE: usize = 128 * 1024;
 const DIGEST_SIZE: usize = 32;
+const DELTA_HEADER_SIZE: usize = 8 + 8 + 12 + (DIGEST_SIZE * 2) + (size_of::<u64>() * 3);
 
 // Snapshot keeps chunk payloads immutable and addressable by offset. Delta is
 // intentionally reverse: it transforms the current snapshot into its parent.
@@ -454,7 +458,7 @@ struct DeltaOp {
     key: ChunkKey,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct ChunkFileDelta {
     target_config: ChunkingConfig,
     base_digest: ChunkDigest,
@@ -463,10 +467,9 @@ pub(crate) struct ChunkFileDelta {
     data_records: Vec<ChunkRecord>,
     data_index: HashMap<ChunkKey, usize>,
     ops: Vec<DeltaOp>,
-    // Delta records are parsed from the decompressed payload. Keeping that
-    // payload lets restore read both the new zstd-wrapped format and legacy
-    // uncompressed files through the same offset-based code path.
-    payload: Vec<u8>,
+    // The decompressed payload is disk-backed so multi-gigabyte history files
+    // do not require matching resident memory during restore.
+    payload: File,
 }
 
 impl ChunkFileDelta {
@@ -474,19 +477,43 @@ impl ChunkFileDelta {
     where
         R: Read + Seek,
     {
+        Self::open_with(delta, tempfile)
+    }
+
+    pub(crate) fn open_in<R>(delta: &mut R, directory: &Path) -> ChunkFileResult<Self>
+    where
+        R: Read + Seek,
+    {
+        Self::open_with(delta, || tempfile_in(directory))
+    }
+
+    fn open_with<R, F>(delta: &mut R, create_payload: F) -> ChunkFileResult<Self>
+    where
+        R: Read + Seek,
+        F: FnOnce() -> io::Result<File>,
+    {
         delta.seek(SeekFrom::Start(0))?;
-        let mut encoded = Vec::new();
-        delta.read_to_end(&mut encoded)?;
-        let payload = if encoded.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
-            zstd::stream::decode_all(encoded.as_slice()).map_err(|error| {
+        let mut prefix = [0_u8; 4];
+        delta.read_exact(&mut prefix)?;
+        delta.seek(SeekFrom::Start(0))?;
+        let compressed = prefix == [0x28, 0xb5, 0x2f, 0xfd];
+        let payload = create_payload()?;
+        let mut payload = if compressed {
+            let mut decoder = zstd::stream::read::Decoder::new(&mut *delta).map_err(|error| {
                 ChunkFileError::InvalidFormat(format!("无法解压 delta：{error}"))
+            })?;
+            spool_delta_payload(&mut decoder, payload).map_err(|error| match error {
+                ChunkFileError::Io(error) => {
+                    ChunkFileError::InvalidFormat(format!("无法解压 delta：{error}"))
+                }
+                other => other,
             })?
         } else {
-            encoded
+            spool_delta_payload(delta, payload)?
         };
-        let file_length = payload.len() as u64;
-        let mut input = Cursor::new(payload.as_slice());
-        let header = read_delta_header(&mut input)?;
+        let file_length = payload.seek(SeekFrom::End(0))?;
+        payload.seek(SeekFrom::Start(0))?;
+        let header = read_delta_header(&mut payload)?;
         let data_count = u64_to_usize(header.data_count, "delta 数据块数量")?;
         let op_count = u64_to_usize(header.target_chunk_count, "delta 操作数量")?;
         if header.data_count > header.target_chunk_count {
@@ -496,7 +523,7 @@ impl ChunkFileDelta {
         }
 
         let minimum_data_record = (DIGEST_SIZE + size_of::<u32>()) as u64;
-        let remaining = file_length.saturating_sub(input.position());
+        let remaining = file_length.saturating_sub(payload.stream_position()?);
         if header.data_count > remaining / minimum_data_record {
             return Err(ChunkFileError::InvalidFormat(
                 "delta 数据块数量超过文件能够容纳的范围".into(),
@@ -506,7 +533,7 @@ impl ChunkFileDelta {
         let mut data_records = Vec::with_capacity(data_count);
         let mut seen_data = HashSet::with_capacity(data_count);
         for index in 0..data_count {
-            let key = read_chunk_key(&mut input)?;
+            let key = read_chunk_key(&mut payload)?;
             validate_record_length(key.length, header.target_config, true)?;
             if !seen_data.insert(key) {
                 return Err(ChunkFileError::InvalidFormat(format!(
@@ -514,7 +541,7 @@ impl ChunkFileDelta {
                     key.digest
                 )));
             }
-            let data_offset = input.position();
+            let data_offset = payload.stream_position()?;
             let data_end = data_offset
                 .checked_add(u64::from(key.length))
                 .ok_or_else(|| ChunkFileError::InvalidFormat("delta 块偏移溢出".into()))?;
@@ -524,7 +551,7 @@ impl ChunkFileDelta {
                     index + 1
                 )));
             }
-            input.set_position(data_end);
+            payload.seek(SeekFrom::Start(data_end))?;
             data_records.push(ChunkRecord { key, data_offset });
         }
 
@@ -533,8 +560,8 @@ impl ChunkFileDelta {
             .target_chunk_count
             .checked_mul(bytes_per_op)
             .ok_or_else(|| ChunkFileError::InvalidFormat("delta 操作区大小溢出".into()))?;
-        if input
-            .position()
+        if payload
+            .stream_position()?
             .checked_add(op_bytes)
             .filter(|end| *end == file_length)
             .is_none()
@@ -548,8 +575,8 @@ impl ChunkFileDelta {
         let mut ops = Vec::with_capacity(op_count);
         let mut logical_size = 0_u64;
         for _ in 0..op_count {
-            let kind = DeltaOpKind::from_byte(read_u8(&mut input)?)?;
-            let key = read_chunk_key(&mut input)?;
+            let kind = DeltaOpKind::from_byte(read_u8(&mut payload)?)?;
+            let key = read_chunk_key(&mut payload)?;
             validate_record_length(key.length, header.target_config, true)?;
             if kind == DeltaOpKind::Data && !data_keys.contains(&key) {
                 return Err(ChunkFileError::InvalidFormat(format!(
@@ -581,7 +608,7 @@ impl ChunkFileDelta {
     }
 
     pub(crate) fn apply<RB, W>(
-        &self,
+        &mut self,
         base: &ChunkFile,
         base_snapshot: &mut RB,
         target_snapshot: &mut W,
@@ -609,7 +636,7 @@ impl ChunkFileDelta {
         let mut logical_size = 0_u64;
         let mut chunks = Vec::with_capacity(self.ops.len());
 
-        let mut delta_payload = Cursor::new(self.payload.as_slice());
+        self.payload.seek(SeekFrom::Start(0))?;
         for op in &self.ops {
             let record = match op.kind {
                 DeltaOpKind::Copy => {
@@ -644,7 +671,7 @@ impl ChunkFileDelta {
                     write_chunk_key(target_snapshot, record.key)?;
                     let data_offset = target_snapshot.stream_position()?;
                     copy_verified_payload(
-                        &mut delta_payload,
+                        &mut self.payload,
                         &record,
                         target_snapshot,
                         &mut file_hasher,
@@ -691,7 +718,7 @@ impl ChunkFileDelta {
         target_size: u64,
         data_records: Vec<ChunkRecord>,
         ops: Vec<DeltaOp>,
-        payload: Vec<u8>,
+        payload: File,
     ) -> Self {
         let mut data_index = HashMap::with_capacity(data_records.len());
         for (index, record) in data_records.iter().enumerate() {
@@ -904,6 +931,46 @@ fn read_delta_header<R: Read>(input: &mut R) -> ChunkFileResult<DeltaHeader> {
     })
 }
 
+fn spool_delta_payload<R: Read>(input: &mut R, mut payload: File) -> ChunkFileResult<File> {
+    let header_bytes = read_array::<DELTA_HEADER_SIZE, _>(input)?;
+    let mut header_input = Cursor::new(header_bytes);
+    let header = read_delta_header(&mut header_input)?;
+    let declared_limit = delta_payload_limit(header)?;
+    let remaining_limit = declared_limit
+        .checked_sub(DELTA_HEADER_SIZE as u64)
+        .ok_or_else(|| ChunkFileError::InvalidFormat("delta 声明大小小于头部".into()))?;
+
+    payload.write_all(&header_bytes)?;
+    let copied = io::copy(
+        &mut input.take(remaining_limit.saturating_add(1)),
+        &mut payload,
+    )?;
+    if copied > remaining_limit {
+        return Err(ChunkFileError::InvalidFormat(format!(
+            "delta 解压内容超过格式声明的最大范围 {declared_limit} 字节"
+        )));
+    }
+    payload.flush()?;
+    payload.seek(SeekFrom::Start(0))?;
+    Ok(payload)
+}
+
+fn delta_payload_limit(header: DeltaHeader) -> ChunkFileResult<u64> {
+    let data_record_bytes = header
+        .data_count
+        .checked_mul((DIGEST_SIZE + size_of::<u32>()) as u64)
+        .ok_or_else(|| ChunkFileError::InvalidFormat("delta 数据记录区大小溢出".into()))?;
+    let operation_bytes = header
+        .target_chunk_count
+        .checked_mul((size_of::<u8>() + DIGEST_SIZE + size_of::<u32>()) as u64)
+        .ok_or_else(|| ChunkFileError::InvalidFormat("delta 操作区大小溢出".into()))?;
+    (DELTA_HEADER_SIZE as u64)
+        .checked_add(header.target_size)
+        .and_then(|value| value.checked_add(data_record_bytes))
+        .and_then(|value| value.checked_add(operation_bytes))
+        .ok_or_else(|| ChunkFileError::InvalidFormat("delta 声明的解压大小溢出".into()))
+}
+
 fn read_common_header<R: Read>(input: &mut R) -> ChunkFileResult<()> {
     let version = read_u16(input)?;
     if version != FORMAT_VERSION {
@@ -1076,4 +1143,80 @@ fn read_u32<R: Read>(input: &mut R) -> ChunkFileResult<u32> {
 
 fn read_u64<R: Read>(input: &mut R) -> ChunkFileResult<u64> {
     Ok(u64::from_le_bytes(read_array::<8, _>(input)?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compressed_delta_round_trip_uses_disk_backed_payload() {
+        let config = ChunkingConfig::default();
+        let current_bytes = b"current artwork bytes with a changed middle";
+        let parent_bytes = b"parent artwork bytes with an older middle";
+        let mut current_snapshot = Cursor::new(Vec::new());
+        let current = ChunkFile::create(
+            &mut Cursor::new(current_bytes),
+            &mut current_snapshot,
+            config,
+        )
+        .unwrap();
+        let mut parent_snapshot = Cursor::new(Vec::new());
+        let parent =
+            ChunkFile::create(&mut Cursor::new(parent_bytes), &mut parent_snapshot, config)
+                .unwrap();
+        let mut encoded_delta = Cursor::new(Vec::new());
+        current
+            .create_reverse_delta(&parent, &mut parent_snapshot, &mut encoded_delta)
+            .unwrap();
+
+        let mut delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
+        let mut restored_snapshot = Cursor::new(Vec::new());
+        let restored = delta
+            .apply(&current, &mut current_snapshot, &mut restored_snapshot)
+            .unwrap();
+        let mut restored_bytes = Vec::new();
+        restored
+            .copy_original(&mut restored_snapshot, &mut restored_bytes)
+            .unwrap();
+
+        assert_eq!(restored_bytes, parent_bytes);
+    }
+
+    #[test]
+    fn compressed_delta_rejects_data_beyond_declared_payload() {
+        let mut payload = Vec::new();
+        write_delta_header(
+            &mut payload,
+            ChunkingConfig::default(),
+            ChunkDigest::from([0; DIGEST_SIZE]),
+            ChunkDigest::from([0; DIGEST_SIZE]),
+            0,
+            0,
+            0,
+        )
+        .unwrap();
+        payload.extend_from_slice(&[0_u8; 4096]);
+        let encoded = zstd::stream::encode_all(payload.as_slice(), 1).unwrap();
+
+        let error = ChunkFileDelta::open(&mut Cursor::new(encoded)).unwrap_err();
+
+        assert!(matches!(error, ChunkFileError::InvalidFormat(_)));
+        assert!(error.to_string().contains("超过格式声明"));
+    }
+
+    #[test]
+    fn declared_limit_allows_multi_gigabyte_targets() {
+        let target_size = 4 * 1024 * 1024 * 1024_u64;
+        let header = DeltaHeader {
+            target_config: ChunkingConfig::default(),
+            base_digest: ChunkDigest::from([0; DIGEST_SIZE]),
+            target_digest: ChunkDigest::from([0; DIGEST_SIZE]),
+            target_size,
+            target_chunk_count: 262_144,
+            data_count: 262_144,
+        };
+
+        assert!(delta_payload_limit(header).unwrap() > target_size);
+    }
 }

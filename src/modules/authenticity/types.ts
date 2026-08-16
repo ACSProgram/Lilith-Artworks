@@ -102,6 +102,8 @@ export interface PublicationPreviewRequest {
 export interface PublicationPreview {
   image: PreviewImage;
   originalImage: PreviewImage;
+  sourceWidth: number;
+  sourceHeight: number;
   outputBytes: number;
   watermarkId: string | null;
 }

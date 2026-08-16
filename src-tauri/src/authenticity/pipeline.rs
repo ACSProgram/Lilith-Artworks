@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File},
-    io::{self, Cursor, Read},
+    io::{self, Cursor, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -16,6 +16,7 @@ use crate::{cleanup, storage};
 use super::{
     c2pa,
     error::{AuthenticityError, AuthenticityResult},
+    image_resource,
     model::{
         CertificationRecord, DecodeRequest, DecodeResult, PreviewImage, PublicationPreview,
         PublicationPreviewRequest, PublishBranchRequest,
@@ -33,6 +34,8 @@ pub(crate) struct PublishedOutput {
     pub(crate) watermark_region_count: u32,
 }
 
+const PUBLICATION_PREVIEW_EDGE: u32 = 2400;
+
 pub(crate) fn preview(
     root: &Path,
     state: &AuthenticityState,
@@ -45,10 +48,13 @@ pub(crate) fn preview(
     let target = publication_repository::publication_target(root, &request.branch_id)
         .map_err(AuthenticityError::Task)?;
     let input = canonical_existing_file(&target.artifact_path, "最终成品")?;
-    let source = image::open(&input)?;
+    let source = image_resource::open(&input)?;
     let (width, height) = source.dimensions();
+    let source_bytes = fs::metadata(&input)?.len();
+    let original_image = png_thumbnail_preview(&source, source_bytes)?;
     let background = trustmark::parse_background(&request.config.background_color)?;
     let flattened = trustmark::flatten_to_rgb(&source, background);
+    drop(source);
     let identifier = request
         .config
         .trustmark_enabled
@@ -65,39 +71,56 @@ pub(crate) fn preview(
     } else {
         flattened
     };
-    let mut encoded = Vec::new();
-    JpegEncoder::new_with_quality(&mut encoded, request.config.jpeg_quality)
+    let mut encoded = NamedTempFile::new_in(root.join("temp"))?;
+    JpegEncoder::new_with_quality(encoded.as_file_mut(), request.config.jpeg_quality)
         .encode_image(&rendition)?;
-    let output_bytes = encoded.len() as u64;
-    let (original_media_type, original_bytes) = match target.media_type.as_str() {
-        "image/jpeg" | "image/png" | "image/webp" => {
-            (target.media_type.as_str(), fs::read(&input)?)
-        }
-        _ => {
-            let mut encoded = Cursor::new(Vec::new());
-            source.write_to(&mut encoded, image::ImageFormat::Png)?;
-            ("image/png", encoded.into_inner())
-        }
-    };
+    encoded.as_file_mut().flush()?;
+    let output_bytes = encoded.as_file().metadata()?.len();
+    drop(rendition);
+    let compressed = image_resource::open(encoded.path())?;
+    let image = jpeg_thumbnail_preview(&compressed, output_bytes)?;
     Ok(PublicationPreview {
-        image: PreviewImage {
-            data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(encoded)),
-            width,
-            height,
-            source_bytes: fs::metadata(&input)?.len(),
-        },
-        original_image: PreviewImage {
-            data_url: format!(
-                "data:{};base64,{}",
-                original_media_type,
-                STANDARD.encode(original_bytes)
-            ),
-            width,
-            height,
-            source_bytes: fs::metadata(&input)?.len(),
-        },
+        image,
+        original_image,
+        source_width: width,
+        source_height: height,
         output_bytes,
         watermark_id: identifier,
+    })
+}
+
+fn png_thumbnail_preview(
+    source: &image::DynamicImage,
+    source_bytes: u64,
+) -> AuthenticityResult<PreviewImage> {
+    let preview = source.thumbnail(PUBLICATION_PREVIEW_EDGE, PUBLICATION_PREVIEW_EDGE);
+    let (width, height) = preview.dimensions();
+    let mut encoded = Cursor::new(Vec::new());
+    preview.write_to(&mut encoded, image::ImageFormat::Png)?;
+    Ok(PreviewImage {
+        data_url: format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(encoded.into_inner())
+        ),
+        width,
+        height,
+        source_bytes,
+    })
+}
+
+fn jpeg_thumbnail_preview(
+    source: &image::DynamicImage,
+    source_bytes: u64,
+) -> AuthenticityResult<PreviewImage> {
+    let preview = source.thumbnail(PUBLICATION_PREVIEW_EDGE, PUBLICATION_PREVIEW_EDGE);
+    let (width, height) = preview.dimensions();
+    let mut encoded = Vec::new();
+    JpegEncoder::new_with_quality(&mut encoded, 92).encode_image(&preview)?;
+    Ok(PreviewImage {
+        data_url: format!("data:image/jpeg;base64,{}", STANDARD.encode(encoded)),
+        width,
+        height,
+        source_bytes,
     })
 }
 
@@ -148,10 +171,11 @@ pub(crate) fn publish(
     let temp_dir = tempdir_in(parent)?;
     let unsigned_path = temp_dir.path().join("rendition.jpg");
     let signed_path = temp_dir.path().join("signed.jpg");
-    let source = image::open(&input)?;
+    let source = image_resource::open(&input)?;
     let (width, height) = source.dimensions();
     let background = trustmark::parse_background(&request.config.background_color)?;
     let flattened = trustmark::flatten_to_rgb(&source, background);
+    drop(source);
     let identifier = trustmark::resolve_identifier(request.watermark_id.as_deref())?;
     let rendition = if request.config.trustmark_enabled {
         trustmark::encode_regions(
@@ -339,13 +363,14 @@ pub(crate) fn decode(
     let input = canonical_existing_file(&request.input_path, "待识别图片")?;
     storage::ensure_outside_repository(root, &input, "待识别图片")
         .map_err(AuthenticityError::InvalidInput)?;
-    let image = image::open(&input)?;
+    let image = image_resource::open(&input)?;
     let decoded_region = request.region;
     let watermark_id = if state.model_files_ready() {
         trustmark::decode_region(state, &image, decoded_region)?
     } else {
         None
     };
+    drop(image);
     let manifest = c2pa::read_manifest(&input)?;
     let identifiers_match = match (&watermark_id, &manifest.watermark_id) {
         (Some(decoded), Some(declared)) => Some(decoded == declared),
@@ -536,5 +561,20 @@ mod tests {
         assert_eq!(matches[0].evidence_sources, vec!["c2pa", "trustmark"]);
         assert_eq!(matches[1].record.id, "other");
         assert_eq!(matches[1].evidence_sources, vec!["trustmark"]);
+    }
+
+    #[test]
+    fn publication_preview_helpers_bound_ipc_image_dimensions() {
+        let source = image::DynamicImage::new_rgb8(3000, 100);
+
+        let png = png_thumbnail_preview(&source, 123).unwrap();
+        let jpeg = jpeg_thumbnail_preview(&source, 456).unwrap();
+
+        assert_eq!((png.width, png.height), (2400, 80));
+        assert_eq!((jpeg.width, jpeg.height), (2400, 80));
+        assert_eq!(png.source_bytes, 123);
+        assert_eq!(jpeg.source_bytes, 456);
+        assert!(png.data_url.starts_with("data:image/png;base64,"));
+        assert!(jpeg.data_url.starts_with("data:image/jpeg;base64,"));
     }
 }
