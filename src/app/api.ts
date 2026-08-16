@@ -1,6 +1,12 @@
 import { invokeCommand } from "../shared/tauri";
 import type { CleanupReport } from "../shared/fileCleanup";
-import type { AppSettings, RepositoryScrubReport, RepositoryStatus, SettingsSnapshot } from "./types";
+import type {
+  AppSettings,
+  RepositoryBackupReport,
+  RepositoryScrubReport,
+  RepositoryStatus,
+  SettingsSnapshot,
+} from "./types";
 
 export const appApi = {
   getSettings: () => invokeCommand<SettingsSnapshot>("get_app_settings"),
@@ -15,4 +21,6 @@ export const appApi = {
     invokeCommand<void>("acknowledge_backup_disable_notices", { artworkIds }),
   scrubRepositoryIntegrity: () =>
     invokeCommand<RepositoryScrubReport>("scrub_repository_integrity"),
+  createRepositoryBackup: (destinationParent: string) =>
+    invokeCommand<RepositoryBackupReport>("create_repository_backup", { destinationParent }),
 };

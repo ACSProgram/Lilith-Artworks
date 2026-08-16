@@ -1,5 +1,6 @@
 pub(crate) mod chunk_file;
 mod commands;
+mod repository_backup;
 mod restore;
 mod runtime;
 mod scheduler;
@@ -8,6 +9,7 @@ mod worker;
 use serde::{Deserialize, Serialize};
 
 pub(crate) use commands::*;
+pub(crate) use repository_backup::{create_repository_backup, RepositoryBackupReport};
 pub(crate) use restore::{ensure_checkpoint, scrub_history};
 pub(crate) use runtime::BackupState;
 

@@ -46,3 +46,10 @@ export interface RepositoryScrubReport {
   finalArtifacts: number;
   certificationRecords: number;
 }
+
+export interface RepositoryBackupReport extends RepositoryScrubReport {
+  backupPath: string;
+  repositoryPath: string;
+  fileCount: number;
+  totalBytes: number;
+}

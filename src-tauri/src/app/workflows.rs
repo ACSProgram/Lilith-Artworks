@@ -69,6 +69,36 @@ pub(crate) async fn scrub_repository_integrity(
 }
 
 #[tauri::command]
+pub(crate) async fn create_repository_backup(
+    destination_parent: String,
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+    window: tauri::WebviewWindow,
+) -> Result<backup::RepositoryBackupReport, String> {
+    let destination_parent = std::path::PathBuf::from(destination_parent.trim());
+    authenticity::ensure_dialog_authorized(&window, &destination_parent, "灾备保存目录")
+        .map_err(|error| error.to_string())?;
+    let app_state = app_state.inner().clone();
+    let state = backup_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.run_exclusive(None, || {
+            app_state.with_ready_repository(|root| {
+                backup::create_repository_backup(
+                    root,
+                    &destination_parent,
+                    || state.cancelled(),
+                    |label, current, total| {
+                        state.report_progress("repository-backup", label, current, total)
+                    },
+                )
+            })
+        })
+    })
+    .await
+    .map_err(|error| format!("仓库灾备任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 pub(crate) fn acknowledge_backup_disable_notices(
     artwork_ids: Vec<String>,
     app_state: State<'_, AppState>,

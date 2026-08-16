@@ -41,7 +41,9 @@ fork 后同一父节点允许多个子节点，因此 schema v3 使用 `history_
 
 恢复从目标节点向下寻找最近可用 snapshot，再沿父链应用反向 delta，最后以临时文件导出且禁止覆盖。恢复、精简物化和检查点会先完整读取链起点 snapshot，逐块校验，并在每次应用 delta 后把生成 snapshot 的原始内容摘要与对应 `history_nodes.sha256` 对照；已有检查点也必须通过同一校验才能提前返回。fork 一个不再拥有 snapshot 的旧节点时，先物化并发布 checkpoint，保证新分支后续提交有稳定基线；建立 checkpoint 与创建分支属于同一个共享运行锁操作。
 
-设置页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。当前仍没有在线整仓复制命令；在该能力和恢复演练完成前，灾备政策是完全退出应用后复制整个仓库目录（数据库与 `artworks/` 必须属于同一份副本），恢复也只能在应用退出时整体替换，并在删除旧副本前运行完整性扫描。
+设置页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。
+
+设置页也提供在线整仓灾备。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。副本会独立执行仓库语义校验、历史链 scrub 和受控发布文件 scrub，随后生成逐文件 SHA-256 `manifest.json`，复核清单后才以目录重命名发布；取消或失败会清理未发布的临时 bundle。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓副本；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。
 
 ## 调度
 
@@ -81,6 +83,7 @@ compact_history_node
 delete_history_subtree
 delete_artwork_branch
 scrub_repository_integrity
+create_repository_backup
 ```
 
 应用工作流通过公开 `backup::ensure_checkpoint` 固化 fork 或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。完整编译与 GUI 测试状态见当前交接文档。

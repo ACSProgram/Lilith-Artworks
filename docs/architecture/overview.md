@@ -18,7 +18,7 @@ src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
 src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务
 src-tauri/src/history/                 分支、历史节点、fork、裁剪和历史图契约
-src-tauri/src/backup/                  ChunkFile、增量提交、恢复、调度和取消
+src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备、调度和取消
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
 src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列、路径校验和失败重试
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
@@ -26,7 +26,7 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`，页面组件只保留视图选择、弹窗和渲染状态。控制器统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
-Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup` 和 `authenticity`；需要组合 checkpoint、调度唤醒、清理队列或共享 `BackupState` 运行锁的 create Artwork、永久清理、fork、分支更新/删除、进入/取消发布和认证发布由 `app/workflows.rs` 编排。前端命令名和 DTO 不因内部所有权变化而改变。
+Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup` 和 `authenticity`；需要组合 checkpoint、调度唤醒、清理队列、仓库 lease 或共享 `BackupState` 运行锁的 create Artwork、永久清理、fork、分支更新/删除、整仓灾备、进入/取消发布和认证发布由 `app/workflows.rs` 编排。前端命令名和 DTO 不因内部所有权变化而改变。
 
 ## 应用生命周期
 
@@ -66,7 +66,9 @@ Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`
 
 普通数据库连接只使用 SQLite `READ_WRITE` 打开现有 `lilith-artworks.sqlite3`，不得带 `CREATE`。仓库目录和新 schema 创建只从 Library 显式初始化入口进入。`AppState` 缓存当前路径已通过完整校验的事实：首次访问、启动状态读取和设置保存执行 SQLite 完整性、外键、实体 UUID、受控相对路径、持久化 SHA-256 与迁移检查，之后所有前台命令和后台调度统一执行轻量 format/version 检查。数据库被外部删除、清空或替换为其他格式/不受支持版本时会清除缓存并报告仓库不可用，不创建占位数据库。
 
-提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁和仓库 lease 后调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本及 C2PA 声明；同一取消命令可以中断节点之间的扫描。
+提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁和仓库 lease 后调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本及 C2PA 声明；同一取消命令可以中断节点之间的扫描。
+
+整仓灾备核心归 `backup/repository_backup.rs` 所有，但由 `app/workflows.rs` 同时取得共享运行锁和仓库 lease 后调用。它先 checkpoint WAL，再复制仓库内普通文件；副本通过 Library 公开打开校验、History/Backup scrub 和 Authenticity 受控文件 scrub 后生成逐文件 SHA-256 清单，最后以同卷目录重命名发布。前端只能提交文件选择器授权的目标父目录；临时 bundle 在失败或取消时清理，成功 bundle 内的 `repository/` 可作为新仓库打开。该流程不复制仓库外的分支工作文件。
 
 ## 增量历史策略
 

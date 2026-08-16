@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SettingsSnapshot } from "./types";
 import type { LibraryTree } from "../modules/library/types";
 
@@ -10,6 +10,7 @@ const appApi = vi.hoisted(() => ({
   retryFileCleanup: vi.fn(),
   acknowledgeBackupDisableNotices: vi.fn(),
   scrubRepositoryIntegrity: vi.fn(),
+  createRepositoryBackup: vi.fn(),
   openSettingsDirectory: vi.fn(),
   openLogDirectory: vi.fn(),
 }));
@@ -30,7 +31,9 @@ const libraryApi = vi.hoisted(() => ({
 
 vi.mock("./api", () => ({ appApi }));
 vi.mock("../modules/library/api", () => ({ libraryApi }));
-vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+const dialog = vi.hoisted(() => ({ open: vi.fn() }));
+
+vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 vi.mock("./WindowTitleBar", () => ({
   WindowTitleBar: ({ onOpenSettings }: { onOpenSettings: () => void }) => (
     <button type="button" onClick={onOpenSettings}>打开设置</button>
@@ -109,11 +112,22 @@ const tree = (title: string, sourcePath: string): LibraryTree => ({
 });
 
 describe("App repository switching", () => {
+  afterEach(cleanup);
+
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
     appApi.retryFileCleanup.mockResolvedValue({ failures: [] });
     appApi.acknowledgeBackupDisableNotices.mockResolvedValue(undefined);
+    appApi.createRepositoryBackup.mockResolvedValue({
+      backupPath: "C:\\backups\\Lilith-Artworks-backup-1",
+      repositoryPath: "C:\\backups\\Lilith-Artworks-backup-1\\repository",
+      fileCount: 4,
+      totalBytes: 1024,
+      historyNodes: 2,
+      finalArtifacts: 0,
+      certificationRecords: 0,
+    });
   });
 
   it("isolates a cloned repository that reuses artwork and branch IDs", async () => {
@@ -189,5 +203,29 @@ describe("App repository switching", () => {
     fireEvent.click(artworkB);
     expect(screen.getByTestId("selected-branch").textContent).toBe("none");
     expect((screen.getByPlaceholderText("搜索标题或工作文件") as HTMLInputElement).value).toBe("");
+  });
+
+  it("creates a verified repository backup in the selected parent directory", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    dialog.open.mockResolvedValue("C:\\backups");
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建副本" }));
+
+    await waitFor(() => {
+      expect(appApi.createRepositoryBackup).toHaveBeenCalledWith("C:\\backups");
+    });
+    expect(await screen.findByText(/灾备副本已校验：4 个文件、2 个历史节点/)).toBeTruthy();
   });
 });

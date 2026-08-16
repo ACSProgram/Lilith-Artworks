@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
   Clock3,
+  DatabaseBackup,
   FolderOpen,
   LoaderCircle,
   MonitorCog,
@@ -137,6 +138,27 @@ export function App() {
     }
   };
 
+  const backupRepository = async () => {
+    const selected = await open({
+      directory: true,
+      multiple: false,
+      title: "选择仓库灾备保存位置",
+    });
+    if (typeof selected !== "string") return;
+    setBusy(true);
+    setMessage(null);
+    try {
+      const report = await appApi.createRepositoryBackup(selected);
+      setMessage(
+        `灾备副本已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点。恢复时选择 ${report.repositoryPath}`,
+      );
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <main className="app-shell">
       <WindowTitleBar
@@ -209,6 +231,13 @@ export function App() {
                 <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
                 <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={busy || !repository.ready}>
                   <ShieldCheck aria-hidden="true" size={15} />开始检查
+                </button>
+              </div>
+              <div className="settings-preference-row">
+                <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
+                <span className="settings-row-copy"><strong>整仓灾备</strong><small>复制数据库与全部仓库文件，并在发布前校验副本</small></span>
+                <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={busy || !repository.ready}>
+                  <DatabaseBackup aria-hidden="true" size={15} />创建副本
                 </button>
               </div>
             </div>
