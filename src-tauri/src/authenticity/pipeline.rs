@@ -204,30 +204,7 @@ pub(crate) fn publish(
         &signed_path,
     )?;
     let manifest = c2pa::read_manifest(&signed_path)?;
-    if !manifest.present {
-        return Err(AuthenticityError::Task(
-            "签名完成后未能回读 C2PA 清单".into(),
-        ));
-    }
-    if !manifest.validation_accepted {
-        return Err(AuthenticityError::Task(
-            "签名后的 C2PA 清单未通过完整性验证".into(),
-        ));
-    }
-    if manifest.record_id.as_deref() != Some(record_id.as_str())
-        || manifest.title.as_deref() != Some(request.config.title.trim())
-        || manifest.creator.as_deref() != Some(request.config.creator.trim())
-        || manifest.rights_statement.as_deref() != Some(request.config.rights_statement.trim())
-        || manifest.authentication_content.as_deref()
-            != Some(request.config.authentication_content.trim())
-        || (request.config.trustmark_enabled
-            && manifest.watermark_id.as_deref() != Some(identifier.as_str()))
-        || (!request.config.trustmark_enabled && manifest.watermark_id.is_some())
-    {
-        return Err(AuthenticityError::Task(
-            "签名后的 C2PA 声明与本次发布参数不匹配".into(),
-        ));
-    }
+    validate_signed_manifest(&manifest, &request.config, &record_id, &identifier)?;
     let output_path = storage::display_path(&output);
     let output_sha256 = sha256_file(&signed_path)?;
     let output_bytes = fs::metadata(&signed_path)?.len();
@@ -314,6 +291,37 @@ pub(crate) fn publish(
             0
         },
     })
+}
+
+fn validate_signed_manifest(
+    manifest: &super::model::ManifestSummary,
+    config: &super::model::CertificationConfig,
+    record_id: &str,
+    identifier: &str,
+) -> AuthenticityResult<()> {
+    if !manifest.present {
+        return Err(AuthenticityError::Task(
+            "签名完成后未能回读 C2PA 清单".into(),
+        ));
+    }
+    if !manifest.validation_accepted {
+        return Err(AuthenticityError::Task(
+            "签名后的 C2PA 清单未通过完整性验证".into(),
+        ));
+    }
+    if manifest.record_id.as_deref() != Some(record_id)
+        || manifest.title.as_deref() != Some(config.title.trim())
+        || manifest.creator.as_deref() != Some(config.creator.trim())
+        || manifest.rights_statement.as_deref() != Some(config.rights_statement.trim())
+        || manifest.authentication_content.as_deref() != Some(config.authentication_content.trim())
+        || (config.trustmark_enabled && manifest.watermark_id.as_deref() != Some(identifier))
+        || (!config.trustmark_enabled && manifest.watermark_id.is_some())
+    {
+        return Err(AuthenticityError::Task(
+            "签名后的 C2PA 声明与本次发布参数不匹配".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn store_certification_copy(destination: &Path, source: &Path) -> AuthenticityResult<()> {
@@ -518,6 +526,168 @@ pub(crate) fn sha256_file(path: &Path) -> AuthenticityResult<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const FIXTURE_RECORD_ID: &str = "fixture-record-0001";
+    const FIXTURE_WATERMARK_ID: &str = "1010101010101010101010101010101010101010";
+
+    fn fixture_directory() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("fixtures")
+            .join("authenticity")
+    }
+
+    fn fixture_state() -> AuthenticityState {
+        AuthenticityState::new(
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("models"),
+        )
+    }
+
+    fn fixture_config() -> super::super::model::CertificationConfig {
+        let directory = fixture_directory();
+        super::super::model::CertificationConfig {
+            branch_id: "fixture-branch".into(),
+            title: "Lilith C2PA fixture".into(),
+            creator: "Lilith Artworks tests".into(),
+            rights_statement: "Regression fixture only".into(),
+            authentication_content: "A tiny deterministic TrustMark/C2PA sample".into(),
+            trustmark_enabled: true,
+            certificate_path: directory
+                .join("es256-test.pub")
+                .to_string_lossy()
+                .into_owned(),
+            signing_algorithm: "es256".into(),
+            timestamp_url: None,
+            jpeg_quality: 90,
+            background_color: "#FFFFFF".into(),
+            watermark_strength: 1.0,
+            additional_regions: vec![super::super::model::NormalizedRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            }],
+            updated_ms: 0,
+        }
+    }
+
+    #[test]
+    #[ignore = "regenerates checked-in C2PA fixtures"]
+    fn regenerate_c2pa_fixtures() {
+        let directory = fixture_directory();
+        let source_path = directory.join("source.jpg");
+        let source = image::open(&source_path).unwrap();
+        let flattened = super::super::trustmark::flatten_to_rgb(&source, image::Rgb([255; 3]));
+        let state = fixture_state();
+        let config = fixture_config();
+        let rendition = super::super::trustmark::encode_regions(
+            &state,
+            flattened,
+            FIXTURE_WATERMARK_ID,
+            config.watermark_strength,
+            &config.additional_regions,
+        )
+        .unwrap();
+        let unsigned = directory.join("unsigned.jpg");
+        let mut unsigned_file = File::create(&unsigned).unwrap();
+        JpegEncoder::new_with_quality(&mut unsigned_file, config.jpeg_quality)
+            .encode_image(&rendition)
+            .unwrap();
+        drop(unsigned_file);
+
+        let signed = directory.join("valid-trustmark.jpg");
+        super::super::c2pa::sign_jpeg(
+            &config,
+            include_bytes!("../../tests/fixtures/authenticity/es256-test.priv"),
+            FIXTURE_RECORD_ID,
+            FIXTURE_WATERMARK_ID,
+            &source_path,
+            &unsigned,
+            &signed,
+        )
+        .unwrap();
+        fs::remove_file(unsigned).unwrap();
+
+        let mut tampered = fs::read(&signed).unwrap();
+        let offset = tampered.len() - 10;
+        tampered[offset] ^= 1;
+        fs::write(directory.join("tampered-trustmark.jpg"), tampered).unwrap();
+    }
+
+    #[test]
+    fn real_c2pa_fixture_matches_record_trustmark_and_claims() {
+        let fixture = fixture_directory().join("valid-trustmark.jpg");
+        let manifest = super::super::c2pa::read_manifest(&fixture).unwrap();
+        let decoded = super::super::trustmark::decode_region(
+            &fixture_state(),
+            &image::open(&fixture).unwrap(),
+            None,
+        )
+        .unwrap();
+
+        validate_signed_manifest(
+            &manifest,
+            &fixture_config(),
+            FIXTURE_RECORD_ID,
+            FIXTURE_WATERMARK_ID,
+        )
+        .unwrap();
+        assert_eq!(manifest.record_id.as_deref(), Some(FIXTURE_RECORD_ID));
+        assert_eq!(manifest.watermark_id.as_deref(), Some(FIXTURE_WATERMARK_ID));
+        assert_eq!(decoded.as_deref(), Some(FIXTURE_WATERMARK_ID));
+        assert!(manifest.manifest_json.is_some());
+    }
+
+    #[test]
+    fn tampered_c2pa_fixture_fails_closed() {
+        let manifest =
+            super::super::c2pa::read_manifest(&fixture_directory().join("tampered-trustmark.jpg"))
+                .unwrap();
+
+        assert!(manifest.present);
+        assert!(!manifest.validation_accepted);
+        assert!(validate_signed_manifest(
+            &manifest,
+            &fixture_config(),
+            FIXTURE_RECORD_ID,
+            FIXTURE_WATERMARK_ID,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn replacement_without_manifest_fails_closed() {
+        let manifest =
+            super::super::c2pa::read_manifest(&fixture_directory().join("source.jpg")).unwrap();
+
+        assert!(!manifest.present);
+        assert!(validate_signed_manifest(
+            &manifest,
+            &fixture_config(),
+            FIXTURE_RECORD_ID,
+            FIXTURE_WATERMARK_ID,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn mismatched_expected_claim_fails_closed() {
+        let manifest =
+            super::super::c2pa::read_manifest(&fixture_directory().join("valid-trustmark.jpg"))
+                .unwrap();
+        let mut config = fixture_config();
+        config.authentication_content = "different expected claim".into();
+
+        assert!(validate_signed_manifest(
+            &manifest,
+            &config,
+            FIXTURE_RECORD_ID,
+            FIXTURE_WATERMARK_ID,
+        )
+        .is_err());
+    }
 
     fn record(id: &str) -> CertificationRecord {
         CertificationRecord {

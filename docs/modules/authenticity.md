@@ -47,6 +47,8 @@ TrustMark 可关闭。启用时使用 Q/BCH_SUPER 模型和 40 位二进制 ID�
 
 签名完成后的回读采用 fail closed：必须存在 active manifest，验证状态必须是 `Valid` 或 `Trusted`，并逐项核对本次 record ID、TrustMark ID（启用时）、标题、创作者、权利声明和认证内容，任一不匹配都不会发布或写入记录。设置页全库完整性扫描会对已有认证仓库副本重复 SHA-256、C2PA 验证状态和数据库声明核对。
 
+`src-tauri/tests/fixtures/authenticity/` 保存约 41 KB 的公开测试专用 ES256 凭据、128 x 128 源图、真实 C2PA/TrustMark 签名图和覆盖字节被篡改的签名图。定向 Rust 测试使用生产回读、TrustMark 模型解码与发布校验函数，固定覆盖合格状态、像素水印与 C2PA 中的 record ID/TrustMark ID/全部声明匹配，以及文件替换、C2PA 无效状态和声明不匹配的 fail-closed 行为；fixture 私钥不得用于生产。
+
 识别始终读取 C2PA；模型可用时还会对整图或用户框选区域解码 TrustMark。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
 
 ## 命令
