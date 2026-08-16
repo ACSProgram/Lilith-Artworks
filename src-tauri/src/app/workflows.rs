@@ -169,16 +169,19 @@ pub(crate) fn update_artwork_branch(
     app_state: State<'_, AppState>,
     backup_state: State<'_, BackupState>,
 ) -> Result<history::ArtworkHistory, String> {
-    let result = app_state.with_ready_repository(|root| {
-        history::update_branch(
-            root,
-            &request.branch_id,
-            &request.title,
-            request.backup_enabled,
-            request.backup_interval_minutes,
-        )?;
-        let artwork_id = history::load_branch(root, &request.branch_id)?.artwork_id;
-        history::list(root, &artwork_id)
+    let result = backup_state.run_exclusive(None, || {
+        app_state.with_ready_repository(|root| {
+            history::update_branch(
+                root,
+                &request.branch_id,
+                &request.title,
+                request.expected_backup_enabled,
+                request.backup_enabled,
+                request.backup_interval_minutes,
+            )?;
+            let artwork_id = history::load_branch(root, &request.branch_id)?.artwork_id;
+            history::list(root, &artwork_id)
+        })
     })?;
     backup_state.wake_scheduler();
     Ok(result)

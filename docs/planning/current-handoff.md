@@ -34,13 +34,13 @@
 - [ ] **仓库 lease 与语义校验。** 仓库命令和设置切换共享 lease；前端切换前卸载旧工作区并以 ready 路径作为组件身份。完整打开检查外键、UUID、受控相对路径和 SHA-256。自动测试已覆盖 lease 阻塞切换、`..` 路径，以及仓库 A/B 复用相同 Artwork/branch UUID 时旧树、选择和延迟搜索结果的隔离；待用含相同实体 UUID 的真实克隆仓库执行 Windows 前端切换验收。
 - [ ] **受控文件与 C2PA fail closed。** 最终成品、认证副本和历史恢复在使用前核对持久化摘要；新签名回读要求 active manifest、`Valid`/`Trusted` 状态，并核对 record ID、TrustMark ID 和声明字段。替换文件自动测试已通过；待用真实 C2PA/TrustMark fixture 验证成功及声明不匹配路径。
 - [ ] **外部导出保留。** Artwork 永久删除、清空回收站和取消发布只清理仓库拥有的文件，不删除首次外部认证导出。自动测试已覆盖已发布 Artwork 元数据、仓库目录清理和外部输出保留；待在 Windows 回收站流程中逐路径人工确认。
+- [ ] **自动备份状态机。** 分支设置草稿会逐字段接收服务端更新，开关更新使用持久化基线避免旧值重新启用已自动关闭的分支；共享操作提供单调完成序号，短任务不再依赖命中 `busy` 轮询窗口；调度器取得运行锁后复查启用、回收站、发布和到期状态，取消、退出及资格失效不计为失败。自动测试已覆盖旧开关写回、显式重新启用、短任务完成事件、锁后禁用/发布、typed cancellation 和退出时拒绝排队任务；待在 Windows 托盘运行态人工确认短自动备份刷新、取消后不立即重启、连续失败通知及手动重新启用。
 
 ## P1：下一个公开候选版之前必须完成
 
 - [ ] **P1-01 仓库灾备。** 实现共享锁下的一致性整仓备份与恢复演练，或完成并实测退出应用后整体复制/恢复数据库与 `artworks/` 的灾备流程；至少从一份代表性副本恢复并通过 scrub。
 - [ ] **P1-03 真实认证 fixture。** 增加真实 C2PA/TrustMark fixture，覆盖合格验证状态、record ID/TrustMark ID/声明匹配，以及文件替换、无效状态和声明不匹配的 fail-closed 行为。
 - [ ] **P1-05 大文件内存上限。** delta 恢复会同时持有完整压缩数据和无上限解压结果；认证管线和隐藏发布页会创建多份全分辨率像素、JPEG 与 base64 data URL。改为流式或有硬上限的解压，限定像素、边长、压缩后/解压后字节数，发布页仅在激活时加载并使用缩略图或分块处理。用 1-4 GB 工作文件及 8K/16K、50/100 MP 图片记录峰值内存和可理解的拒绝行为。
-- [ ] **P1-06 自动备份状态机。** 分支设置只在 branch ID 变化时同步，本地旧值可在调度器第 5 次失败自动关闭后再次写回并清除通知；短于 3 秒的备份也可能完全错过 busy 轮询。区分用户 dirty 与服务端更新，增加单调 completion revision/event；取消、退出和发布竞态使用 typed error，不计为失败，拿到运行锁后再次检查分支仍可调度。
 - [ ] **P1-07 发布状态与 TrustMark 身份。** 发布元数据和预览读取处于同一异常路径，预览损坏会让已发布分支显示为未发布并隐藏取消入口；自动生成的 TrustMark ID 还会跨分支和发布复用。先提交发布元数据，再独立加载/重试预览；取消发布始终可达；将 watermark ID 绑定到分支或一次待发布操作，并在切换、禁用和成功发布后清空。
 - [ ] **P1-08 版本、迁移与旧标识。** 增加 v8→v9 自动迁移测试和迁移前备份；现有 v4→v5、v7→v8 会删除认证记录，必须明确最低支持版本、导出/提示和数据保留策略。在 `rc.1` 仓库副本上完成升级、外键与完整性检查，明确 `art.lilith.artworks` 设置/日志/C2PA label 到 `com.lilith.artworks` 的一次性迁移或不兼容策略，并实测安装升级与卸载。发布前把 package、Cargo、Tauri 和锁文件统一升到 `0.1.0-rc.2`，不得移动 `rc.1` 标签。
 - [ ] **P1-09 依赖与构建基线。** 将 Vitest 升到 3.2.6 或更高版本；把已 EOL 的 Node 20 CI 升到受支持的 Node 24 LTS；为 `rsa`/PS256 给出禁用、替换或书面风险接受。CI 增加官方 npm audit、RustSec、许可与 SBOM 门槛，并按 Windows 实际目标分类仅限其他平台的 Rust 告警。
@@ -68,7 +68,7 @@
 ## 分阶段执行计划
 
 1. **完整性与隔离验收。** 完成剩余 P1-01、P1-03，并验收“阶段 1 待检查”中的四组实现；退出条件是克隆仓库切换、真实认证 fixture、Windows 外部导出保留和代表性整仓恢复全部通过。
-2. **状态机与资源边界。** 完成 P1-05 至 P1-07 和 P2-02；退出条件是大文件峰值受控、取消/退出有界、短任务不会丢事件、发布状态和 TrustMark ID 生命周期测试通过。
+2. **状态机与资源边界。** 完成 P1-05、P1-07 和 P2-02，并验收自动备份状态机；退出条件是大文件峰值受控、取消/退出有界、短任务不会丢事件、发布状态和 TrustMark ID 生命周期测试通过。
 3. **迁移与发布工程。** 完成 P1-08 至 P1-11；退出条件是唯一 `rc.2` 版本、迁移矩阵、私密披露、许可包、标签构建、签名、SBOM 和安装包解包检查全部有证据。
 4. **正式版质量。** 完成全部 P2；在干净 Windows 普通用户环境执行下列人工验收并至少保留一个候选观察周期，期间不得出现未解释的数据损坏、不可恢复备份或安全边界回归。
 5. **正式发布。** 从已验收提交升为 `0.1.0`，创建不可复用的签名标签；由 release workflow 构建并发布，不使用开发机手工产物替换 CI 资产。
@@ -102,9 +102,10 @@
 ## 本轮收尾验证
 
 - `npm run build` 通过。
-- `npm test` 通过：8 个测试文件、20 个用例；新增克隆仓库 A/B 复用相同 Artwork/branch UUID 的前端切换回归，覆盖旧树卸载、Artwork/分支选择清空和延迟搜索结果隔离。
+- `npm test` 通过：10 个测试文件、22 个用例；除克隆仓库切换隔离外，新增分支设置合并服务端自动关闭状态和短操作完成序号触发刷新回归。
 - `cargo test --manifest-path src-tauri/Cargo.toml --lib library::` 通过：17 个用例，包含仓库语义校验、路径穿越拒绝、外部输出保留与 WAL 迁移。
-- `cargo test --manifest-path src-tauri/Cargo.toml --lib backup::worker::tests` 通过：6 个用例，包含恢复/检查点替换拒绝与损坏 delta scrub。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib backup::` 通过：12 个用例，包含短操作完成序号、typed cancellation、锁后禁用/发布复查、退出排队拒绝，以及恢复/检查点替换拒绝与损坏 delta scrub。
+- `cargo test --manifest-path src-tauri/Cargo.toml --lib history::repository::tests` 通过：7 个用例，包含自动关闭后的过期开关拒绝和显式重新启用状态清理。
 - Rust 定向测试另通过：`app::settings::tests` 5 个、`storage::tests` 5 个、`authenticity::repository::tests` 2 个、`authenticity::publication_repository::tests` 3 个、`authenticity::scrub::tests` 1 个。
 - `cargo fmt --check --manifest-path src-tauri/Cargo.toml` 通过。
 - `npm run tauri -- info` 成功加载当前 Tauri 配置；`tauri.conf.json` 也通过 JSON 解析。

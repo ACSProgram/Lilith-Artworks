@@ -21,6 +21,7 @@ pub(crate) struct BackupRuntimeStatus {
     pub(crate) progress_current: u64,
     pub(crate) progress_total: u64,
     pub(crate) automatic_scheduling: bool,
+    pub(crate) completion_revision: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]

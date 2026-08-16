@@ -48,6 +48,7 @@ export interface ForkBranchRequest {
 export interface UpdateBranchBackupRequest {
   branchId: string;
   title: string;
+  expectedBackupEnabled: boolean;
   backupEnabled: boolean;
   backupIntervalMinutes: number;
 }
@@ -71,4 +72,5 @@ export interface BackupRuntimeStatus {
   progressCurrent: number;
   progressTotal: number;
   automaticScheduling: boolean;
+  completionRevision: number;
 }

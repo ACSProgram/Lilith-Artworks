@@ -13,6 +13,7 @@ const IDLE_RUNTIME: BackupRuntimeStatus = {
   progressCurrent: 0,
   progressTotal: 0,
   automaticScheduling: true,
+  completionRevision: 0,
 };
 
 interface HistoryControllerOptions {
@@ -42,7 +43,7 @@ export function useHistoryController({
   const onErrorRef = useRef(onError);
   const requestSequence = useRef(0);
   const lastRefresh = useRef({ artworkId, refreshVersion });
-  const wasRuntimeBusy = useRef(false);
+  const lastCompletionRevision = useRef<number | null>(null);
 
   artworkIdRef.current = artworkId;
   onHistoryChangedRef.current = onHistoryChanged;
@@ -109,8 +110,10 @@ export function useHistoryController({
       try {
         const next = await historyApi.runtime();
         if (cancelled) return;
-        const operationCompleted = wasRuntimeBusy.current && !next.busy;
-        wasRuntimeBusy.current = next.busy;
+        const previousRevision = lastCompletionRevision.current;
+        const operationCompleted = previousRevision !== null
+          && previousRevision !== next.completionRevision;
+        lastCompletionRevision.current = next.completionRevision;
         setRuntime(next);
         delay = busy || next.busy ? 350 : 3000;
         if (operationCompleted) await reload();

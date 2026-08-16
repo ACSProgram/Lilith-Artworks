@@ -14,6 +14,33 @@ use super::{
 
 const MAX_TITLE_CHARS: usize = 160;
 
+#[derive(Debug)]
+pub(super) enum BackupRunError {
+    Cancelled,
+    Failed(String),
+}
+
+impl std::fmt::Display for BackupRunError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Cancelled => formatter.write_str("备份操作已取消"),
+            Self::Failed(error) => formatter.write_str(error),
+        }
+    }
+}
+
+impl From<String> for BackupRunError {
+    fn from(error: String) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<&str> for BackupRunError {
+    fn from(error: &str) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
 #[derive(Clone, Copy)]
 struct SourceMetadata {
     length: u64,
@@ -26,9 +53,9 @@ pub(crate) fn run_backup(
     note: &str,
     commit_kind: &str,
     cancelled: impl Fn() -> bool,
-) -> Result<BackupCommitResult, String> {
+) -> Result<BackupCommitResult, BackupRunError> {
     if note.chars().count() > 500 {
-        return Err("提交备注不能超过 500 个字符".into());
+        return Err(BackupRunError::Failed("提交备注不能超过 500 个字符".into()));
     }
     let title = if note.trim().is_empty() {
         if commit_kind == "automatic" {
@@ -64,7 +91,9 @@ pub(crate) fn run_backup(
     ensure_not_cancelled(&cancelled)?;
     let after = source_metadata(source_path)?;
     if before.length != after.length || before.modified != after.modified {
-        return Err("工作文件在读取期间发生变化，本次提交已取消".into());
+        return Err(BackupRunError::Failed(
+            "工作文件在读取期间发生变化，本次提交已取消".into(),
+        ));
     }
 
     let digest = snapshot.file_digest().to_hex();
@@ -140,7 +169,7 @@ pub(crate) fn run_backup(
     if let (Some(temp), Some(final_path)) = (delta_temp, delta_final.as_ref()) {
         if let Err(error) = publish_temp(temp, final_path, "delta") {
             let _ = fs::remove_file(&snapshot_final);
-            return Err(error);
+            return Err(error.into());
         }
     }
     if let Err(error) = ensure_not_cancelled(&cancelled) {
@@ -177,7 +206,7 @@ pub(crate) fn run_backup(
             if let Some(path) = delta_final.as_ref() {
                 let _ = fs::remove_file(path);
             }
-            return Err(error);
+            return Err(error.into());
         }
     };
     if let Some(relative) = old_snapshot {
@@ -251,9 +280,9 @@ fn repair_head_snapshot(
     Ok(())
 }
 
-fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
+fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), BackupRunError> {
     if cancelled() {
-        Err("备份操作已取消".into())
+        Err(BackupRunError::Cancelled)
     } else {
         Ok(())
     }
@@ -347,6 +376,15 @@ mod tests {
             super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
             2
         );
+    }
+
+    #[test]
+    fn cancellation_has_a_typed_result() {
+        let (_directory, root, _source, _artwork_id, branch_id) = create_fixture();
+
+        let error = run_backup(&root, &branch_id, "", "automatic", || true).unwrap_err();
+
+        assert!(matches!(error, BackupRunError::Cancelled));
     }
 
     #[test]

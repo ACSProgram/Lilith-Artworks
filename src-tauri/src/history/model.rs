@@ -60,6 +60,7 @@ pub(crate) struct ForkBranchRequest {
 pub(crate) struct UpdateBranchBackupRequest {
     pub(crate) branch_id: String,
     pub(crate) title: String,
+    pub(crate) expected_backup_enabled: bool,
     pub(crate) backup_enabled: bool,
     pub(crate) backup_interval_minutes: u32,
 }

@@ -26,9 +26,9 @@ pub(crate) async fn run_branch_backup(
                         state.cancelled()
                     });
                 if let Err(error) = result.as_ref() {
-                    history::mark_error(root, &request.branch_id, error);
+                    history::mark_error(root, &request.branch_id, &error.to_string());
                 }
-                result
+                result.map_err(|error| error.to_string())
             })
         });
         state.wake_scheduler();

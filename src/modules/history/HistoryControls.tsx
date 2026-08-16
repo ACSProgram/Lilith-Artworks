@@ -21,14 +21,37 @@ export function BranchSettings({
   const [interval, setInterval] = useState(branch.backupIntervalMinutes);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const requestVersion = useRef(0);
+  const persisted = useRef({
+    id: branch.id,
+    title: branch.title,
+    enabled: branch.backupEnabled,
+    interval: branch.backupIntervalMinutes,
+  });
 
   useEffect(() => {
-    setTitle(branch.title);
-    setEnabled(branch.backupEnabled);
-    setInterval(branch.backupIntervalMinutes);
-    setSaveState("saved");
+    const previous = persisted.current;
+    const branchChanged = previous.id !== branch.id;
+    setTitle((current) => branchChanged || current === previous.title ? branch.title : current);
+    setEnabled((current) => branchChanged || current === previous.enabled
+      ? branch.backupEnabled
+      : current);
+    setInterval((current) => branchChanged || current === previous.interval
+      ? branch.backupIntervalMinutes
+      : current);
+    persisted.current = {
+      id: branch.id,
+      title: branch.title,
+      enabled: branch.backupEnabled,
+      interval: branch.backupIntervalMinutes,
+    };
     requestVersion.current += 1;
-  }, [branch.id]);
+    if (branchChanged) setSaveState("saved");
+  }, [
+    branch.backupEnabled,
+    branch.backupIntervalMinutes,
+    branch.id,
+    branch.title,
+  ]);
 
   const valid = title.trim().length > 0 && interval >= 1 && interval <= 10_080;
   const dirty = title.trim() !== branch.title
@@ -47,6 +70,7 @@ export function BranchSettings({
       void onSave({
         branchId: branch.id,
         title: title.trim(),
+        expectedBackupEnabled: branch.backupEnabled,
         backupEnabled: enabled,
         backupIntervalMinutes: interval,
       }).then(() => {

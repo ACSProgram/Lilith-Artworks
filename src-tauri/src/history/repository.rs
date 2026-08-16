@@ -161,6 +161,7 @@ pub(crate) fn update_branch(
     root: &Path,
     branch_id: &str,
     title: &str,
+    expected_enabled: bool,
     enabled: bool,
     interval_minutes: u32,
 ) -> Result<(), String> {
@@ -171,16 +172,26 @@ pub(crate) fn update_branch(
     let connection = storage::open(root)?;
     let changed = connection
         .execute(
-            "UPDATE branches SET title = ?2, backup_enabled = ?3,
-                    backup_interval_minutes = ?4,
-                    consecutive_backup_failures = CASE WHEN ?3 <> 0 THEN 0 ELSE consecutive_backup_failures END,
-                    backup_retry_at_ms = CASE WHEN ?3 <> 0 THEN NULL ELSE backup_retry_at_ms END,
-                    last_error = CASE WHEN ?3 <> 0 THEN NULL ELSE last_error END,
-                    backup_disable_notice_pending = CASE WHEN ?3 <> 0 THEN 0 ELSE backup_disable_notice_pending END,
-                    updated_ms = ?5 WHERE id = ?1",
+            "UPDATE branches SET title = ?2,
+                    backup_enabled = CASE WHEN backup_enabled = ?3 THEN ?4 ELSE backup_enabled END,
+                    backup_interval_minutes = ?5,
+                    consecutive_backup_failures = CASE
+                      WHEN backup_enabled = 0 AND ?3 = 0 AND ?4 <> 0 THEN 0
+                      ELSE consecutive_backup_failures END,
+                    backup_retry_at_ms = CASE
+                      WHEN backup_enabled = 0 AND ?3 = 0 AND ?4 <> 0 THEN NULL
+                      ELSE backup_retry_at_ms END,
+                    last_error = CASE
+                      WHEN backup_enabled = 0 AND ?3 = 0 AND ?4 <> 0 THEN NULL
+                      ELSE last_error END,
+                    backup_disable_notice_pending = CASE
+                      WHEN backup_enabled = 0 AND ?3 = 0 AND ?4 <> 0 THEN 0
+                      ELSE backup_disable_notice_pending END,
+                    updated_ms = ?6 WHERE id = ?1",
             params![
                 branch_id,
                 title.trim(),
+                i64::from(expected_enabled),
                 i64::from(enabled),
                 interval_minutes,
                 storage::now_ms()?
@@ -1142,6 +1153,30 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     Ok(branches)
 }
 
+pub(crate) fn load_scheduled(
+    root: &Path,
+    branch_id: &str,
+) -> Result<Option<ScheduledBranch>, String> {
+    storage::open(root)?
+        .query_row(
+            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
+             FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
+             WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
+               AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
+            [branch_id],
+            |row| {
+                Ok(ScheduledBranch {
+                    id: row.get(0)?,
+                    last_check_ms: row.get(1)?,
+                    interval_minutes: row.get(2)?,
+                    retry_at_ms: row.get(3)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage::database_error)
+}
+
 pub(crate) fn count_scheduled_files(root: &Path) -> Result<usize, String> {
     let count: i64 = storage::open(root)?
         .query_row(
@@ -1234,7 +1269,15 @@ mod tests {
         let fixture = HistoryFixture::new();
         assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 1);
 
-        update_branch(&fixture.root, &fixture.main_branch_id, "Main", false, 10).unwrap();
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            true,
+            false,
+            10,
+        )
+        .unwrap();
         assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
     }
 
@@ -1242,7 +1285,15 @@ mod tests {
     fn automatic_backup_failures_follow_interval_and_eventually_disable() {
         let fixture = HistoryFixture::new();
         mark_unchanged(&fixture.root, &fixture.main_branch_id, 100).unwrap();
-        update_branch(&fixture.root, &fixture.main_branch_id, "Main", true, 120).unwrap();
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            true,
+            true,
+            120,
+        )
+        .unwrap();
 
         let expected_delays = [1_i64, 30, 60, 120];
         for (index, delay_minutes) in expected_delays.into_iter().enumerate() {
@@ -1299,6 +1350,53 @@ mod tests {
         assert_eq!(state.3, 5);
         assert!(!state.4);
         assert!(state.5);
+
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Renamed while stale",
+            true,
+            true,
+            60,
+        )
+        .unwrap();
+        let stale_update: (String, bool, u32, bool) = storage::open(&fixture.root)
+            .unwrap()
+            .query_row(
+                "SELECT title, backup_enabled, consecutive_backup_failures,
+                        backup_disable_notice_pending
+                 FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(stale_update.0, "Renamed while stale");
+        assert!(!stale_update.1);
+        assert_eq!(stale_update.2, 5);
+        assert!(stale_update.3);
+
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Renamed while stale",
+            false,
+            true,
+            60,
+        )
+        .unwrap();
+        let reenabled: (bool, u32, bool) = storage::open(&fixture.root)
+            .unwrap()
+            .query_row(
+                "SELECT backup_enabled, consecutive_backup_failures,
+                        backup_disable_notice_pending
+                 FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert!(reenabled.0);
+        assert_eq!(reenabled.1, 0);
+        assert!(!reenabled.2);
 
         acknowledge_backup_disable_notices(&fixture.root, &[fixture.artwork_id.clone()]).unwrap();
         let pending: bool = storage::open(&fixture.root)

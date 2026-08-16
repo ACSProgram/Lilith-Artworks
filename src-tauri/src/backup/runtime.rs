@@ -11,6 +11,23 @@ use tauri::AppHandle;
 
 use super::BackupRuntimeStatus;
 
+#[derive(Debug)]
+pub(crate) enum ExclusiveRunError<E> {
+    ShuttingDown,
+    State(String),
+    Operation(E),
+}
+
+impl<E: std::fmt::Display> std::fmt::Display for ExclusiveRunError<E> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ShuttingDown => formatter.write_str("应用正在退出，操作已取消"),
+            Self::State(error) => formatter.write_str(error),
+            Self::Operation(error) => error.fmt(formatter),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct BackupState {
     inner: Arc<Inner>,
@@ -44,25 +61,40 @@ impl BackupState {
         branch_id: Option<&str>,
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.run_exclusive_typed(branch_id, operation)
+            .map_err(|error| error.to_string())
+    }
+
+    pub(crate) fn run_exclusive_typed<T, E>(
+        &self,
+        branch_id: Option<&str>,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, ExclusiveRunError<E>> {
         let _guard = self
             .inner
             .operation_lock
             .lock()
-            .map_err(|_| "备份操作锁已损坏")?;
+            .map_err(|_| ExclusiveRunError::State("备份操作锁已损坏".into()))?;
         if self.inner.shutting_down.load(Ordering::SeqCst) {
-            return Err("应用正在退出，操作已取消".into());
+            return Err(ExclusiveRunError::ShuttingDown);
         }
         self.inner.cancel_requested.store(false, Ordering::SeqCst);
         {
-            let mut runtime = self.inner.runtime.lock().map_err(|_| "备份状态已损坏")?;
+            let mut runtime = self
+                .inner
+                .runtime
+                .lock()
+                .map_err(|_| ExclusiveRunError::State("备份状态已损坏".into()))?;
             runtime.busy = true;
             runtime.active_branch_id = branch_id.map(str::to_owned);
         }
-        let result = operation();
+        let result = operation().map_err(ExclusiveRunError::Operation);
         if let Ok(mut runtime) = self.inner.runtime.lock() {
             let scheduling = runtime.automatic_scheduling;
+            let completion_revision = runtime.completion_revision.wrapping_add(1);
             *runtime = BackupRuntimeStatus {
                 automatic_scheduling: scheduling,
+                completion_revision,
                 ..Default::default()
             };
         }
@@ -189,6 +221,22 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn completion_revision_advances_for_short_operations() {
+        let state = BackupState::default();
+        assert_eq!(state.status().unwrap().completion_revision, 0);
+
+        state.run_exclusive(None, || Ok::<_, String>(())).unwrap();
+        let first = state.status().unwrap();
+        assert!(!first.busy);
+        assert_eq!(first.completion_revision, 1);
+
+        state
+            .run_exclusive(None, || Err::<(), _>("failed".to_string()))
+            .unwrap_err();
+        assert_eq!(state.status().unwrap().completion_revision, 2);
+    }
 
     #[test]
     fn shutdown_waits_for_active_operation_and_rejects_queued_work() {
