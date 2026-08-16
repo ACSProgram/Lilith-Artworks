@@ -182,6 +182,16 @@ describe("usePublicationController", () => {
     expect(result.current.artifactPreviewError).toBeNull();
   });
 
+  it("contains an invalid size-estimate adapter result inside the debounced request", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.estimate.mockReturnValue(undefined);
+    const { result } = renderHook(() => usePublicationController(options("first")));
+
+    await waitFor(() => expect(result.current.publication?.branchId).toBe("first"));
+    await waitFor(() => expect(api.estimate).toHaveBeenCalledOnce(), { timeout: 500 });
+    expect(result.current.sizeEstimate).toBeNull();
+  });
+
   it("clears an automatically generated TrustMark ID when switching branches", async () => {
     api.getPublication.mockImplementation((branchId: string) => Promise.resolve(publishedBranch(branchId)));
     api.previewPublication.mockResolvedValue(outputPreview("1".repeat(40)));

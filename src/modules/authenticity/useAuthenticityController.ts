@@ -200,18 +200,17 @@ export function usePublicationController({
     if (!publication?.artifact || !config) return;
     const requestId = ++estimateRequest.current;
     setSizeEstimate(null);
-    const timer = window.setTimeout(() => {
-      authenticityApi.estimate(
-        publication.branchId,
-        config.jpegQuality,
-        config.backgroundColor,
-      )
-        .then((value) => {
-          if (requestId === estimateRequest.current) setSizeEstimate(value.jpegBytes);
-        })
-        .catch(() => {
-          if (requestId === estimateRequest.current) setSizeEstimate(null);
-        });
+    const timer = window.setTimeout(async () => {
+      try {
+        const value = await authenticityApi.estimate(
+          publication.branchId,
+          config.jpegQuality,
+          config.backgroundColor,
+        );
+        if (requestId === estimateRequest.current) setSizeEstimate(value.jpegBytes);
+      } catch {
+        if (requestId === estimateRequest.current) setSizeEstimate(null);
+      }
     }, 180);
     return () => {
       window.clearTimeout(timer);
