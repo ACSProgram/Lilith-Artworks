@@ -15,7 +15,7 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - Artwork、分支、历史、成品与认证记录的核心不变量测试。
 - 可嵌套作品树、标题/工作文件搜索、创建、重命名、拖放排序和 Ctrl/Shift 多选。
 - 项目回收站，支持恢复、永久删除和清空；Artwork 内部历史节点仍按规划直接裁剪。
-- 完整迁移 LilithClient ChunkFile v1、内容定义分块、SHA-256、zstd 反向 delta 与完整性校验。
+- 支持 LilithClient ChunkFile v1 文件格式、内容定义分块、SHA-256、zstd 反向 delta 与完整性校验；当前测试阶段不承诺旧仓库数据迁移。
 - 每个 Artwork 支持多分支、独立工作文件、主动提交、托盘自动调度、取消与历史恢复。
 - 历史工作区显示树状 fork 结构、分支 head、节点标题、逻辑大小、Chunk 文件大小和 SHA-256。
 - 作品树展开状态持久化，拖放沿用 LilithClient 的递归树实现；项目删除继续进入回收站。

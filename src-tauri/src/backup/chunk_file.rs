@@ -9,7 +9,9 @@ use std::{
 };
 
 use sha2::{Digest, Sha256};
-use tempfile::{tempfile, tempfile_in};
+#[cfg(test)]
+use tempfile::tempfile;
+use tempfile::tempfile_in;
 
 const SNAPSHOT_MAGIC: [u8; 8] = *b"LBCHUNK\0";
 const DELTA_MAGIC: [u8; 8] = *b"LBDELTA\0";
@@ -473,6 +475,7 @@ pub(crate) struct ChunkFileDelta {
 }
 
 impl ChunkFileDelta {
+    #[cfg(test)]
     pub(crate) fn open<R>(delta: &mut R) -> ChunkFileResult<Self>
     where
         R: Read + Seek,
