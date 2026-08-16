@@ -14,6 +14,45 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Audit production dependencies against the official registry
+        run: npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Audit complete dependency graph against the official registry
+        run: npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Audit Rust dependencies
+        uses: actions-rust-lang/audit@v1
+        with:
+          workingDirectory: src-tauri
+          ignore: RUSTSEC-2023-0071
+          denyWarnings: false
+          createIssues: false
+
+      - name: Generate source dependency SBOM
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: lilith-artworks-source-sbom.cdx.json
+          output-file: lilith-artworks-source-sbom.cdx.json
+          upload-release-assets: false
+
   validate:
     runs-on: windows-latest
     timeout-minutes: 90
@@ -24,7 +63,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Set up Rust
@@ -34,6 +73,15 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Verify release metadata
+        run: npm run verify:release-metadata
+
+      - name: Generate Windows target licenses
+        run: npm run legal
+
+      - name: Check generated licenses are current
+        run: git diff --exit-code -- licenses/THIRD_PARTY_LICENSES.html
 
       - name: Build frontend
         run: npm run build

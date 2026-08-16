@@ -260,8 +260,29 @@ pub(crate) fn open_settings_directory(state: State<'_, AppState>) -> Result<(), 
     open_directory(directory, "设置")
 }
 
+#[tauri::command]
+pub(crate) fn open_legal_directory(app: AppHandle) -> Result<(), String> {
+    let resource_dir = app
+        .path()
+        .resource_dir()
+        .map_err(|error| format!("无法定位应用资源目录：{error}"))?;
+    let candidates = [
+        resource_dir.join("licenses"),
+        resource_dir.join("resources").join("licenses"),
+    ];
+    let directory = candidates
+        .iter()
+        .find(|path| path.join("THIRD_PARTY_LICENSES.html").is_file())
+        .ok_or("随包法律材料缺失；请重新安装应用")?;
+    open_existing_directory(directory, "法律材料")
+}
+
 fn open_directory(path: &Path, label: &str) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|error| format!("无法创建{label}目录：{error}"))?;
+    open_existing_directory(path, label)
+}
+
+fn open_existing_directory(path: &Path, label: &str) -> Result<(), String> {
     let mut command = if cfg!(target_os = "windows") {
         Command::new("explorer.exe")
     } else if cfg!(target_os = "macos") {

@@ -1222,4 +1222,59 @@ mod tests {
 
         assert!(delta_payload_limit(header).unwrap() > target_size);
     }
+
+    #[test]
+    fn large_delta_stress_round_trip_and_truncation_failure() {
+        const SIZE: usize = 32 * 1024 * 1024;
+        let config = ChunkingConfig::default();
+        let mut state = 0x9e37_79b9_u32;
+        let mut parent_bytes = vec![0_u8; SIZE];
+        for byte in &mut parent_bytes {
+            state ^= state << 13;
+            state ^= state >> 17;
+            state ^= state << 5;
+            *byte = state as u8;
+        }
+        let mut current_bytes = parent_bytes.clone();
+        for start in (0..SIZE).step_by(256 * 1024) {
+            let end = (start + 4096).min(SIZE);
+            for byte in &mut current_bytes[start..end] {
+                *byte ^= 0x5a;
+            }
+        }
+
+        let mut current_snapshot = Cursor::new(Vec::new());
+        let current = ChunkFile::create(
+            &mut Cursor::new(&current_bytes),
+            &mut current_snapshot,
+            config,
+        )
+        .unwrap();
+        let mut parent_snapshot = Cursor::new(Vec::new());
+        let parent = ChunkFile::create(
+            &mut Cursor::new(&parent_bytes),
+            &mut parent_snapshot,
+            config,
+        )
+        .unwrap();
+        let mut encoded_delta = Cursor::new(Vec::new());
+        current
+            .create_reverse_delta(&parent, &mut parent_snapshot, &mut encoded_delta)
+            .unwrap();
+
+        let mut delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
+        let mut restored_snapshot = Cursor::new(Vec::new());
+        let restored = delta
+            .apply(&current, &mut current_snapshot, &mut restored_snapshot)
+            .unwrap();
+        let mut restored_bytes = Vec::with_capacity(SIZE);
+        restored
+            .copy_original(&mut restored_snapshot, &mut restored_bytes)
+            .unwrap();
+        assert_eq!(restored_bytes, parent_bytes);
+
+        let mut truncated = encoded_delta.into_inner();
+        truncated.truncate(truncated.len().saturating_sub(17));
+        assert!(ChunkFileDelta::open(&mut Cursor::new(truncated)).is_err());
+    }
 }

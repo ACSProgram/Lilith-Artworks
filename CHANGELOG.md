@@ -7,6 +7,12 @@ before and after the first stable release.
 
 ### Changed
 
+- Bumped all release metadata to `0.1.0-rc.2`, upgraded Vitest to 3.2.6,
+  moved CI to Node 24, and disabled PS256 pending resolution of its Rust crypto advisory.
+- Added a Windows dependency license closure, an About/Legal entry, and a
+  tag-only draft release workflow with signing inputs, package inspection,
+  checksums, CycloneDX SBOM, and provenance attestations.
+
 - Changed the application identifier and C2PA label from
   `art.lilith.artworks` to `com.lilith.artworks`; the next published build must
   use a new release-candidate version rather than reuse `0.1.0-rc.1`.

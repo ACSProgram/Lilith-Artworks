@@ -18,6 +18,8 @@ Windows CI 必须通过以下项目：
 4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
 5. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
 
+CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；RustSec 仅精确忽略 `RUSTSEC-2023-0071`，因为 PS256 已在前后端禁用并有直接回归测试，其余漏洞仍使作业失败。
+
 正式候选版还必须通过：
 
 6. 使用 npm 官方 registry 的生产与完整依赖漏洞审计；
@@ -50,6 +52,7 @@ Windows CI 必须通过以下项目：
 - 发布说明从 `CHANGELOG.md` 生成，并列出 schema 版本、已知限制和人工验收结果。
 - 公布安装包前记录 SHA-256；正式版安装包和主程序必须完成 Authenticode 签名、可信时间戳和签名复核。候选版若暂时未签名，发布说明必须显著披露。
 - 发布资产应同时包含校验和、目标依赖许可包、SBOM 和构建来源证明；release workflow 必须由标签触发并在干净 Windows 环境构建。
+- `.github/workflows/release.yml` 校验标签、版本、标识和 schema，构建后静默安装 NSIS 并断言版本及法律资源，生成 CycloneDX SBOM、SHA-256 和 GitHub artifact attestation，最后创建草稿 release。候选版缺少签名输入时披露未签名，正式版缺少签名输入时直接失败。签名输入为 `WINDOWS_CERTIFICATE_BASE64`、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_TIMESTAMP_URL`。
 - 不把私钥、证书、测试仓库、用户 Artwork 或未确认再分发许可的模型文件上传为发行资产。
 - 项目贡献者创作的代码以 `LICENSE`（GPL-3.0-only）发布；第三方软件与 Adobe TrustMark 模型保留各自许可。分发完整应用时必须交付 `LICENSE`、目标专用第三方许可包和 `src-tauri/resources/models/LICENSE`。
 - 正式版前必须启用并实测 GitHub 私密漏洞报告，或提供另一条已验证的私密报告渠道；公开 issue 只能用于请求建立私密联系，不得承载漏洞细节。

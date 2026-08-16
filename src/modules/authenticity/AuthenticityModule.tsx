@@ -113,7 +113,7 @@ function PublishView({
             <label>认证说明<textarea value={config.authenticationContent} rows={3} onChange={(event) => setConfig({ ...config, authenticationContent: event.target.value })} /></label>
           </div>
           <div className="auth-form-section two-fields">
-            <label>签名算法<select value={config.signingAlgorithm} onChange={(event) => setConfig({ ...config, signingAlgorithm: event.target.value })}><option value="es256">ES256</option><option value="es384">ES384</option><option value="ps256">PS256</option><option value="ed25519">Ed25519</option></select></label>
+            <label>签名算法<select value={config.signingAlgorithm} onChange={(event) => setConfig({ ...config, signingAlgorithm: event.target.value })}><option value="es256">ES256</option><option value="es384">ES384</option><option value="ed25519">Ed25519</option></select></label>
             <label className="wide-field">证书链<div className="auth-path-control"><input readOnly value={config.certificatePath} placeholder="选择 PEM 证书链" /><button className="icon-button" type="button" title="选择证书" onClick={() => void chooseCertificate()}><FolderOpen size={16} /></button></div></label>
             <label className="wide-field">PEM 私钥<input className="secret-field" type="password" value={privateKey} autoComplete="new-password" placeholder="输入后仅在本次发布使用" onChange={(event) => setPrivateKey(event.target.value)} /></label>
             <label className="wide-field">时间戳服务<input value={config.timestampUrl ?? ""} placeholder="可选 RFC 3161 URL" onChange={(event) => setConfig({ ...config, timestampUrl: event.target.value || null })} /></label>

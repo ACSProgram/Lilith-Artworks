@@ -5,6 +5,7 @@ import {
   Clock3,
   DatabaseBackup,
   FolderOpen,
+  Info,
   LoaderCircle,
   MonitorCog,
   Palette,
@@ -18,6 +19,7 @@ import { ArtworkWorkspace } from "./ArtworkWorkspace";
 import { appApi } from "./api";
 import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
 import { WindowTitleBar } from "./WindowTitleBar";
+import packageInfo from "../../package.json";
 
 const EMPTY_STATUS: RepositoryStatus = {
   configured: false,
@@ -285,6 +287,17 @@ export function App() {
                   <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
                   <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
                   <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                </div>
+              </div>
+            </div>
+
+            <div className="settings-section">
+              <div className="settings-section-title"><Info aria-hidden="true" size={17} /><h3>About / Legal</h3></div>
+              <div className="settings-preference-list">
+                <div className="settings-preference-row">
+                  <span className="settings-row-icon"><Info aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>Lilith Artworks {packageInfo.version}</strong><small>Copyright 2026 ACSProgram · GPL-3.0-only</small></span>
+                  <button className="secondary-button" type="button" onClick={() => void appApi.openLegalDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />查看许可</button>
                 </div>
               </div>
             </div>

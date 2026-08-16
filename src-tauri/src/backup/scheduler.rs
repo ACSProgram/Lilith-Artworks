@@ -244,4 +244,36 @@ mod tests {
         assert_eq!(branch.consecutive_backup_failures, 0);
         assert!(branch.last_error.is_none());
     }
+
+    #[test]
+    fn cancelled_scheduled_backup_does_not_count_as_a_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.bin");
+        fs::write(&source, b"scheduled content").unwrap();
+        crate::library::initialize(&root).unwrap();
+        let artwork =
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+        let state = BackupState::default();
+        let operation_state = state.clone();
+
+        let result = state.run_exclusive_typed(Some(&artwork.branch_id), || {
+            assert!(operation_state.request_cancel().unwrap());
+            run_scheduled_backup(&root, &operation_state, &artwork.branch_id)
+        });
+
+        assert!(matches!(
+            result,
+            Err(ExclusiveRunError::Operation(
+                AutomaticBackupError::Cancelled
+            ))
+        ));
+        let branch = history::list(&root, &artwork.artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.consecutive_backup_failures, 0);
+        assert!(branch.last_error.is_none());
+        assert!(branch.backup_enabled);
+    }
 }

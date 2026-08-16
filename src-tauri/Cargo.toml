@@ -1,8 +1,8 @@
 [package]
 name = "lilith-artworks"
-version = "0.1.0-rc.1"
+version = "0.1.0-rc.2"
 description = "Branch-aware artwork history and provenance manager"
-authors = ["Lilith Artworks contributors"]
+authors = ["ACSProgram"]
 edition = "2021"
 license = "GPL-3.0-only"
 

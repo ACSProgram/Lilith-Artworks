@@ -13,6 +13,7 @@ const appApi = vi.hoisted(() => ({
   createRepositoryBackup: vi.fn(),
   openSettingsDirectory: vi.fn(),
   openLogDirectory: vi.fn(),
+  openLegalDirectory: vi.fn(),
 }));
 
 const libraryApi = vi.hoisted(() => ({
@@ -227,5 +228,28 @@ describe("App repository switching", () => {
       expect(appApi.createRepositoryBackup).toHaveBeenCalledWith("C:\\backups");
     });
     expect(await screen.findByText(/灾备副本已校验：4 个文件、2 个历史节点/)).toBeTruthy();
+  });
+
+  it("shows release identity and opens the bundled legal directory", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.openLegalDirectory.mockResolvedValue(undefined);
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+
+    expect(await screen.findByText("Lilith Artworks 0.1.0-rc.2")).toBeTruthy();
+    expect(screen.getByText(/Copyright 2026 ACSProgram/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看许可" }));
+    await waitFor(() => expect(appApi.openLegalDirectory).toHaveBeenCalledOnce());
   });
 });

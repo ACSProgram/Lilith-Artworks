@@ -466,6 +466,7 @@ fn validate_publish_request(
 fn validate_publication_config(
     config: &super::model::CertificationConfig,
 ) -> AuthenticityResult<()> {
+    c2pa::supported_signing_algorithm(&config.signing_algorithm)?;
     if config.title.trim().is_empty() {
         return Err(AuthenticityError::InvalidInput("作品标题不能为空".into()));
     }

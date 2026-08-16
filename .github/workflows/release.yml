@@ -1,0 +1,151 @@
+name: Windows Release Candidate
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - name: Check out immutable tag
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Install locked frontend dependencies
+        run: npm ci
+
+      - name: Verify tag, version, identifier, and schema
+        run: npm run verify:release-metadata
+
+      - name: Audit npm dependencies against the official registry
+        run: |
+          npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
+          npm audit --audit-level=high --registry=https://registry.npmjs.org
+
+      - name: Audit Rust dependencies
+        uses: actions-rust-lang/audit@v1
+        with:
+          workingDirectory: src-tauri
+          ignore: RUSTSEC-2023-0071
+          denyWarnings: false
+          createIssues: false
+
+      - name: Generate and verify Windows target licenses
+        run: |
+          npm run legal
+          git diff --exit-code -- licenses/THIRD_PARTY_LICENSES.html
+
+      - name: Build and test frontend
+        run: |
+          npm run build
+          npm test
+
+      - name: Format and test Rust library
+        run: |
+          cargo fmt --check --manifest-path src-tauri/Cargo.toml
+          cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Prepare optional Authenticode signing input
+        id: signing
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE_BASE64: ${{ secrets.WINDOWS_CERTIFICATE_BASE64 }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          WINDOWS_TIMESTAMP_URL: ${{ secrets.WINDOWS_TIMESTAMP_URL }}
+        run: .\tools\release\prepare-windows-signing.ps1
+
+      - name: Build signed NSIS package
+        if: steps.signing.outputs.signed == 'true'
+        run: npm run tauri -- build --config "${{ steps.signing.outputs.config }}"
+
+      - name: Build unsigned NSIS package
+        if: steps.signing.outputs.signed != 'true'
+        run: npm run tauri -- build
+
+      - name: Stage release assets
+        id: assets
+        shell: pwsh
+        run: .\tools\release\prepare-release-assets.ps1 -ExpectedVersion "${{ steps.signing.outputs.version }}"
+
+      - name: Install and inspect NSIS package
+        shell: pwsh
+        run: |
+          $parameters = @{
+            InstallerPath = "${{ steps.assets.outputs.installer }}"
+            ExpectedVersion = "${{ steps.signing.outputs.version }}"
+            InstallationDirectory = "${{ runner.temp }}\lilith-artworks-install"
+          }
+          if ("${{ steps.signing.outputs.signed }}" -eq "true") { $parameters.RequireSignature = $true }
+          .\tools\release\test-release-bundle.ps1 @parameters
+
+      - name: Generate release SBOM
+        uses: anchore/sbom-action@v0.24.0
+        with:
+          path: .
+          format: cyclonedx-json
+          artifact-name: Lilith-Artworks-${{ steps.signing.outputs.version }}-windows-x64.cdx.json
+          output-file: release-assets/Lilith-Artworks-${{ steps.signing.outputs.version }}-windows-x64.cdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Generate SHA-256 checksums
+        shell: pwsh
+        run: .\tools\release\write-checksums.ps1 -Directory release-assets
+
+      - name: Attest release assets
+        uses: actions/attest@v4
+        with:
+          subject-path: release-assets/*
+
+      - name: Upload workflow evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: Lilith-Artworks-${{ steps.signing.outputs.version }}-release-evidence
+          path: release-assets/*
+          if-no-files-found: error
+
+      - name: Create draft GitHub release from existing tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $signature = if ("${{ steps.signing.outputs.signed }}" -eq "true") {
+            "Authenticode signing and timestamp verification passed in CI."
+          } else {
+            "WARNING: this release candidate is unsigned. Windows cannot verify its publisher."
+          }
+          $notes = Join-Path $env:RUNNER_TEMP "release-notes.md"
+          @"
+          # Lilith Artworks ${{ steps.signing.outputs.version }}
+
+          $signature
+
+          Repository schema: v9. This test-stage build supports newly created repositories only; older repository, settings, and application-identifier migration is not part of this candidate.
+
+          Automated build evidence includes SHA-256 checksums, a CycloneDX SBOM, the Windows target license closure, and GitHub artifact attestations. Publish this draft only after the manual release checklist is complete.
+          "@ | Set-Content -LiteralPath $notes -Encoding utf8
+          gh release create "${{ github.ref_name }}" release-assets/* --verify-tag --draft --prerelease --title "Lilith Artworks ${{ steps.signing.outputs.version }}" --notes-file $notes

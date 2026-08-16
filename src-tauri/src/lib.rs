@@ -258,6 +258,7 @@ pub fn run() {
             app::settings::get_app_settings,
             app::settings::save_app_settings,
             app::settings::open_log_directory,
+            app::settings::open_legal_directory,
             app::settings::open_settings_directory,
             app::cleanup_commands::retry_pending_file_cleanup,
             app::workflows::acknowledge_backup_disable_notices,

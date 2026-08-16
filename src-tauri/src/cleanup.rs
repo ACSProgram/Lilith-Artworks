@@ -489,4 +489,66 @@ mod tests {
         assert!(stored.is_file());
         assert_eq!(report.pending_count, 1);
     }
+
+    #[test]
+    fn committed_cleanup_intent_recovers_after_restart_before_deletion() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored = root.join("artworks").join("orphan.bin");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"orphan").unwrap();
+        let expected = sha256_file(&stored).unwrap();
+        let id = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let id = enqueue_repository_file_with_hash(
+                &transaction,
+                "artworks/orphan.bin",
+                &expected,
+                "crash-window-before-delete",
+            )
+            .unwrap();
+            transaction.commit().unwrap();
+            id
+        };
+
+        let report = run(&root, &[]).unwrap();
+
+        assert_eq!(report.cleaned_count, 1);
+        assert_eq!(report.pending_count, 0);
+        assert!(!stored.exists());
+        assert!(!id.is_empty());
+    }
+
+    #[test]
+    fn cleanup_replay_is_idempotent_after_deletion_before_intent_removal() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored = root.join("artworks").join("already-removed.bin");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"orphan").unwrap();
+        let expected = sha256_file(&stored).unwrap();
+        let id = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let id = enqueue_repository_file_with_hash(
+                &transaction,
+                "artworks/already-removed.bin",
+                &expected,
+                "crash-window-after-delete",
+            )
+            .unwrap();
+            transaction.commit().unwrap();
+            id
+        };
+        fs::remove_file(&stored).unwrap();
+
+        let report = run(&root, &[id]).unwrap();
+
+        assert_eq!(report.cleaned_count, 1);
+        assert_eq!(report.pending_count, 0);
+        assert!(report.failures.is_empty());
+    }
 }

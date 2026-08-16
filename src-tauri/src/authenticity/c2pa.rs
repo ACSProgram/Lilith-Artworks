@@ -27,14 +27,7 @@ pub(crate) fn sign_jpeg(
     unsigned_jpeg: &Path,
     signed_jpeg: &Path,
 ) -> AuthenticityResult<()> {
-    let algorithm = SigningAlg::from_str(
-        config
-            .signing_algorithm
-            .trim()
-            .to_ascii_lowercase()
-            .as_str(),
-    )
-    .map_err(|_| AuthenticityError::InvalidInput("不支持的 C2PA 签名算法".into()))?;
+    let algorithm = supported_signing_algorithm(&config.signing_algorithm)?;
     let certificate = fs::read(&config.certificate_path)?;
     let timestamp_url = config
         .timestamp_url
@@ -159,6 +152,17 @@ pub(crate) fn sign_jpeg(
     Ok(())
 }
 
+pub(super) fn supported_signing_algorithm(value: &str) -> AuthenticityResult<SigningAlg> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if !matches!(normalized.as_str(), "es256" | "es384" | "ed25519") {
+        return Err(AuthenticityError::InvalidInput(
+            "仅支持 ES256、ES384 或 Ed25519；PS256 因依赖安全公告已禁用".into(),
+        ));
+    }
+    SigningAlg::from_str(&normalized)
+        .map_err(|_| AuthenticityError::InvalidInput("不支持的 C2PA 签名算法".into()))
+}
+
 fn image_format_hint(path: &Path) -> AuthenticityResult<&'static str> {
     match path
         .extension()
@@ -262,4 +266,22 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
             .map(str::to_owned),
         manifest_json: Some(reader.json()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supported_signing_algorithm;
+
+    #[test]
+    fn ps256_is_rejected_before_signing() {
+        let error = supported_signing_algorithm("PS256").unwrap_err();
+        assert!(error.to_string().contains("PS256"));
+    }
+
+    #[test]
+    fn supported_non_rsa_algorithms_are_accepted() {
+        for algorithm in ["es256", "ES384", "ed25519"] {
+            supported_signing_algorithm(algorithm).unwrap();
+        }
+    }
 }

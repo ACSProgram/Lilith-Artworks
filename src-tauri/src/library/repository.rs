@@ -1196,7 +1196,7 @@ mod tests {
     }
 
     #[test]
-    fn initializes_current_cleanup_schema() {
+    fn initializes_current_v9_schema() {
         let fixture = Fixture::new();
         let connection = open(&fixture.root).unwrap();
         let version: i64 = connection
@@ -1214,8 +1214,34 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let branch_columns: Vec<String> = {
+            let mut statement = connection.prepare("PRAGMA table_info(branches)").unwrap();
+            statement
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let defaults: (i64, i64, i64) = connection
+            .query_row(
+                "SELECT consecutive_backup_failures, backup_retry_at_ms IS NULL,
+                        backup_disable_notice_pending
+                 FROM branches WHERE id = ?1",
+                [&fixture.artwork.branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(version, super::super::schema::SCHEMA_VERSION);
         assert!(cleanup_table);
+        for column in [
+            "consecutive_backup_failures",
+            "backup_retry_at_ms",
+            "backup_disable_notice_pending",
+        ] {
+            assert!(branch_columns.iter().any(|item| item == column), "{column}");
+        }
+        assert_eq!(defaults, (0, 1, 0));
+        open_existing(&fixture.root).unwrap();
     }
 
     #[test]

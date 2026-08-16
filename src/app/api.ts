@@ -14,6 +14,7 @@ export const appApi = {
     invokeCommand<SettingsSnapshot>("save_app_settings", { settings }),
   getRepositoryStatus: () => invokeCommand<RepositoryStatus>("get_repository_status"),
   openLogDirectory: () => invokeCommand<void>("open_log_directory"),
+  openLegalDirectory: () => invokeCommand<void>("open_legal_directory"),
   openSettingsDirectory: () => invokeCommand<void>("open_settings_directory"),
   retryFileCleanup: (ids: string[]) =>
     invokeCommand<CleanupReport>("retry_pending_file_cleanup", { ids }),
