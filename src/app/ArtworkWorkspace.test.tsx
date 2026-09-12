@@ -14,6 +14,7 @@ describe("ArtworkWorkspace", () => {
   it("mounts only the active workspace view", () => {
     render(<ArtworkWorkspace
       artworkId="artwork-1"
+      pinBoardSettings={{ arrangementGapPx: 10, textureCacheLevel: "medium" }}
       onError={vi.fn()}
       onNavigateRecord={vi.fn()}
       onRetryFileCleanup={vi.fn().mockResolvedValue({ removed: 0, failures: [] })}

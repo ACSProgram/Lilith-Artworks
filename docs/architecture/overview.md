@@ -9,6 +9,7 @@ src/app/                 应用启动、窗口、全局设置与跨模块工作�
 src/modules/library/     Artwork 树、搜索和选择交互
 src/modules/history/     分支历史图、提交、fork、恢复和裁剪
 src/modules/authenticity 成品、C2PA/TrustMark 发布与识别
+src/modules/pin-board    按 Artwork 的素材板画布、图片导入导出与画板回收站
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 
 src-tauri/src/app/                     配置、窗口和应用生命周期
@@ -20,6 +21,7 @@ src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/A
 src-tauri/src/history/                 分支、历史节点、fork、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备、调度和取消
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
+src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
 src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列、路径校验和失败重试
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
@@ -44,6 +46,7 @@ Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`
 - History node：不可变提交，只有一个父节点，可以被多个后继节点引用；fork 是从选定节点创建新 branch/head。
 - Final artifact：分支可选的一份最终成品，固定关联进入发布状态时的 head。存在时分支被冻结，该 head 是强制检查点。
 - Certification record：不可变导出快照，固定关联 final artifact、branch 和发布节点，记录 TrustMark ID、输出文件摘要、C2PA manifest 与验证状态。
+- Pin board：Artwork 内平铺一层的画板聚合，拥有图片记录、step 历史、图层/顺序与回收站状态；不进入分支历史，DDS 实体存于 `boards/`。
 
 作品树删除使用数据库软删除。删除一个分组会把其完整子树作为同一个回收站根保存，恢复时优先回到原父分组，原父级不可用时回到根级。只有回收站中的永久删除才清理项目元数据。Artwork 内部的历史节点裁剪属于版本图操作，不进入项目回收站。
 
@@ -58,6 +61,7 @@ Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`
     history/<history-id>.lbs
     deltas/<child-id>--<parent-id>.lbd
     artifacts/<branch-id>/
+    boards/<board-id>/<image-id>.dds
     temp/
   temp/
 ```

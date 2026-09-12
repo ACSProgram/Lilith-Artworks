@@ -9,6 +9,7 @@
 | 作品树、搜索、拖放、回收站 | `docs/modules/library.md` | `src/modules/library/`、`src-tauri/src/library/` |
 | 分支、提交、fork、恢复、精简、检查点 | `docs/modules/history-and-backup.md` | `src/modules/history/`、`src-tauri/src/history/`、`src-tauri/src/backup/` |
 | 发布、成品、C2PA、TrustMark、识别 | `docs/modules/authenticity.md` | `src/modules/authenticity/`、`src-tauri/src/authenticity/` |
+| 素材板、画板、图片导入导出、画板回收站 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
 | 设置、托盘、窗口生命周期 | `docs/architecture/overview.md` | `src-tauri/src/app/`、`src-tauri/src/lib.rs` |
 | 构建、格式、静态检查 | `docs/guides/validation.md` | 只运行与改动匹配的检查 |
 
@@ -26,6 +27,7 @@
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。
+- `pin_board` 通过公开的 repository 函数持久化画板/图片/历史，DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。
 - `authenticity` 通过公开的 history/backup 能力建立检查点，不导入 library 内部。
 - 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经 `repository.rs`。
 - 发布状态与 `final_artifacts` 绑定经 `src-tauri/src/authenticity/publication_repository.rs` 进入；认证配置与记录查询经 `repository.rs`。

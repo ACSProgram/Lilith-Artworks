@@ -1,7 +1,7 @@
 {
   "name": "lilith-artworks",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0-alpha.1",
   "author": "ACSProgram",
   "license": "GPL-3.0-only",
   "type": "module",
@@ -10,6 +10,7 @@
     "build": "tsc && vite build",
     "legal": "node tools/release/generate-licenses.mjs",
     "test": "vitest run",
+    "test:pin-board": "vitest run src/modules/pin-board",
     "verify:release-metadata": "node tools/release/verify-metadata.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
@@ -24,6 +25,7 @@
   "devDependencies": {
     "@tauri-apps/cli": "^2.8.0",
     "@testing-library/react": "^16.3.0",
+    "@types/node": "^22.20.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

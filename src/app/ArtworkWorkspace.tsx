@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useState } from "react";
-import { Fingerprint, GitCommitVertical, ShieldCheck } from "lucide-react";
+import { Fingerprint, GitCommitVertical, Images, ShieldCheck } from "lucide-react";
 import { AuthenticityModule } from "../modules/authenticity/AuthenticityModule";
 import type { CertificationRecord } from "../modules/authenticity/types";
 import { HistoryModule } from "../modules/history/HistoryModule";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
+import { PinBoardModule } from "../modules/pin-board/PinBoardModule";
+import type { PinBoardModuleSettings } from "../modules/pin-board/PinBoardModule";
 import type { CleanupReport } from "../shared/fileCleanup";
 
-type WorkspaceView = "history" | "publish" | "identify";
+type WorkspaceView = "history" | "publish" | "identify" | "pin-board";
 
 interface ArtworkWorkspaceProps {
   artworkId: string;
@@ -14,6 +16,8 @@ interface ArtworkWorkspaceProps {
   initialBranchId?: string | null;
   initialRecordId?: string | null;
   navigationKey?: number;
+  /** 素材板显示与缓存设置（来自应用设置）。 */
+  pinBoardSettings: PinBoardModuleSettings;
   onError: (message: string | null) => void;
   onNavigateRecord: (record: CertificationRecord) => void;
   onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
@@ -25,6 +29,7 @@ export function ArtworkWorkspace({
   initialBranchId = null,
   initialRecordId = null,
   navigationKey = 0,
+  pinBoardSettings,
   onError,
   onNavigateRecord,
   onRetryFileCleanup,
@@ -66,11 +71,20 @@ export function ArtworkWorkspace({
       <button className={view === "history" ? "active" : ""} type="button" onClick={() => setView("history")}><GitCommitVertical size={16} />版本历史</button>
       <button className={view === "publish" ? "active" : ""} type="button" onClick={() => setView("publish")}><ShieldCheck size={16} />发布与认证</button>
       <button className={view === "identify" ? "active" : ""} type="button" onClick={() => setView("identify")}><Fingerprint size={16} />识别与溯源</button>
+      <button className={view === "pin-board" ? "active" : ""} type="button" onClick={() => setView("pin-board")}><Images size={16} />素材板</button>
     </nav>
     <div className="artwork-view">
       {view === "history" && <div className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}
       {view === "publish" && <div className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
       {view === "identify" && <div className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>}
+      {/* 素材板保持挂载：切换视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源。 */}
+      <div className="workspace-view-pane" hidden={view !== "pin-board"}>
+        <PinBoardModule
+          artworkId={artworkId}
+          active={view === "pin-board"}
+          settings={pinBoardSettings}
+        />
+      </div>
     </div>
   </div>;
 }

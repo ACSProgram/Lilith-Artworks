@@ -28,6 +28,7 @@ pub(crate) struct AppSettings {
     pause_automatic_backups: bool,
     window: WindowSettings,
     content: ContentSettings,
+    pin_board: PinBoardSettings,
 }
 
 impl Default for AppSettings {
@@ -40,6 +41,24 @@ impl Default for AppSettings {
             pause_automatic_backups: false,
             window: WindowSettings::default(),
             content: ContentSettings::default(),
+            pin_board: PinBoardSettings::default(),
+        }
+    }
+}
+
+/// 素材板显示与性能设置。缓存等级与间距由前端模块和原生纹理缓存预算共同消费。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct PinBoardSettings {
+    texture_cache_level: String,
+    arrangement_gap_px: f64,
+}
+
+impl Default for PinBoardSettings {
+    fn default() -> Self {
+        Self {
+            texture_cache_level: "medium".into(),
+            arrangement_gap_px: 10.0,
         }
     }
 }
@@ -222,6 +241,14 @@ impl AppState {
             .read()
             .map(|settings| settings.pause_automatic_backups)
             .unwrap_or(false)
+    }
+
+    /// 素材板原生纹理解码结果缓存等级（low/medium/high）。
+    pub(crate) fn pin_board_texture_cache_level(&self) -> String {
+        self.settings
+            .read()
+            .map(|settings| settings.pin_board.texture_cache_level.clone())
+            .unwrap_or_else(|_| "medium".into())
     }
 
     pub(crate) fn request_exit(&self) {
@@ -496,6 +523,15 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     ) {
         return Err("默认内容面板无效".into());
     }
+    if !matches!(
+        settings.pin_board.texture_cache_level.as_str(),
+        "low" | "medium" | "high"
+    ) {
+        return Err("素材板纹理缓存等级无效".into());
+    }
+    if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
+        return Err("素材板阵列间距超出允许范围".into());
+    }
     if settings.window.width < 760
         || settings.window.height < 560
         || settings.window.width > 16_384
@@ -624,7 +660,7 @@ mod tests {
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '1' WHERE key = 'schema_version'",
+                "UPDATE repository_meta SET value = '2' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();

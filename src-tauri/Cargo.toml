@@ -1,6 +1,6 @@
 [package]
 name = "lilith-artworks"
-version = "0.1.0"
+version = "0.2.0-alpha.1"
 description = "Branch-aware artwork history and provenance manager"
 authors = ["ACSProgram"]
 edition = "2021"
@@ -16,10 +16,12 @@ tauri-build = { version = "2.6", features = [] }
 [dependencies]
 anyhow = "1"
 base64 = "0.22"
+bcdec_rs = "0.2"
 c2pa = { version = "0.90.11", default-features = false, features = ["file_io", "rust_native_crypto", "http_ureq"] }
 hex = "0.4"
 ico = "0.5"
-image = { version = "0.25.6", default-features = false, features = ["jpeg", "png", "webp", "tiff"] }
+image = { version = "0.25.6", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tga", "webp", "tiff"] }
+image_dds = { version = "0.7", default-features = false, features = ["ddsfile", "image", "encode"] }
 log = "0.4"
 rand = "0.9"
 rusqlite = { version = "0.37", features = ["bundled"] }
@@ -44,3 +46,6 @@ panic = "abort"
 codegen-units = 1
 lto = "thin"
 strip = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell"] }

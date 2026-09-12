@@ -40,8 +40,9 @@ if (nonOfficialPackages.length > 0) {
 }
 
 const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "schema.rs"), "utf8");
-if (!/SCHEMA_VERSION:\s*i64\s*=\s*1\s*;/.test(schema)) {
-  throw new Error("Release must use repository schema v1");
+const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
+if (schemaVersion !== "2") {
+  throw new Error(`Release must use repository schema v2 (found: ${schemaVersion ?? "unknown"})`);
 }
 
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
@@ -55,4 +56,4 @@ if (tag && tag !== `v${expected}`) {
   throw new Error(`Tag ${tag} does not match version v${expected}`);
 }
 
-console.log(`Release metadata verified: v${expected}, com.lilith.artworks, schema v1`);
+console.log(`Release metadata verified: v${expected}, com.lilith.artworks, schema v${schemaVersion}`);

@@ -6,7 +6,51 @@ use crate::storage;
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 1;
+pub(super) const SCHEMA_VERSION: i64 = 2;
+
+/// 素材板（pin-board）三张表。v2 起：
+/// - `pin_boards`：按 Artwork 平铺一层画板，`deleted_at` 为回收站软删除；
+/// - `pin_board_images`：图片记录，DDS 实体存于
+///   `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`；
+/// - `pin_board_history`：每张图片按 step 的历史状态（撤销/恢复持久化），
+///   变换（points/uv）以 JSON 存储。
+const PIN_BOARD_TABLES_SQL: &str = "
+             CREATE TABLE pin_boards (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               artwork_id TEXT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
+               name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+               sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+               now_step INTEGER NOT NULL DEFAULT 0 CHECK (now_step >= 0),
+               max_step INTEGER NOT NULL DEFAULT 0 CHECK (max_step >= 0),
+               revision TEXT NOT NULL CHECK (length(revision) = 64),
+               deleted_at INTEGER,
+               created_ms INTEGER NOT NULL,
+               updated_ms INTEGER NOT NULL
+             );
+             CREATE INDEX pin_boards_artwork
+               ON pin_boards(artwork_id, deleted_at, sort_order, id);
+             CREATE INDEX pin_boards_trash ON pin_boards(deleted_at, id);
+
+             CREATE TABLE pin_board_images (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+               file_path TEXT NOT NULL,
+               width INTEGER NOT NULL CHECK (width > 0),
+               height INTEGER NOT NULL CHECK (height > 0),
+               created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX pin_board_images_board ON pin_board_images(board_id, id);
+
+             CREATE TABLE pin_board_history (
+               board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+               image_id INTEGER NOT NULL REFERENCES pin_board_images(id) ON DELETE CASCADE,
+               step INTEGER NOT NULL CHECK (step >= 0),
+               deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+               layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 2),
+               sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+               transform_json TEXT NOT NULL,
+               PRIMARY KEY (board_id, image_id, step)
+             );";
 
 #[cfg(test)]
 thread_local! {
@@ -15,7 +59,7 @@ thread_local! {
 
 pub(super) fn create(connection: &Connection) -> Result<(), String> {
     connection
-        .execute_batch(
+        .execute_batch(&format!(
             "BEGIN IMMEDIATE;
              CREATE TABLE repository_meta (
                key TEXT PRIMARY KEY,
@@ -23,7 +67,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
              INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '1');
+               ('schema_version', '2');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -158,6 +202,8 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              CREATE INDEX certification_records_branch
                ON certification_records(branch_id, created_ms DESC);
 
+             {PIN_BOARD_TABLES_SQL}
+
              CREATE TABLE pending_file_cleanup (
                id TEXT PRIMARY KEY,
                path_kind TEXT NOT NULL CHECK (path_kind IN ('repository_file', 'repository_directory', 'external_file')),
@@ -243,7 +289,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              END;
 
              COMMIT;",
-        )
+        ))
         .map_err(|error| format!("无法创建作品数据库结构：{error}"))
 }
 
@@ -305,6 +351,8 @@ pub(super) fn validate_repository_semantics(connection: &Connection) -> Result<(
              UNION ALL SELECT 'final_artifacts.source_path', source_path FROM final_artifacts
              UNION ALL SELECT 'certification_records.stored_path', stored_path
                FROM certification_records
+             UNION ALL SELECT 'pin_board_images.file_path', file_path
+               FROM pin_board_images
              UNION ALL SELECT 'pending_file_cleanup.path', path FROM pending_file_cleanup
                WHERE path_kind <> 'external_file'",
         )
@@ -369,6 +417,29 @@ fn repository_version(connection: &Connection) -> Result<i64, String> {
 fn validate_current_version(version: i64) -> Result<(), String> {
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{version}"));
+    }
+    Ok(())
+}
+
+/// 打开既有仓库时执行追加式 schema 迁移。迁移不支持回退；高于当前版本的
+/// 仓库直接拒绝打开。v1 → v2 追加素材板三张表，不改动既有表。
+pub(super) fn migrate(connection: &Connection) -> Result<(), String> {
+    let version = repository_version(connection)?;
+    if version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version < 1 || version > SCHEMA_VERSION {
+        return Err(format!("作品仓库版本不受支持：{version}"));
+    }
+    if version < 2 {
+        connection
+            .execute_batch(&format!(
+                "BEGIN IMMEDIATE;
+                 {PIN_BOARD_TABLES_SQL}
+                 UPDATE repository_meta SET value = '2' WHERE key = 'schema_version';
+                 COMMIT;"
+            ))
+            .map_err(|error| format!("无法迁移作品数据库结构：{error}"))?;
     }
     Ok(())
 }
