@@ -1,0 +1,22 @@
+/node_modules/
+/dist/
+/target/
+/src-tauri/target/
+/.idea/
+/.vscode/
+*.log
+*.tmp
+*.bak
+.DS_Store
+Thumbs.db
+
+# Local application state and signing material
+/.runtime-data/
+/*.sqlite3
+/*.sqlite3-shm
+/*.sqlite3-wal
+*.pem
+*.key
+*.p12
+*.pfx
+
