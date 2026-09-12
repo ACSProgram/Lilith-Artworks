@@ -85,6 +85,10 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
       density: "comfortable",
       defaultPanel: "overview",
     },
+    pinBoard: {
+      textureCacheLevel: "medium",
+      arrangementGapPx: 10,
+    },
   },
   settingsPath: "C:\\settings\\settings.json",
   logDirectory: "C:\\settings\\logs",

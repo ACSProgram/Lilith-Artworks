@@ -1,6 +1,12 @@
 export type Theme = "system" | "light" | "dark";
 export type ContentDensity = "comfortable" | "compact";
 export type DefaultPanel = "overview" | "history" | "authenticity";
+export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
+
+export interface PinBoardSettings {
+  textureCacheLevel: PinBoardTextureCacheLevel;
+  arrangementGapPx: number;
+}
 
 export interface WindowSettings {
   x: number | null;
@@ -23,6 +29,7 @@ export interface AppSettings {
   pauseAutomaticBackups: boolean;
   window: WindowSettings;
   content: ContentSettings;
+  pinBoard: PinBoardSettings;
 }
 
 export interface SettingsSnapshot {

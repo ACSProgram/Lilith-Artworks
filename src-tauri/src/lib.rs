@@ -4,6 +4,7 @@ mod backup;
 mod cleanup;
 mod history;
 mod library;
+mod pin_board;
 mod storage;
 
 use std::{
@@ -329,6 +330,24 @@ pub fn run() {
             authenticity::preview_certification_record,
             authenticity::export_certification_record,
             authenticity::estimate_authenticity_output_size,
+            pin_board::list_pin_boards,
+            pin_board::list_pin_board_trash,
+            pin_board::create_pin_board,
+            pin_board::rename_pin_board,
+            pin_board::trash_pin_board,
+            pin_board::restore_pin_board,
+            pin_board::delete_pin_board_permanently,
+            pin_board::empty_pin_board_trash,
+            pin_board::load_pin_board,
+            pin_board::save_pin_board,
+            pin_board::finalize_pin_board,
+            pin_board::paste_pin_board_images,
+            pin_board::import_pin_board_images,
+            pin_board::import_pin_board_clipboard_image,
+            pin_board::export_pin_board_images,
+            pin_board::read_pin_board_image_png,
+            pin_board::read_pin_board_texture,
+            pin_board::read_pin_board_clipboard_paths,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lilith Artworks");

@@ -1,0 +1,307 @@
+/* 素材板模块样式（自 Lilith Client 迁移，按 Artworks 调色板适配）。 */
+
+.pin-board-module {
+  --pin-board-bg: #e7eae7;
+  --pb-surface-raised: var(--surface);
+  --pb-border-strong: color-mix(in srgb, var(--text) 24%, var(--border));
+  --pb-text-soft: color-mix(in srgb, var(--text) 78%, var(--surface-subtle));
+  --pb-text-faint: var(--muted);
+  --pb-accent-text: var(--accent);
+  --pb-accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
+  --pb-warning-soft: color-mix(in srgb, var(--warning) 14%, transparent);
+  --pb-danger-soft: color-mix(in srgb, var(--danger) 12%, transparent);
+  --pb-shadow-modal: 0 18px 48px rgb(0 0 0 / 24%);
+  --pb-selection: color-mix(in srgb, var(--accent) 16%, transparent);
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+:root[data-theme="dark"] .pin-board-module { --pin-board-bg: #141815; }
+
+.pin-board-module.sidebar-collapsed { grid-template-columns: 0 minmax(0, 1fr); }
+.pin-board-module.sidebar-collapsed .pin-board-sidebar { visibility: hidden; }
+
+.pin-board-sidebar {
+  display: flex;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+
+.pin-board-sidebar header {
+  display: flex;
+  height: 58px;
+  flex: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px 0 15px;
+  border-bottom: 1px solid var(--border);
+}
+.pin-board-sidebar header div { display: flex; flex-direction: column; }
+.pin-board-sidebar small,
+.pin-board-toolbar span { color: var(--pb-text-faint); font-size: 11px; }
+
+.pin-board-tree-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 8px;
+}
+.pin-board-board-list { display: flex; flex-direction: column; gap: 1px; }
+
+.pin-board-tree-row,
+.pin-board-trash-heading {
+  display: flex;
+  width: 100%;
+  min-height: 32px;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--pb-text-soft);
+  background: transparent;
+  text-align: left;
+}
+.pin-board-tree-row { cursor: pointer; }
+.pin-board-tree-row:hover,
+.pin-board-tree-row.active,
+.pin-board-trash-heading:hover { color: var(--pb-accent-text); background: var(--pb-accent-soft); }
+.pin-board-tree-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin-board-tree-empty,
+.pin-board-trash-empty { padding: 8px 12px; color: var(--pb-text-faint); font-size: 11px; }
+
+.pin-board-trash-section { flex: none; display: flex; flex-direction: column; max-height: 200px; }
+.pin-board-trash-divider { height: 1px; margin: 10px 8px 7px; background: var(--border); }
+.pin-board-trash-heading { color: var(--pb-text-soft); font-size: 12px; font-weight: 600; }
+.pin-board-trash-heading small { margin-left: auto; color: var(--pb-text-faint); font-size: 11px; }
+.pin-board-trash-heading .icon-button { width: 24px; height: 24px; margin-left: 2px; }
+.pin-board-tree-row.trash { color: var(--pb-text-faint); }
+.pin-board-tree-row.trash:hover { color: var(--danger); background: var(--pb-danger-soft); }
+.pin-board-trash-list { min-height: 0; flex: 1; overflow-y: auto; padding: 0 8px 8px; }
+
+.pin-board-workspace {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--surface);
+}
+.pin-board-workspace.fullscreen { position: fixed; z-index: 2000; inset: 0; width: 100vw; height: 100vh; background: var(--surface); }
+.pin-board-workspace.fullscreen .pin-board-toolbar,
+.pin-board-workspace.fullscreen .pin-board-transfer-progress { display: none; }
+
+.pin-board-toolbar {
+  display: flex;
+  width: 100%;
+  height: 58px;
+  min-height: 58px;
+  box-sizing: border-box;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  overflow: hidden;
+  padding: 0 14px;
+  border-bottom: 1px solid var(--border);
+}
+.pin-board-title { display: flex; min-width: 140px; flex-direction: column; }
+.pin-board-toolbar strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pin-board-actions { display: flex; min-width: 0; align-items: center; gap: 2px; margin-left: auto; overflow-x: auto; }
+.pin-board-actions .icon-button { flex: none; }
+.pin-board-actions .icon-button.active { color: var(--pb-accent-text); background: var(--pb-accent-soft); }
+.pin-board-divider { width: 1px; height: 20px; margin: 0 5px; background: var(--border); flex: none; }
+.pin-board-zoom { min-width: 42px; color: var(--pb-text-soft); font-size: 11px; text-align: center; }
+
+.pin-board-status {
+  display: flex;
+  height: 34px;
+  box-sizing: border-box;
+  flex: none;
+  align-items: center;
+  gap: 7px;
+  overflow: hidden;
+  padding: 8px 14px;
+  color: var(--warning);
+  background: var(--pb-warning-soft);
+  font-size: 12px;
+}
+.pin-board-status svg { flex: none; }
+.pin-board-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.pin-board-transfer-progress {
+  display: grid;
+  gap: 6px;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-subtle);
+}
+.pin-board-transfer-progress div { display: flex; align-items: center; justify-content: space-between; color: var(--pb-text-soft); font-size: 12px; }
+.pin-board-transfer-progress strong { color: var(--text); font-variant-numeric: tabular-nums; }
+.pin-board-transfer-progress progress { width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 3px; background: var(--border); }
+
+.pin-board-stage {
+  display: grid;
+  position: relative;
+  min-height: 0;
+  flex: 1;
+  place-items: center;
+  overflow: hidden;
+  background: var(--pin-board-bg);
+}
+.pin-board-lock-indicator {
+  position: absolute;
+  z-index: 2;
+  top: 10px;
+  left: 10px;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 5px;
+  color: var(--pb-accent-text);
+  background: var(--surface);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
+  pointer-events: none;
+}
+
+.pin-board-canvas-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--pin-board-bg); }
+.pin-board-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; outline: 0; touch-action: none; background: var(--pin-board-bg); }
+.pin-board-canvas.locked { cursor: grab; }
+.pin-board-canvas.dragging { cursor: grabbing; }
+.pin-board-canvas.moving-image { cursor: move; }
+.pin-board-canvas.rotating-image,
+.pin-board-canvas.over-rotate-handle { cursor: alias; }
+.pin-board-canvas.scaling-image,
+.pin-board-canvas.over-resize-nwse { cursor: nwse-resize; }
+.pin-board-canvas.over-resize-nesw { cursor: nesw-resize; }
+.pin-board-canvas.selecting { cursor: crosshair; }
+
+.pin-board-selection,
+.pin-board-marquee { position: absolute; top: 0; left: 0; pointer-events: none; }
+.pin-board-selection[hidden],
+.pin-board-marquee[hidden] { display: none; }
+.pin-board-selection { border: 1px solid #f0b429; box-shadow: 0 0 0 1px rgba(30, 33, 31, 0.45); will-change: transform; }
+.pin-board-rotation-stem { position: absolute; top: -23px; left: 50%; width: 1px; height: 22px; background: #f0b429; }
+.pin-board-rotation-handle,
+.pin-board-resize-handle { position: absolute; width: 10px; height: 10px; border: 2px solid #f0b429; background: var(--surface); box-shadow: 0 1px 3px rgba(0, 0, 0, 0.35); }
+.pin-board-rotation-handle { top: -33px; left: calc(50% - 5px); border-radius: 50%; }
+.pin-board-resize-handle { border-radius: 2px; }
+.pin-board-resize-handle.top-left { top: -6px; left: -6px; }
+.pin-board-resize-handle.top-right { top: -6px; right: -6px; }
+.pin-board-resize-handle.bottom-right { right: -6px; bottom: -6px; }
+.pin-board-resize-handle.bottom-left { bottom: -6px; left: -6px; }
+.pin-board-marquee { border: 1px solid rgba(31, 114, 83, 0.95); background: rgba(31, 114, 83, 0.15); }
+
+.pin-board-layer-swatch { display: block; width: 14px; height: 3px; border-radius: 1px; background: var(--pb-text-faint); box-shadow: 0 -4px 0 var(--pb-border-strong), 0 4px 0 var(--pb-border-strong); }
+.pin-board-layer-swatch.top { transform: translateY(-2px); }
+.pin-board-layer-swatch.bottom { transform: translateY(2px); }
+
+.pin-board-text-backdrop { z-index: 2300; }
+.pin-board-text-dialog { width: min(520px, 100%); }
+.pin-board-text-fields { display: grid; gap: 16px; }
+.pin-board-text-input { min-height: 126px; resize: vertical; }
+.pin-board-text-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
+.pin-board-text-color {
+  display: grid;
+  height: 36px;
+  grid-template-columns: 42px minmax(0, 1fr);
+  align-items: center;
+  overflow: hidden;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 5px;
+  background: var(--surface);
+}
+.pin-board-text-color input { width: 42px; height: 36px; padding: 3px; border: 0; background: transparent; cursor: pointer; }
+.pin-board-text-color span { overflow: hidden; padding: 0 10px; color: var(--pb-text-soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 共享右键菜单与模态对话框（ContextMenu/Modal/PromptDialog 专用）。 */
+.modal-backdrop {
+  position: fixed;
+  z-index: 100;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(16, 20, 17, 0.42);
+}
+.modal {
+  width: min(480px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--surface);
+  box-shadow: var(--pb-shadow-modal);
+}
+.modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 20px 20px 14px; }
+.modal-header h2, .modal-header p { margin: 0; }
+.modal-header h2 { font-size: 16px; }
+.modal-content { padding: 8px 20px 22px; }
+.modal-footer { display: flex; align-items: center; justify-content: flex-end; gap: 8px; padding: 12px 20px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
+.prompt-dialog-form { display: grid; gap: 8px; }
+.prompt-dialog-label { color: var(--pb-text-soft); font-size: 12px; }
+.prompt-dialog-input { min-height: 34px; padding: 0 10px; border: 1px solid var(--control-border, var(--border)); border-radius: 6px; background: var(--control-bg, var(--surface)); color: var(--text); }
+.dialog-input { min-height: 34px; padding: 0 10px; border: 1px solid var(--control-border, var(--border)); border-radius: 6px; background: var(--control-bg, var(--surface)); color: var(--text); }
+.field-label { display: block; margin-bottom: 6px; color: var(--pb-text-soft); font-size: 12px; }
+
+.context-menu {
+  position: fixed;
+  z-index: 120;
+  display: flex;
+  min-width: 150px;
+  max-width: 260px;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 8px;
+  background: var(--surface);
+  box-shadow: var(--pb-shadow-modal);
+}
+.context-menu button {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 5px;
+  color: var(--text);
+  background: transparent;
+  font-size: 13px;
+  text-align: left;
+}
+.context-menu button:hover,
+.context-menu button:focus-visible { color: var(--pb-accent-text); background: var(--pb-accent-soft); outline: 0; }
+.context-menu button.danger { color: var(--danger); }
+.context-menu button.danger:hover { color: var(--danger); background: var(--pb-warning-soft); }
+.context-menu button:disabled { color: var(--pb-text-faint); cursor: default; }
+.context-menu button svg { flex: none; }
+.context-menu button span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.context-menu button kbd { margin-left: auto; color: var(--pb-text-faint); font-size: 10px; }
+.context-menu-separator { height: 1px; margin: 4px 6px; background: var(--border); }
+.context-menu-heading {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 10px 4px;
+  color: var(--pb-text-faint);
+  font-size: 11px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.context-menu-heading svg { flex: none; }
+.context-menu-heading span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

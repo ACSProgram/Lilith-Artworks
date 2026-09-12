@@ -5,6 +5,7 @@ import {
   Clock3,
   DatabaseBackup,
   FolderOpen,
+  Images,
   Info,
   LoaderCircle,
   MonitorCog,
@@ -129,6 +130,11 @@ export function App() {
     if (repository.configured) return "仓库不可用";
     return "尚未配置仓库";
   }, [repository]);
+
+  const pinBoardSettings = useMemo(() => ({
+    arrangementGapPx: snapshot?.settings.pinBoard?.arrangementGapPx ?? 10,
+    textureCacheLevel: snapshot?.settings.pinBoard?.textureCacheLevel ?? "medium",
+  }), [snapshot]);
 
   const chooseRepository = async () => {
     if (!draft) return;
@@ -286,6 +292,7 @@ export function App() {
               initialBranchId={workspace.initialBranchId}
               initialRecordId={workspace.initialRecordId}
               navigationKey={workspace.navigationKey}
+              pinBoardSettings={pinBoardSettings}
               onError={setMessage}
               onRetryFileCleanup={appApi.retryFileCleanup}
               onNavigateRecord={(record) => workspace.onNavigateRecord({
@@ -403,6 +410,34 @@ export function App() {
                   <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
                   <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
                 </div>
+              </div>
+            </div>
+
+            <div className="settings-section settings-section-left">
+              <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
+              <div className="settings-preference-list">
+                <label className="settings-preference-row">
+                  <span className="settings-row-icon"><Images aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>纹理缓存等级</strong><small>影响画布流畅度与显存占用</small></span>
+                  <select value={draft.pinBoard.textureCacheLevel} onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, textureCacheLevel: event.target.value as AppSettings["pinBoard"]["textureCacheLevel"] } })}>
+                    <option value="low">低</option>
+                    <option value="medium">中</option>
+                    <option value="high">高</option>
+                  </select>
+                </label>
+                <label className="settings-preference-row">
+                  <span className="settings-row-icon"><Images aria-hidden="true" size={17} /></span>
+                  <span className="settings-row-copy"><strong>阵列间距（CSS 像素）</strong><small>执行阵列排序时图片之间的间距</small></span>
+                  <input
+                    className="dialog-input"
+                    type="number"
+                    min={1}
+                    max={200}
+                    step={1}
+                    value={draft.pinBoard.arrangementGapPx}
+                    onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
+                  />
+                </label>
               </div>
             </div>
 

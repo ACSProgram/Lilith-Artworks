@@ -50,6 +50,7 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
         super::schema::create(&connection)?;
         create_directories(root)?;
     } else {
+        super::schema::migrate(&connection)?;
         super::schema::validate(&connection)?;
         super::schema::validate_repository_semantics(&connection)?;
         create_directories(root)?;
@@ -63,6 +64,7 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
     require_database_file(&database)?;
 
     let connection = storage::open(root)?;
+    super::schema::migrate(&connection)?;
     super::schema::validate(&connection)?;
     super::schema::validate_repository_semantics(&connection)?;
     create_directories(root)
