@@ -1,0 +1,497 @@
+import {
+  FileImage,
+  FolderPlus,
+  LoaderCircle,
+  ChevronsUp,
+  Pencil,
+  Plus,
+  Search,
+  Settings,
+  TriangleAlert,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  Fragment,
+  useEffect,
+  useMemo,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+} from "react";
+import type { CleanupReport } from "../../shared/fileCleanup";
+import { ConfirmDialog } from "../../shared/ConfirmDialog";
+import type { ConfirmView } from "../../shared/ConfirmDialog";
+import { useMenuPlacement } from "../../shared/useMenuPlacement";
+import { flattenTree, selectionForClick, visibleTree } from "./tree";
+import { NodeEditor, TrashDialog } from "./LibraryDialogs";
+import type { EditorState } from "./LibraryDialogs";
+import { LibraryTreeView } from "./LibraryTreeView";
+import { CommandMenu, NodeOverview, WorkspaceEmpty } from "./LibraryViews";
+import type { LibraryNode, LibrarySearchResult, MoveLibraryNodesRequest } from "./types";
+import { useLibraryController } from "./useLibraryController";
+
+interface LibraryModuleProps {
+  repositoryReady: boolean;
+  onConfigure: () => void;
+  onError: (message: string | null) => void;
+  onRetryFileCleanup: (ids: string[]) => Promise<CleanupReport>;
+  onAcknowledgeBackupDisableNotices: (artworkIds: string[]) => Promise<void>;
+  onOpenBackupDisableNotice: () => Promise<BackupDisableNoticeTarget | null>;
+  renderArtworkWorkspace: (props: LibraryArtworkWorkspaceProps) => ReactNode;
+}
+
+export interface BackupDisableNoticeTarget {
+  artworkId: string;
+  branchId: string;
+}
+
+export interface ArtworkTraceTarget {
+  artworkId: string;
+  branchId: string;
+  recordId: string;
+}
+
+export interface LibraryArtworkWorkspaceProps {
+  artworkId: string;
+  initialView: "history" | "publish";
+  initialBranchId: string | null;
+  initialRecordId: string | null;
+  navigationKey: number;
+  onNavigateRecord: (target: ArtworkTraceTarget) => void;
+}
+
+interface LibraryWorkspaceTarget {
+  artworkId: string;
+  branchId: string;
+  recordId: string | null;
+  initialView: "history" | "publish";
+  navigationKey: number;
+}
+
+interface ContextState {
+  node: LibraryNode | null;
+  x: number;
+  y: number;
+}
+
+interface PendingConfirm extends ConfirmView {
+  run: () => Promise<void>;
+}
+
+export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices, onOpenBackupDisableNotice, renderArtworkWorkspace }: LibraryModuleProps) {
+  const controller = useLibraryController({ repositoryReady, onError, onRetryFileCleanup, onAcknowledgeBackupDisableNotices });
+  const {
+    tree, loading, operationBusy, expandedIds, setExpandedIds, selectedIds, setSelectedIds,
+    anchorId, setAnchorId, activeId, setActiveId, query, setQuery, searchResults,
+    setSearchResults, searching, trashEntries, cleanupFailures, retryCleanup, loadTrash,
+    createGroup, createArtwork, renameNode, trashNodes, moveNodes, restoreTrash,
+    permanentlyDeleteTrash, emptyTrash, acknowledgeBackupDisableNotices,
+  } = controller;
+  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [context, setContext] = useState<ContextState | null>(null);
+  const [editor, setEditor] = useState<EditorState | null>(null);
+  const [trashOpen, setTrashOpen] = useState(false);
+  const [workspaceTarget, setWorkspaceTarget] = useState<LibraryWorkspaceTarget | null>(null);
+  const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
+  const contextPlacement = useMenuPlacement(context);
+
+  const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
+
+  const nodeById = useMemo(
+    () => new Map(allNodes.map((node) => [node.id, node])),
+    [allNodes],
+  );
+  const visibleIds = useMemo(
+    () => visibleTree(tree.nodes, expandedIds).map(({ node }) => node.id),
+    [expandedIds, tree.nodes],
+  );
+  const activeNode = activeId ? nodeById.get(activeId) ?? null : null;
+  const backupNoticeArtworkIds = useMemo(() => allNodes
+    .filter((node) => (node.artwork?.backupDisableNoticeCount ?? 0) > 0)
+    .map((node) => node.id), [allNodes]);
+  const backupNoticeCount = useMemo(() => allNodes.reduce(
+    (count, node) => count + (node.artwork?.backupDisableNoticeCount ?? 0), 0,
+  ), [allNodes]);
+
+  useEffect(() => {
+    if (!context && !newMenuOpen) return;
+    const close = () => {
+      setContext(null);
+      setNewMenuOpen(false);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") close();
+    };
+    window.addEventListener("pointerdown", close);
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [context, newMenuOpen]);
+
+  const creationParent = (node: LibraryNode | null): string | null => {
+    if (!node) return null;
+    return node.kind === "group" ? node.id : node.parentId;
+  };
+
+  const selectedForNode = (node: LibraryNode): string[] =>
+    selectedIds.has(node.id) ? [...selectedIds] : [node.id];
+
+  const openContext = (node: LibraryNode | null, event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (node && !selectedIds.has(node.id)) {
+      setSelectedIds(new Set([node.id]));
+      setAnchorId(node.id);
+      setActiveId(node.id);
+    }
+    setNewMenuOpen(false);
+    setContext({
+      node,
+      x: event.clientX,
+      y: event.clientY,
+    });
+  };
+
+  const beginTrashMove = (node: LibraryNode) => {
+    const ids = selectedForNode(node);
+    const label = ids.length === 1 ? `“${node.title}”` : `选中的 ${ids.length} 个节点`;
+    setContext(null);
+    setPendingConfirm({
+      icon: <Trash2 size={20} />,
+      eyebrow: "可恢复",
+      title: "移到回收站",
+      subject: label,
+      description: "项目及其子树会作为一个回收站条目保存，可在回收站中恢复到原位置。",
+      detail: "回收站条目在永久删除前不会释放任何 Chunk 文件。",
+      action: "移到回收站",
+      run: async () => {
+        await trashNodes(ids);
+        setSelectedIds(new Set());
+        setActiveId(null);
+      },
+    });
+  };
+
+  const openTrash = async () => {
+    try {
+      await loadTrash();
+      setTrashOpen(true);
+    } catch { /* Error is surfaced by the controller. */ }
+  };
+
+  const selectSearchResult = (result: LibrarySearchResult) => {
+    setExpandedIds((current) => new Set([...current, ...result.ancestorIds]));
+    setSelectedIds(new Set([result.id]));
+    setAnchorId(result.id);
+    setActiveId(result.id);
+    setWorkspaceTarget(null);
+    setQuery("");
+    setSearchResults([]);
+  };
+
+  const navigateToArtwork = (
+    target: Omit<LibraryWorkspaceTarget, "navigationKey">,
+    missingMessage: string,
+  ) => {
+    const node = nodeById.get(target.artworkId);
+    if (!node) {
+      onError(missingMessage);
+      return;
+    }
+    setExpandedIds((current) => {
+      const ancestors: string[] = [];
+      let parentId = node.parentId;
+      while (parentId) {
+        ancestors.push(parentId);
+        parentId = nodeById.get(parentId)?.parentId ?? null;
+      }
+      return new Set([...current, ...ancestors]);
+    });
+    setSelectedIds(new Set([target.artworkId]));
+    setAnchorId(target.artworkId);
+    setActiveId(target.artworkId);
+    setWorkspaceTarget((current) => ({
+      ...target,
+      navigationKey: (current?.navigationKey ?? 0) + 1,
+    }));
+  };
+
+  const openBackupDisableNotice = async () => {
+    try {
+      const target = await onOpenBackupDisableNotice();
+      if (!target) {
+        onError("待处理的自动备份关闭通知已经清除。");
+        return;
+      }
+      navigateToArtwork({
+        ...target,
+        recordId: null,
+        initialView: "history",
+      }, "自动备份通知所属 Artwork 当前不在作品树中。");
+    } catch (error) {
+      onError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  return (
+    <Fragment>
+      <aside className="library-sidebar">
+        <div className="sidebar-heading">
+          <div>
+            <span>作品库</span>
+            <small>{tree.artworkCount}</small>
+          </div>
+          <div className="sidebar-actions">
+            <div className="menu-anchor">
+              <button
+                className="icon-button"
+                type="button"
+                title="新建"
+                disabled={!repositoryReady || operationBusy}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => setNewMenuOpen((current) => !current)}
+              >
+                <Plus aria-hidden="true" size={18} />
+              </button>
+              {newMenuOpen && (
+                <CommandMenu
+                  className="new-command-menu"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onGroup={() => {
+                    setEditor({ mode: "group", parentId: creationParent(activeNode), node: null });
+                    setNewMenuOpen(false);
+                  }}
+                  onArtwork={() => {
+                    setEditor({ mode: "artwork", parentId: creationParent(activeNode), node: null });
+                    setNewMenuOpen(false);
+                  }}
+                />
+              )}
+            </div>
+            <button className="icon-button" type="button" title="折叠所有分组" disabled={!repositoryReady} onClick={() => setExpandedIds(new Set())}>
+              <ChevronsUp aria-hidden="true" size={18} />
+            </button>
+          </div>
+        </div>
+
+        <div className="search-area">
+          <label className="search-box">
+            {searching ? <LoaderCircle className="spin" aria-hidden="true" size={16} /> : <Search aria-hidden="true" size={16} />}
+            <input
+              type="search"
+              placeholder="搜索标题或工作文件"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              disabled={!repositoryReady}
+            />
+            {query && (
+              <button type="button" title="清除搜索" onClick={() => setQuery("")}>
+                <X aria-hidden="true" size={14} />
+              </button>
+            )}
+          </label>
+          {query.trim() && (
+            <div className="search-results">
+              {!searching && searchResults.length === 0 && <div>没有匹配项</div>}
+              {searchResults.map((result) => (
+                <button key={result.id} type="button" onClick={() => selectSearchResult(result)}>
+                  {result.kind === "group" ? <FolderPlus aria-hidden="true" size={16} /> : <FileImage aria-hidden="true" size={16} />}
+                  <span>
+                    <strong>{result.title}</strong>
+                    <small>{result.breadcrumb}</small>
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {backupNoticeCount > 0 && <div className="backup-disable-alert" role="alert">
+          <TriangleAlert aria-hidden="true" size={16} />
+          <span><strong>{backupNoticeCount} 个分支的自动备份已关闭</strong><small>连续 5 次读取或备份失败，请检查工作文件路径后手动重新启用。</small></span>
+          <div className="backup-disable-alert-actions">
+            <button type="button" disabled={operationBusy} onClick={() => void openBackupDisableNotice()}>查看分支设置</button>
+            <button type="button" disabled={operationBusy} onClick={() => void acknowledgeBackupDisableNotices(backupNoticeArtworkIds)}>知道了</button>
+          </div>
+        </div>}
+
+        <div className="tree-scroll">
+          {loading ? (
+            <div className="tree-loading"><LoaderCircle className="spin" aria-hidden="true" size={16} />读取作品树</div>
+          ) : (
+            <LibraryTreeView
+              nodes={tree.nodes}
+              selectedIds={selectedIds}
+              disabled={!repositoryReady || operationBusy}
+              isExpanded={(id) => expandedIds.has(id)}
+              onToggleExpanded={(id) => setExpandedIds((current) => {
+                const next = new Set(current);
+                if (next.has(id)) next.delete(id);
+                else next.add(id);
+                return next;
+              })}
+              onSelect={(node, event) => {
+                const next = selectionForClick(
+                  visibleIds,
+                  selectedIds,
+                  anchorId,
+                  node.id,
+                  event.shiftKey,
+                  event.ctrlKey || event.metaKey,
+                );
+                setSelectedIds(next.ids);
+                setAnchorId(next.anchorId);
+                setActiveId(node.id);
+                setWorkspaceTarget(null);
+              }}
+              onMove={(request: MoveLibraryNodesRequest) => {
+                void moveNodes(request).catch(() => undefined);
+              }}
+              onContextMenu={openContext}
+            />
+          )}
+        </div>
+
+        <footer className="sidebar-footer">
+          <span>{tree.groupCount} 个分组 · {tree.artworkCount} 个作品</span>
+          {selectedIds.size > 1 && <strong>已选择 {selectedIds.size} 项</strong>}
+          <button type="button" title={`回收站${trashEntries.length ? ` · ${trashEntries.length} 个项目` : ""}`} aria-label={`打开回收站${trashEntries.length ? `，${trashEntries.length} 个项目` : ""}`} disabled={!repositoryReady || operationBusy} onClick={() => void openTrash()}>
+            <Trash2 aria-hidden="true" size={16} />
+          </button>
+        </footer>
+      </aside>
+
+      <section className="workspace">
+        {!repositoryReady ? (
+          <WorkspaceEmpty
+            icon={<Settings aria-hidden="true" size={28} />}
+            title="配置作品仓库"
+            description="选择一个空目录保存作品树、分支历史与认证记录。"
+            action={<button className="primary-button" type="button" onClick={onConfigure}><Settings aria-hidden="true" size={18} />设置仓库</button>}
+          />
+        ) : activeNode?.kind === "artwork" && selectedIds.size === 1 ? (
+          renderArtworkWorkspace({
+            artworkId: activeNode.id,
+            initialView: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.initialView : "history",
+            initialBranchId: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.branchId : null,
+            initialRecordId: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.recordId : null,
+            navigationKey: workspaceTarget?.artworkId === activeNode.id ? workspaceTarget.navigationKey : 0,
+            onNavigateRecord: (target) => {
+              navigateToArtwork({
+                ...target,
+                initialView: "publish",
+              }, "匹配记录所属 Artwork 当前不在作品树中。");
+            },
+          })
+        ) : activeNode ? (
+          <NodeOverview node={activeNode} selectedCount={selectedIds.size} />
+        ) : (
+          <WorkspaceEmpty
+            icon={<FileImage aria-hidden="true" size={28} />}
+            title={tree.artworkCount ? "选择一个 Artwork" : "创建第一个 Artwork"}
+            description={tree.artworkCount ? "从左侧作品树中选择项目。" : "Artwork 是作品树的叶节点，并从一个独立工作文件开始。"}
+            action={!tree.artworkCount ? <button className="primary-button" type="button" onClick={() => setEditor({ mode: "artwork", parentId: null, node: null })}><Plus aria-hidden="true" size={18} />新建 Artwork</button> : undefined}
+          />
+        )}
+        {operationBusy && <div className="operation-indicator"><LoaderCircle className="spin" aria-hidden="true" size={16} />正在更新作品树</div>}
+      </section>
+
+      {context && (
+        <div
+          className="context-menu"
+          ref={contextPlacement.ref}
+          style={contextPlacement.style}
+          onPointerDown={(event) => event.stopPropagation()}
+        >
+          {(!context.node || context.node.kind === "group") && (
+            <>
+              <button type="button" onClick={() => {
+                setEditor({ mode: "group", parentId: creationParent(context.node), node: null });
+                setContext(null);
+              }}><FolderPlus aria-hidden="true" size={16} />新建分组</button>
+              <button type="button" onClick={() => {
+                setEditor({ mode: "artwork", parentId: creationParent(context.node), node: null });
+                setContext(null);
+              }}><FileImage aria-hidden="true" size={16} />新建 Artwork</button>
+            </>
+          )}
+          {context.node && (
+            <>
+              <div className="context-separator" />
+              <button type="button" onClick={() => {
+                setEditor({ mode: "rename", parentId: context.node?.parentId ?? null, node: context.node });
+                setContext(null);
+              }}><Pencil aria-hidden="true" size={16} />重命名</button>
+              <button className="danger" type="button" onClick={() => beginTrashMove(context.node!)}><Trash2 aria-hidden="true" size={16} />移到回收站{selectedIds.size > 1 ? ` ${selectedIds.size} 项` : ""}</button>
+            </>
+          )}
+        </div>
+      )}
+
+      {editor && (
+        <NodeEditor
+          state={editor}
+          busy={operationBusy}
+          onClose={() => setEditor(null)}
+          onSubmit={async (values) => {
+            try {
+              if (editor.mode === "group") {
+                await createGroup(editor.parentId, values.title);
+              } else if (editor.mode === "artwork") {
+                await createArtwork({
+                  parentId: editor.parentId,
+                  title: values.title,
+                  branchTitle: values.branchTitle,
+                  sourcePath: values.sourcePath,
+                });
+              } else if (editor.node) {
+                await renameNode(editor.node!.id, values.title);
+              }
+              setEditor(null);
+              if (editor.parentId) setExpandedIds((current) => new Set([...current, editor.parentId!]));
+            } catch {
+              // Error is already surfaced by runMutation.
+            }
+          }}
+        />
+      )}
+
+      {trashOpen && (
+        <TrashDialog
+          entries={trashEntries}
+          busy={operationBusy}
+          cleanupFailures={cleanupFailures}
+          onClose={() => setTrashOpen(false)}
+          onRestore={async (entry) => {
+            await restoreTrash(entry.id);
+            setExpandedIds((current) => new Set(current));
+          }}
+          onDelete={async (entry) => {
+            await permanentlyDeleteTrash([entry.id]);
+          }}
+          onEmpty={async () => {
+            if (!trashEntries.length) return;
+            await emptyTrash();
+          }}
+          onRetryCleanup={retryCleanup}
+        />
+      )}
+
+      {pendingConfirm && (
+        <ConfirmDialog
+          view={pendingConfirm}
+          busy={operationBusy}
+          onCancel={() => setPendingConfirm(null)}
+          onConfirm={() => {
+            const pending = pendingConfirm;
+            setPendingConfirm(null);
+            void pending.run().catch(() => undefined);
+          }}
+        />
+      )}
+    </Fragment>
+  );
+}
