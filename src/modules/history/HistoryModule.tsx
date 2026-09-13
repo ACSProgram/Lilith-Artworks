@@ -280,9 +280,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="commit-block">
         <label htmlFor="commit-note">主动提交</label>
         <div className="commit-control">
-          <input id="commit-note" value={commitNote} maxLength={500} placeholder="添加本次提交备注（可选）" disabled={!selectedBranch || selectedBranch.finalArtifactLocked || busy || runtime.busy} onChange={(event) => setCommitNote(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void commit(); }} />
-          <button className="primary-button" type="button" disabled={!selectedBranch || selectedBranch.finalArtifactLocked || busy || runtime.busy} onClick={() => void commit()}>{visibleRuntime.busy && visibleRuntime.activeBranchId === selectedBranch?.id ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}提交</button>
+          <input id="commit-note" value={commitNote} maxLength={500} placeholder="添加本次提交备注（可选）" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || busy || runtime.busy} onChange={(event) => setCommitNote(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void commit(); }} />
+          <button className="primary-button" type="button" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || busy || runtime.busy} onClick={() => void commit()}>{visibleRuntime.busy && visibleRuntime.activeBranchId === selectedBranch?.id ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}提交</button>
         </div>
+        {selectedBranch && !selectedBranch.sourcePath && <span className="commit-feedback muted" role="status">该分支未选择工作文件，自动备份与主动提交不可用。</span>}
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
       {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={() => {

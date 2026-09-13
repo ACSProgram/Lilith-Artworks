@@ -79,13 +79,17 @@ import {
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
 
-/** 素材板固定快捷键（应用尚无全局快捷键配置，取 Client 侧默认键位）。 */
-const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+Shift+K";
-const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
+/** 素材板快捷键默认值，与设置页默认项保持一致（锁定沿用 Client 的替代键位，避免 Ctrl+R 冲突）。 */
+export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+Shift+K";
+export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
+/** Client 旧版锁定键位：素材板活跃时屏蔽，避免 WebView 整页刷新丢失状态。 */
+const LEGACY_RELOAD_SHORTCUT = "CommandOrControl+R";
 
 export interface PinBoardModuleSettings {
   arrangementGapPx: number;
   textureCacheLevel: PinBoardTextureCacheLevel;
+  lockShortcut: string;
+  fullscreenShortcut: string;
 }
 
 interface PinBoardModuleProps {
@@ -852,7 +856,9 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         await pinBoardApi.trashPinBoard(request.board.boardId);
         const next = await refreshBoards();
         if (selected !== null && request.board.boardId === selected) {
-          rendererRef.current?.destroy();
+          // 画板已进入回收站：跳过 destroy 默认的 finalize 保存，
+          // 否则异步 finalize 会对已删除画板再次写库并报“画板不存在”。
+          rendererRef.current?.destroy(false);
           rendererRef.current = null;
           setSelected(null);
           setView(null);
@@ -992,9 +998,15 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     const keyDown = (event: KeyboardEvent) => {
       if (!active) return;
       if (!shortcutCanHandle(event)) return;
-      const fullscreenRequested = shortcutMatches(event, PIN_BOARD_FULLSCREEN_SHORTCUT)
+      if (shortcutMatches(event, LEGACY_RELOAD_SHORTCUT)) {
+        // 屏蔽 Client 旧版 Ctrl+R 刷新：素材板活跃时整页刷新会丢失全部画布状态。
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      const fullscreenRequested = shortcutMatches(event, settings.fullscreenShortcut)
         || (event.key === "Escape" && fullscreenRef.current);
-      const lockRequested = shortcutMatches(event, PIN_BOARD_LOCK_SHORTCUT);
+      const lockRequested = shortcutMatches(event, settings.lockShortcut);
       if (!fullscreenRequested && !lockRequested) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -1005,7 +1017,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     return () => {
       window.removeEventListener("keydown", keyDown, true);
     };
-  }, [active, toggleFullscreen, toggleLock]);
+  }, [active, settings.fullscreenShortcut, settings.lockShortcut, toggleFullscreen, toggleLock]);
 
   useEffect(() => () => {
     if (fullscreenRef.current) void setPinBoardWindowFullscreen(false).catch(() => undefined);
@@ -1146,8 +1158,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={() => void importImages()} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={openTextDialog} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
-            <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", PIN_BOARD_LOCK_SHORTCUT)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
-            <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={() => void toggleFullscreen()} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", PIN_BOARD_FULLSCREEN_SHORTCUT)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
+            <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
+            <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={() => void toggleFullscreen()} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", settings.fullscreenShortcut)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
             <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={() => void renderer?.save()} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
           </div>
         </header>
@@ -1181,7 +1193,16 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
               onState={handleRendererState}
               onContextMenu={handleRendererContextMenu}
             />
-            : <LoaderCircle className="spin" size={24} />}
+            : boards === null
+              ? <LoaderCircle className="spin" size={24} />
+              : (
+                <div className="pin-board-stage-hint" role="status">
+                  <Images size={22} />
+                  <span>{boards.length === 0
+                    ? "尚无画板，点击右上角“新建画板”创建"
+                    : "当前未选择素材板，请从左侧列表选择画板"}</span>
+                </div>
+              )}
           {view && interaction.locked && (
             <span className="pin-board-lock-indicator" title="画板已锁定" aria-label="画板已锁定">
               <Lock size={16} />

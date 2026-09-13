@@ -340,7 +340,13 @@ pub(crate) fn create_artwork(
 ) -> Result<CreatedArtwork, String> {
     validate_title(title, "Artwork 标题")?;
     validate_title(branch_title, "分支标题")?;
-    let (source_display, source_key) = normalize_source_path(root, source_path)?;
+    // 允许不选择工作文件创建 Artwork（source_path 为空）：自动备份与主动提交
+    // 对该分支不可用（调度查询会跳过空工作文件），但素材板等仓库功能不受影响。
+    let (source_display, source_key) = if source_path.as_os_str().is_empty() {
+        (String::new(), String::new())
+    } else {
+        normalize_source_path(root, source_path)?
+    };
     let mut connection = open(root)?;
     let transaction = connection.transaction().map_err(database_error)?;
     ensure_group_parent(&transaction, parent_id)?;
@@ -1518,5 +1524,37 @@ mod tests {
             )
             .unwrap();
         assert_eq!(external_cleanup_count, 0);
+    }
+
+    #[test]
+    fn creates_artwork_without_a_source_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root).unwrap();
+
+        let created = create_artwork(&root, None, "Artwork", "Main", Path::new("")).unwrap();
+        let branch = crate::history::list(&root, &created.artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.source_path, "");
+
+        // 空工作文件分支不进入自动备份调度，且同一仓库可创建多个无源 Artwork。
+        let scheduled = crate::history::list_scheduled(&root).unwrap();
+        assert!(scheduled
+            .iter()
+            .all(|branch| branch.id != created.branch_id));
+        create_artwork(&root, None, "Second", "Main", Path::new("")).unwrap();
+    }
+
+    #[test]
+    fn create_artwork_still_requires_an_existing_source_file_when_given() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root).unwrap();
+
+        let error =
+            create_artwork(&root, None, "Artwork", "Main", Path::new("missing.psd")).unwrap_err();
+        assert!(error.contains("分支工作文件"), "{error}");
     }
 }

@@ -159,6 +159,14 @@
   overflow: hidden;
   background: var(--pin-board-bg);
 }
+.pin-board-stage-hint {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 13px;
+}
 .pin-board-lock-indicator {
   position: absolute;
   z-index: 2;

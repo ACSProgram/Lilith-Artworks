@@ -71,6 +71,12 @@ pub(crate) fn run_backup(
     let branch = history::load_branch(root, branch_id)?;
     ensure_not_cancelled(&cancelled)?;
     history::ensure_directories(root, &branch.artwork_id)?;
+    // 未选择工作文件的分支不参与备份：调度已跳过，这里兜底给出明确错误。
+    if branch.source_path.trim().is_empty() {
+        return Err(BackupRunError::Failed(
+            "该分支未选择工作文件，无法创建备份".into(),
+        ));
+    }
     let source_path = Path::new(&branch.source_path);
     let before = source_metadata(source_path)?;
     let mut source =
@@ -367,6 +373,22 @@ mod tests {
         )
         .unwrap();
         fs::read(output).unwrap()
+    }
+
+    #[test]
+    fn rejects_backup_for_a_branch_without_a_source_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        library::initialize(&root).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", Path::new("")).unwrap();
+
+        let error = run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap_err();
+
+        assert!(
+            matches!(error, BackupRunError::Failed(ref message) if message.contains("未选择工作文件")),
+            "{error}"
+        );
     }
 
     #[test]

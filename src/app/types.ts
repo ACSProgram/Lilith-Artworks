@@ -6,6 +6,8 @@ export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 export interface PinBoardSettings {
   textureCacheLevel: PinBoardTextureCacheLevel;
   arrangementGapPx: number;
+  lockShortcut: string;
+  fullscreenShortcut: string;
 }
 
 export interface WindowSettings {

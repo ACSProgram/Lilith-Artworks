@@ -52,6 +52,8 @@ impl Default for AppSettings {
 struct PinBoardSettings {
     texture_cache_level: String,
     arrangement_gap_px: f64,
+    lock_shortcut: String,
+    fullscreen_shortcut: String,
 }
 
 impl Default for PinBoardSettings {
@@ -59,6 +61,8 @@ impl Default for PinBoardSettings {
         Self {
             texture_cache_level: "medium".into(),
             arrangement_gap_px: 10.0,
+            lock_shortcut: "CommandOrControl+Shift+K".into(),
+            fullscreen_shortcut: "F11".into(),
         }
     }
 }
@@ -532,6 +536,19 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
         return Err("素材板阵列间距超出允许范围".into());
     }
+    // 快捷键允许留空（表示未设置）；非空时按键组合必须由非空段组成，长度受限。
+    for (label, shortcut) in [
+        ("锁定画板", &settings.pin_board.lock_shortcut),
+        ("画板全屏", &settings.pin_board.fullscreen_shortcut),
+    ] {
+        let shortcut = shortcut.trim();
+        if shortcut.is_empty() {
+            continue;
+        }
+        if shortcut.chars().count() > 64 || shortcut.split('+').any(|part| part.trim().is_empty()) {
+            return Err(format!("素材板{label}快捷键格式无效"));
+        }
+    }
     if settings.window.width < 760
         || settings.window.height < 560
         || settings.window.width > 16_384
@@ -590,6 +607,21 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(actual.version, CURRENT_SETTINGS_VERSION);
         assert_eq!(actual.window.width, 1320);
+        assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+Shift+K");
+        assert_eq!(actual.pin_board.fullscreen_shortcut, "F11");
+    }
+
+    #[test]
+    fn pin_board_shortcut_validation_accepts_defaults_and_rejects_empty_parts() {
+        let mut settings = AppSettings::default();
+        validate_settings(&settings).unwrap();
+
+        settings.pin_board.lock_shortcut = "CommandOrControl++".into();
+        assert!(validate_settings(&settings).is_err());
+
+        settings.pin_board.lock_shortcut = String::new();
+        settings.pin_board.fullscreen_shortcut = String::new();
+        validate_settings(&settings).unwrap();
     }
 
     #[test]

@@ -37,7 +37,7 @@ export function NodeEditor({ state, busy, onClose, onSubmit }: {
     if (typeof selected === "string") setSourcePath(selected);
   };
 
-  const valid = title.trim() && (!isArtwork || (branchTitle.trim() && sourcePath.trim()));
+  const valid = title.trim() && (!isArtwork || branchTitle.trim());
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
       <form
@@ -61,9 +61,10 @@ export function NodeEditor({ state, busy, onClose, onSubmit }: {
             <>
               <label><span>初始分支标题</span><input value={branchTitle} maxLength={160} onChange={(event) => setBranchTitle(event.target.value)} /></label>
               <label>
-                <span>工作文件</span>
+                <span>工作文件（可选）</span>
                 <div className="path-control"><input value={sourcePath} onChange={(event) => setSourcePath(event.target.value)} placeholder="选择现有作品文件" /><button className="secondary-button" type="button" onClick={chooseSource}>浏览</button></div>
               </label>
+              {!sourcePath.trim() && <p className="editor-hint">未选择工作文件时，该分支的自动备份与主动提交不可用，但仍可使用素材板。</p>}
             </>
           )}
         </div>

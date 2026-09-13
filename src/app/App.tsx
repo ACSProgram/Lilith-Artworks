@@ -7,6 +7,7 @@ import {
   FolderOpen,
   Images,
   Info,
+  Keyboard,
   LoaderCircle,
   MonitorCog,
   Palette,
@@ -17,7 +18,15 @@ import {
 } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
 import { ArtworkWorkspace } from "./ArtworkWorkspace";
+import {
+  PIN_BOARD_FULLSCREEN_SHORTCUT,
+  PIN_BOARD_LOCK_SHORTCUT,
+} from "../modules/pin-board/PinBoardModule";
 import { appApi } from "./api";
+import {
+  shortcutFromEvent,
+  shortcutLabel,
+} from "./settingsShortcuts";
 import type {
   AppSettings,
   BackupRuntimeStatus,
@@ -34,6 +43,14 @@ const EMPTY_STATUS: RepositoryStatus = {
   databasePath: "",
   error: null,
 };
+
+type SettingsPage = "general" | "repository" | "pin-board";
+
+const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
+  { id: "general", label: "通用" },
+  { id: "repository", label: "仓库与备份" },
+  { id: "pin-board", label: "素材板" },
+];
 
 const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
   busy: false,
@@ -57,6 +74,7 @@ export function App() {
   const [draft, setDraft] = useState<AppSettings | null>(null);
   const [repository, setRepository] = useState(EMPTY_STATUS);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
   const [busy, setBusy] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const [settingsOperation, setSettingsOperation] = useState<SettingsOperation | null>(null);
@@ -134,7 +152,15 @@ export function App() {
   const pinBoardSettings = useMemo(() => ({
     arrangementGapPx: snapshot?.settings.pinBoard?.arrangementGapPx ?? 10,
     textureCacheLevel: snapshot?.settings.pinBoard?.textureCacheLevel ?? "medium",
+    lockShortcut: snapshot?.settings.pinBoard?.lockShortcut ?? PIN_BOARD_LOCK_SHORTCUT,
+    fullscreenShortcut: snapshot?.settings.pinBoard?.fullscreenShortcut ?? PIN_BOARD_FULLSCREEN_SHORTCUT,
   }), [snapshot]);
+
+  const setPinBoardShortcut = (key: "lockShortcut" | "fullscreenShortcut", shortcut: string) => {
+    setDraft((current) => current
+      ? { ...current, pinBoard: { ...current.pinBoard, [key]: shortcut } }
+      : current);
+  };
 
   const chooseRepository = async () => {
     if (!draft) return;
@@ -325,132 +351,257 @@ export function App() {
               <button className="icon-button" type="button" title="关闭设置" onClick={() => setSettingsOpen(false)}><X aria-hidden="true" size={18} /></button>
             </header>
 
-            <div className="settings-content">
-            <div className="settings-section settings-section-wide">
-              <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
-              <div className="settings-path-field">
-                <label htmlFor="repository-path">仓库位置</label>
-                <div className="path-control">
-                  <input id="repository-path" aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
-                  <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
-                </div>
-              </div>
-              <div className="settings-preference-list settings-repository-actions">
-                <div className="settings-preference-row">
-                  <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
-                  <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
-                    <ShieldCheck aria-hidden="true" size={15} />开始检查
+            <div className="settings-body">
+              <nav className="settings-navigation" aria-label="设置分类">
+                {SETTINGS_PAGES.map((page) => (
+                  <button
+                    key={page.id}
+                    type="button"
+                    className={settingsPage === page.id ? "active" : ""}
+                    onClick={() => setSettingsPage(page.id)}
+                  >
+                    {page.label}
                   </button>
+                ))}
+              </nav>
+              <div className="settings-content">
+              {settingsPage === "general" && (
+                <>
+                <div className="settings-section settings-section-left">
+                  <div className="settings-section-title"><Palette aria-hidden="true" size={17} /><h3>外观</h3></div>
+                  <div className="settings-select-grid">
+                    <label>
+                      <span>主题</span>
+                      <select value={draft.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value as AppSettings["theme"] })}>
+                        <option value="system">跟随系统</option>
+                        <option value="light">浅色</option>
+                        <option value="dark">深色</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>内容密度</span>
+                      <select value={draft.content.density} onChange={(event) => setDraft({ ...draft, content: { ...draft.content, density: event.target.value as AppSettings["content"]["density"] } })}>
+                        <option value="comfortable">舒适</option>
+                        <option value="compact">紧凑</option>
+                      </select>
+                    </label>
+                  </div>
                 </div>
-                <div className="settings-preference-row">
-                  <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
-                  <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
-                    <DatabaseBackup aria-hidden="true" size={15} />创建备份
-                  </button>
+
+                <div className="settings-section settings-section-left">
+                  <div className="settings-section-title"><MonitorCog aria-hidden="true" size={17} /><h3>应用行为</h3></div>
+                  <div className="settings-preference-list">
+                    <label className="settings-preference-row">
+                      <span className="settings-row-icon"><PanelLeftClose aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>关闭时驻留托盘</strong><small>{draft.closeToTray ? "已启用" : "已关闭"}</small></span>
+                      <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
+                    </label>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><Settings aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>配置文件夹</strong><small title={snapshot?.settingsPath}>{snapshot?.settingsPath ?? "设置目录尚未就绪"}</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void appApi.openSettingsDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                    </div>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                    </div>
+                  </div>
                 </div>
-              </div>
-              {visibleSettingsRuntime && (
-                <SettingsOperationProgress
-                  runtime={visibleSettingsRuntime}
-                  cancelPending={cancelPending}
-                  onCancel={() => void cancelSettingsOperation()}
-                />
+
+                <div className="settings-section">
+                  <div className="settings-section-title"><Info aria-hidden="true" size={17} /><h3>关于与法律</h3></div>
+                  <div className="settings-preference-list">
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><Info aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>Lilith Artworks {packageInfo.version}</strong><small>Copyright 2026 ACSProgram · GPL-3.0-only</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void appApi.openLegalDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />查看许可</button>
+                    </div>
+                  </div>
+                </div>
+                </>
               )}
-            </div>
 
-            <div className="settings-section settings-section-left">
-              <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
-              <div className="settings-preference-list">
-                <label className="settings-preference-row">
-                  <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
-                  <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
-                </label>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-title"><Palette aria-hidden="true" size={17} /><h3>外观</h3></div>
-              <div className="settings-select-grid">
-                <label>
-                  <span>主题</span>
-                  <select value={draft.theme} onChange={(event) => setDraft({ ...draft, theme: event.target.value as AppSettings["theme"] })}>
-                    <option value="system">跟随系统</option>
-                    <option value="light">浅色</option>
-                    <option value="dark">深色</option>
-                  </select>
-                </label>
-                <label>
-                  <span>内容密度</span>
-                  <select value={draft.content.density} onChange={(event) => setDraft({ ...draft, content: { ...draft.content, density: event.target.value as AppSettings["content"]["density"] } })}>
-                    <option value="comfortable">舒适</option>
-                    <option value="compact">紧凑</option>
-                  </select>
-                </label>
-              </div>
-            </div>
-
-            <div className="settings-section settings-section-left">
-              <div className="settings-section-title"><MonitorCog aria-hidden="true" size={17} /><h3>应用行为</h3></div>
-              <div className="settings-preference-list">
-                <label className="settings-preference-row">
-                  <span className="settings-row-icon"><PanelLeftClose aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>关闭时驻留托盘</strong><small>{draft.closeToTray ? "已启用" : "已关闭"}</small></span>
-                  <input className="switch-input" type="checkbox" checked={draft.closeToTray} onChange={(event) => setDraft({ ...draft, closeToTray: event.target.checked })} />
-                </label>
-                <div className="settings-preference-row">
-                  <span className="settings-row-icon"><Settings aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>配置文件夹</strong><small title={snapshot?.settingsPath}>{snapshot?.settingsPath ?? "设置目录尚未就绪"}</small></span>
-                  <button className="secondary-button" type="button" onClick={() => void appApi.openSettingsDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+              {settingsPage === "repository" && (
+                <>
+                <div className="settings-section settings-section-wide">
+                  <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
+                  <div className="settings-path-field">
+                    <label htmlFor="repository-path">仓库位置</label>
+                    <div className="path-control">
+                      <input id="repository-path" aria-label="作品仓库路径" value={draft.repositoryPath} onChange={(event) => setDraft({ ...draft, repositoryPath: event.target.value })} placeholder="选择空目录" />
+                      <button className="secondary-button" type="button" onClick={chooseRepository}><FolderOpen aria-hidden="true" size={15} />浏览</button>
+                    </div>
+                  </div>
+                  <div className="settings-preference-list settings-repository-actions">
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
+                        <ShieldCheck aria-hidden="true" size={15} />开始检查
+                      </button>
+                    </div>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
+                        <DatabaseBackup aria-hidden="true" size={15} />创建备份
+                      </button>
+                    </div>
+                  </div>
+                  {visibleSettingsRuntime && (
+                    <SettingsOperationProgress
+                      runtime={visibleSettingsRuntime}
+                      cancelPending={cancelPending}
+                      onCancel={() => void cancelSettingsOperation()}
+                    />
+                  )}
                 </div>
-                <div className="settings-preference-row">
-                  <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
-                  <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
-                </div>
-              </div>
-            </div>
 
-            <div className="settings-section settings-section-left">
-              <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
-              <div className="settings-preference-list">
-                <label className="settings-preference-row">
-                  <span className="settings-row-icon"><Images aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>纹理缓存等级</strong><small>影响画布流畅度与显存占用</small></span>
-                  <select value={draft.pinBoard.textureCacheLevel} onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, textureCacheLevel: event.target.value as AppSettings["pinBoard"]["textureCacheLevel"] } })}>
-                    <option value="low">低</option>
-                    <option value="medium">中</option>
-                    <option value="high">高</option>
-                  </select>
-                </label>
-                <label className="settings-preference-row">
-                  <span className="settings-row-icon"><Images aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>阵列间距（CSS 像素）</strong><small>执行阵列排序时图片之间的间距</small></span>
-                  <input
-                    className="dialog-input"
-                    type="number"
-                    min={1}
-                    max={200}
-                    step={1}
-                    value={draft.pinBoard.arrangementGapPx}
-                    onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
-                  />
-                </label>
-              </div>
-            </div>
-
-            <div className="settings-section">
-              <div className="settings-section-title"><Info aria-hidden="true" size={17} /><h3>关于与法律</h3></div>
-              <div className="settings-preference-list">
-                <div className="settings-preference-row">
-                  <span className="settings-row-icon"><Info aria-hidden="true" size={17} /></span>
-                  <span className="settings-row-copy"><strong>Lilith Artworks {packageInfo.version}</strong><small>Copyright 2026 ACSProgram · GPL-3.0-only</small></span>
-                  <button className="secondary-button" type="button" onClick={() => void appApi.openLegalDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />查看许可</button>
+                <div className="settings-section">
+                  <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
+                  <div className="settings-preference-list">
+                    <label className="settings-preference-row">
+                      <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
+                      <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
+                    </label>
+                  </div>
                 </div>
+                </>
+              )}
+
+              {settingsPage === "pin-board" && (
+                <div className="settings-section settings-section-wide">
+                  <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
+                  <div className="setting-row">
+                    <div>
+                      <label id="pin-board-cache-level-label">纹理缓存等级</label>
+                      <p>决定素材板可常驻的纹理数量与内存占用，保存后立即生效。</p>
+                    </div>
+                    <div
+                      className="segmented-control pin-board-cache-control"
+                      role="radiogroup"
+                      aria-labelledby="pin-board-cache-level-label"
+                    >
+                      {([
+                        { level: "low", label: "低", memory: "约 64 MB" },
+                        { level: "medium", label: "中", memory: "约 128 MB" },
+                        { level: "high", label: "高", memory: "约 256 MB" },
+                      ] as const).map(({ level, label, memory }) => (
+                        <button
+                          key={level}
+                          type="button"
+                          role="radio"
+                          aria-checked={draft.pinBoard.textureCacheLevel === level}
+                          className={draft.pinBoard.textureCacheLevel === level ? "active" : ""}
+                          onClick={() => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, textureCacheLevel: level } })}
+                        >
+                          <strong>{label}</strong>
+                          <small>{memory}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <label htmlFor="pin-board-arrangement-gap">阵列图片间距</label>
+                      <p>阵列排序时图片之间的屏幕间距，保存后使用新数值，范围 1–200 像素。</p>
+                    </div>
+                    <input
+                      id="pin-board-arrangement-gap"
+                      className="number-control"
+                      type="number"
+                      min={1}
+                      max={200}
+                      step={1}
+                      value={draft.pinBoard.arrangementGapPx}
+                      onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
+                    />
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <label htmlFor="pin-board-lock-shortcut">锁定画板快捷键</label>
+                      <p>默认 Ctrl+Shift+K；锁定后仍可缩放和移动视口，但不会修改图片。</p>
+                    </div>
+                    <div className="shortcut-control">
+                      <Keyboard size={16} aria-hidden="true" />
+                      <input
+                        id="pin-board-lock-shortcut"
+                        className="shortcut-input"
+                        value={shortcutLabel(draft.pinBoard.lockShortcut)}
+                        placeholder="未设置"
+                        readOnly
+                        spellCheck={false}
+                        onKeyDown={(event) => {
+                          if (event.key === "Backspace" || event.key === "Delete") {
+                            event.preventDefault();
+                            setPinBoardShortcut("lockShortcut", "");
+                            return;
+                          }
+                          const shortcut = shortcutFromEvent(event, true);
+                          if (!shortcut) return;
+                          event.preventDefault();
+                          setPinBoardShortcut("lockShortcut", shortcut);
+                        }}
+                        onFocus={(event) => event.currentTarget.select()}
+                      />
+                      {draft.pinBoard.lockShortcut && (
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="清除锁定画板快捷键"
+                          aria-label="清除锁定画板快捷键"
+                          onClick={() => setPinBoardShortcut("lockShortcut", "")}
+                        >
+                          <X size={15} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                  <div className="setting-row">
+                    <div>
+                      <label htmlFor="pin-board-fullscreen-shortcut">画板全屏快捷键</label>
+                      <p>切换素材板内容区全屏；全屏时隐藏顶部工具栏，默认使用 F11。</p>
+                    </div>
+                    <div className="shortcut-control">
+                      <Keyboard size={16} aria-hidden="true" />
+                      <input
+                        id="pin-board-fullscreen-shortcut"
+                        className="shortcut-input"
+                        value={shortcutLabel(draft.pinBoard.fullscreenShortcut)}
+                        placeholder="未设置"
+                        readOnly
+                        spellCheck={false}
+                        onKeyDown={(event) => {
+                          if (event.key === "Backspace" || event.key === "Delete") {
+                            event.preventDefault();
+                            setPinBoardShortcut("fullscreenShortcut", "");
+                            return;
+                          }
+                          const shortcut = shortcutFromEvent(event, true);
+                          if (!shortcut) return;
+                          event.preventDefault();
+                          setPinBoardShortcut("fullscreenShortcut", shortcut);
+                        }}
+                        onFocus={(event) => event.currentTarget.select()}
+                      />
+                      {draft.pinBoard.fullscreenShortcut && (
+                        <button
+                          className="icon-button"
+                          type="button"
+                          title="清除画板全屏快捷键"
+                          aria-label="清除画板全屏快捷键"
+                          onClick={() => setPinBoardShortcut("fullscreenShortcut", "")}
+                        >
+                          <X size={15} />
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
               </div>
-            </div>
             </div>
 
             <footer>

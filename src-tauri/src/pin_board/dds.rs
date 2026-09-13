@@ -502,6 +502,9 @@ impl Drop for CreatedFiles {
 
 pub(crate) fn persist_dds_file(destination: &Path, bytes: &[u8], kind: &str) -> Result<(), String> {
     let parent = destination.parent().ok_or("DDS 保存路径无效")?;
+    // 画板目录可能缺失（例如仓库数据迁移后目录未随行），先补建再落临时文件，
+    // 否则 NamedTempFile 会因父目录不存在（os error 3）直接失败。
+    fs::create_dir_all(parent).map_err(|error| format!("无法创建画板图片目录：{error}"))?;
     let mut temporary = NamedTempFile::new_in(parent)
         .map_err(|error| format!("无法创建{kind}临时文件：{error}"))?;
     temporary
@@ -763,5 +766,15 @@ mod tests {
         assert_eq!(u32::from_le_bytes(preview[4..8].try_into().unwrap()), 4);
         assert_eq!(u32::from_le_bytes(preview[8..12].try_into().unwrap()), 4);
         assert_eq!(preview.len(), 12 + 4 * 4 * 4);
+    }
+
+    #[test]
+    fn persists_dds_file_into_a_missing_board_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("boards").join("2").join("image.dds");
+
+        persist_dds_file(&destination, b"dds-bytes", "剪贴板 DDS 图片").unwrap();
+
+        assert_eq!(fs::read(&destination).unwrap(), b"dds-bytes");
     }
 }

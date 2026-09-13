@@ -1,12 +1,27 @@
 # 当前任务交接
 
-更新时间：2026-09-12
+更新时间：2026-09-13
 
 ## 当前发布基线
 
 `v0.1.0` **已发布**，使用 repository schema v1 和应用标识 `com.lilith.artworks`。发布标签与资产一经公开即不可移动、覆盖或复用；任何发布后的代码、schema 或签名声明变化都必须使用新的版本号和标签，并按 `docs/guides/release-policy.md` 走发布流程（发布说明由 `write-release-notes.mjs` 生成，未签名需在发布说明中披露）。
 
 版本基线重置批次（应用版本与 schema 重置为 0.1.0 / v1、历史候选版与迁移链清除、维护者验收与发布确认）已归档到 `docs/planning/archive/version-reset-2026-09-12.md`。
+
+## 素材板迁移后修复批次（待人工验收）
+
+0.2.0-alpha.1 迁移后由维护者反馈的 8 项问题已修复，完整编译与 GUI 手工验收尚未执行：
+
+1. Artwork 工作区标签顺序调整：素材板位于版本历史之前；
+2. 设置弹窗改为左侧导航分页（通用 / 仓库与备份 / 素材板），素材板页排版沿用 Client 的行式布局与分段控件；
+3. 素材板全屏修复：capabilities 放行 `core:window:allow-set-fullscreen` 与 `allow-is-fullscreen`；
+4. 未选择画板时画布区域显示占位提示，不再一直显示加载动画；
+5. 画板移入回收站时以 `destroy(false)` 跳过对已删除画板的 finalize 保存，消除时序失败；
+6. 剪贴板/导入 DDS 落盘前自动创建缺失的画板目录（迁移仓库目录缺失导致的 os error 3）；
+7. 素材板锁定/全屏快捷键可在设置中自定义（默认 `Ctrl+Shift+K` / `F11`），素材板活跃时屏蔽 `Ctrl+R` 整页刷新；
+8. 允许不选择工作文件创建 Artwork：`source_path` 为空时自动备份调度与主动提交不可用（UI 禁用并提示、调度查询排除、worker 兜底报错），素材板功能不受影响。
+
+已验证：`npx tsc --noEmit`、`npm test`（95 通过，含新增 settingsShortcuts 与标签顺序用例）、`cargo test --lib`（104 通过，含空工作文件创建/调度排除/DDS 目录自建/快捷键校验新用例）、`cargo fmt --check`、`git diff --check`。
 
 ## 素材板迁移（0.2.0-alpha.1，待人工验收）
 
