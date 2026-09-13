@@ -16,7 +16,7 @@ use tempfile::NamedTempFile;
 use crate::backup::BackupState;
 use crate::{history, library};
 
-const CURRENT_SETTINGS_VERSION: u32 = 1;
+const CURRENT_SETTINGS_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -61,7 +61,7 @@ impl Default for PinBoardSettings {
         Self {
             texture_cache_level: "medium".into(),
             arrangement_gap_px: 10.0,
-            lock_shortcut: "CommandOrControl+Shift+K".into(),
+            lock_shortcut: "CommandOrControl+R".into(),
             fullscreen_shortcut: "F11".into(),
         }
     }
@@ -274,6 +274,17 @@ pub(crate) struct SettingsSnapshot {
     automatic_backup_file_count: Option<usize>,
 }
 
+/// 旧版本设置迁移。
+///
+/// v1 曾把素材板“锁定画板”的默认键设为 `CommandOrControl+Shift+K`；该默认值已改回
+/// Client 的 `CommandOrControl+R`（整页刷新由应用层拦截），因此把仍是旧默认值的
+/// 持久化设置一并升级，用户自定义过的其他键位保持不变。
+fn migrate_settings(settings: &mut AppSettings) {
+    if settings.version < 2 && settings.pin_board.lock_shortcut == "CommandOrControl+Shift+K" {
+        settings.pin_board.lock_shortcut = "CommandOrControl+R".into();
+    }
+}
+
 pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     if !path.exists() {
         let settings = AppSettings::default();
@@ -299,6 +310,7 @@ pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
                 Some("settings.json 来自更高版本，本次运行不会覆盖它".into()),
             ),
             Ok(mut settings) => {
+                migrate_settings(&mut settings);
                 settings.version = CURRENT_SETTINGS_VERSION;
                 let warning = write_json_atomic(path, &settings)
                     .err()
@@ -607,7 +619,7 @@ mod tests {
         assert!(warning.is_none());
         assert_eq!(actual.version, CURRENT_SETTINGS_VERSION);
         assert_eq!(actual.window.width, 1320);
-        assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+Shift+K");
+        assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+R");
         assert_eq!(actual.pin_board.fullscreen_shortcut, "F11");
     }
 
@@ -622,6 +634,39 @@ mod tests {
         settings.pin_board.lock_shortcut = String::new();
         settings.pin_board.fullscreen_shortcut = String::new();
         validate_settings(&settings).unwrap();
+    }
+
+    #[test]
+    fn migrates_the_v1_pin_board_lock_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+
+        let mut legacy = AppSettings::default();
+        legacy.version = 1;
+        legacy.pin_board.lock_shortcut = "CommandOrControl+Shift+K".into();
+        write_json_atomic(&path, &legacy).unwrap();
+
+        let (actual, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(actual.version, CURRENT_SETTINGS_VERSION);
+        // v1 的旧默认键位随迁移升级为 Client 的 Ctrl+R，否则用户升级后 Ctrl+R 仍不生效。
+        assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+R");
+    }
+
+    #[test]
+    fn settings_migration_preserves_a_custom_lock_shortcut() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+
+        let mut legacy = AppSettings::default();
+        legacy.version = 1;
+        legacy.pin_board.lock_shortcut = "CommandOrControl+Alt+L".into();
+        write_json_atomic(&path, &legacy).unwrap();
+
+        let (actual, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(actual.version, CURRENT_SETTINGS_VERSION);
+        assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+Alt+L");
     }
 
     #[test]

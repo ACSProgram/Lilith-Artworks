@@ -336,6 +336,7 @@ pub fn run() {
             pin_board::rename_pin_board,
             pin_board::trash_pin_board,
             pin_board::restore_pin_board,
+            pin_board::reorder_pin_boards,
             pin_board::delete_pin_board_permanently,
             pin_board::empty_pin_board_trash,
             pin_board::load_pin_board,

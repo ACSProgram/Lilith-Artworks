@@ -17,13 +17,22 @@ before and after the first stable release.
   endless spinner when no board is selected.
 - The pin-board tab is now listed before the version history tab in the
   Artwork workspace.
+- Pin boards no longer open with a degenerate viewport: the workspace pane
+  keeps its layout size while inactive, the renderer fits the undeleted-image
+  bounds on first draw, and sessions captured from a zero-size canvas are not
+  persisted. This fixes images that appeared too small and the missing
+  bounding-box fit when reopening a board.
+- The settings dialog now uses a roomy single-column layout per page instead
+  of the cramped two-column arrangement.
 
 ### Added
 
-- Configurable pin-board lock and fullscreen shortcuts (defaults
-  `Ctrl+Shift+K` / `F11`) on a new paginated settings dialog with a
-  Client-style pin-board page; `Ctrl+R` page reload is suppressed while the
-  pin board is active.
+- Configurable pin-board lock and fullscreen shortcuts (defaults `Ctrl+R` /
+  `F11`) on a paginated settings dialog with a Client-style pin-board page. The
+  app-level webview guard cancels the F5 / `Ctrl+R` page reload without
+  swallowing the key, so `Ctrl+R` still triggers the lock action.
+- Drag-and-drop reordering of pin boards in the board sidebar. Reordering only
+  rewrites list order, so an open board's editing session is not invalidated.
 - Artworks can be created without a working file. Branches without a working
   file are excluded from automatic backup scheduling and manual commits are
   disabled for them with an explanatory hint; pin boards and other repository
@@ -31,6 +40,10 @@ before and after the first stable release.
 
 ### Compatibility
 
+- Application settings version moves to 2. Existing settings.json files load
+  through an append-only migration: a persisted pin-board lock shortcut that
+  still holds the previous default `CommandOrControl+Shift+K` is upgraded to
+  `CommandOrControl+R`, while any other custom shortcut is preserved.
 - Application settings gain optional `lockShortcut` and `fullscreenShortcut`
   fields in the `pinBoard` section; existing settings.json files load with the
   new defaults.

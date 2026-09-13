@@ -17,7 +17,7 @@ describe("ArtworkWorkspace", () => {
       pinBoardSettings={{
         arrangementGapPx: 10,
         textureCacheLevel: "medium",
-        lockShortcut: "CommandOrControl+Shift+K",
+        lockShortcut: "CommandOrControl+R",
         fullscreenShortcut: "F11",
       }}
       onError={vi.fn()}
@@ -46,7 +46,7 @@ describe("ArtworkWorkspace", () => {
       pinBoardSettings={{
         arrangementGapPx: 10,
         textureCacheLevel: "medium",
-        lockShortcut: "CommandOrControl+Shift+K",
+        lockShortcut: "CommandOrControl+R",
         fullscreenShortcut: "F11",
       }}
       onError={vi.fn()}

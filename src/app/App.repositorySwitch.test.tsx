@@ -69,7 +69,7 @@ function deferred<T>() {
 
 const settings = (repositoryPath: string): SettingsSnapshot => ({
   settings: {
-    version: 1,
+    version: 2,
     repositoryPath,
     theme: "system",
     closeToTray: true,
@@ -88,7 +88,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     pinBoard: {
       textureCacheLevel: "medium",
       arrangementGapPx: 10,
-      lockShortcut: "CommandOrControl+Shift+K",
+      lockShortcut: "CommandOrControl+R",
       fullscreenShortcut: "F11",
     },
   },
