@@ -3,6 +3,40 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
+## Unreleased
+
+### Fixed
+
+- Pin-board fullscreen now works: the window capability allows
+  `set_fullscreen` and `is_fullscreen`.
+- Trashing the selected board no longer triggers a doomed finalize save
+  against the deleted board.
+- Clipboard/file image imports create the board directory when it is missing
+  (fixes `os error 3` after repository data migration).
+- The pin-board canvas shows a "no board selected" placeholder instead of an
+  endless spinner when no board is selected.
+- The pin-board tab is now listed before the version history tab in the
+  Artwork workspace.
+
+### Added
+
+- Configurable pin-board lock and fullscreen shortcuts (defaults
+  `Ctrl+Shift+K` / `F11`) on a new paginated settings dialog with a
+  Client-style pin-board page; `Ctrl+R` page reload is suppressed while the
+  pin board is active.
+- Artworks can be created without a working file. Branches without a working
+  file are excluded from automatic backup scheduling and manual commits are
+  disabled for them with an explanatory hint; pin boards and other repository
+  features keep working.
+
+### Compatibility
+
+- Application settings gain optional `lockShortcut` and `fullscreenShortcut`
+  fields in the `pinBoard` section; existing settings.json files load with the
+  new defaults.
+- Branches may now store an empty `source_path`; the database schema is
+  unchanged and no migration is required.
+
 ## 0.2.0-alpha.1 - 2026-09-12
 
 ### Added

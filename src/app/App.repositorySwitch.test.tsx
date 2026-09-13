@@ -88,6 +88,8 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     pinBoard: {
       textureCacheLevel: "medium",
       arrangementGapPx: 10,
+      lockShortcut: "CommandOrControl+Shift+K",
+      fullscreenShortcut: "F11",
     },
   },
   settingsPath: "C:\\settings\\settings.json",
@@ -194,6 +196,7 @@ describe("App repository switching", () => {
     await waitFor(() => expect(libraryApi.search).toHaveBeenCalledWith("only-in-a"));
 
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
     const repositoryInput = await screen.findByLabelText("作品仓库路径");
     fireEvent.change(repositoryInput, { target: { value: repositoryB } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -242,6 +245,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     await waitFor(() => {
@@ -299,6 +303,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     expect(await screen.findByText("正在复制仓库文件")).toBeTruthy();

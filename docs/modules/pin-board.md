@@ -43,6 +43,7 @@ SQLite:
 ```
 
 - `revision` 每次 写库后单调更新，用于 `save_pin_board`/`finalize_pin_board` 的冲突检测；
+- DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试。
 
@@ -70,7 +71,10 @@ SQLite:
 - 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；
 - “添加文字”生成透明 PNG 素材，尺寸补齐到 4 像素压缩块边界，走普通图片导入链路；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
-- 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与 `F11`、锁定 `Ctrl+Shift+K` 只在模块活跃时生效。
+- 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
+- 锁定与全屏快捷键默认为 `Ctrl+Shift+K` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；素材板活跃时屏蔽 `Ctrl+R`，避免 WebView 整页刷新丢失画布状态；
+- 画板列表为空或未选中画板时，画布区域显示“当前未选择素材板”等占位提示，不显示加载动画；
+- 将当前选中画板移入回收站时以 `destroy(false)` 释放渲染器，跳过针对已删除画板的 finalize 保存，避免时序上的写库失败。
 
 ## 快速验证
 

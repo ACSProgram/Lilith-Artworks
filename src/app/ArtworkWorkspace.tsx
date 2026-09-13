@@ -68,10 +68,10 @@ export function ArtworkWorkspace({
 
   return <div className="artwork-workspace">
     <nav className="artwork-tabs" aria-label="Artwork 工作区">
+      <button className={view === "pin-board" ? "active" : ""} type="button" onClick={() => setView("pin-board")}><Images size={16} />素材板</button>
       <button className={view === "history" ? "active" : ""} type="button" onClick={() => setView("history")}><GitCommitVertical size={16} />版本历史</button>
       <button className={view === "publish" ? "active" : ""} type="button" onClick={() => setView("publish")}><ShieldCheck size={16} />发布与认证</button>
       <button className={view === "identify" ? "active" : ""} type="button" onClick={() => setView("identify")}><Fingerprint size={16} />识别与溯源</button>
-      <button className={view === "pin-board" ? "active" : ""} type="button" onClick={() => setView("pin-board")}><Images size={16} />素材板</button>
     </nav>
     <div className="artwork-view">
       {view === "history" && <div className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}

@@ -1241,6 +1241,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
             "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
+           AND TRIM(b.source_path) <> ''
            AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
          ORDER BY b.id",
         )
@@ -1269,6 +1270,7 @@ pub(crate) fn load_scheduled(
             "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
+               AND TRIM(b.source_path) <> ''
                AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
             [branch_id],
             |row| {
@@ -1290,6 +1292,7 @@ pub(crate) fn count_scheduled_files(root: &Path) -> Result<usize, String> {
             "SELECT COUNT(DISTINCT b.source_path_key)
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
+               AND TRIM(b.source_path) <> ''
                AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
             [],
             |row| row.get(0),

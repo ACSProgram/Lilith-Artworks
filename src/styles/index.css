@@ -244,6 +244,11 @@ button { color: inherit; }
 .settings-heading-icon { display: grid; place-items: center; width: 34px; height: 34px; border: 1px solid var(--border); border-radius: 6px; color: var(--accent); background: var(--surface-subtle); }
 .settings-dialog h2 { margin: 0; font-size: 17px; }
 .settings-dialog header small { display: block; max-width: 450px; margin-top: 2px; overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.settings-body { display: grid; grid-template-columns: 168px minmax(0, 1fr); min-height: 0; }
+.settings-navigation { display: flex; min-height: 0; flex-direction: column; gap: 3px; padding: 14px 10px; border-right: 1px solid var(--border); background: var(--surface-subtle); }
+.settings-navigation button { display: flex; width: 100%; height: 34px; align-items: center; gap: 9px; padding: 0 10px; border: 0; border-radius: 5px; color: var(--muted); background: transparent; text-align: left; }
+.settings-navigation button:hover { color: var(--text); background: var(--surface); }
+.settings-navigation button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); font-weight: 600; }
 .settings-content { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-content: start; min-height: 0; overflow: auto; }
 .settings-section { min-width: 0; padding: 14px 18px 16px; border-bottom: 1px solid var(--border); }
 .settings-section-wide { grid-column: 1 / -1; }
@@ -277,6 +282,22 @@ button { color: inherit; }
 .switch-input:checked { border-color: var(--accent); background: var(--accent); }
 .switch-input:checked::after { transform: translateX(16px); }
 .switch-input:disabled { opacity: .45; cursor: default; }
+.setting-row { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(240px, auto); align-items: center; gap: 24px; min-height: 62px; padding-bottom: 8px; border-bottom: 1px solid var(--border); }
+.setting-row:last-child { border-bottom: 0; }
+.setting-row label { font-weight: 600; }
+.setting-row p { margin: 3px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.number-control { width: 132px; min-height: 36px; justify-self: end; padding: 7px 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
+.shortcut-control { display: grid; width: 260px; min-height: 36px; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 7px; justify-self: end; padding: 0 3px 0 10px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--muted); background: var(--control-bg); }
+.shortcut-control:focus-within { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.shortcut-input { min-width: 0; height: 34px; padding: 0; border: 0; outline: 0; color: var(--text); background: transparent; text-align: right; cursor: default; }
+.segmented-control { display: inline-flex; flex: none; overflow: hidden; justify-self: end; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.segmented-control button { display: inline-flex; min-height: 30px; align-items: center; justify-content: center; gap: 5px; padding: 4px 10px; border: 0; border-right: 1px solid var(--border); color: var(--muted); background: transparent; }
+.segmented-control button:last-child { border-right: 0; }
+.segmented-control button:hover { color: var(--text); }
+.segmented-control button.active { color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.setting-row .segmented-control.pin-board-cache-control button { flex-direction: column; gap: 1px; min-height: 38px; padding: 5px 14px; line-height: 1.25; }
+.setting-row .segmented-control.pin-board-cache-control button strong { font-size: 12px; font-weight: 600; }
+.setting-row .segmented-control.pin-board-cache-control button small { font-size: 11px; opacity: .72; }
 .settings-dialog footer { display: flex; justify-content: flex-end; gap: 8px; min-height: 54px; padding: 10px 18px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
 .node-editor, .trash-dialog { width: min(540px, 100%); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 56px rgb(0 0 0 / 20%); }
 .node-editor > header, .trash-dialog > header { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid var(--border); }
@@ -285,6 +306,7 @@ button { color: inherit; }
 .editor-fields { display: grid; gap: 14px; padding: 18px; }
 .editor-fields label { display: grid; gap: 7px; color: var(--muted); font-size: 11px; }
 .editor-fields input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
+.editor-hint { margin: -6px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
 .node-editor > footer, .trash-dialog > footer { display: flex; justify-content: flex-end; align-items: center; gap: 8px; padding: 13px 18px; border-top: 1px solid var(--border); }
 .trash-dialog { width: min(680px, 100%); }
 .trash-list { min-height: 180px; max-height: min(520px, 62vh); overflow: auto; }
@@ -323,4 +345,8 @@ button { color: inherit; }
   .settings-content { grid-template-columns: minmax(0, 1fr); }
   .settings-section-wide { grid-column: auto; }
   .settings-section-left { border-right: 0; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); gap: 10px; }
+  .setting-row .segmented-control,
+  .number-control,
+  .shortcut-control { justify-self: start; }
 }
