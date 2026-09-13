@@ -148,6 +148,23 @@ pub(crate) async fn restore_pin_board(
 }
 
 #[tauri::command]
+pub(crate) async fn reorder_pin_boards(
+    state: State<'_, AppState>,
+    artwork_id: String,
+    board_ids: Vec<i64>,
+) -> Result<Vec<PinBoardSummary>, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        state.with_ready_repository(|root| {
+            let mut connection = storage::open(root)?;
+            repository::reorder_boards(&mut connection, &artwork_id, &board_ids)
+        })
+    })
+    .await
+    .map_err(|error| format!("画板排序任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 pub(crate) async fn delete_pin_board_permanently(
     state: State<'_, AppState>,
     board_id: i64,

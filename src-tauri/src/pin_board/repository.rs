@@ -324,6 +324,72 @@ pub(crate) fn restore_board(
     Ok(summary)
 }
 
+/// 重排同一 Artwork 内未删除画板的显示顺序：`board_ids` 的顺序即目标顺序，
+/// 必须与当前未删除画板集合完全一致，否则视为列表已变化并拒绝写入。
+///
+/// 顺序只是列表元数据，不是画板内容，因此只改 `sort_order`，不更新
+/// `updated_ms` / `revision`——避免“重排后已打开画板的下一次保存被误判为冲突”。
+pub(crate) fn reorder_boards(
+    connection: &mut Connection,
+    artwork_id: &str,
+    board_ids: &[i64],
+) -> Result<Vec<PinBoardSummary>, String> {
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let artwork: Option<Option<i64>> = transaction
+        .query_row(
+            "SELECT n.trashed_ms FROM artworks a
+             JOIN library_nodes n ON n.id = a.id
+             WHERE a.id = ?1",
+            [artwork_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    match artwork {
+        None => return Err("作品不存在".into()),
+        Some(Some(_)) => return Err("回收站中的作品不能调整画板顺序".into()),
+        Some(None) => {}
+    }
+
+    let current: Vec<i64> = {
+        let mut statement = transaction
+            .prepare(
+                "SELECT id FROM pin_boards
+                 WHERE artwork_id = ?1 AND deleted_at IS NULL
+                 ORDER BY sort_order, id",
+            )
+            .map_err(storage::database_error)?;
+        let rows = statement
+            .query_map([artwork_id], |row| row.get::<_, i64>(0))
+            .map_err(storage::database_error)?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(storage::database_error)?
+    };
+
+    let mut requested = board_ids.to_vec();
+    requested.sort_unstable();
+    requested.dedup();
+    let mut expected = current.clone();
+    expected.sort_unstable();
+    if board_ids.len() != current.len()
+        || requested.len() != board_ids.len()
+        || requested != expected
+    {
+        return Err("画板列表已变化，请刷新后重试".into());
+    }
+
+    for (index, board_id) in board_ids.iter().enumerate() {
+        transaction
+            .execute(
+                "UPDATE pin_boards SET sort_order = ?1 WHERE id = ?2",
+                params![index as i64, board_id],
+            )
+            .map_err(storage::database_error)?;
+    }
+    transaction.commit().map_err(storage::database_error)?;
+    list_boards(connection, artwork_id)
+}
+
 /// 永久删除单个回收站画板：先在事务中删除记录并入队目录清理，
 /// 提交后由调用方执行 `cleanup::run`。
 pub(crate) fn delete_board_permanently(
@@ -1418,6 +1484,94 @@ mod tests {
         let renamed = rename_board(&mut connection, board.board_id, "  新名字  ").unwrap();
         assert_eq!(renamed.name, "新名字");
         assert!(rename_board(&mut connection, board.board_id, "   ").is_err());
+    }
+
+    #[test]
+    fn reorders_boards_within_an_artwork() {
+        let (_guard, mut connection) = test_repository();
+        let artwork_id = create_test_artwork(&connection);
+        let first = create_board(&mut connection, &artwork_id, "一").unwrap();
+        let second = create_board(&mut connection, &artwork_id, "二").unwrap();
+        let third = create_board(&mut connection, &artwork_id, "三").unwrap();
+
+        let revision_before: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [first.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let reordered = reorder_boards(
+            &mut connection,
+            &artwork_id,
+            &[third.board_id, first.board_id, second.board_id],
+        )
+        .unwrap();
+        let names = reordered
+            .iter()
+            .map(|board| board.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["三", "一", "二"]);
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|board| board.sort_order)
+                .collect::<Vec<_>>(),
+            [0, 1, 2]
+        );
+
+        // 顺序不是画板内容：重排不能改 revision，否则已打开画板的下一次保存会被误判冲突。
+        let revision_after: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [first.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision_before, revision_after);
+
+        // 缺项或重复 id 一律拒绝，并保持原顺序。
+        assert!(reorder_boards(
+            &mut connection,
+            &artwork_id,
+            &[third.board_id, first.board_id]
+        )
+        .is_err());
+        assert!(reorder_boards(
+            &mut connection,
+            &artwork_id,
+            &[first.board_id, first.board_id, second.board_id],
+        )
+        .is_err());
+        let unchanged = list_boards(&connection, &artwork_id)
+            .unwrap()
+            .into_iter()
+            .map(|board| board.name)
+            .collect::<Vec<_>>();
+        assert_eq!(unchanged, ["三", "一", "二"]);
+    }
+
+    #[test]
+    fn reorder_only_covers_active_boards_of_one_artwork() {
+        let (_guard, mut connection) = test_repository();
+        let artwork_id = create_test_artwork(&connection);
+        let first = create_board(&mut connection, &artwork_id, "一").unwrap();
+        let second = create_board(&mut connection, &artwork_id, "二").unwrap();
+        trash_board(&mut connection, second.board_id).unwrap();
+
+        // 回收站画板不参与排序，集合只需覆盖未删除画板。
+        let reordered = reorder_boards(&mut connection, &artwork_id, &[first.board_id]).unwrap();
+        assert_eq!(reordered.len(), 1);
+        assert_eq!(reordered[0].name, "一");
+
+        // 把回收站画板也算进集合应被拒绝。
+        assert!(reorder_boards(
+            &mut connection,
+            &artwork_id,
+            &[first.board_id, second.board_id],
+        )
+        .is_err());
     }
 
     #[test]

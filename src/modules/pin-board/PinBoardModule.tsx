@@ -79,11 +79,13 @@ import {
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
 
-/** 素材板快捷键默认值，与设置页默认项保持一致（锁定沿用 Client 的替代键位，避免 Ctrl+R 冲突）。 */
-export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+Shift+K";
+/**
+ * 素材板快捷键默认值，与设置页默认项保持一致。
+ * 锁定沿用 Client 的默认键位 Ctrl+R；WebView 整页刷新由应用层的
+ * `preventWebViewReload` 只取消默认行为，因此不会与本快捷键冲突。
+ */
+export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+R";
 export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
-/** Client 旧版锁定键位：素材板活跃时屏蔽，避免 WebView 整页刷新丢失状态。 */
-const LEGACY_RELOAD_SHORTCUT = "CommandOrControl+R";
 
 export interface PinBoardModuleSettings {
   arrangementGapPx: number;
@@ -105,6 +107,34 @@ function actionTitle(action: string, shortcut: string): string {
 }
 
 const IMAGE_PATH_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif|tga|dds)$/i;
+
+/** 侧栏画板拖放排序使用的自定义 dataTransfer 类型。 */
+const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
+
+type BoardDropPosition = "before" | "after";
+
+/**
+ * 计算拖放后的画板 id 顺序：把 `draggedId` 插到 `targetId` 的前或后。
+ * 返回 `null` 表示顺序没有变化（同位置、id 不在列表中或拖到自己身上）。
+ */
+export function reorderBoardIds(
+  boardIds: number[],
+  draggedId: number,
+  targetId: number,
+  position: BoardDropPosition,
+): number[] | null {
+  if (draggedId === targetId || !boardIds.includes(draggedId)) return null;
+  const withoutDragged = boardIds.filter((boardId) => boardId !== draggedId);
+  const targetIndex = withoutDragged.indexOf(targetId);
+  if (targetIndex < 0) return null;
+  const insertAt = position === "before" ? targetIndex : targetIndex + 1;
+  const next = [
+    ...withoutDragged.slice(0, insertAt),
+    draggedId,
+    ...withoutDragged.slice(insertAt),
+  ];
+  return next.every((boardId, index) => boardId === boardIds[index]) ? null : next;
+}
 
 function clipboardImagePaths(value: string): string[] {
   return value
@@ -228,7 +258,13 @@ function GpuCanvas({
       arrangementGapCssPixels,
       (message) => setStatus(message),
       (state) => onState(state),
-      (session) => setBoardSession(artworkId, view.boardId, session),
+      (session) => {
+        // 画布没有布局尺寸时（面板从未获得空间）不写入会话，避免下次进入
+        // 恢复出退化视口导致图片过小且跳过包围框适配。
+        if (canvas.getBoundingClientRect().height > 0) {
+          setBoardSession(artworkId, view.boardId, session);
+        }
+      },
       onContextMenu,
       cacheBudgets,
     )
@@ -476,6 +512,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [transferProgress, setTransferProgress] = useState<PinBoardTransferProgress | null>(null);
   const [clipboardCount, setClipboardCount] = useState(0);
   const [interaction, setInteraction] = useState(DEFAULT_INTERACTION);
+  /** 侧栏画板拖放排序：正在拖动的画板与当前落点。 */
+  const [draggingBoardId, setDraggingBoardId] = useState<number | null>(null);
+  const [boardDropTarget, setBoardDropTarget] = useState<
+    { boardId: number; position: BoardDropPosition } | null
+  >(null);
   const rendererRef = useRef<PinBoardRenderer | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
   const loadSequence = useRef(0);
@@ -484,6 +525,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const fullscreenRef = useRef(false);
   const fullscreenBusyRef = useRef(false);
   const transferBusyRef = useRef(false);
+  const reorderBusyRef = useRef(false);
   const setRenderer = useCallback((renderer: PinBoardRenderer | null) => {
     rendererRef.current = renderer;
   }, []);
@@ -504,6 +546,41 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     setTrash(nextTrash);
     return nextBoards;
   }, [artworkId]);
+
+  /**
+   * 侧栏拖放排序：把 `draggedId` 放到 `targetId` 的前/后，先本地重排再落库，
+   * 失败时回滚。重排只改列表顺序，不影响已打开画板的保存。
+   */
+  const moveBoard = useCallback((
+    draggedId: number,
+    targetId: number,
+    position: BoardDropPosition,
+  ) => {
+    if (!boards || reorderBusyRef.current || transferBusyRef.current) return;
+    const nextOrder = reorderBoardIds(
+      boards.map((board) => board.boardId),
+      draggedId,
+      targetId,
+      position,
+    );
+    if (!nextOrder) return;
+    const byId = new Map(boards.map((board) => [board.boardId, board]));
+    const optimistic = nextOrder
+      .map((boardId) => byId.get(boardId))
+      .filter((board): board is PinBoardSummary => board !== undefined);
+    const previous = boards;
+    setBoards(optimistic);
+    reorderBusyRef.current = true;
+    void pinBoardApi.reorderPinBoards(artworkId, nextOrder)
+      .then((next) => setBoards(next))
+      .catch((error) => {
+        setBoards(previous);
+        setStatus(errorMessage(error));
+      })
+      .finally(() => {
+        reorderBusyRef.current = false;
+      });
+  }, [artworkId, boards]);
 
   useEffect(() => {
     rendererRef.current?.setActive(active);
@@ -998,12 +1075,6 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     const keyDown = (event: KeyboardEvent) => {
       if (!active) return;
       if (!shortcutCanHandle(event)) return;
-      if (shortcutMatches(event, LEGACY_RELOAD_SHORTCUT)) {
-        // 屏蔽 Client 旧版 Ctrl+R 刷新：素材板活跃时整页刷新会丢失全部画布状态。
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        return;
-      }
       const fullscreenRequested = shortcutMatches(event, settings.fullscreenShortcut)
         || (event.key === "Escape" && fullscreenRef.current);
       const lockRequested = shortcutMatches(event, settings.lockShortcut);
@@ -1050,23 +1121,68 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         <div className="pin-board-tree-scroll">
           {boards
             ? <div className="pin-board-board-list">
-              {boards.map((board) => (
-                <button
-                  type="button"
-                  className={`pin-board-tree-row${board.boardId === selected ? " active" : ""}`}
-                  key={board.boardId}
-                  onClick={() => void select(board)}
-                  onContextMenu={(event) => {
-                    event.preventDefault();
-                    setContextMenu(null);
-                    setListContextMenu({ board, trash: false, x: event.clientX, y: event.clientY });
-                  }}
-                  title={board.name}
-                >
-                  <Images size={16} />
-                  <span>{board.name}</span>
-                </button>
-              ))}
+              {boards.map((board) => {
+                const dragging = draggingBoardId === board.boardId;
+                const dropPosition = boardDropTarget?.boardId === board.boardId
+                  ? boardDropTarget.position
+                  : null;
+                return (
+                  <button
+                    type="button"
+                    key={board.boardId}
+                    className={`pin-board-tree-row${board.boardId === selected ? " active" : ""}${dragging ? " dragging" : ""}${dropPosition ? ` drop-${dropPosition}` : ""}`}
+                    draggable={boards.length > 1 && transferProgress === null}
+                    onClick={() => void select(board)}
+                    onContextMenu={(event) => {
+                      event.preventDefault();
+                      setContextMenu(null);
+                      setListContextMenu({ board, trash: false, x: event.clientX, y: event.clientY });
+                    }}
+                    onDragStart={(event) => {
+                      setContextMenu(null);
+                      setListContextMenu(null);
+                      setDraggingBoardId(board.boardId);
+                      setBoardDropTarget(null);
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData(PIN_BOARD_DRAG_TYPE, String(board.boardId));
+                      event.dataTransfer.setData("text/plain", board.name);
+                    }}
+                    onDragOver={(event) => {
+                      if (draggingBoardId === null || draggingBoardId === board.boardId) return;
+                      event.preventDefault();
+                      event.dataTransfer.dropEffect = "move";
+                      const rect = event.currentTarget.getBoundingClientRect();
+                      const position: BoardDropPosition =
+                        event.clientY < rect.top + rect.height / 2 ? "before" : "after";
+                      setBoardDropTarget((current) => (
+                        current?.boardId === board.boardId && current.position === position
+                          ? current
+                          : { boardId: board.boardId, position }
+                      ));
+                    }}
+                    onDrop={(event) => {
+                      event.preventDefault();
+                      const draggedId =
+                        Number(event.dataTransfer.getData(PIN_BOARD_DRAG_TYPE)) || draggingBoardId;
+                      const position: BoardDropPosition = boardDropTarget?.boardId === board.boardId
+                        ? boardDropTarget.position
+                        : "after";
+                      setDraggingBoardId(null);
+                      setBoardDropTarget(null);
+                      if (draggedId === null || draggedId === board.boardId) return;
+                      moveBoard(draggedId, board.boardId, position);
+                    }}
+                    onDragEnd={() => {
+                      setDraggingBoardId(null);
+                      setBoardDropTarget(null);
+                    }}
+                    title={boards.length > 1 ? `拖动可调整顺序：${board.name}` : board.name}
+                  >
+                    <Images size={16} />
+                    <span>{board.name}</span>
+                  </button>
+                );
+              })}
               {boards.length === 0 && (
                 <div className="pin-board-tree-empty">尚无画板，点击右上角“新建画板”</div>
               )}

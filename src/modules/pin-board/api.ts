@@ -24,6 +24,8 @@ export const pinBoardApi = {
   listPinBoardTrash: () => invokeCommand<PinBoardSummary[]>("list_pin_board_trash"),
   createPinBoard: (artworkId: string, name: string) =>
     invokeCommand<PinBoardSummary[]>("create_pin_board", { artworkId, name }),
+  reorderPinBoards: (artworkId: string, boardIds: number[]) =>
+    invokeCommand<PinBoardSummary[]>("reorder_pin_boards", { artworkId, boardIds }),
   renamePinBoard: (boardId: number, name: string) =>
     invokeCommand<PinBoardSummary>("rename_pin_board", { boardId, name }),
   trashPinBoard: (boardId: number) =>

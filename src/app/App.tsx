@@ -27,6 +27,7 @@ import {
   shortcutFromEvent,
   shortcutLabel,
 } from "./settingsShortcuts";
+import { preventWebViewReload } from "./webviewShortcuts";
 import type {
   AppSettings,
   BackupRuntimeStatus,
@@ -110,6 +111,13 @@ export function App() {
 
   useEffect(() => {
     void load();
+  }, []);
+
+  // F5 / Ctrl+R 只会被取消默认行为，不吞掉事件；素材板“锁定画板”等模块快捷键
+  // 仍能拿到同一组合键（默认 Ctrl+R），避免整页刷新丢失画布状态。
+  useEffect(() => {
+    window.addEventListener("keydown", preventWebViewReload, true);
+    return () => window.removeEventListener("keydown", preventWebViewReload, true);
   }, []);
 
   useEffect(() => {
@@ -367,7 +375,7 @@ export function App() {
               <div className="settings-content">
               {settingsPage === "general" && (
                 <>
-                <div className="settings-section settings-section-left">
+                <div className="settings-section">
                   <div className="settings-section-title"><Palette aria-hidden="true" size={17} /><h3>外观</h3></div>
                   <div className="settings-select-grid">
                     <label>
@@ -388,7 +396,7 @@ export function App() {
                   </div>
                 </div>
 
-                <div className="settings-section settings-section-left">
+                <div className="settings-section">
                   <div className="settings-section-title"><MonitorCog aria-hidden="true" size={17} /><h3>应用行为</h3></div>
                   <div className="settings-preference-list">
                     <label className="settings-preference-row">
@@ -424,7 +432,7 @@ export function App() {
 
               {settingsPage === "repository" && (
                 <>
-                <div className="settings-section settings-section-wide">
+                <div className="settings-section">
                   <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
                   <div className="settings-path-field">
                     <label htmlFor="repository-path">仓库位置</label>
@@ -472,7 +480,7 @@ export function App() {
               )}
 
               {settingsPage === "pin-board" && (
-                <div className="settings-section settings-section-wide">
+                <div className="settings-section">
                   <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
                   <div className="setting-row">
                     <div>
@@ -485,9 +493,9 @@ export function App() {
                       aria-labelledby="pin-board-cache-level-label"
                     >
                       {([
-                        { level: "low", label: "低", memory: "约 64 MB" },
-                        { level: "medium", label: "中", memory: "约 128 MB" },
-                        { level: "high", label: "高", memory: "约 256 MB" },
+                        { level: "low", label: "低", memory: "约 256 MB" },
+                        { level: "medium", label: "中", memory: "约 512 MB" },
+                        { level: "high", label: "高", memory: "约 1 GB" },
                       ] as const).map(({ level, label, memory }) => (
                         <button
                           key={level}
@@ -522,7 +530,7 @@ export function App() {
                   <div className="setting-row">
                     <div>
                       <label htmlFor="pin-board-lock-shortcut">锁定画板快捷键</label>
-                      <p>默认 Ctrl+Shift+K；锁定后仍可缩放和移动视口，但不会修改图片。</p>
+                      <p>默认 Ctrl+R；锁定后仍可缩放和移动视口，但不会修改图片。</p>
                     </div>
                     <div className="shortcut-control">
                       <Keyboard size={16} aria-hidden="true" />

@@ -8,6 +8,18 @@
 
 版本基线重置批次（应用版本与 schema 重置为 0.1.0 / v1、历史候选版与迁移链清除、维护者验收与发布确认）已归档到 `docs/planning/archive/version-reset-2026-09-12.md`。
 
+## 素材板设置/快捷键/视图适配与拖放排序批次（待人工验收）
+
+在 0.2.0-alpha.1 基础上，由维护者第二轮反馈的 4 项问题已修复，并补齐原 Client 具备的侧栏画板拖放排序；与 Client 原模块的逐项差异见 `docs/planning/pin-board-client-comparison.md`。完整编译与 GUI 手工验收尚未执行：
+
+1. 设置弹窗改为单列纵向布局：分页后不再沿用 Client 的两列紧凑排版，`.settings-content` 去掉两列网格，外观页两个下拉也改为单列并统一片段间距；
+2. 锁定画板快捷键恢复 Client 默认 `Ctrl+R`：新增应用层 `src/app/webviewShortcuts.ts`（只取消默认行为、不停止传播）拦截 F5 / `Ctrl+R` 整页刷新，移除素材板模块内提前吞掉 `Ctrl+R` 的分支，使 `Ctrl+R` 能正常命中锁定；设置文件版本升到 v2，读取 v1 时把仍是旧默认值 `CommandOrControl+Shift+K` 的锁定键位迁移为 `CommandOrControl+R`（其余自定义键位保留）；
+3. 修复“图片过小 / 进入不自动适配视图”：素材板工作区面板改用 keep-alive 可见性隐藏（`visibility` + 绝对定位）代替 `display:none`，画布始终保有布局尺寸，渲染器首次创建即按未删除图片的最小包围框完成适配；会话写入增加“画布无布局尺寸则不落盘”守卫，杜绝退化视口被恢复；
+4. 设置页纹理缓存等级容量标注由 64/128/256 MiB 改为与 Client 一致的约 256 MB / 512 MB / 1 GB（含 Rust 解码缓存与前端 GPU 常驻缓存的总量）；
+5. 侧栏画板拖放排序（对齐 Client）：新增 `reorder_pin_boards(artworkId, boardIds)` 命令与 `repository::reorder_boards`，要求传入 id 集合与当前未删除画板完全一致（缺项/重复/跨作品一律拒绝）；前端按落点的上/下半区决定插入前/后，先乐观重排再落库、失败回滚。排序只改 `sort_order`、不改 `revision`，因此不会打断已打开画板的保存。
+
+已验证：`npx tsc --noEmit`、`npm test`（102 通过，含新增 webviewShortcuts、拖放排序与锁定默认键位用例）、`cargo test --lib`（108 通过，含 1 个忽略项，新增排序集合校验与设置 v1→v2 迁移用例）、`cargo fmt --check`、`git diff --check`。
+
 ## 素材板迁移后修复批次（待人工验收）
 
 0.2.0-alpha.1 迁移后由维护者反馈的 8 项问题已修复，完整编译与 GUI 手工验收尚未执行：
