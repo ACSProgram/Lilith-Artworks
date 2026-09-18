@@ -1,5 +1,8 @@
 # 素材板模块与 Lilith Client 原模块对比报告
 
+> **已归档（2026-09-18）**：本报告是迁入完成后的差异核对记录，结论已并入
+> `docs/modules/pin-board.md`。本文件仅作为历史核对依据保留。
+
 对比基线：`F:\programs\Lilith Client\src\modules\pin-board`、`src-tauri\src\pin_board`、`src\app\webviewShortcuts.ts`、`src\styles\pin-board.css`。
 
 对比方法：对前端实现按文件做逐字节 diff；Rust 侧原模块集中在一个 `mod.rs`，迁入后拆为 `mod.rs`（命令层）/ `repository.rs`（持久化）/ `dds.rs`（DDS 与纹理缓存），因此按函数逐项比对而非整文件 diff。

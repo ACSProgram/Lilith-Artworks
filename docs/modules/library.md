@@ -19,13 +19,15 @@
 - 分组可以任意嵌套，Artwork 是叶节点。
 - 单击选择节点；单击分组同时切换展开。`Ctrl`/`Command` 切换单项选择，`Shift` 选择当前可见范围。
 - 拖动已选择节点会按树中的显示顺序批量移动。分组中央表示移入，节点上下边缘表示同级前后排序；拖到“全部作品”移动到根级。
-- 新建 Artwork 必须填写标题和初始分支标题；工作文件可选。选择工作文件时 Rust 负责绝对路径、普通文件、仓库外路径和同 Artwork 分支路径唯一性检查；留空时分支 `source_path` 记为空字符串，自动备份与主动提交对该分支不可用（见 history-and-backup 文档），但素材板等功能不受影响。
+- 新建 Artwork 必须填写标题和初始分支标题；工作文件可选。选择工作文件时 Rust 负责绝对路径、普通文件、仓库外路径和同 Artwork 分支路径唯一性检查；留空时分支 `source_path` 记为空字符串，之后可在历史页清除或重新选择路径，自动备份与主动提交对该分支不可用（见 history-and-backup 文档），但素材板等功能不受影响。
 - 搜索匹配节点标题与 Artwork 主分支工作文件路径；选择结果会展开完整祖先路径并定位节点。
 - 侧栏底部统计固定在树滚动区之外，同时显示分组数和 Artwork 数；回收站入口显示当前项目数量，树滚动和侧栏高度变化不会带走入口。
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
 - Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器、文件清理重试和自动备份关闭通知的目标查询，并把认证记录或待处理分支转换为应用层导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
 - `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
-- `src/app/App.repositorySwitch.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互仍按当前交接清单人工验收。
+- `src/app/App.repositorySwitch.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互属人工验收项，见 `docs/planning/todo.md`。
+
+当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
 ## 仓库打开与初始化
 
