@@ -1,5 +1,9 @@
 # 系统架构
 
+Lilith Artworks 是本地优先的**平面美术个人项目**工作台，统一管理三件事：作品资源（Artwork 树与
+素材板）、版本（可派生分支的增量历史）与发布（最终成品与 C2PA/TrustMark 认证）。四个领域模块
+（Library、History/Backup、Authenticity、Pin-board）共享同一作品仓库，互不导入，由应用层编排。
+
 ## 层级
 
 代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。认证发布状态与成品绑定在 `authenticity/publication_repository.rs`，认证配置/记录查询在 `repository.rs`；历史破坏性删除通过 `history/deletion_repository.rs` 进入。
@@ -7,7 +11,7 @@
 ```text
 src/app/                 应用启动、窗口、全局设置与跨模块工作区编排
 src/modules/library/     Artwork 树、搜索和选择交互
-src/modules/history/     分支历史图、提交、fork、恢复和裁剪
+src/modules/history/     分支历史图、提交、创建分支、恢复和裁剪
 src/modules/authenticity 成品、C2PA/TrustMark 发布与识别
 src/modules/pin-board    按 Artwork 的素材板画布、图片导入导出与画板回收站
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
@@ -18,7 +22,7 @@ src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
 src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务
-src-tauri/src/history/                 分支、历史节点、fork、裁剪和历史图契约
+src-tauri/src/history/                 分支、历史节点、创建分支、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备、调度和取消
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
 src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
@@ -26,9 +30,9 @@ src-tauri/src/cleanup.rs                 数据库提交后的文件清理队列
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
-前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`，页面组件只保留视图选择、弹窗和渲染状态。控制器统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
+前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`；素材板保留 Lilith Client 的直连结构，由 `PinBoardModule.tsx` 与 `renderer.ts` 直接消费 `pin-board/api.ts`，不额外插入控制器层。控制器与素材板页面组件只保留视图选择、弹窗和渲染状态，统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
-Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup` 和 `authenticity`；需要组合 checkpoint、调度唤醒、清理队列、仓库 lease 或共享 `BackupState` 运行锁的 create Artwork、永久清理、fork、分支更新/删除、整仓灾备、进入/取消发布和认证发布由 `app/workflows.rs` 编排。前端命令名和 DTO 不因内部所有权变化而改变。
+Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup`、`authenticity` 和 `pin_board`；需要组合 checkpoint、调度唤醒、清理队列、仓库 lease 或共享 `BackupState` 运行锁的 create Artwork、永久清理、创建分支、分支更新/删除、整仓灾备、进入/取消发布和认证发布由 `app/workflows.rs` 编排。`pin_board` 命令直接在 `lib.rs` 注册，不经应用工作流：浏览走共享读租约，变更走仓库操作锁。前端命令名和 DTO 不因内部所有权变化而改变。
 
 ## 应用生命周期
 
@@ -45,7 +49,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 - Library tree：分组和 Artwork 构成任意深度树，Artwork 是叶节点。
 - Artwork：作品级聚合根，拥有多个 branch。
 - Branch：命名工作线，绑定唯一源文件路径和一个可变 head 指针。
-- History node：不可变提交，只有一个父节点，可以被多个后继节点引用；fork 是从选定节点创建新 branch/head。
+- History node：不可变提交，只有一个父节点，可以被多个后继节点引用；创建分支是从选定节点派生新的 branch/head。
 - Final artifact：分支可选的一份最终成品，固定关联进入发布状态时的 head。存在时分支被冻结，该 head 是强制检查点。
 - Certification record：不可变导出快照，固定关联 final artifact、branch 和发布节点，记录 TrustMark ID、输出文件摘要、C2PA manifest 与验证状态。
 - Pin board：Artwork 内平铺一层的画板聚合，拥有图片记录、step 历史、图层/顺序与回收站状态；不进入分支历史，DDS 实体存于 `boards/`。
@@ -72,7 +76,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 普通数据库连接只使用 SQLite `READ_WRITE` 打开现有 `lilith-artworks.sqlite3`，不得带 `CREATE`。仓库目录和新 schema 创建只从 Library 显式初始化入口进入。`AppState` 缓存当前路径已通过完整校验的事实：首次访问、启动状态读取和设置保存执行 SQLite 完整性、外键、实体 UUID、受控相对路径、持久化 SHA-256 与 schema 版本检查，之后所有前台命令和后台调度统一执行轻量 format/version 检查。数据库被外部删除、清空或替换为其他格式/不受支持版本时会清除缓存并报告仓库不可用，不创建占位数据库。
 
-提交、完整 fork、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁和仓库 lease 后调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本及 C2PA 声明；同一取消命令可以中断节点之间的扫描。
+提交、完整创建分支、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁和仓库 lease 后调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本及 C2PA 声明；同一取消命令可以中断节点之间的扫描。素材板命令不经过 `app/workflows.rs`，因此不持有共享运行锁：浏览走共享读租约，变更只持有仓库操作锁，长灾备或扫描运行期间的画板写入会等待操作锁释放。
 
 整仓灾备核心归 `backup/repository_backup.rs` 所有，但由 `app/workflows.rs` 同时取得共享运行锁和仓库 lease 后调用。它先 checkpoint WAL，再复制仓库内普通文件；副本通过 Library 公开打开校验、History/Backup scrub 和 Authenticity 受控文件 scrub 后生成逐文件 SHA-256 清单，最后以同卷目录重命名发布。前端只能提交文件选择器授权的目标父目录；临时 bundle 在失败或取消时清理，成功 bundle 内的 `repository/` 可作为新仓库打开。该流程不复制仓库外的分支工作文件。
 

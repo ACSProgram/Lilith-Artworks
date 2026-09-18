@@ -4,8 +4,10 @@
 
 Keep changes within the module boundaries documented in
 [`docs/architecture/ai-reading-guide.md`](docs/architecture/ai-reading-guide.md).
-Read [`docs/planning/current-handoff.md`](docs/planning/current-handoff.md) before
-starting work so completed architecture work is not reopened accidentally.
+Read [`docs/planning/current-handoff.md`](docs/planning/current-handoff.md) and
+[`docs/planning/todo.md`](docs/planning/todo.md) before starting work so
+completed architecture work is not reopened and unfinished work is not
+duplicated.
 
 ## Development setup
 
@@ -22,14 +24,15 @@ Install locked frontend dependencies with `npm ci`. Run the app with
 
 ## Change requirements
 
-- Preserve the existing History, Backup, Library, Authenticity, and application
-  workflow boundaries.
+- Preserve the existing History, Backup, Library, Authenticity, Pin-board, and
+  application workflow boundaries.
 - Keep database and file mutations transactional and test them with temporary
   repositories rather than user data.
 - Update the owning module document when a command, DTO, schema, cleanup rule,
   or user workflow changes.
 - Record unfinished work and manual acceptance results only in
-  `docs/planning/current-handoff.md`.
+  `docs/planning/todo.md` and `docs/planning/current-handoff.md`; completed or
+  superseded plans move to `docs/planning/archive/`.
 - Do not commit signing keys, certificates, application state, generated build
   output, or model files without confirming their redistribution terms.
 

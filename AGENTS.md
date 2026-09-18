@@ -6,10 +6,12 @@
 
 - 历史图、分支、精简、检查点、恢复或自动备份：先读 `docs/modules/history-and-backup.md` 的“上下文入口”，再进入 `src/modules/history/` 或 `src-tauri/src/history/`、`src-tauri/src/backup/`。
 - Artwork 树、搜索、拖放或回收站：先读 `docs/modules/library.md`，再进入 `src/modules/library/` 或 `src-tauri/src/library/`。
+- 素材板、画板画布、图片导入导出或画板回收站：先读 `docs/modules/pin-board.md`，再进入 `src/modules/pin-board/` 或 `src-tauri/src/pin_board/`。
+- 发布、成品、C2PA、TrustMark 或识别：先读 `docs/modules/authenticity.md`，再进入 `src/modules/authenticity/` 或 `src-tauri/src/authenticity/`。
 - 设置、窗口、托盘和应用生命周期：读 `docs/architecture/overview.md` 的“应用生命周期”，再进入 `src/app/` 或 `src-tauri/src/app/`、`src-tauri/src/lib.rs`。
 - 样式问题：业务模块样式优先读对应 `src/styles/<module>.css`；`src/styles/index.css` 只保留基础控件和仍未拆出的共享规则。
 - 构建与验证：只读 `docs/guides/validation.md`，按用户要求选择轻量检查或完整验证。
-- 本轮尚未验收的工作：读 `docs/planning/current-handoff.md`，不要从旧聊天记录重建范围。
+- 本轮尚未验收的工作：读 `docs/planning/current-handoff.md`；未完成事项查 `docs/planning/todo.md`，不要从旧聊天记录重建范围。
 
 ## 边界
 
@@ -23,7 +25,7 @@
 ## 文档与验证
 
 - 当前有效事实写入 `docs/architecture/`、`docs/modules/` 和 `docs/guides/`。
-- 未完成项、人工验收结果和下一步只写入 `docs/planning/current-handoff.md`。
+- 当前批次状态与人工验收结果写入 `docs/planning/current-handoff.md`；未完成事项写入 `docs/planning/todo.md`；已完成或被替代的计划移入 `docs/planning/archive/`。
 - 代码入口或契约改变时同步更新模块文档。不要把“计划实现”写成“已经验收”。
 - 默认做与改动匹配的类型、格式和静态检查；完整编译、GUI 流程与大文件测试由用户明确安排。
 

@@ -11,7 +11,7 @@
 - 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`。
 - 强制发布检查点和共享运行锁：`src-tauri/src/app/workflows.rs` 调用公开 `backup::ensure_checkpoint` 后进入认证服务；认证模块不导入 backup 或读取 `chunk_file.rs`。
 
-当前未验收项和人工检查清单只读 `docs/planning/current-handoff.md`。
+当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
 ## 发布状态
 
@@ -80,9 +80,7 @@ cancel_authenticity_operation
 ## 数据版本
 
 认证记录的 `stored_path` 为非空约束，每条记录都必须有仓库内 JPG 副本；DTO 和界面不暴露冗余的 `contentStored` 状态。共享待清理队列处理发布创建失败和取消发布的数据库/文件边界；取消发布只清理仓库拥有的文件，不清理首次导出路径。
-## 本轮实现补充（2026-08-13）
 
-TrustMark 使用 Q / BCH_SUPER，标识长度为 40 位。水印只写入用户在预览中框选的区域；没有框选区域时不会启用 TrustMark，发布仍保留 C2PA。发布页提供强度与 JPEG 质量滑条、质量损失提示、大小预览及模型哈希摘要；识别页展示完整 C2PA manifest，导出记录支持自动搜索和详细字段查看。
 ## 前端交互约定
 
 - Authenticity 不直接导入 App、Library 或 History。应用层传入只含 `id`、`title`、`headHistoryId` 的认证分支视图，注入清理重试，并把认证记录转换为 Library 导航目标。

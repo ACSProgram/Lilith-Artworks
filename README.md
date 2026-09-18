@@ -1,14 +1,16 @@
 # Lilith Artworks
 
-Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统一管理 Artwork 树、可 fork 的增量历史、最终成品以及 C2PA/TrustMark 认证。
+Lilith Artworks 是一个本地优先的**平面美术个人项目**桌面应用，统一管理三件事：作品资源
+（可嵌套 Artwork 树与按作品的素材板）、版本（可派生分支的增量历史）与发布（最终成品以及
+C2PA/TrustMark 认证）。四个领域模块共享同一个作品仓库，全部数据留在本机。
 
 ## 当前状态
 
-`v0.1.0` 已发布；当前 `0.2.0-alpha.1` 为测试版，使用 repository schema v2 和应用标识 `com.lilith.artworks`（v1 仓库打开时自动追加式迁移到 v2）。项目仍处于早期阶段，可能存在缺陷、稳定性问题或安全缺口；不要用它承载唯一副本、不可替代的作品数据或生产工作流。已发布的标签与资产一经公开即不可移动、覆盖或复用；任何发布后的代码、schema 或签名声明变化都必须使用新的版本号和标签。
+`v0.1.0` 已发布；当前 `0.2.0-alpha.2` 为测试版，使用 repository schema v2 和应用标识 `com.lilith.artworks`（v1 仓库打开时自动追加式迁移到 v2）。项目仍处于早期阶段，可能存在缺陷、稳定性问题或安全缺口；不要用它承载唯一副本、不可替代的作品数据或生产工作流。已发布的标签与资产一经公开即不可移动、覆盖或复用；任何发布后的代码、schema 或签名声明变化都必须使用新的版本号和标签。
 
 **数据兼容性警告：** 本版本不提供旧数据迁移支持。任何早于 schema v1 的作品仓库、设置和应用数据均不受支持，请创建新仓库，不要直接打开、覆盖或复用旧版本数据。
 
-作品仓库、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现，后续风险和工作入口见[当前任务交接](docs/planning/current-handoff.md)。当前功能包括：
+作品仓库、素材板、增量历史、认证发布/识别、恢复清理和跨模块工作流均已实现。当前功能包括：
 
 - React + TypeScript + Tauri 2 工程骨架；
 - 版本化设置、仓库选择、窗口状态和内容偏好；
@@ -18,21 +20,23 @@ Lilith Artworks 是一个本地优先的作品管理桌面应用，目标是统�
 - 可嵌套作品树、标题/工作文件搜索、创建、重命名、拖放排序和 Ctrl/Shift 多选。
 - 项目回收站，支持恢复、永久删除和清空；Artwork 内部历史节点仍按规划直接裁剪。
 - 支持 LilithClient ChunkFile v1 文件格式、内容定义分块、SHA-256、zstd 反向 delta 与完整性校验。
-- 每个 Artwork 支持多分支、独立工作文件、主动提交、托盘自动调度、取消与历史恢复。
-- 历史工作区显示树状 fork 结构、分支 head、节点标题、逻辑大小、Chunk 文件大小和 SHA-256。
+- 每个 Artwork 支持多分支、独立工作文件、主动提交、托盘自动调度、取消与历史恢复；工作文件可留空或事后清除，此时该分支的自动备份与主动提交保持关闭。
+- 历史工作区显示树状分支结构、分支 head、节点标题、逻辑大小、Chunk 文件大小和 SHA-256。
 - 作品树展开状态持久化，拖放沿用 LilithClient 的递归树实现；项目删除继续进入回收站。
-- Tauri 图标与 TrustMark 模型已迁入 `src-tauri/resources/` 并随应用打包。
 - 素材板模块（自 Lilith Client 迁入）：按 Artwork 的画板画布、BC7 DDS 图片存储、持久化撤销/恢复历史与画板回收站（详见[模块文档](docs/modules/pin-board.md)）。
+- Tauri 图标与 TrustMark 模型已迁入 `src-tauri/resources/` 并随应用打包。
 
 历史总览 mindmap、单分支历史、右键恢复与分支操作、当前分支精简模式、永久删除、中间节点 ChunkFile 重建与检查点均已接入；C2PA/TrustMark 认证支持发布、区域水印、识别与跨 Artwork 溯源。
+
+素材板迁入后已完成一次完整编译与 GUI 验收（含导入/导出、大图、缓存、回收站以及整仓灾备与灾备恢复后画板可用）。本轮批次的执行状态见[当前任务交接](docs/planning/current-handoff.md)，未完成事项见[待办清单](docs/planning/todo.md)。
 
 ## 文档入口
 
 - [AI 阅读引导](docs/architecture/ai-reading-guide.md)
-- [当前任务交接](docs/planning/current-handoff.md)
-- [RC2 发布与验收归档](docs/planning/archive/rc2-release-2026-08-16.md)
-- [规划归档](docs/planning/archive/README.md)
 - [系统架构](docs/architecture/overview.md)
+- [当前任务交接](docs/planning/current-handoff.md)
+- [待办清单](docs/planning/todo.md)
+- [规划归档](docs/planning/archive/README.md)
 - [验证策略](docs/guides/validation.md)
 - [发行政策](docs/guides/release-policy.md)
 - [贡献指南](CONTRIBUTING.md)

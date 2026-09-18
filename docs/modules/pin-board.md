@@ -12,11 +12,15 @@
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - schema v2 表定义：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`）
 
+当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
+
 只改画板列表或设置时不需要读取 `renderer.ts`；只改几何算法时不需要读取页面组件和 Rust 数据解析。
 
 ## 数据所有权与边界
 
-素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）；整仓灾备需要完整复制 `artworks/<artwork-id>/boards/`（见 `docs/planning/current-handoff.md` 中尚未完成的扩围项）。
+素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
+
+整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板。设置页的"仓库完整性"扫描目前只覆盖历史链与认证受控文件，尚未校验画板 DDS 的内容语义，该缺口记在 `docs/planning/todo.md`。
 
 前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
@@ -25,8 +29,8 @@
 ## 并发与锁
 
 - 普通浏览（列表、加载、纹理读取、导出 PNG 到剪贴板）走共享读租约（`with_repository_read`）；
-- 保存、结算、粘贴、导入、画板增删改与回收站操作走互斥写锁（`with_ready_repository`，同时持有仓库租约与 `BackupState` 运行锁的编排入口由应用层保证）；
-- 灾备、scrub、仓库完整性操作持锁期间画板文件访问被阻塞。
+- 保存、结算、粘贴、导入、画板增删改与回收站操作走仓库操作锁（`with_ready_repository`＝仓库租约 + `repository_operation` 互斥锁）。`pin_board` 命令直接在 `lib.rs` 注册，不经 `app/workflows.rs`，因此不持有 `BackupState` 运行锁；
+- 灾备、scrub、仓库完整性操作持仓库操作锁期间，画板写入会被阻塞（读取仍可继续）。
 
 ## 存储布局（schema v2）
 
@@ -80,4 +84,4 @@ SQLite:
 
 - `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序/迁移（临时目录 SQLite），不依赖 Tauri 运行时；
-- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用）由维护者执行。
+- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用）由维护者执行，结果记录在 `docs/planning/current-handoff.md`。

@@ -9,18 +9,18 @@
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
-- fork、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
+- 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
 - SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file.rs`。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`。
 - 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
 
-当前未验收项和人工检查清单只读 `docs/planning/current-handoff.md`。
+当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
 ## 模块边界
 
 - `src-tauri/src/library/`：仓库初始化、作品树、搜索与项目回收站。
-- `src-tauri/src/history/`：分支、历史节点、fork、head 和历史元数据事务。
+- `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
@@ -35,13 +35,13 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 `ChunkStore` 把基础 snapshot 与各条 delta 的解压 payload 追加为同一段虚拟偏移空间中的分段。`ChunkFileDelta::resolve` 只重写块布局、不写 payload 字节；`write_snapshot`、`copy_original` 在导出或校验时才按虚拟偏移流式读取并逐块验哈希。因此物化一条链的成本取决于链上变化的字节数，而不是"链长 × 文件大小"。`ChunkFileDelta::apply`（物化成完整 snapshot 文件）由 resolve + write_snapshot 组合实现，chunk 格式单测在无 GUI 依赖的隔离 crate 中运行。
 
-fork 后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
+创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
-删除 fork 分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。SQLite 事务提交后仍逐项查询当前图是否引用该路径，只删除已经无引用的 snapshot/delta，避免共享祖先或其它分支仍使用的文件被误删。
+删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。SQLite 事务提交后仍逐项查询当前图是否引用该路径，只删除已经无引用的 snapshot/delta，避免共享祖先或其它分支仍使用的文件被误删。
 
 ## 存储大小语义
 
-`history_nodes.chunk_file_size` 记录"重建该节点需要读取的字节数"：节点拥有 snapshot 时为 snapshot 文件大小（由发布它的调用方写入），否则为指向其唯一子节点的边 delta 大小；多个子节点时取最小 delta（fork 点通常持有 snapshot，不会走到该分支）。`history_nodes.delta_path` 兼容列与该语义保持一致，仅在没有边（分支根）时被 `load_node_from` 读取。写路径统一由 `refresh_storage_metadata` 从图推导：提交释放父 snapshot、取消检查点、精简改接后都会重算，精简后刷新的是被移除节点的父节点（新 delta 的受益方）与子节点。
+`history_nodes.chunk_file_size` 记录"重建该节点需要读取的字节数"：节点拥有 snapshot 时为 snapshot 文件大小（由发布它的调用方写入），否则为指向其唯一子节点的边 delta 大小；多个子节点时取最小 delta（分支起点通常持有 snapshot，不会走到该分支）。`history_nodes.delta_path` 兼容列与该语义保持一致，仅在没有边（分支根）时被 `load_node_from` 读取。写路径统一由 `refresh_storage_metadata` 从图推导：提交释放父 snapshot、取消检查点、精简改接后都会重算，精简后刷新的是被移除节点的父节点（新 delta 的受益方）与子节点。
 
 ## 提交与恢复
 
@@ -67,19 +67,21 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 历史总览是纵向缩进的父子 mindmap，使用工作区原生滚轮纵向浏览；分支视图列出当前 head 的祖先链。节点左键只选择或在精简模式中勾选；总览中双击唯一属于一个分支的节点只切换当前分支选择，不进入分支视图，右键菜单仍提供显式“进入分支”。恢复使用系统“另存为”窗口选择新文件，并在页面头部报告可取消进度。
 
-总览与当前分支视图使用同一个精简入口。总览直接在原视图进入精简模式，以分支下拉框的当前选择为范围，不切入分支视图；选择范围只包含该分支祖先链中有一个子节点且不是叶节点、分支 head、fork 起点或检查点的普通中间节点，不允许混入其它分支节点。任务按分支链从后向前处理所选节点，重新物化父子节点，使用原始 ChunkFile API 重建新的反向 delta，再以事务同步改接 `history_nodes.parent_id`、`history_edges` 和兼容 `delta_path`，最后销毁旧节点和不再引用的文件。
+总览与当前分支视图使用同一个精简入口。总览直接在原视图进入精简模式，以分支下拉框的当前选择为范围，不切入分支视图；选择范围只包含该分支祖先链中有一个子节点且不是叶节点、分支 head、分支起点或检查点的普通中间节点，不允许混入其它分支节点。任务按分支链从后向前处理所选节点，重新物化父子节点，使用原始 ChunkFile API 重建新的反向 delta，再以事务同步改接 `history_nodes.parent_id`、`history_edges` 和兼容 `delta_path`，最后销毁旧节点和不再引用的文件。
 
-删除节点仅从当前分支视角发起。预检在建立保留检查点之前拒绝包含发布节点的子树；若其它完整分支仍指向子树，也会拒绝并要求先删除对应分支。事务删除节点及后代并回退受影响分支，只更新 head 或 fork 起点确实落在删除集合中的分支，不改写同 Artwork 下无关旁支的 `updated_ms`。
+删除节点仅从当前分支视角发起。预检在建立保留检查点之前拒绝包含发布节点的子树；若其它完整分支仍指向子树，也会拒绝并要求先删除对应分支。事务删除节点及后代并回退受影响分支，只更新 head 或分支起点确实落在删除集合中的分支，不改写同 Artwork 下无关旁支的 `updated_ms`。
 
-检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta，并把 UI 的当前存储路径/大小统计切回该 delta。分支 head、fork 起点、分叉点和已进入发布状态的节点是强制检查点，不能取消。
+检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta，并把 UI 的当前存储路径/大小统计切回该 delta。分支 head、分支起点、分叉点和已进入发布状态的节点是强制检查点，不能取消。
 
-全局设置和分支设置使用开关表达自动备份状态。托盘菜单会根据持久化状态动态显示“暂停所有自动备份”或“继续所有自动备份”；分支设置自动保存并显示未保存、保存中、已保存和保存失败状态。历史页顶部只保留一份工作文件路径，在当前分支名称下以较大字号显示，并通过紧邻的文件修改按钮重新选择；`update_artwork_branch` 在同一事务内更新路径与其它分支设置，路径继续复用普通文件、绝对路径、仓库外和同 Artwork 分支唯一校验，选择取消或保存失败时保留旧路径。设置草稿逐字段合并服务端更新，开关写入携带用户读取到的持久化基线；过期请求可以继续保存名称或间隔，但不能重新启用已由调度器自动关闭的备份。自动备份因连续失败被关闭后，作品库左侧持续显示警告，只有“知道了”或手动重新启用才清除通知。
+全局设置和分支设置使用开关表达自动备份状态。托盘菜单会根据持久化状态动态显示“暂停所有自动备份”或“继续所有自动备份”；分支设置自动保存并显示未保存、保存中、已保存和保存失败状态。历史页顶部只保留一份工作文件路径，在当前分支名称下以较大字号显示，并通过紧邻的文件修改按钮重新选择；该行还提供“清除工作文件路径”按钮，把路径写回空字符串。`update_artwork_branch` 在同一事务内更新路径与其它分支设置，路径继续复用普通文件、绝对路径、仓库外和同 Artwork 分支唯一校验，选择取消或保存失败时保留旧路径。未选择工作文件时自动备份开关置灰、间隔输入禁用，保存结果始终是关闭；此时"修改工作文件"图标按钮替换为醒目的"选择文件"主按钮。设置草稿逐字段合并服务端更新，开关写入携带用户读取到的持久化基线；过期请求可以继续保存名称或间隔，但不能重新启用已由调度器自动关闭的备份。自动备份因连续失败被关闭后，作品库左侧持续显示警告，只有“知道了”或手动重新启用才清除通知。
 
 历史页的分支状态行只显示自动备份失败的短摘要，不拼接后端完整错误。完整错误保存在可展开详情中并提供复制入口；详情使用独立浮层，不参与分支设置和删除操作的横向布局。自动重试、连续失败计数和自动关闭语义仍完全由持久化分支状态决定。
 
 主动提交返回“创建节点”或“内容已是最新”两种成功结果。后者在历史页显示为成功检查状态，不再占用全局错误提示；自动任务刚刚抢先记录同一内容时，也使用这一结果说明当前内容已有备份。
 
-未选择工作文件的分支（创建 Artwork 时留空，`source_path` 为空字符串）不参与备份：调度查询与调度文件统计都会排除这类分支，worker 对空路径兜底返回明确错误；历史页主动提交输入框与按钮在该分支上禁用并显示提示。这类 Artwork 的素材板等其他仓库功能不受影响。
+未选择工作文件的分支（创建 Artwork 时留空，或事后清除路径，`source_path` 为空字符串）不参与备份：调度查询与调度文件统计都会排除这类分支，worker 对空路径兜底返回明确错误；分支设置的自动备份开关置灰并强制为关闭，历史页主动提交输入框与按钮在该分支上禁用并显示提示。这类 Artwork 的素材板等其他仓库功能不受影响。
+
+`update_artwork_branch` 以 `source_path` 的三种取值区分语义：字段缺省表示本次不改路径，非空字符串表示设置新路径，空字符串表示清除路径。清空与设置都走同一条路径校验，因此绝对路径、普通文件、仓库外和同 Artwork 唯一性约束始终成立。由于 `branches.source_path_key` 为非空列且与 `artwork_id` 组成唯一索引，同一 Artwork 只能有一个分支不设置工作文件；第二个分支清空路径会被拒绝并返回明确错误，事务整体回滚。Rust 侧对空路径分支一律把 `backup_enabled` 落库为 0，前端置灰只是提示，真正的约束在仓储层兜底。
 
 ## 命令
 
@@ -100,7 +102,8 @@ scrub_repository_integrity
 create_repository_backup
 ```
 
-应用工作流通过公开 `backup::ensure_checkpoint` 固化 fork 或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。完整编译与 GUI 测试状态见当前交接文档。
+应用工作流通过公开 `backup::ensure_checkpoint` 固化分支起点或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。当前批次状态见 `docs/planning/current-handoff.md`。
+
 ## 历史图前端布局
 
 - 总览 mindmap 使用可横向滚动的内容画布，支持“紧凑”和“时间轴”排列模式。模式开关位于“历史总览”标题行；同一行的滑条把节点最小宽度调整在 220px 到 420px，并通过 `lilith-artworks.history-node-min-width-v1` 持久化。标题与控制行从滚动容器顶边开始吸顶，不留可透出画布内容的顶部空隙；兄弟节点水平间隔收紧，减少无效横向占用。
