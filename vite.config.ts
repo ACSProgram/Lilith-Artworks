@@ -8,6 +8,9 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
     host: "127.0.0.1",
+    watch: {
+      ignored: ["**/src-tauri/**"],
+    },
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {
@@ -16,4 +19,3 @@ export default defineConfig({
     sourcemap: Boolean(process.env.TAURI_ENV_DEBUG),
   },
 });
-
