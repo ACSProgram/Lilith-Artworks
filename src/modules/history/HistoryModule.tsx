@@ -231,7 +231,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       </span>
       <span className="history-labels">
         {heads.map((branch) => <i className={branch.id === selectedBranchId ? "current-branch-label" : undefined} key={branch.id}>{branch.title} HEAD</i>)}
-        {forks.map((branch) => <i className="fork-label" key={branch.id}>{branch.title} fork</i>)}
+        {forks.map((branch) => <i className="fork-label" key={branch.id}>{branch.title} 分支起点</i>)}
         {node.isCheckpoint && <i>检查点</i>}
         {publishedCount > 0 && <i className="published-label">已发布 {publishedCount}</i>}
         {selectedForCompact && <i className="selected-label">待精简</i>}
@@ -336,10 +336,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       {childBranches.map((branch) => <button key={branch.id} className="danger" onClick={() => { setConfirmRequest({ kind: "delete-branch", node: actionNode, branch }); setContext(null); }}><Trash2 size={15} />删除分支：{branch.title}</button>)}
       {(uniqueContextBranch || childBranches.length > 0) && <div className="context-separator" />}
       <button onClick={() => { setEditOpen(true); setContext(null); }}><Pencil size={15} />编辑节点名称</button>
-      <button onClick={() => { setForkOpen(true); setContext(null); }}><GitFork size={15} />从此处 Fork</button>
+      <button onClick={() => { setForkOpen(true); setContext(null); }}><GitFork size={15} />从此处创建分支</button>
       <button onClick={() => { setContext(null); void beginRestore(actionNode); }}><Download size={15} />恢复到文件</button>
       {actionNode.isCheckpoint && isForcedCheckpoint(actionNode, history)
-        ? <button disabled title="分支 head、fork 起点和分叉点必须保留"><CircleDot size={15} />强制检查点</button>
+        ? <button disabled title="分支 head、分支起点和分叉点必须保留"><CircleDot size={15} />强制检查点</button>
         : <button onClick={() => { setConfirmRequest({ kind: "checkpoint", node: actionNode, enable: !actionNode.isCheckpoint }); setContext(null); }}><CircleDot size={15} />{actionNode.isCheckpoint ? "取消检查点" : "设为检查点"}</button>}
       {view === "branch" && selectedBranch && branchNodeIds.has(actionNode.id) && <><div className="context-separator" /><button className="danger" onClick={() => {
         const descendants = branchLine.slice(branchLine.findIndex((node) => node.id === actionNode.id));

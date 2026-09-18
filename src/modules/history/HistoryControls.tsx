@@ -1,6 +1,6 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, FileOutput, FilePenLine,
+  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, Eraser, FileOutput, FilePenLine,
   GitBranch, GitFork, LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -121,9 +121,14 @@ export function BranchSettings({
     branch.title,
   ]);
 
+  // 没有工作文件的分支没有可读取的源，自动备份必须保持关闭：开关置灰、间隔禁用，
+  // 保存时也强制写回 false（Rust 侧同样兜底），避免"看起来开着却什么也不做"。
+  const hasSource = sourcePath.trim().length > 0;
+  const effectiveEnabled = hasSource && enabled;
+
   const valid = title.trim().length > 0 && interval >= 1 && interval <= 10_080;
   const dirty = title.trim() !== branch.title
-    || enabled !== branch.backupEnabled
+    || effectiveEnabled !== branch.backupEnabled
     || interval !== branch.backupIntervalMinutes
     || sourcePath !== branch.sourcePath;
 
@@ -140,7 +145,7 @@ export function BranchSettings({
         branchId: branch.id,
         title: title.trim(),
         expectedBackupEnabled: branch.backupEnabled,
-        backupEnabled: enabled,
+        backupEnabled: effectiveEnabled,
         backupIntervalMinutes: interval,
         ...(sourcePath !== branch.sourcePath ? { sourcePath } : {}),
       }).then(() => {
@@ -151,7 +156,13 @@ export function BranchSettings({
       });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [branch.id, branch.sourcePath, dirty, disabled, enabled, interval, onSave, sourcePath, title, valid]);
+  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, sourcePath, title, valid]);
+
+  const pathActionsDisabled = disabled || branch.finalArtifactLocked;
+  const chooseSource = async () => {
+    const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
+    if (typeof value === "string") setSourcePath(value);
+  };
 
   return <div className="branch-settings">
     <div className="branch-primary">
@@ -172,22 +183,31 @@ export function BranchSettings({
         </div>
         <div className="branch-source-file">
           <span>工作文件</span>
-          <strong aria-label="工作文件" title={sourcePath}>{sourcePath}</strong>
-          <button className="icon-button" type="button" title="修改工作文件" disabled={disabled || branch.finalArtifactLocked} onClick={async () => {
-            const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
-            if (typeof value === "string") setSourcePath(value);
-          }}><FilePenLine aria-hidden="true" size={15} /></button>
+          {hasSource
+            ? <strong aria-label="工作文件" title={sourcePath}>{sourcePath}</strong>
+            : <em aria-label="工作文件">未选择工作文件</em>}
+          <div className="branch-source-actions">
+            {hasSource
+              ? <>
+                <button className="icon-button" type="button" title="修改工作文件" disabled={pathActionsDisabled} onClick={() => void chooseSource()}><FilePenLine aria-hidden="true" size={15} /></button>
+                <button className="icon-button" type="button" title="清除工作文件路径" disabled={pathActionsDisabled} onClick={() => setSourcePath("")}><Eraser aria-hidden="true" size={15} /></button>
+              </>
+              : <button className="primary-button branch-source-pick" type="button" title="选择工作文件" disabled={pathActionsDisabled} onClick={() => void chooseSource()}><FilePenLine aria-hidden="true" size={15} />选择文件</button>}
+          </div>
         </div>
       </div>
     </div>
     <div className="branch-backup-controls">
       <label className="switch-field">
-        <span className="switch-copy"><strong>自动备份</strong><small>{enabled ? "按间隔运行" : "当前已关闭"}</small></span>
+        <span className="switch-copy">
+          <strong>自动备份</strong>
+          <small>{!hasSource ? "未选择工作文件" : effectiveEnabled ? "按间隔运行" : "当前已关闭"}</small>
+        </span>
         <input
           className="switch-input"
           type="checkbox"
-          checked={enabled}
-          disabled={disabled || branch.finalArtifactLocked}
+          checked={effectiveEnabled}
+          disabled={disabled || branch.finalArtifactLocked || !hasSource}
           onChange={(event) => setEnabled(event.target.checked)}
         />
       </label>
@@ -198,7 +218,7 @@ export function BranchSettings({
           min={1}
           max={10_080}
           value={interval}
-          disabled={disabled || !enabled || branch.finalArtifactLocked}
+          disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
           onChange={(event) => setInterval(Number(event.target.value))}
         />
         <span>分钟</span>
@@ -321,7 +341,7 @@ function confirmCopy(request: ConfirmRequest): ConfirmView {
     title: "执行精简",
     subject: `已选择 ${request.selectedCount} 个中间节点`,
     description: "程序会逐个重建相邻节点的反向增量并重新连接历史链，所选节点随后被永久移除。",
-    detail: "分支 head、fork 起点、分叉点和检查点不会被选中。",
+    detail: "分支 head、分支起点、分叉点和检查点不会被选中。",
     action: "开始精简",
   };
   return {
