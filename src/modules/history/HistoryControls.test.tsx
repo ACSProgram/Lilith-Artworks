@@ -74,6 +74,50 @@ describe("BranchSettings", () => {
     expect(screen.getByLabelText("工作文件").textContent)
       .toBe("C:\\work\\artwork.psd");
   });
+
+  it("keeps automatic backup greyed out and closed without a working file", async () => {
+    vi.useFakeTimers();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<BranchSettings
+      branch={{ ...branch(true), sourcePath: "" }}
+      disabled={false}
+      onSave={onSave}
+    />);
+
+    const toggle = screen.getByRole("checkbox") as HTMLInputElement;
+    expect(toggle.disabled).toBe(true);
+    expect(toggle.checked).toBe(false);
+    expect((screen.getByRole("spinbutton") as HTMLInputElement).disabled).toBe(true);
+    expect(screen.getByLabelText("工作文件").textContent).toBe("未选择工作文件");
+    expect(screen.getByRole("button", { name: "选择文件" })).toBeTruthy();
+
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+    });
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      backupEnabled: false,
+    }));
+  });
+
+  it("clears the persisted working file path and closes automatic backup", async () => {
+    vi.useFakeTimers();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+
+    fireEvent.click(screen.getByTitle("清除工作文件路径"));
+    expect(screen.getByLabelText("工作文件").textContent).toBe("未选择工作文件");
+    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+    });
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      sourcePath: "",
+      backupEnabled: false,
+    }));
+  });
 });
 
 describe("BranchScheduleStatus", () => {

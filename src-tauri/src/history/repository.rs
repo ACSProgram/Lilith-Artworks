@@ -170,11 +170,48 @@ pub(crate) fn update_branch(
     if !(1..=10_080).contains(&interval_minutes) {
         return Err("自动备份间隔必须在 1 到 10080 分钟之间".into());
     }
-    let normalized_source = source_path
-        .map(|value| storage::normalize_source_path(root, Path::new(value.trim())))
-        .transpose()?;
+    // `Some("")` 清除工作文件路径（界面上的“清除工作文件路径”按钮），`None` 表示本次不改路径。
+    let normalized_source = match source_path {
+        Some(value) if value.trim().is_empty() => Some((String::new(), String::new())),
+        Some(value) => Some(storage::normalize_source_path(
+            root,
+            Path::new(value.trim()),
+        )?),
+        None => None,
+    };
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
+    let branch = transaction
+        .query_row(
+            "SELECT artwork_id, source_path FROM branches WHERE id = ?1",
+            [branch_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .ok_or_else(|| "找不到分支".to_owned())?;
+    let (artwork_id, current_source) = branch;
+    let effective_source = normalized_source
+        .as_ref()
+        .map(|value| value.0.clone())
+        .unwrap_or(current_source);
+    if effective_source.trim().is_empty() {
+        // `source_path_key` 非空且与 artwork_id 唯一，因此同一 Artwork 只能有一个分支留空。
+        let conflicting: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM branches
+                 WHERE artwork_id = ?1 AND id <> ?2 AND TRIM(source_path) = '')",
+                params![artwork_id, branch_id],
+                |row| row.get(0),
+            )
+            .map_err(storage::database_error)?;
+        if conflicting {
+            return Err("同一 Artwork 只能有一个分支不设置工作文件".into());
+        }
+    }
+    // 没有工作文件就没有可读取的源，自动备份必须保持关闭：前端置灰只是提示，
+    // 真正的约束在这里兜底，避免出现"开关是开的但永远不会备份"的状态。
+    let effective_enabled = enabled && !effective_source.trim().is_empty();
     let changed = transaction
         .execute(
             "UPDATE branches SET title = ?2,
@@ -199,7 +236,7 @@ pub(crate) fn update_branch(
                 branch_id,
                 title.trim(),
                 i64::from(expected_enabled),
-                i64::from(enabled),
+                i64::from(effective_enabled),
                 interval_minutes,
                 storage::now_ms()?,
                 normalized_source.as_ref().map(|value| &value.0),
@@ -576,7 +613,7 @@ pub(crate) fn unmark_checkpoint(root: &Path, history_id: &str) -> Result<Option<
         [history_id], |row| row.get(0)
     ).map_err(storage::database_error)?;
     if forced {
-        return Err("分支 head、fork 起点或分叉节点必须保留为检查点".into());
+        return Err("分支 head、分支起点或分叉点必须保留为检查点".into());
     }
     let value: Option<(bool, Option<String>)> = transaction
         .query_row(
@@ -1432,6 +1469,90 @@ mod tests {
             preserved.branches[0].source_path,
             storage::display_path(&replacement.canonicalize().unwrap())
         );
+    }
+
+    #[test]
+    fn clearing_the_source_path_also_turns_automatic_backup_off() {
+        let fixture = HistoryFixture::new();
+        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 1);
+
+        // 空白字符串表示清除工作文件路径，同时必须把自动备份写回关闭。
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            true,
+            true,
+            10,
+            Some("   "),
+        )
+        .unwrap();
+
+        let branch = list(&fixture.root, &fixture.artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.source_path, "");
+        assert!(!branch.backup_enabled);
+        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
+
+        // 空路径分支不能保留自动备份：显式请求打开也只落库为关闭。
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            false,
+            true,
+            10,
+            None,
+        )
+        .unwrap();
+        assert!(!list(&fixture.root, &fixture.artwork_id).unwrap().branches[0].backup_enabled);
+    }
+
+    #[test]
+    fn only_one_branch_per_artwork_may_clear_its_source_path() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        let side_branch = create_branch(
+            &fixture.root,
+            &fixture.artwork_id,
+            "root",
+            "Side",
+            &fixture.fork_source,
+        )
+        .unwrap();
+
+        update_branch(
+            &fixture.root,
+            &fixture.main_branch_id,
+            "Main",
+            true,
+            true,
+            10,
+            Some(""),
+        )
+        .unwrap();
+        assert!(update_branch(
+            &fixture.root,
+            &side_branch,
+            "Should not persist",
+            true,
+            true,
+            10,
+            Some(""),
+        )
+        .is_err());
+
+        // 拒绝时事务整体回滚：标题与路径都不受影响。
+        let history = list(&fixture.root, &fixture.artwork_id).unwrap();
+        let side = history
+            .branches
+            .iter()
+            .find(|branch| branch.id == side_branch)
+            .unwrap();
+        assert_eq!(side.title, "Side");
+        assert!(!side.source_path.is_empty());
     }
 
     #[test]
