@@ -347,3 +347,162 @@ describe("pin-board renderer keep-alive", () => {
     expect(viewport.height).toBe(3000);
   });
 });
+
+type AutosaveTestRenderer = {
+  afterModelChange: (imageIds: number[]) => void;
+  save: () => Promise<boolean>;
+  destroy: (finalize?: boolean) => void;
+  setAutosaveEnabled: (enabled: boolean) => void;
+  autosaveTimer: number | null;
+  autosaveEnabled: boolean;
+  dirty: boolean;
+  destroyed: boolean;
+};
+
+function autosaveRenderer(options: Record<string, unknown>): AutosaveTestRenderer {
+  return rendererWith({
+    destroyed: false,
+    autosaveTimer: null,
+    // 设置页开关默认关闭；需要验证排程行为时在用例里显式开启。
+    autosaveEnabled: false,
+    dirty: false,
+    savedStateKey: "saved",
+    selectedIds: new Set<number>(),
+    imageById: new Map(),
+    images: [],
+    // 默认模拟“内存状态与已保存状态不同”，让 afterModelChange 判定为脏。
+    stateKey: () => "current",
+    syncGeometryBuffers: vi.fn(),
+    refreshViewport: vi.fn(),
+    emitState: vi.fn(),
+    ...options,
+  }) as unknown as AutosaveTestRenderer;
+}
+
+describe("pin-board renderer autosave", () => {
+  it("does not schedule a save while the setting is disabled", () => {
+    const setTimeout = vi.fn();
+    vi.stubGlobal("window", { setTimeout, clearTimeout: vi.fn() });
+    const renderer = autosaveRenderer({});
+
+    renderer.afterModelChange([]);
+
+    expect(setTimeout).not.toHaveBeenCalled();
+    expect(renderer.autosaveTimer).toBeNull();
+  });
+
+  it("schedules immediately when enabled while dirty", () => {
+    const setTimeout = vi.fn(() => 101);
+    vi.stubGlobal("window", { setTimeout, clearTimeout: vi.fn() });
+    const renderer = autosaveRenderer({ dirty: true });
+
+    renderer.setAutosaveEnabled(true);
+
+    expect(setTimeout).toHaveBeenCalledOnce();
+    expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 1500);
+    expect(renderer.autosaveTimer).toBe(101);
+  });
+
+  it("cancels the pending timer when disabled", () => {
+    const clearTimeout = vi.fn();
+    vi.stubGlobal("window", { setTimeout: vi.fn(), clearTimeout });
+    const renderer = autosaveRenderer({ autosaveEnabled: true, autosaveTimer: 77 });
+
+    renderer.setAutosaveEnabled(false);
+
+    expect(clearTimeout).toHaveBeenCalledWith(77);
+    expect(renderer.autosaveTimer).toBeNull();
+  });
+
+  it("schedules a debounced save after a model change", () => {
+    const setTimeout = vi.fn(() => 101);
+    vi.stubGlobal("window", { setTimeout, clearTimeout: vi.fn() });
+    const renderer = autosaveRenderer({ autosaveEnabled: true });
+
+    renderer.afterModelChange([]);
+
+    expect(setTimeout).toHaveBeenCalledOnce();
+    expect(setTimeout).toHaveBeenLastCalledWith(expect.any(Function), 1500);
+    expect(renderer.autosaveTimer).toBe(101);
+    expect(renderer.dirty).toBe(true);
+  });
+
+  it("reschedules when another change arrives before the timer fires", () => {
+    const setTimeout = vi.fn().mockReturnValueOnce(101).mockReturnValueOnce(202);
+    const clearTimeout = vi.fn();
+    vi.stubGlobal("window", { setTimeout, clearTimeout });
+    const renderer = autosaveRenderer({ autosaveEnabled: true });
+
+    renderer.afterModelChange([]);
+    renderer.afterModelChange([]);
+
+    expect(setTimeout).toHaveBeenCalledTimes(2);
+    expect(clearTimeout).toHaveBeenCalledWith(101);
+    expect(renderer.autosaveTimer).toBe(202);
+  });
+
+  it("does not schedule a save when the state is already persisted", () => {
+    const setTimeout = vi.fn();
+    vi.stubGlobal("window", { setTimeout, clearTimeout: vi.fn() });
+    const renderer = autosaveRenderer({
+      autosaveEnabled: true,
+      stateKey: () => "saved",
+    });
+
+    renderer.afterModelChange([]);
+
+    expect(setTimeout).not.toHaveBeenCalled();
+    expect(renderer.autosaveTimer).toBeNull();
+  });
+
+  it("cancels the pending autosave when an explicit save starts", () => {
+    const clearTimeout = vi.fn();
+    vi.stubGlobal("window", { setTimeout: vi.fn(), clearTimeout });
+    const renderer = autosaveRenderer({
+      autosaveTimer: 77,
+      stateKey: () => "saved",
+      savePromise: null,
+      revision: "r1",
+      boardId: 1,
+      images: [],
+      onError: vi.fn(),
+    });
+
+    void renderer.save();
+
+    expect(clearTimeout).toHaveBeenCalledWith(77);
+    expect(renderer.autosaveTimer).toBeNull();
+  });
+
+  it("cancels the pending autosave on destroy", () => {
+    const clearTimeout = vi.fn();
+    vi.stubGlobal("window", {
+      setTimeout: vi.fn(),
+      clearTimeout,
+      removeEventListener: vi.fn(),
+    });
+    const renderer = autosaveRenderer({
+      autosaveTimer: 77,
+      finalized: true,
+      generation: 0,
+      loadTimer: null,
+      viewport: { centerX: 0, centerY: 0, height: 100 },
+      locked: true,
+      selectedIds: new Set<number>(),
+      canvas: { removeEventListener: vi.fn() },
+      resizeObserver: { disconnect: vi.fn() },
+      themeObserver: { disconnect: vi.fn() },
+      onSessionChange: vi.fn(),
+      gpu: { viewportBuffer: { destroy: vi.fn() } },
+      textures: new Map(),
+      previewTextures: new Map(),
+      worldUnitsPerCssPixel: () => 1,
+    });
+
+    renderer.destroy();
+
+    expect(clearTimeout).toHaveBeenCalledWith(77);
+    expect(renderer.autosaveTimer).toBeNull();
+    expect(renderer.destroyed).toBe(true);
+  });
+});

@@ -49,11 +49,16 @@ impl Default for AppSettings {
 }
 
 /// 素材板显示与性能设置。缓存等级与间距由前端模块和原生纹理缓存预算共同消费。
+/// 新增字段依赖容器级 `#[serde(default)]` 兼容旧设置文件，无需提升设置版本。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct PinBoardSettings {
     texture_cache_level: String,
     arrangement_gap_px: f64,
+    /// 编辑停顿后的防抖自动保存（前端行为），默认关闭。
+    autosave: bool,
+    /// 退出应用前结算并保存素材板（关闭握手），默认开启。
+    save_on_exit: bool,
     lock_shortcut: String,
     fullscreen_shortcut: String,
 }
@@ -63,6 +68,8 @@ impl Default for PinBoardSettings {
         Self {
             texture_cache_level: "medium".into(),
             arrangement_gap_px: 10.0,
+            autosave: false,
+            save_on_exit: true,
             lock_shortcut: "CommandOrControl+R".into(),
             fullscreen_shortcut: "F11".into(),
         }
@@ -124,6 +131,12 @@ pub(crate) struct AppState {
     /// still waits for all in-flight work before replacing the path.
     repository_lease: Arc<RwLock<()>>,
     exit_requested: Arc<AtomicBool>,
+    /// Set once when the close/tray-quit path starts the webview shutdown
+    /// handshake, so repeated close requests do not restart it.
+    shutdown_handshake_started: Arc<AtomicBool>,
+    /// Set once by the webview confirmation command before running the
+    /// irreversible shutdown sequence; the fallback force-exit timer checks it.
+    shutdown_confirmed: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -142,6 +155,8 @@ impl AppState {
             repository_operation: Arc::new(Mutex::new(())),
             repository_lease: Arc::new(RwLock::new(())),
             exit_requested: Arc::new(AtomicBool::new(false)),
+            shutdown_handshake_started: Arc::new(AtomicBool::new(false)),
+            shutdown_confirmed: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -272,6 +287,22 @@ impl AppState {
 
     pub(crate) fn exit_requested(&self) -> bool {
         self.exit_requested.load(Ordering::SeqCst)
+    }
+
+    /// Marks the shutdown handshake as started; returns false when it was
+    /// already running, so duplicate close requests keep out of the way.
+    pub(crate) fn begin_shutdown_handshake(&self) -> bool {
+        !self.shutdown_handshake_started.swap(true, Ordering::SeqCst)
+    }
+
+    /// Marks the webview confirmation as consumed; returns false when another
+    /// confirmation already started the exit sequence.
+    pub(crate) fn mark_shutdown_confirmed(&self) -> bool {
+        !self.shutdown_confirmed.swap(true, Ordering::SeqCst)
+    }
+
+    pub(crate) fn shutdown_confirmed(&self) -> bool {
+        self.shutdown_confirmed.load(Ordering::SeqCst)
     }
 }
 

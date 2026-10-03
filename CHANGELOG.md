@@ -23,6 +23,22 @@ before and after the first stable release.
 - An "打开所在文件夹" action beside the working file actions in the branch
   settings, revealing the working file in the system file manager (selects the
   file on Windows via the new `reveal_path_in_folder` command).
+- Pin-board edits can now autosave: when the new "自动保存" pin-board setting
+  (off by default) is enabled, the board persists itself 1.5 seconds after the
+  last model change (drag, scale, rotate, layer/order, delete, undo/redo), so
+  a crash or forced kill only loses the last few seconds of work. A companion
+  "关闭时保存" setting (on by default) controls whether the exit handshake
+  finalizes the open board before quitting.
+
+### Fixed
+
+- Pin-board arrangements no longer regress after closing the app. Exit (window
+  close with close-to-tray disabled, or tray "退出") used to call `app.exit(0)`
+  immediately, dropping any in-flight save. The native side now requests a
+  shutdown handshake: it emits `app_shutdown_requested`, the webview finalizes
+  the open board (persist and truncate the step history) and answers via the
+  new `confirm_app_shutdown` command, and a 15-second fallback force-exit keeps
+  the window closable if the webview hangs or crashes.
 
 ### Changed
 

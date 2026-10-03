@@ -125,6 +125,8 @@ const MAX_VIEWPORT_HEIGHT = 10_000_000;
 const VIEWPORT_FIT_MIN_CANVAS_CSS_PIXELS = 32;
 const HISTORY_LIMIT = 100;
 const HISTORY_MERGE_MS = 350;
+/** 模型变化后静默该时长即自动保存；期间再次变化会重新计时。 */
+const AUTOSAVE_DELAY_MS = 1500;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
@@ -500,6 +502,7 @@ export class PinBoardRenderer {
   private finalized = false;
   private active: boolean;
   private dirty = false;
+  private autosaveTimer: number | null = null;
   private savePromise: Promise<boolean> | null = null;
   private finalizePromise: Promise<boolean> | null = null;
   private locked = false;
@@ -528,6 +531,7 @@ export class PinBoardRenderer {
     initialSession: PinBoardViewSession | null,
     initiallyActive: boolean,
     private arrangementGapCssPixels: number,
+    private autosaveEnabled: boolean,
     private readonly onError: (message: string) => void,
     private readonly onState: (state: PinBoardInteractionState) => void,
     private readonly onSessionChange: (session: PinBoardViewSession) => void,
@@ -596,6 +600,7 @@ export class PinBoardRenderer {
     initialSession: PinBoardViewSession | null,
     initiallyActive: boolean,
     arrangementGapCssPixels: number,
+    autosaveEnabled: boolean,
     onError: (message: string) => void,
     onState: (state: PinBoardInteractionState) => void,
     onSessionChange: (session: PinBoardViewSession) => void,
@@ -612,6 +617,7 @@ export class PinBoardRenderer {
       initialSession,
       initiallyActive,
       arrangementGapCssPixels,
+      autosaveEnabled,
       onError,
       onState,
       onSessionChange,
@@ -622,6 +628,8 @@ export class PinBoardRenderer {
 
   destroy(finalize = true) {
     if (this.destroyed) return;
+    // finalize 内部会先保存当前状态，挂起的防抖保存没有必要再触发。
+    this.cancelAutosave();
     if (finalize && !this.finalized) void this.finalize();
     this.onSessionChange({
       centerX: this.viewport.centerX,
@@ -880,6 +888,7 @@ export class PinBoardRenderer {
   }
 
   save(): Promise<boolean> {
+    this.cancelAutosave();
     if (this.savePromise) {
       return this.savePromise.then((saved) => (
         saved && this.dirty ? this.save() : saved
@@ -896,6 +905,8 @@ export class PinBoardRenderer {
         this.revision = result.revision;
         this.savedStateKey = stateKey;
         this.dirty = this.stateKey() !== stateKey;
+        // 保存期间又有编辑时，恢复自动保存排程。
+        if (this.dirty) this.scheduleAutosave();
         return true;
       })
       .catch((error) => {
@@ -1501,6 +1512,7 @@ export class PinBoardRenderer {
     });
     if (changed) {
       this.dirty = this.stateKey() !== this.savedStateKey;
+      if (this.dirty) this.scheduleAutosave();
       this.sortVisibleImages();
       this.draw();
     }
@@ -1584,9 +1596,38 @@ export class PinBoardRenderer {
       if (this.imageById.get(imageId)?.deleted) this.selectedIds.delete(imageId);
     }
     this.dirty = this.stateKey() !== this.savedStateKey;
+    if (this.dirty) this.scheduleAutosave();
+    else this.cancelAutosave();
     this.syncGeometryBuffers(imageIds);
     this.refreshViewport(0);
     this.emitState();
+  }
+
+  private scheduleAutosave() {
+    if (!this.autosaveEnabled || this.destroyed) return;
+    if (this.autosaveTimer !== null) window.clearTimeout(this.autosaveTimer);
+    this.autosaveTimer = window.setTimeout(() => {
+      this.autosaveTimer = null;
+      void this.save();
+    }, AUTOSAVE_DELAY_MS);
+  }
+
+  private cancelAutosave() {
+    if (this.autosaveTimer !== null) {
+      window.clearTimeout(this.autosaveTimer);
+      this.autosaveTimer = null;
+    }
+  }
+
+  /** 设置页开关：关闭时取消挂起的自动保存，开启时若有未保存编辑立即排程。 */
+  setAutosaveEnabled(enabled: boolean) {
+    if (this.autosaveEnabled === enabled) return;
+    this.autosaveEnabled = enabled;
+    if (!enabled) {
+      this.cancelAutosave();
+    } else if (this.dirty) {
+      this.scheduleAutosave();
+    }
   }
 
   private syncGeometryBuffers(imageIds: number[]) {

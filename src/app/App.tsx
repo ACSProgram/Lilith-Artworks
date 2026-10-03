@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
@@ -11,10 +12,12 @@ import {
   Keyboard,
   Layers,
   LoaderCircle,
+  LogOut,
   MonitorCog,
   MoveHorizontal,
   Palette,
   PanelLeftClose,
+  Save,
   Settings,
   ShieldCheck,
   X,
@@ -25,6 +28,7 @@ import {
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
 } from "../modules/pin-board/PinBoardModule";
+import { preparePinBoardRuntimeChange } from "../modules/pin-board/lifecycle";
 import { appApi } from "./api";
 import {
   shortcutFromEvent,
@@ -123,6 +127,36 @@ export function App() {
     return () => window.removeEventListener("keydown", preventWebViewReload, true);
   }, []);
 
+  // 原生端关闭窗口或托盘退出时不再直接结束进程，而是先请求 webview 结算素材板
+  // （保存并截断步骤历史），确认完成后再由 confirm_app_shutdown 退出；Rust 侧
+  // 有 15 秒兜底强退，因此这里无论结算成败都必须回复确认，不能阻塞退出。
+  // "关闭时保存"开关关闭时跳过结算，回到退出即丢未保存编辑的旧行为。
+  // 退出握手时是否先结算素材板；默认开启，读取失败时保持开启以免静默丢编辑。
+  const pinBoardSaveOnExit = snapshot?.settings.pinBoard?.saveOnExit ?? true;
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | null = null;
+    void listen("app_shutdown_requested", () => {
+      const settle = pinBoardSaveOnExit
+        ? preparePinBoardRuntimeChange().catch(() => undefined)
+        : Promise.resolve();
+      void settle.finally(() => {
+        void appApi.confirmShutdown().catch(() => undefined);
+      });
+    })
+      .then((off) => {
+        if (disposed) off();
+        else unlisten = off;
+      })
+      .catch(() => {
+        // 监听不可用时（例如非 Tauri 环境）依赖原生端 15 秒兜底强退，不阻塞退出。
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [pinBoardSaveOnExit]);
+
   useEffect(() => {
     if (!message) return;
     const timer = window.setTimeout(() => setMessage(null), 7000);
@@ -163,6 +197,7 @@ export function App() {
   const pinBoardSettings = useMemo(() => ({
     arrangementGapPx: snapshot?.settings.pinBoard?.arrangementGapPx ?? 10,
     textureCacheLevel: snapshot?.settings.pinBoard?.textureCacheLevel ?? "medium",
+    autosave: snapshot?.settings.pinBoard?.autosave ?? false,
     lockShortcut: snapshot?.settings.pinBoard?.lockShortcut ?? PIN_BOARD_LOCK_SHORTCUT,
     fullscreenShortcut: snapshot?.settings.pinBoard?.fullscreenShortcut ?? PIN_BOARD_FULLSCREEN_SHORTCUT,
   }), [snapshot]);
@@ -545,6 +580,22 @@ export function App() {
                         onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
                       />
                     </div>
+                    <label className="settings-preference-row">
+                      <span className="settings-row-icon"><Save aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <strong>自动保存</strong>
+                        <small>编辑停止约 1.5 秒后自动保存摆放进度，崩溃或强退最多丢失几秒内的改动。</small>
+                      </span>
+                      <input className="switch-input" type="checkbox" checked={draft.pinBoard.autosave} onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, autosave: event.target.checked } })} />
+                    </label>
+                    <label className="settings-preference-row">
+                      <span className="settings-row-icon"><LogOut aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <strong>关闭时保存</strong>
+                        <small>退出应用前先保存并结算素材板；关闭后退出即结束，未保存的编辑会丢失。</small>
+                      </span>
+                      <input className="switch-input" type="checkbox" checked={draft.pinBoard.saveOnExit} onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, saveOnExit: event.target.checked } })} />
+                    </label>
                     <div className="settings-preference-row">
                       <span className="settings-row-icon"><Keyboard aria-hidden="true" size={17} /></span>
                       <span className="settings-row-copy is-descriptive">

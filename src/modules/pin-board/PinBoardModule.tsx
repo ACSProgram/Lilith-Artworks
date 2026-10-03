@@ -90,6 +90,7 @@ export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
 export interface PinBoardModuleSettings {
   arrangementGapPx: number;
   textureCacheLevel: PinBoardTextureCacheLevel;
+  autosave: boolean;
   lockShortcut: string;
   fullscreenShortcut: string;
 }
@@ -216,6 +217,7 @@ function GpuCanvas({
   view,
   artworkId,
   arrangementGapCssPixels,
+  autosaveEnabled,
   cacheBudgets,
   active,
   setStatus,
@@ -226,6 +228,7 @@ function GpuCanvas({
   view: PinBoardView;
   artworkId: string;
   arrangementGapCssPixels: number;
+  autosaveEnabled: boolean;
   cacheBudgets: PinBoardTextureBudgets;
   active: boolean;
   setStatus: (message: string | null) => void;
@@ -256,6 +259,7 @@ function GpuCanvas({
       getBoardSession(artworkId, view.boardId),
       activeRef.current,
       arrangementGapCssPixels,
+      autosaveEnabled,
       (message) => setStatus(message),
       (state) => onState(state),
       (session) => {
@@ -593,6 +597,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   useEffect(() => {
     rendererRef.current?.setArrangementGapCssPixels(settings.arrangementGapPx);
   }, [settings.arrangementGapPx]);
+
+  useEffect(() => {
+    rendererRef.current?.setAutosaveEnabled(settings.autosave);
+  }, [settings.autosave]);
 
   useEffect(() => {
     rendererRef.current?.setTextureCacheBudgets(textureBudgetsForLevel(settings.textureCacheLevel));
@@ -1302,6 +1310,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
               view={view}
               artworkId={artworkId}
               arrangementGapCssPixels={settings.arrangementGapPx}
+              autosaveEnabled={settings.autosave}
               cacheBudgets={textureBudgetsForLevel(settings.textureCacheLevel)}
               active={active}
               setStatus={setStatus}

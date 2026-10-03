@@ -7,6 +7,8 @@ export type BackupCheckMode = "quick" | "full";
 export interface PinBoardSettings {
   textureCacheLevel: PinBoardTextureCacheLevel;
   arrangementGapPx: number;
+  autosave: boolean;
+  saveOnExit: boolean;
   lockShortcut: string;
   fullscreenShortcut: string;
 }
