@@ -9,8 +9,10 @@ import {
   Images,
   Info,
   Keyboard,
+  Layers,
   LoaderCircle,
   MonitorCog,
+  MoveHorizontal,
   Palette,
   PanelLeftClose,
   Settings,
@@ -495,57 +497,61 @@ export function App() {
               {settingsPage === "pin-board" && (
                 <div className="settings-section">
                   <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
-                  <div className="setting-row">
-                    <div>
-                      <label id="pin-board-cache-level-label">纹理缓存等级</label>
-                      <p>决定素材板可常驻的纹理数量与内存占用，保存后立即生效。</p>
+                  <div className="settings-preference-list">
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><Layers aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <strong>纹理缓存等级</strong>
+                        <small>决定素材板可常驻的纹理数量与内存占用，保存后立即生效。</small>
+                      </span>
+                      <div
+                        className="segmented-control pin-board-cache-control"
+                        role="radiogroup"
+                        aria-label="纹理缓存等级"
+                      >
+                        {([
+                          { level: "low", label: "低", memory: "约 256 MB" },
+                          { level: "medium", label: "中", memory: "约 512 MB" },
+                          { level: "high", label: "高", memory: "约 1 GB" },
+                        ] as const).map(({ level, label, memory }) => (
+                          <button
+                            key={level}
+                            type="button"
+                            role="radio"
+                            aria-checked={draft.pinBoard.textureCacheLevel === level}
+                            className={draft.pinBoard.textureCacheLevel === level ? "active" : ""}
+                            onClick={() => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, textureCacheLevel: level } })}
+                          >
+                            <strong>{label}</strong>
+                            <small>{memory}</small>
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <div
-                      className="segmented-control pin-board-cache-control"
-                      role="radiogroup"
-                      aria-labelledby="pin-board-cache-level-label"
-                    >
-                      {([
-                        { level: "low", label: "低", memory: "约 256 MB" },
-                        { level: "medium", label: "中", memory: "约 512 MB" },
-                        { level: "high", label: "高", memory: "约 1 GB" },
-                      ] as const).map(({ level, label, memory }) => (
-                        <button
-                          key={level}
-                          type="button"
-                          role="radio"
-                          aria-checked={draft.pinBoard.textureCacheLevel === level}
-                          className={draft.pinBoard.textureCacheLevel === level ? "active" : ""}
-                          onClick={() => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, textureCacheLevel: level } })}
-                        >
-                          <strong>{label}</strong>
-                          <small>{memory}</small>
-                        </button>
-                      ))}
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><MoveHorizontal aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <label htmlFor="pin-board-arrangement-gap"><strong>阵列图片间距</strong></label>
+                        <small>阵列排序时图片之间的屏幕间距，保存后使用新数值，范围 1–200 像素。</small>
+                      </span>
+                      <input
+                        id="pin-board-arrangement-gap"
+                        className="number-control"
+                        type="number"
+                        min={1}
+                        max={200}
+                        step={1}
+                        value={draft.pinBoard.arrangementGapPx}
+                        onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
+                      />
                     </div>
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <label htmlFor="pin-board-arrangement-gap">阵列图片间距</label>
-                      <p>阵列排序时图片之间的屏幕间距，保存后使用新数值，范围 1–200 像素。</p>
-                    </div>
-                    <input
-                      id="pin-board-arrangement-gap"
-                      className="number-control"
-                      type="number"
-                      min={1}
-                      max={200}
-                      step={1}
-                      value={draft.pinBoard.arrangementGapPx}
-                      onChange={(event) => setDraft({ ...draft, pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
-                    />
-                  </div>
-                  <div className="setting-row">
-                    <div>
-                      <label htmlFor="pin-board-lock-shortcut">锁定画板快捷键</label>
-                      <p>默认 Ctrl+R；锁定后仍可缩放和移动视口，但不会修改图片。</p>
-                    </div>
-                    <div className="shortcut-control">
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><Keyboard aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <label htmlFor="pin-board-lock-shortcut"><strong>锁定画板快捷键</strong></label>
+                        <small>默认 Ctrl+R；锁定后仍可缩放和移动视口，但不会修改图片。</small>
+                      </span>
+                      <div className="shortcut-control">
                       <Keyboard size={16} aria-hidden="true" />
                       <input
                         id="pin-board-lock-shortcut"
@@ -580,11 +586,12 @@ export function App() {
                       )}
                     </div>
                   </div>
-                  <div className="setting-row">
-                    <div>
-                      <label htmlFor="pin-board-fullscreen-shortcut">画板全屏快捷键</label>
-                      <p>切换素材板内容区全屏；全屏时隐藏顶部工具栏，默认使用 F11。</p>
-                    </div>
+                  <div className="settings-preference-row">
+                    <span className="settings-row-icon"><Keyboard aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy is-descriptive">
+                      <label htmlFor="pin-board-fullscreen-shortcut"><strong>画板全屏快捷键</strong></label>
+                      <small>切换素材板内容区全屏；全屏时隐藏顶部工具栏，默认使用 F11。</small>
+                    </span>
                     <div className="shortcut-control">
                       <Keyboard size={16} aria-hidden="true" />
                       <input
@@ -619,6 +626,7 @@ export function App() {
                         </button>
                       )}
                     </div>
+                  </div>
                   </div>
                 </div>
               )}
