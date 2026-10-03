@@ -3194,7 +3194,7 @@ dependencies = [
 
 [[package]]
 name = "lilith-artworks"
-version = "0.2.0-alpha.2"
+version = "0.2.0-alpha.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",

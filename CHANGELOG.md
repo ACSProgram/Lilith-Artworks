@@ -3,7 +3,7 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
-## Unreleased
+## 0.2.0-alpha.3 - 2026-10-03
 
 ### Added
 
@@ -45,7 +45,7 @@ before and after the first stable release.
 - The repository schema moves to v3 with an append-only migration: `branches`
   gains `backup_quick_enabled`, `last_source_size`, and
   `last_source_modified_ms`. `tools/release/verify-metadata.mjs` now asserts
-  schema v3, so the next release must use a new version and tag.
+  schema v3, so this release uses a new version and tag (`v0.2.0-alpha.3`).
 
 ## 0.2.0-alpha.2 - 2026-09-18
 
