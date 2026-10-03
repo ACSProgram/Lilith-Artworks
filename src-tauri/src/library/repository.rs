@@ -1245,6 +1245,9 @@ mod tests {
             "consecutive_backup_failures",
             "backup_retry_at_ms",
             "backup_disable_notice_pending",
+            "verified_history_id",
+            "verified_ms",
+            "verify_error",
         ] {
             assert!(branch_columns.iter().any(|item| item == column), "{column}");
         }

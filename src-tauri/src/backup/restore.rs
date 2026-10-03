@@ -323,7 +323,11 @@ fn resolve_chain(
     })
 }
 
-fn validate_snapshot(
+/// 校验单个 snapshot 文件与其历史记录一致：先比对 ChunkFile 的文件摘要与数据库
+/// 记录的 `sha256`，再把全部分块流式读出以验证载荷。恢复与检查点复用该入口，
+/// 空闲链路校验（后续批次）同样以它作为单节点校验入口，因此保持 crate 可见。
+#[allow(dead_code)]
+pub(crate) fn validate_snapshot(
     path: &Path,
     record: &history::HistoryRecord,
     label: &str,
@@ -375,4 +379,68 @@ fn validate_output_path(root: &Path, value: &str) -> Result<PathBuf, String> {
         return Err("恢复文件不能写入作品仓库内部".into());
     }
     Ok(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::*;
+    use crate::backup::chunk_file::ChunkingConfig;
+
+    /// 生成一个合法 snapshot 文件的内容与它记录在数据库里的 `sha256`。
+    fn snapshot_bytes(bytes: &[u8]) -> (Vec<u8>, String) {
+        let mut output = Cursor::new(Vec::new());
+        let chunk_file = ChunkFile::create(
+            &mut Cursor::new(bytes),
+            &mut output,
+            ChunkingConfig::default(),
+        )
+        .unwrap();
+        (output.into_inner(), chunk_file.file_digest().to_hex())
+    }
+
+    fn record(sha256: String) -> history::HistoryRecord {
+        history::HistoryRecord {
+            id: "node".into(),
+            artwork_id: "artwork".into(),
+            parent_id: None,
+            sha256,
+            snapshot_path: None,
+            delta_path: None,
+        }
+    }
+
+    #[test]
+    fn validate_snapshot_accepts_a_matching_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("node.lbc");
+        let (bytes, digest) = snapshot_bytes(&[b'A'; 64 * 1024]);
+        fs::write(&path, bytes).unwrap();
+
+        validate_snapshot(&path, &record(digest), "检查点").unwrap();
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_a_mismatched_digest() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("node.lbc");
+        let (bytes, _) = snapshot_bytes(&[b'B'; 64 * 1024]);
+        fs::write(&path, bytes).unwrap();
+
+        let error = validate_snapshot(&path, &record("0".repeat(64)), "检查点").unwrap_err();
+        assert!(error.contains("摘要"), "{error}");
+    }
+
+    #[test]
+    fn validate_snapshot_rejects_a_replaced_snapshot() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("node.lbc");
+        let (bytes, digest) = snapshot_bytes(&[b'C'; 64 * 1024]);
+        fs::write(&path, bytes).unwrap();
+        fs::write(&path, b"replacement").unwrap();
+
+        let error = validate_snapshot(&path, &record(digest), "检查点").unwrap_err();
+        assert!(error.contains("snapshot"), "{error}");
+    }
 }

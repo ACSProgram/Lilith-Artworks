@@ -1618,10 +1618,10 @@ mod tests {
 mod migration_tests {
     use super::*;
 
-    /// v1 仓库（无素材板表、分支表也没有 v3 追加列）打开时必须通过追加式
+    /// v1 仓库（无素材板表、分支表也没有 v2/v3/v4 追加列）打开时必须通过追加式
     /// 迁移升级到当前版本，且既有 v1 数据保持不变。
     #[test]
-    fn migrates_a_v1_repository_to_v2_append_only() {
+    fn migrates_a_v1_repository_to_the_current_version_append_only() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         std::fs::create_dir(&root).unwrap();
@@ -1682,7 +1682,7 @@ mod migration_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         for table in ["pin_boards", "pin_board_images", "pin_board_history"] {
             let exists: bool = connection
                 .query_row(
@@ -1694,9 +1694,24 @@ mod migration_tests {
                 .unwrap();
             assert!(exists, "表 {table} 应在迁移后存在");
         }
-        // v3 追加的快速检查列必须在迁移后可用。
-        connection
-            .prepare("SELECT backup_quick_enabled, last_source_size, last_source_modified_ms FROM branches LIMIT 0")
-            .unwrap();
+        // v3 追加的快速检查列与 v4 追加的校验状态列必须在迁移后可用。
+        let columns: Vec<String> = {
+            let mut statement = connection.prepare("PRAGMA table_info(branches)").unwrap();
+            statement
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for column in [
+            "backup_quick_enabled",
+            "last_source_size",
+            "last_source_modified_ms",
+            "verified_history_id",
+            "verified_ms",
+            "verify_error",
+        ] {
+            assert!(columns.iter().any(|item| item == column), "{column}");
+        }
     }
 }

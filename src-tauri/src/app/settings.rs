@@ -829,7 +829,7 @@ mod tests {
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '3' WHERE key = 'schema_version'",
+                "UPDATE repository_meta SET value = '4' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();
