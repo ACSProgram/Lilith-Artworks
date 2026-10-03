@@ -40,8 +40,10 @@ foreach ($item in $required) {
     throw "Installed legal resource has unexpected content: $($item.Name)"
   }
 }
+# The bundled Adobe TrustMark model license opens with "Copyright <year> Adobe",
+# so match the notice with an optional year instead of a fixed hyphen-free string.
 $modelLicenses = @(Get-ChildItem -LiteralPath $InstallationDirectory -Recurse -Filter "LICENSE" -File | Where-Object {
-  (Get-Content -LiteralPath $_.FullName -Raw) -match "Copyright Adobe"
+  (Get-Content -LiteralPath $_.FullName -Raw) -match "Copyright\s+(?:\d{4}\s+)?Adobe"
 })
 if ($modelLicenses.Count -eq 0) { throw "Adobe TrustMark model license is missing from the installed package." }
 
