@@ -17,6 +17,19 @@ pub(crate) async fn run_branch_backup(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 手动提交优先：先登记待处理请求，让调度器延后该分支的自动备份；
+        // 若同分支的自动备份正在运行，请求取消，让手动提交先取得运行锁，
+        // 避免自动任务抢先记录同一内容导致手动备注丢失。
+        state.begin_manual_request(&request.branch_id);
+        if state.active_automatic() {
+            if let Ok(status) = state.status() {
+                if status.busy
+                    && status.active_branch_id.as_deref() == Some(request.branch_id.as_str())
+                {
+                    let _ = state.request_cancel();
+                }
+            }
+        }
         let result = state.run_logged(
             "manual backup",
             &format!(
@@ -41,6 +54,7 @@ pub(crate) async fn run_branch_backup(
                 })
             },
         );
+        state.end_manual_request(&request.branch_id);
         state.wake_scheduler();
         result
     })

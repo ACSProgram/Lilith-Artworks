@@ -288,6 +288,7 @@ pub fn run() {
             app::settings::open_log_directory,
             app::settings::open_legal_directory,
             app::settings::open_settings_directory,
+            app::settings::reveal_path_in_folder,
             app::cleanup_commands::retry_pending_file_cleanup,
             app::workflows::acknowledge_backup_disable_notices,
             app::workflows::get_backup_disable_notice_target,

@@ -74,6 +74,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     theme: "system",
     closeToTray: true,
     pauseAutomaticBackups: false,
+    automaticBackupCheckMode: "quick",
     window: {
       x: null,
       y: null,

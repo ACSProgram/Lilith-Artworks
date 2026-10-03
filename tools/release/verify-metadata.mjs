@@ -41,8 +41,8 @@ if (nonOfficialPackages.length > 0) {
 
 const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "schema.rs"), "utf8");
 const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
-if (schemaVersion !== "2") {
-  throw new Error(`Release must use repository schema v2 (found: ${schemaVersion ?? "unknown"})`);
+if (schemaVersion !== "3") {
+  throw new Error(`Release must use repository schema v3 (found: ${schemaVersion ?? "unknown"})`);
 }
 
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");

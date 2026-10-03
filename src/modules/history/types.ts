@@ -13,6 +13,7 @@ export interface ArtworkBranch {
   createdFromHistoryId: string | null;
   backupEnabled: boolean;
   backupIntervalMinutes: number;
+  backupQuickEnabled: boolean;
   lastCheckMs: number | null;
   lastSuccessMs: number | null;
   lastError: string | null;
@@ -51,6 +52,7 @@ export interface UpdateBranchBackupRequest {
   expectedBackupEnabled: boolean;
   backupEnabled: boolean;
   backupIntervalMinutes: number;
+  backupQuickEnabled: boolean;
   sourcePath?: string;
 }
 

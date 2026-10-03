@@ -2,6 +2,7 @@ export type Theme = "system" | "light" | "dark";
 export type ContentDensity = "comfortable" | "compact";
 export type DefaultPanel = "overview" | "history" | "authenticity";
 export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
+export type BackupCheckMode = "quick" | "full";
 
 export interface PinBoardSettings {
   textureCacheLevel: PinBoardTextureCacheLevel;
@@ -29,6 +30,7 @@ export interface AppSettings {
   theme: Theme;
   closeToTray: boolean;
   pauseAutomaticBackups: boolean;
+  automaticBackupCheckMode: BackupCheckMode;
   window: WindowSettings;
   content: ContentSettings;
   pinBoard: PinBoardSettings;

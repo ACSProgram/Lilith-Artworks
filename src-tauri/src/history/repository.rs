@@ -33,7 +33,8 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                     b.consecutive_backup_failures, b.backup_retry_at_ms,
                     b.backup_disable_notice_pending,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
-                    (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id)
+                    (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id),
+                    b.backup_quick_enabled
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
@@ -55,6 +56,7 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 backup_disable_notice_pending: row.get::<_, i64>(12)? != 0,
                 final_artifact_locked: row.get::<_, bool>(13)?,
                 published_count: row.get(14)?,
+                backup_quick_enabled: row.get::<_, i64>(15)? != 0,
             })
         })
         .map_err(storage::database_error)?
@@ -164,6 +166,7 @@ pub(crate) fn update_branch(
     expected_enabled: bool,
     enabled: bool,
     interval_minutes: u32,
+    quick_enabled: bool,
     source_path: Option<&str>,
 ) -> Result<(), String> {
     storage::validate_title(title, "分支标题")?;
@@ -219,6 +222,7 @@ pub(crate) fn update_branch(
                     source_path_key = COALESCE(?8, source_path_key),
                     backup_enabled = CASE WHEN backup_enabled = ?3 THEN ?4 ELSE backup_enabled END,
                     backup_interval_minutes = ?5,
+                    backup_quick_enabled = ?9,
                     consecutive_backup_failures = CASE
                       WHEN backup_enabled = 0 AND ?3 = 0 AND ?4 <> 0 THEN 0
                       ELSE consecutive_backup_failures END,
@@ -241,6 +245,7 @@ pub(crate) fn update_branch(
                 storage::now_ms()?,
                 normalized_source.as_ref().map(|value| &value.0),
                 normalized_source.as_ref().map(|value| &value.1),
+                i64::from(quick_enabled),
             ],
         )
         .map_err(|error| {
@@ -541,6 +546,43 @@ pub(crate) fn mark_unchanged(root: &Path, branch_id: &str, checked_ms: i64) -> R
             consecutive_backup_failures = 0, backup_retry_at_ms = NULL, updated_ms = ?2 WHERE id = ?1",
         params![branch_id, checked_ms]
     ).map_err(storage::database_error)?;
+    Ok(())
+}
+
+/// 读取上次全量检查成功后记录的工作文件元数据。
+/// `last_source_size` 为 NULL 表示还没有可信任的基线，快速检查必须退回全量。
+pub(crate) fn load_source_metadata(
+    root: &Path,
+    branch_id: &str,
+) -> Result<Option<(i64, Option<i64>)>, String> {
+    Ok(storage::open(root)?
+        .query_row(
+            "SELECT last_source_size, last_source_modified_ms FROM branches WHERE id = ?1",
+            [branch_id],
+            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .and_then(|(size, modified)| size.map(|value| (value, modified))))
+}
+
+/// 在全量检查或提交成功后记录工作文件的大小与修改时间，作为快速检查的基线。
+pub(crate) fn record_source_metadata(
+    root: &Path,
+    branch_id: &str,
+    length: u64,
+    modified_ms: Option<i64>,
+) -> Result<(), String> {
+    storage::open(root)?
+        .execute(
+            "UPDATE branches SET last_source_size = ?2, last_source_modified_ms = ?3 WHERE id = ?1",
+            params![
+                branch_id,
+                i64::try_from(length).map_err(|_| "源文件大小超出范围")?,
+                modified_ms
+            ],
+        )
+        .map_err(storage::database_error)?;
     Ok(())
 }
 
@@ -1275,7 +1317,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
+            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_quick_enabled, b.backup_retry_at_ms
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND TRIM(b.source_path) <> ''
@@ -1289,7 +1331,8 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
                 id: row.get(0)?,
                 last_check_ms: row.get(1)?,
                 interval_minutes: row.get(2)?,
-                retry_at_ms: row.get(3)?,
+                quick_enabled: row.get::<_, i64>(3)? != 0,
+                retry_at_ms: row.get(4)?,
             })
         })
         .map_err(storage::database_error)?
@@ -1304,7 +1347,7 @@ pub(crate) fn load_scheduled(
 ) -> Result<Option<ScheduledBranch>, String> {
     storage::open(root)?
         .query_row(
-            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_retry_at_ms
+            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_quick_enabled, b.backup_retry_at_ms
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
@@ -1315,7 +1358,8 @@ pub(crate) fn load_scheduled(
                     id: row.get(0)?,
                     last_check_ms: row.get(1)?,
                     interval_minutes: row.get(2)?,
-                    retry_at_ms: row.get(3)?,
+                    quick_enabled: row.get::<_, i64>(3)? != 0,
+                    retry_at_ms: row.get(4)?,
                 })
             },
         )
@@ -1423,6 +1467,7 @@ mod tests {
             true,
             false,
             10,
+            false,
             None,
         )
         .unwrap();
@@ -1442,6 +1487,7 @@ mod tests {
             true,
             true,
             10,
+            false,
             replacement.to_str(),
         )
         .unwrap();
@@ -1460,6 +1506,7 @@ mod tests {
             true,
             true,
             10,
+            false,
             missing.to_str(),
         )
         .is_err());
@@ -1484,6 +1531,7 @@ mod tests {
             true,
             true,
             10,
+            false,
             Some("   "),
         )
         .unwrap();
@@ -1504,6 +1552,7 @@ mod tests {
             false,
             true,
             10,
+            false,
             None,
         )
         .unwrap();
@@ -1530,6 +1579,7 @@ mod tests {
             true,
             true,
             10,
+            false,
             Some(""),
         )
         .unwrap();
@@ -1540,6 +1590,7 @@ mod tests {
             true,
             true,
             10,
+            false,
             Some(""),
         )
         .is_err());
@@ -1566,6 +1617,7 @@ mod tests {
             true,
             true,
             120,
+            false,
             None,
         )
         .unwrap();
@@ -1640,6 +1692,7 @@ mod tests {
             true,
             true,
             60,
+            false,
             None,
         )
         .unwrap();
@@ -1665,6 +1718,7 @@ mod tests {
             false,
             true,
             60,
+            false,
             None,
         )
         .unwrap();

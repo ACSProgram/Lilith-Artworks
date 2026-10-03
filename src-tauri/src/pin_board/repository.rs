@@ -1618,8 +1618,8 @@ mod tests {
 mod migration_tests {
     use super::*;
 
-    /// v1 仓库（无素材板表）打开时必须通过追加式迁移升级到 v2，
-    /// 且既有 v1 数据保持不变。
+    /// v1 仓库（无素材板表、分支表也没有 v3 追加列）打开时必须通过追加式
+    /// 迁移升级到当前版本，且既有 v1 数据保持不变。
     #[test]
     fn migrates_a_v1_repository_to_v2_append_only() {
         let directory = tempfile::tempdir().unwrap();
@@ -1627,14 +1627,45 @@ mod migration_tests {
         std::fs::create_dir(&root).unwrap();
         crate::library::initialize(&root).unwrap();
 
-        // 把刚创建的 v2 仓库降级为等价 v1：移除素材板表并把版本写回 1。
+        // 把刚创建的仓库降级为等价 v1：移除素材板表、按 v1 结构重建
+        // branches（去掉 v3 追加的快速检查列）并把版本写回 1。
         {
             let connection = crate::storage::open(&root).unwrap();
             connection
                 .execute_batch(
-                    "DROP TABLE pin_board_history;
+                    "PRAGMA foreign_keys = OFF;
+                 DROP TABLE pin_board_history;
                  DROP TABLE pin_board_images;
                  DROP TABLE pin_boards;
+                 CREATE TABLE branches_v1 (
+                   id TEXT PRIMARY KEY,
+                   artwork_id TEXT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
+                   title TEXT NOT NULL CHECK (length(title) BETWEEN 1 AND 160),
+                   source_path TEXT NOT NULL,
+                   source_path_key TEXT NOT NULL,
+                   head_history_id TEXT REFERENCES history_nodes(id) ON DELETE SET NULL,
+                   created_from_history_id TEXT REFERENCES history_nodes(id) ON DELETE SET NULL,
+                   backup_enabled INTEGER NOT NULL DEFAULT 1 CHECK (backup_enabled IN (0, 1)),
+                   backup_interval_minutes INTEGER NOT NULL DEFAULT 5 CHECK (backup_interval_minutes BETWEEN 1 AND 10080),
+                   last_check_ms INTEGER,
+                   last_success_ms INTEGER,
+                   last_error TEXT,
+                   consecutive_backup_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_backup_failures >= 0),
+                   backup_retry_at_ms INTEGER,
+                   backup_disable_notice_pending INTEGER NOT NULL DEFAULT 0 CHECK (backup_disable_notice_pending IN (0, 1)),
+                   created_ms INTEGER NOT NULL,
+                   updated_ms INTEGER NOT NULL,
+                   UNIQUE (artwork_id, source_path_key)
+                 );
+                 INSERT INTO branches_v1 SELECT
+                   id, artwork_id, title, source_path, source_path_key, head_history_id,
+                   created_from_history_id, backup_enabled, backup_interval_minutes,
+                   last_check_ms, last_success_ms, last_error, consecutive_backup_failures,
+                   backup_retry_at_ms, backup_disable_notice_pending, created_ms, updated_ms
+                 FROM branches;
+                 DROP TABLE branches;
+                 ALTER TABLE branches_v1 RENAME TO branches;
+                 CREATE INDEX branches_artwork_created ON branches(artwork_id, created_ms, id);
                  UPDATE repository_meta SET value = '1' WHERE key = 'schema_version';",
                 )
                 .unwrap();
@@ -1651,7 +1682,7 @@ mod migration_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
         for table in ["pin_boards", "pin_board_images", "pin_board_history"] {
             let exists: bool = connection
                 .query_row(
@@ -1663,5 +1694,9 @@ mod migration_tests {
                 .unwrap();
             assert!(exists, "表 {table} 应在迁移后存在");
         }
+        // v3 追加的快速检查列必须在迁移后可用。
+        connection
+            .prepare("SELECT backup_quick_enabled, last_source_size, last_source_modified_ms FROM branches LIMIT 0")
+            .unwrap();
     }
 }

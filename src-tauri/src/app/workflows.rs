@@ -242,6 +242,7 @@ pub(crate) async fn update_artwork_branch(
                     request.expected_backup_enabled,
                     request.backup_enabled,
                     request.backup_interval_minutes,
+                    request.backup_quick_enabled,
                     request.source_path.as_deref(),
                 )?;
                 let artwork_id = history::load_branch(root, &request.branch_id)?.artwork_id;
