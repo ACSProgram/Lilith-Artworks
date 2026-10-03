@@ -9,6 +9,14 @@ if (!outputPath) {
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const version = packageJson.version;
+const schemaSource = fs.readFileSync(
+  path.join(root, "src-tauri", "src", "library", "schema.rs"),
+  "utf8",
+);
+const schemaVersion = schemaSource.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
+if (!schemaVersion) {
+  throw new Error("Could not read SCHEMA_VERSION from src-tauri/src/library/schema.rs");
+}
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const sectionPattern = new RegExp(
@@ -29,7 +37,7 @@ const notes = `# Lilith Artworks ${version}
 
 ${signature}
 
-Repository schema: v1. Repositories created by earlier pre-release builds are not compatible and must be recreated; repositories that do not report schema v1 are refused on open.
+Repository schema: v${schemaVersion}. Opening a repository written by an earlier schema performs an append-only migration up to v${schemaVersion}; migration is one-way with no downgrade path, and a repository below v1 or above v${schemaVersion} is refused on open. Application settings migrate through their own append-only path.
 
 ${section}
 
