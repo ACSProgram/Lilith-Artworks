@@ -17,6 +17,7 @@ describe("ArtworkWorkspace", () => {
       pinBoardSettings={{
         arrangementGapPx: 10,
         textureCacheLevel: "medium",
+        autosave: false,
         lockShortcut: "CommandOrControl+R",
         fullscreenShortcut: "F11",
       }}
@@ -46,6 +47,7 @@ describe("ArtworkWorkspace", () => {
       pinBoardSettings={{
         arrangementGapPx: 10,
         textureCacheLevel: "medium",
+        autosave: false,
         lockShortcut: "CommandOrControl+R",
         fullscreenShortcut: "F11",
       }}

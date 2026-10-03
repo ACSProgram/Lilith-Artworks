@@ -16,7 +16,7 @@ use tauri::{
     image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager, WindowEvent,
+    AppHandle, Emitter, Manager, WindowEvent,
 };
 
 const BASE_TRAY_ICON_SIZE: f64 = 16.0;
@@ -24,6 +24,10 @@ const BASE_TRAY_ICON_SIZE: f64 = 16.0;
 /// survives several restarts of a busy repository without growing unbounded.
 const LOG_MAX_FILE_SIZE: u128 = 4_000_000;
 const LOG_KEPT_FILES: usize = 5;
+/// Upper bound for the shutdown handshake with the webview. Normal confirmation
+/// (pin-board finalize plus settings flush) arrives in well under a second; the
+/// timeout only covers a hung or crashed webview so the window can still close.
+const SHUTDOWN_CONFIRM_TIMEOUT_MS: u64 = 15_000;
 
 /// Operations log at Info; `LILITH_LOG_LEVEL=debug|trace` (or warn|error) turns
 /// the per-step detail on or off without rebuilding the application.
@@ -120,6 +124,45 @@ fn show_main_window(app: &AppHandle) {
     }
 }
 
+/// Starts the shutdown handshake with the webview: the frontend is expected to
+/// finalize the pin board (persist and truncate the step history) and then call
+/// `confirm_app_shutdown`. A fallback thread force-exits when the confirmation
+/// never arrives, so a hung webview cannot keep the application alive.
+fn begin_webview_shutdown(app: &AppHandle) {
+    if let Err(error) = app.emit("app_shutdown_requested", ()) {
+        log::error!("failed to emit shutdown request: {error}");
+    }
+    let handle = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(
+            SHUTDOWN_CONFIRM_TIMEOUT_MS,
+        ));
+        let state = handle.state::<app::AppState>();
+        if state.shutdown_confirmed() || state.exit_requested() {
+            return;
+        }
+        log::warn!("webview shutdown confirmation timed out; forcing exit");
+        handle.exit(0);
+    });
+}
+
+/// Confirmation side of the shutdown handshake. Runs the same irreversible
+/// sequence the previous close paths ran inline: wait for the shared operation
+/// lock, stop the scheduler threads, then exit the process.
+#[tauri::command]
+async fn confirm_app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
+    let state = app.state::<app::AppState>();
+    if !state.mark_shutdown_confirmed() {
+        // Another confirmation is already running the exit sequence.
+        return Ok(());
+    }
+    log::info!("Lilith Artworks shutting down (webview confirmed)");
+    app.state::<backup::BackupState>().shutdown();
+    state.request_exit();
+    app.exit(0);
+    Ok(())
+}
+
 fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) -> tauri::Result<()> {
     let show = MenuItem::with_id(
         application,
@@ -158,9 +201,13 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
             }
             "quit" => {
                 let _ = app::capture_window_settings(app);
-                app.state::<backup::BackupState>().shutdown();
-                app.state::<app::AppState>().request_exit();
-                app.exit(0);
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+                if app.state::<app::AppState>().begin_shutdown_handshake() {
+                    log::info!("Lilith Artworks shutting down");
+                    begin_webview_shutdown(app);
+                }
             }
             _ => {}
         })
@@ -273,16 +320,23 @@ pub fn run() {
                 if state.close_to_tray() {
                     api.prevent_close();
                     let _ = window.hide();
-                } else {
+                } else if state.begin_shutdown_handshake() {
                     log::info!("Lilith Artworks shutting down");
-                    window.state::<backup::BackupState>().shutdown();
-                    state.request_exit();
-                    window.app_handle().exit(0);
+                    api.prevent_close();
+                    // Hiding first also fires the webview visibilitychange
+                    // handler, which saves open pin boards as a side effect.
+                    let _ = window.hide();
+                    begin_webview_shutdown(window.app_handle());
+                } else {
+                    // A handshake is already running; just keep the window shut.
+                    api.prevent_close();
+                    let _ = window.hide();
                 }
             }
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            confirm_app_shutdown,
             app::settings::get_app_settings,
             app::settings::save_app_settings,
             app::settings::open_log_directory,

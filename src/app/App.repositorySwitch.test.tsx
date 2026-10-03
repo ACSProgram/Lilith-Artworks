@@ -89,6 +89,8 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     pinBoard: {
       textureCacheLevel: "medium",
       arrangementGapPx: 10,
+      autosave: false,
+      saveOnExit: true,
       lockShortcut: "CommandOrControl+R",
       fullscreenShortcut: "F11",
     },

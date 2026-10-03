@@ -11,6 +11,7 @@ import type {
 } from "./types";
 
 export const appApi = {
+  confirmShutdown: () => invokeCommand<void>("confirm_app_shutdown"),
   getSettings: () => invokeCommand<SettingsSnapshot>("get_app_settings"),
   saveSettings: (settings: AppSettings) =>
     invokeCommand<SettingsSnapshot>("save_app_settings", { settings }),
