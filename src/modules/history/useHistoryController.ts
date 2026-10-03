@@ -190,6 +190,12 @@ export function useHistoryController({
       await reload();
     }), [reload, runOperation]);
 
+  const reverifyBranch = useCallback((branchId: string) =>
+    runOperation("verify", "正在重新校验分支链路", async () => {
+      // 命令只清空失败摘要并让分支重新入队，真正的校验由调度器在空闲时执行。
+      replaceHistory(await historyApi.reverifyBranch(branchId));
+    }), [replaceHistory, runOperation]);
+
   const deleteBranch = useCallback((branchId: string) =>
     runOperation("delete-branch", "正在删除分支", async () => {
       replaceHistory(await historyApi.deleteBranch(branchId));
@@ -241,6 +247,7 @@ export function useHistoryController({
     restoreNode,
     compactNodes,
     deleteBranch,
+    reverifyBranch,
     deleteSubtree,
     setCheckpoint,
     forkBranch,

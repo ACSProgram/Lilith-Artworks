@@ -34,6 +34,8 @@ const branch: ArtworkBranch = {
   backupDisableNoticePending: false,
   finalArtifactLocked: false,
   publishedCount: 0,
+  verifyError: null,
+  verifiedMs: null,
 };
 
 describe("history model", () => {

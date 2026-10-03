@@ -26,6 +26,8 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
   backupDisableNoticePending: !backupEnabled,
   finalArtifactLocked: false,
   publishedCount: 0,
+  verifyError: null,
+  verifiedMs: null,
 });
 
 describe("BranchSettings", () => {
@@ -146,6 +148,8 @@ describe("BranchSettings", () => {
 });
 
 describe("BranchScheduleStatus", () => {
+  afterEach(() => cleanup());
+
   it("keeps the status summary short and exposes the complete error for copying", async () => {    const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -171,5 +175,33 @@ describe("BranchScheduleStatus", () => {
   it("mentions quick check for branches that opted in", () => {
     render(<BranchScheduleStatus branch={{ ...branch(true), backupQuickEnabled: true }} />);
     expect(screen.getByText(/每 10 分钟自动备份 · 快速检查/)).toBeTruthy();
+  });
+
+  it("shows a chain verification failure separately and re-queues it", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: { writeText },
+    });
+    const onReverify = vi.fn();
+    const verifyFailedBranch = {
+      ...branch(true),
+      verifyError: "链路校验 snapshot 摘要与历史数据库不匹配",
+      verifiedMs: null,
+    };
+
+    render(<BranchScheduleStatus branch={verifyFailedBranch} onReverify={onReverify} />);
+
+    // 备份状态正常时仍独立显示校验失败。
+    expect(screen.getByText(/每 10 分钟自动备份/)).toBeTruthy();
+    expect(screen.getByText("链路校验失败")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "查看链路校验失败详情" }));
+    expect(screen.getByText(verifyFailedBranch.verifyError)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "复制链路校验失败详情" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(verifyFailedBranch.verifyError));
+
+    fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
+    expect(onReverify).toHaveBeenCalledWith("branch-1");
   });
 });

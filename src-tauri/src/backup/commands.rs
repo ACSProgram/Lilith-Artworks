@@ -206,6 +206,30 @@ pub(crate) async fn set_history_checkpoint(
     .map_err(|error| format!("检查点任务异常结束：{error}"))?
 }
 
+/// 清除分支的链路校验失败摘要，使其重新进入空闲校验队列，并唤醒调度器。
+///
+/// 与调度器"失败后退出队列、head 变化或手动重查才重新入队"的语义一致：这里只清空
+/// `verify_error`，真正的校验仍由调度器在空闲时执行，不占用前台锁。
+#[tauri::command]
+pub(crate) async fn reverify_branch_history(
+    branch_id: String,
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+) -> Result<history::ArtworkHistory, String> {
+    let app_state = app_state.inner().clone();
+    let state = backup_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let artwork_id = app_state.with_repository_read(|root| {
+            history::load_branch(root, &branch_id).map(|b| b.artwork_id)
+        })?;
+        app_state.with_ready_repository(|root| history::clear_verify_error(root, &branch_id))?;
+        state.wake_scheduler();
+        app_state.with_repository_read(|root| history::list(root, &artwork_id))
+    })
+    .await
+    .map_err(|error| format!("重新校验任务异常结束：{error}"))?
+}
+
 #[tauri::command]
 pub(crate) fn get_backup_runtime_status(
     state: State<'_, BackupState>,

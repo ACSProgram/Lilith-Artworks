@@ -22,6 +22,10 @@ export interface ArtworkBranch {
   backupDisableNoticePending: boolean;
   finalArtifactLocked: boolean;
   publishedCount: number;
+  /** 最近一次空闲链路校验失败的摘要；与备份失败 `lastError` 相互独立。 */
+  verifyError: string | null;
+  /** 最近一次链路校验通过的时间；未校验过为 null。 */
+  verifiedMs: number | null;
 }
 
 export interface HistoryNode {

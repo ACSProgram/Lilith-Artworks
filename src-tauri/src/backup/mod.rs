@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub(crate) use commands::*;
 pub(crate) use repository_backup::{create_repository_backup, RepositoryBackupReport};
-pub(crate) use restore::{ensure_checkpoint, scrub_history};
+pub(crate) use restore::{ensure_checkpoint, scrub_history, validate_snapshot};
 pub(crate) use runtime::{BackupState, BackupTaskKind};
 
 #[derive(Debug, Clone, Serialize, Default)]

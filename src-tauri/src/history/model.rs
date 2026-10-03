@@ -28,6 +28,10 @@ pub(crate) struct ArtworkBranch {
     pub(crate) backup_disable_notice_pending: bool,
     pub(crate) final_artifact_locked: bool,
     pub(crate) published_count: u32,
+    /// 最近一次空闲链路校验失败的摘要；成功或 head 变化时清空。
+    pub(crate) verify_error: Option<String>,
+    /// 最近一次校验通过的时间；成功写入 `verified_history_id` 时一并记录。
+    pub(crate) verified_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +103,18 @@ pub(crate) struct ScheduledBranch {
     pub(crate) interval_minutes: u32,
     pub(crate) quick_enabled: bool,
     pub(crate) retry_at_ms: Option<i64>,
+}
+
+/// 派生队列中的一条空闲校验候选：分支 head 尚未被校验过（或已变化）。
+///
+/// `head_created_ms` 取自 head 节点的 `history_nodes.created_ms`，调度器据此延迟
+/// 刚提交的分支，避免刚写完就整链重读；不得改用 `last_check_ms`——快速检查的
+/// "内容未变化"会推进它但不改变 head。
+#[derive(Debug, Clone)]
+pub(crate) struct IdleVerifyTarget {
+    pub(crate) branch_id: String,
+    pub(crate) head_history_id: String,
+    pub(crate) head_created_ms: i64,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

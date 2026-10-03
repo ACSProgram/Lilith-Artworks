@@ -43,7 +43,7 @@ function loadMindmapNodeWidth(): number {
 export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0, onSelectBranch, onHistoryChanged, onError }: HistoryModuleProps) {
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
-    restoreNode, compactNodes, deleteBranch, deleteSubtree, setCheckpoint,
+    restoreNode, compactNodes, deleteBranch, reverifyBranch, deleteSubtree, setCheckpoint,
     forkBranch, renameNode, cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
@@ -268,7 +268,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     {selectedBranch && <section className="branch-band">
       <BranchSettings branch={selectedBranch} disabled={busy || runtime.busy} onSave={saveBranch} />
       <div className="branch-status-actions">
-        <BranchScheduleStatus branch={selectedBranch} />
+        <BranchScheduleStatus branch={selectedBranch} onReverify={reverifyBranch} />
         {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={busy || runtime.busy} onClick={() => {
           const origin = history.nodes.find((node) => node.id === selectedBranch.createdFromHistoryId);
           if (origin) setConfirmRequest({ kind: "delete-branch", node: origin, branch: selectedBranch });

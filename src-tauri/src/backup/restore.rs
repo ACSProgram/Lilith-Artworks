@@ -324,9 +324,8 @@ fn resolve_chain(
 }
 
 /// 校验单个 snapshot 文件与其历史记录一致：先比对 ChunkFile 的文件摘要与数据库
-/// 记录的 `sha256`，再把全部分块流式读出以验证载荷。恢复与检查点复用该入口，
-/// 空闲链路校验（后续批次）同样以它作为单节点校验入口，因此保持 crate 可见。
-#[allow(dead_code)]
+/// 记录的 `sha256`，再把全部分块流式读出以验证载荷。恢复、检查点与空闲链路校验
+/// 复用该入口；分支 head 恒持有 snapshot，因此校验 head 等价于校验这一个文件。
 pub(crate) fn validate_snapshot(
     path: &Path,
     record: &history::HistoryRecord,

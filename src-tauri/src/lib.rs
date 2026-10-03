@@ -370,6 +370,7 @@ pub fn run() {
             backup::compact_history_node,
             backup::delete_history_subtree,
             backup::set_history_checkpoint,
+            backup::reverify_branch_history,
             backup::get_backup_runtime_status,
             backup::cancel_backup_operation,
             app::workflows::enter_branch_publication,
