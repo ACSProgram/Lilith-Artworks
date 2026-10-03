@@ -8,7 +8,7 @@ use crate::{
         self, AuthenticityError, AuthenticityState, BranchPublication, EnterPublicationRequest,
         PublishBranchRequest, PublishResult,
     },
-    backup::{self, BackupState},
+    backup::{self, BackupState, BackupTaskKind},
     cleanup, history, library, storage,
 };
 
@@ -28,7 +28,7 @@ pub(crate) async fn scrub_repository_integrity(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_foreground(None, || {
             app_state.with_ready_repository(|root| {
                 state.report_progress("repository-scrub", "正在检查历史文件", 0, 0);
                 let history_nodes = backup::scrub_history(
@@ -81,7 +81,7 @@ pub(crate) async fn create_repository_backup(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_foreground(None, || {
             app_state.with_ready_repository(|root| {
                 backup::create_repository_backup(
                     root,
@@ -159,7 +159,7 @@ pub(crate) async fn permanently_delete_library_trash(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let report = state.run_exclusive(None, || {
+        let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 let cleanup_ids = library::permanently_delete_trash(root, &ids)?;
                 cleanup::run(root, &cleanup_ids)
@@ -180,7 +180,7 @@ pub(crate) async fn empty_library_trash(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let report = state.run_exclusive(None, || {
+        let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 let cleanup_ids = library::empty_trash(root)?;
                 cleanup::run(root, &cleanup_ids)
@@ -203,7 +203,7 @@ pub(crate) async fn fork_artwork_branch(
     let state = backup_state.inner().clone();
     let scheduler = state.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 backup::ensure_checkpoint(root, &request.from_history_id)?;
                 history::create_branch(
@@ -233,7 +233,7 @@ pub(crate) async fn update_artwork_branch(
     let state = backup_state.inner().clone();
     let scheduler = state.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 history::update_branch(
                     root,
@@ -265,7 +265,7 @@ pub(crate) async fn delete_artwork_branch(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 state.report_progress("delete-branch", "正在删除分支历史", 0, 1);
                 let deletion = history::delete_branch(root, &branch_id)?;
@@ -303,7 +303,7 @@ pub(crate) async fn enter_branch_publication(
     let models_ready = authenticity_state.model_files_ready();
     let model_info = authenticity_state.model_info();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(Some(&request.branch_id), || {
+        state.run_foreground(Some(&request.branch_id), || {
             app_state.with_ready_repository(|root| {
                 let (_, history_id) = authenticity::branch_head(root, &request.branch_id)?;
                 state.report_progress("publish-lock", "正在固化发布检查点", 0, 2);
@@ -333,7 +333,7 @@ pub(crate) async fn cancel_branch_publication(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(Some(&branch_id), || {
+        state.run_exclusive(Some(&branch_id), BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 let cleanup_ids = authenticity::remove_artifact(root, &branch_id)?;
                 cleanup::run(root, &cleanup_ids)
@@ -369,7 +369,7 @@ pub(crate) async fn publish_branch_artifact(
     tauri::async_runtime::spawn_blocking(move || {
         let branch_id = request.branch_id.clone();
         backup
-            .run_exclusive(Some(&branch_id), || {
+            .run_foreground(Some(&branch_id), || {
                 app_state.with_ready_repository(|root| {
                     authenticity::publish_artifact(root, &authenticity, &operation, request)
                         .map_err(|error| error.to_string())

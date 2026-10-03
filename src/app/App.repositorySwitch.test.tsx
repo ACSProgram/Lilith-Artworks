@@ -137,6 +137,7 @@ describe("App repository switching", () => {
     appApi.getBackupRuntimeStatus.mockResolvedValue({
       busy: false,
       activeBranchId: null,
+      taskKind: null,
       operation: null,
       progressLabel: null,
       progressCurrent: 0,
@@ -280,6 +281,7 @@ describe("App repository switching", () => {
     appApi.getBackupRuntimeStatus.mockImplementation(async () => backupStarted ? {
       busy: true,
       activeBranchId: null,
+      taskKind: "userOperation",
       operation: "repository-backup",
       progressLabel: "正在复制仓库文件",
       progressCurrent: 512,
@@ -289,6 +291,7 @@ describe("App repository switching", () => {
     } : {
       busy: false,
       activeBranchId: null,
+      taskKind: null,
       operation: null,
       progressLabel: null,
       progressCurrent: 0,

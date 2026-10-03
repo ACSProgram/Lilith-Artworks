@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State};
 use tempfile::NamedTempFile;
 
-use crate::backup::BackupState;
+use crate::backup::{BackupState, BackupTaskKind};
 use crate::{history, library};
 
 const CURRENT_SETTINGS_VERSION: u32 = 2;
@@ -482,7 +482,7 @@ pub(crate) fn save_app_settings(
         .repository_path()?
         .map(|path| path.to_string_lossy().into_owned())
         != Some(settings.repository_path.trim().to_owned());
-    let next = backup_state.run_exclusive(None, || {
+    let save = || {
         state.with_repository_switch(|| {
             let current_repository = state.repository_path()?;
             let prepared_repository = prepare_repository(
@@ -502,7 +502,14 @@ pub(crate) fn save_app_settings(
             );
             snapshot(state.inner())
         })
-    })?;
+    };
+    // 切换仓库是前台长命令：登记前台等待并请求后台任务让位。普通设置保存持有
+    // 运行锁的时间极短，不必打断正在运行的自动备份。
+    let next = if repository_changed {
+        backup_state.run_foreground(None, save)?
+    } else {
+        backup_state.run_exclusive(None, BackupTaskKind::UserOperation, save)?
+    };
     backup_state.set_automatic_scheduling(!paused);
     backup_state.wake_scheduler();
     crate::refresh_tray_backup_menu(&app)?;

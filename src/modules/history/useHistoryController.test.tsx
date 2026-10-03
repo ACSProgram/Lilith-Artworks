@@ -21,6 +21,7 @@ const history: ArtworkHistory = {
 const runtime = (completionRevision: number): BackupRuntimeStatus => ({
   busy: false,
   activeBranchId: null,
+  taskKind: null,
   operation: null,
   progressLabel: null,
   progressCurrent: 0,

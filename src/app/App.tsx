@@ -63,6 +63,7 @@ const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
 const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
   busy: false,
   activeBranchId: null,
+  taskKind: null,
   operation: null,
   progressLabel: null,
   progressCurrent: 0,

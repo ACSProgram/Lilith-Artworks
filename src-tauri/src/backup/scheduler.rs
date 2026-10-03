@@ -8,10 +8,13 @@ use crate::{
     storage,
 };
 
-use super::{runtime::ExclusiveRunError, worker, BackupCommitResult, BackupState};
+use super::{runtime::ExclusiveRunError, worker, BackupCommitResult, BackupState, BackupTaskKind};
 
 const ERROR_RETRY: Duration = Duration::from_secs(60);
 const IDLE_RECHECK: Duration = Duration::from_secs(5 * 60);
+/// 有前台命令在等待共享运行锁时的让位退避。它足够短以保证前台结束后的响应性，
+/// 又足以避免调度器空转抢锁。
+const FOREGROUND_YIELD_BACKOFF: Duration = Duration::from_millis(200);
 
 pub(crate) fn run(state: BackupState, app: AppHandle) {
     loop {
@@ -27,6 +30,14 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             continue;
         }
         state.set_automatic_scheduling(true);
+        // 有前台命令正在等待共享运行锁时主动让位：不选新任务，也不与前台争抢
+        // 运行锁。
+        if state.foreground_waiting() > 0 {
+            if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
+                break;
+            }
+            continue;
+        }
         let quick_default = app_state.automatic_backup_quick_default();
         let branches = match app_state.with_ready_repository(history::list_scheduled) {
             Ok(branches) => branches,
@@ -62,24 +73,28 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             next_due = Some(next_due.map_or(due_at, |current: i64| current.min(due_at)));
         }
         if let Some(branch_id) = due {
-            state.set_active_automatic(true);
-            let result = state.run_exclusive_typed(Some(&branch_id), || {
-                app_state
-                    .with_ready_repository(|root| {
-                        Ok(run_scheduled_backup(
-                            root,
-                            &state,
-                            &branch_id,
-                            quick_default,
-                        ))
-                    })
-                    .map_err(AutomaticBackupError::Infrastructure)?
-            });
-            state.set_active_automatic(false);
+            let result = state.run_exclusive_typed(
+                Some(&branch_id),
+                BackupTaskKind::AutomaticBackup,
+                || {
+                    app_state
+                        .with_ready_repository(|root| {
+                            Ok(run_scheduled_backup(
+                                root,
+                                &state,
+                                &branch_id,
+                                quick_default,
+                            ))
+                        })
+                        .map_err(AutomaticBackupError::Infrastructure)?
+                },
+            );
             match result {
                 Ok(_)
                 | Err(ExclusiveRunError::Operation(
-                    AutomaticBackupError::NotScheduled | AutomaticBackupError::Deferred,
+                    AutomaticBackupError::NotScheduled
+                    | AutomaticBackupError::Deferred
+                    | AutomaticBackupError::ForegroundWaiting,
                 )) => {}
                 Err(ExclusiveRunError::Operation(AutomaticBackupError::Cancelled)) => {
                     if !state.wait_scheduler(ERROR_RETRY) {
@@ -127,6 +142,8 @@ enum AutomaticBackupError {
     NotScheduled,
     /// 分支有待处理的手动提交，本轮自动备份主动让位，不计入失败。
     Deferred,
+    /// 有前台命令在等待共享运行锁，本轮自动备份主动让位，不计入失败。
+    ForegroundWaiting,
     Cancelled,
     Failed {
         error: String,
@@ -140,6 +157,7 @@ impl std::fmt::Display for AutomaticBackupError {
         match self {
             Self::NotScheduled => formatter.write_str("分支不再满足自动备份条件"),
             Self::Deferred => formatter.write_str("分支有待处理的手动提交，自动备份已延后"),
+            Self::ForegroundWaiting => formatter.write_str("有前台命令在等待，自动备份已让位"),
             Self::Cancelled => formatter.write_str("自动备份已取消"),
             Self::Failed { error, .. } | Self::Infrastructure(error) => error.fmt(formatter),
         }
@@ -163,6 +181,11 @@ fn run_scheduled_backup(
     // 候选选择与加锁之间到达时仍被自动任务抢先。
     if state.manual_pending(branch_id) {
         return Err(AutomaticBackupError::Deferred);
+    }
+    // 取得运行锁后复查前台等待登记：有前台命令在等锁时立即让位，既不复核
+    // 资格也不占用仓库锁，保证前台命令尽快拿到运行锁。
+    if state.foreground_waiting() > 0 {
+        return Err(AutomaticBackupError::ForegroundWaiting);
     }
     // 快速检查：分支单独开启或全局默认为快速时，先只比较大小与修改时间；
     // 完全一致视为内容未变化，任何不一致都退回下方全量检查和备份流程。
@@ -324,6 +347,35 @@ mod tests {
     }
 
     #[test]
+    fn scheduled_backup_yields_to_a_waiting_foreground_command() {
+        let (_directory, root, _source, artwork_id, branch_id) = fixture();
+        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        make_due(&root, &branch_id);
+        let state = BackupState::default();
+        // 模拟一个已登记、仍在等待运行锁的前台命令：后台任务取得运行锁后必须让位，
+        // 且不计入失败、不推进检查时间。
+        let waiting = state.begin_foreground_wait();
+
+        let yielded = run_scheduled_backup(&root, &state, &branch_id, true);
+
+        assert!(
+            matches!(yielded, Err(AutomaticBackupError::ForegroundWaiting)),
+            "{yielded:?}"
+        );
+        drop(waiting);
+        assert_eq!(state.foreground_waiting(), 0);
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.consecutive_backup_failures, 0);
+        assert!(branch.last_error.is_none());
+
+        let result = run_scheduled_backup(&root, &state, &branch_id, true).unwrap();
+        assert!(result.unchanged);
+    }
+
+    #[test]
     fn scheduled_backup_defers_to_a_pending_manual_request() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
         worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
@@ -438,10 +490,14 @@ mod tests {
         let state = BackupState::default();
         let operation_state = state.clone();
 
-        let result = state.run_exclusive_typed(Some(&artwork.branch_id), || {
-            assert!(operation_state.request_cancel().unwrap());
-            run_scheduled_backup(&root, &operation_state, &artwork.branch_id, false)
-        });
+        let result = state.run_exclusive_typed(
+            Some(&artwork.branch_id),
+            BackupTaskKind::AutomaticBackup,
+            || {
+                assert!(operation_state.request_cancel().unwrap());
+                run_scheduled_backup(&root, &operation_state, &artwork.branch_id, false)
+            },
+        );
 
         assert!(matches!(
             result,
