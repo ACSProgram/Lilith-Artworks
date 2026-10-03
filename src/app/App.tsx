@@ -454,7 +454,7 @@ export function App() {
                     </div>
                     <div className="settings-preference-row">
                       <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
-                      <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并在发布前校验备份</small></span>
+                      <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并校验备份</small></span>
                       <button className="secondary-button" type="button" onClick={() => void backupRepository()} disabled={settingsBusy || !repository.ready}>
                         <DatabaseBackup aria-hidden="true" size={15} />创建备份
                       </button>
@@ -502,7 +502,7 @@ export function App() {
                       <span className="settings-row-icon"><Layers aria-hidden="true" size={17} /></span>
                       <span className="settings-row-copy is-descriptive">
                         <strong>纹理缓存等级</strong>
-                        <small>决定素材板可常驻的纹理数量与内存占用，保存后立即生效。</small>
+                        <small>决定素材板可常驻的纹理数量与内存占用。</small>
                       </span>
                       <div
                         className="segmented-control pin-board-cache-control"
@@ -532,7 +532,7 @@ export function App() {
                       <span className="settings-row-icon"><MoveHorizontal aria-hidden="true" size={17} /></span>
                       <span className="settings-row-copy is-descriptive">
                         <label htmlFor="pin-board-arrangement-gap"><strong>阵列图片间距</strong></label>
-                        <small>阵列排序时图片之间的屏幕间距，保存后使用新数值，范围 1–200 像素。</small>
+                        <small>阵列排序时图片之间的屏幕间距，范围 1–200 像素。</small>
                       </span>
                       <input
                         id="pin-board-arrangement-gap"
@@ -549,7 +549,7 @@ export function App() {
                       <span className="settings-row-icon"><Keyboard aria-hidden="true" size={17} /></span>
                       <span className="settings-row-copy is-descriptive">
                         <label htmlFor="pin-board-lock-shortcut"><strong>锁定画板快捷键</strong></label>
-                        <small>默认 Ctrl+R；锁定后仍可缩放和移动视口，但不会修改图片。</small>
+                        <small>锁定后无法编辑图片，仅可缩放和移动视图。</small>
                       </span>
                       <div className="shortcut-control">
                       <Keyboard size={16} aria-hidden="true" />
@@ -590,7 +590,7 @@ export function App() {
                     <span className="settings-row-icon"><Keyboard aria-hidden="true" size={17} /></span>
                     <span className="settings-row-copy is-descriptive">
                       <label htmlFor="pin-board-fullscreen-shortcut"><strong>画板全屏快捷键</strong></label>
-                      <small>切换素材板内容区全屏；全屏时隐藏顶部工具栏，默认使用 F11。</small>
+                      <small>切换素材板内容区全屏，全屏时隐藏顶部工具栏。</small>
                     </span>
                     <div className="shortcut-control">
                       <Keyboard size={16} aria-hidden="true" />
