@@ -6,7 +6,7 @@ use crate::storage;
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 3;
+pub(super) const SCHEMA_VERSION: i64 = 4;
 
 /// 素材板（pin-board）三张表。v2 起：
 /// - `pin_boards`：按 Artwork 平铺一层画板，`deleted_at` 为回收站软删除；
@@ -67,7 +67,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
                INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '3');
+               ('schema_version', '4');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -113,6 +113,9 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                backup_quick_enabled INTEGER NOT NULL DEFAULT 0 CHECK (backup_quick_enabled IN (0, 1)),
                last_source_size INTEGER,
                last_source_modified_ms INTEGER,
+               verified_history_id TEXT,
+               verified_ms INTEGER,
+               verify_error TEXT,
                created_ms INTEGER NOT NULL,
                updated_ms INTEGER NOT NULL,
                UNIQUE (artwork_id, source_path_key)
@@ -426,7 +429,9 @@ fn validate_current_version(version: i64) -> Result<(), String> {
 
 /// 打开既有仓库时执行追加式 schema 迁移。迁移不支持回退；高于当前版本的
 /// 仓库直接拒绝打开。v1 → v2 追加素材板三张表；v2 → v3 为分支追加快速
-/// 自动备份开关与上次全量检查记录的源文件元数据，均为追加列，不改既有数据。
+/// 自动备份开关与上次全量检查记录的源文件元数据；v3 → v4 为分支追加空闲
+/// 链路校验状态（最近校验通过的 head、校验时间与失败摘要）。全部为追加列，
+/// 不改既有数据；v4 三列只是校验结果的派生缓存，不参与外键约束。
 pub(super) fn migrate(connection: &Connection) -> Result<(), String> {
     let version = repository_version(connection)?;
     if version == SCHEMA_VERSION {
@@ -454,6 +459,18 @@ pub(super) fn migrate(connection: &Connection) -> Result<(), String> {
                  ALTER TABLE branches ADD COLUMN last_source_size INTEGER;
                  ALTER TABLE branches ADD COLUMN last_source_modified_ms INTEGER;
                  UPDATE repository_meta SET value = '3' WHERE key = 'schema_version';
+                 COMMIT;",
+            )
+            .map_err(|error| format!("无法迁移作品数据库结构：{error}"))?;
+    }
+    if version < 4 {
+        connection
+            .execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE branches ADD COLUMN verified_history_id TEXT;
+                 ALTER TABLE branches ADD COLUMN verified_ms INTEGER;
+                 ALTER TABLE branches ADD COLUMN verify_error TEXT;
+                 UPDATE repository_meta SET value = '4' WHERE key = 'schema_version';
                  COMMIT;",
             )
             .map_err(|error| format!("无法迁移作品数据库结构：{error}"))?;
