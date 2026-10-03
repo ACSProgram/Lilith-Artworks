@@ -7,10 +7,11 @@
 
 ## 当前基线
 
-- 应用版本 `0.2.0-alpha.2`，repository schema **v3**（v2 → v3 为 `branches`
+- 应用版本 `0.2.0-alpha.3`，repository schema **v3**（v2 → v3 为 `branches`
   追加 `backup_quick_enabled`、`last_source_size`、`last_source_modified_ms` 三列，
-  追加式迁移），应用标识 `com.lilith.artworks`。schema 变化后下次发布必须使用新的
-  版本号和标签，`tools/release/verify-metadata.mjs` 的 schema 断言已同步为 v3。
+  追加式迁移），应用标识 `com.lilith.artworks`。版本号已从 `0.2.0-alpha.2` 递增到
+  `0.2.0-alpha.3` 并同步五处版本字段，`tools/release/verify-metadata.mjs` 的 schema
+  断言为 v3；`v0.2.0-alpha.3` 标签尚未创建，待 Windows CI 跑通后再打标签发布。
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
