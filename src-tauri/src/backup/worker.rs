@@ -47,6 +47,43 @@ struct SourceMetadata {
     modified: Option<SystemTime>,
 }
 
+fn system_time_ms(time: Option<SystemTime>) -> Option<i64> {
+    let duration = time?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(duration.as_millis()).ok()
+}
+
+/// 快速检查：仅比较工作文件大小与修改时间和上次全量检查记录的基线。
+/// 完全一致返回 true，表示可以跳过全量校验；缺少基线、任何不一致或读取
+/// 失败都返回 false，交给全量流程给出权威结论并自行修复或报错。
+pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool, String> {
+    let branch = history::load_branch(root, branch_id)?;
+    // 没有工作文件或还没有任何提交时无从比较，必须走全量路径建立基线。
+    if branch.source_path.trim().is_empty() || branch.head_history_id.is_none() {
+        return Ok(false);
+    }
+    let Some((size, modified_ms)) = history::load_source_metadata(root, branch_id)? else {
+        return Ok(false);
+    };
+    let Ok(metadata) = Path::new(&branch.source_path).metadata() else {
+        return Ok(false);
+    };
+    if !metadata.is_file() || metadata.len() != u64::try_from(size).unwrap_or(u64::MAX) {
+        return Ok(false);
+    }
+    Ok(system_time_ms(metadata.modified().ok()) == modified_ms)
+}
+
+fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadata) {
+    if let Err(error) = history::record_source_metadata(
+        root,
+        branch_id,
+        metadata.length,
+        system_time_ms(metadata.modified),
+    ) {
+        log::warn!("failed to record source metadata for branch {branch_id}: {error}");
+    }
+}
+
 pub(crate) fn run_backup(
     root: &Path,
     branch_id: &str,
@@ -123,6 +160,8 @@ pub(crate) fn run_backup(
             repair_head_snapshot(root, &artwork_directory, head, snapshot_temp)?;
         }
         history::mark_unchanged(root, branch_id, checked_ms)?;
+        // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
+        record_source_metadata(root, branch_id, &after);
         log::info!(
             "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, elapsed_ms={}",
             head.id,
@@ -230,6 +269,8 @@ pub(crate) fn run_backup(
     if let Some(relative) = old_snapshot {
         let _ = fs::remove_file(storage::resolve_path(root, &relative)?);
     }
+    // 提交成功，记录基线元数据供快速检查使用。
+    record_source_metadata(root, branch_id, &after);
     log::info!(
         "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, elapsed_ms={}",
         started.elapsed().as_millis()
@@ -373,6 +414,32 @@ mod tests {
         )
         .unwrap();
         fs::read(output).unwrap()
+    }
+
+    #[test]
+    fn quick_check_tracks_source_metadata_baseline() {
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+
+        // 没有任何提交也没有基线时必须退回全量。
+        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+
+        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+
+        // 恢复内容后元数据基线不再匹配（修改时间变化），仍需全量复核。
+        fs::write(&source, vec![b'A'; 96 * 1024]).unwrap();
+        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+    }
+
+    #[test]
+    fn quick_check_needs_a_readable_source_file() {
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        fs::remove_file(&source).unwrap();
+        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
     }
 
     #[test]

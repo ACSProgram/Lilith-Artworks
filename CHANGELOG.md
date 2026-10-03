@@ -3,6 +3,34 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
+## Unreleased
+
+### Added
+
+- Quick automatic backups. Each branch has a "快速检查" switch that forces the
+  quick mode even when the global default is a full check, and the settings
+  dialog gains a default check mode (quick by default). The quick mode compares
+  only the working file's size and modification time against the baseline
+  recorded after the last successful full check or commit; a complete match is
+  reported as unchanged without reading the file, and any mismatch, missing
+  baseline, or read failure falls back to the full check-and-backup flow.
+  Manual commits always run a full check.
+- Manual commits now take priority over automatic backups. A pending manual
+  commit defers the branch's automatic backup at candidate selection and again
+  after the exclusive run lock is acquired (without counting as a failure), and
+  an automatic backup of the same branch that is already running is requested
+  to cancel so the manual commit runs first.
+- An "打开所在文件夹" action beside the working file actions in the branch
+  settings, revealing the working file in the system file manager (selects the
+  file on Windows via the new `reveal_path_in_folder` command).
+
+### Changed
+
+- The repository schema moves to v3 with an append-only migration: `branches`
+  gains `backup_quick_enabled`, `last_source_size`, and
+  `last_source_modified_ms`. `tools/release/verify-metadata.mjs` now asserts
+  schema v3, so the next release must use a new version and tag.
+
 ## 0.2.0-alpha.2 - 2026-09-18
 
 ### Added

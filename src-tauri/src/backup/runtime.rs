@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Condvar, Mutex,
@@ -39,6 +40,12 @@ struct Inner {
     runtime: Mutex<BackupRuntimeStatus>,
     cancel_requested: AtomicBool,
     shutting_down: AtomicBool,
+    /// 手动提交优先：记录有待处理手动提交请求的分支 ID，调度器据此延后
+    /// 这些分支的自动备份，避免自动任务抢在手动提交之前占据共享运行锁。
+    manual_pending: Mutex<HashSet<String>>,
+    /// 当前在共享运行锁内执行的是否为调度器发起的自动备份。手动提交据此
+    /// 决定是否对同分支正在运行的自动备份请求取消。
+    active_automatic: AtomicBool,
     scheduler_signal: Mutex<SchedulerSignal>,
     scheduler_wake: Condvar,
     scheduler_handle: Mutex<Option<JoinHandle<()>>>,
@@ -55,6 +62,34 @@ impl BackupState {
         if let Ok(mut runtime) = self.inner.runtime.lock() {
             runtime.automatic_scheduling = enabled;
         }
+    }
+
+    pub(crate) fn begin_manual_request(&self, branch_id: &str) {
+        if let Ok(mut pending) = self.inner.manual_pending.lock() {
+            pending.insert(branch_id.to_owned());
+        }
+    }
+
+    pub(crate) fn end_manual_request(&self, branch_id: &str) {
+        if let Ok(mut pending) = self.inner.manual_pending.lock() {
+            pending.remove(branch_id);
+        }
+    }
+
+    pub(crate) fn manual_pending(&self, branch_id: &str) -> bool {
+        self.inner
+            .manual_pending
+            .lock()
+            .map(|pending| pending.contains(branch_id))
+            .unwrap_or(false)
+    }
+
+    pub(crate) fn set_active_automatic(&self, active: bool) {
+        self.inner.active_automatic.store(active, Ordering::SeqCst);
+    }
+
+    pub(crate) fn active_automatic(&self) -> bool {
+        self.inner.active_automatic.load(Ordering::SeqCst)
     }
     pub(crate) fn run_exclusive<T>(
         &self,

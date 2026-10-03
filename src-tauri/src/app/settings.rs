@@ -26,6 +26,7 @@ pub(crate) struct AppSettings {
     theme: String,
     close_to_tray: bool,
     pause_automatic_backups: bool,
+    automatic_backup_check_mode: String,
     window: WindowSettings,
     content: ContentSettings,
     pin_board: PinBoardSettings,
@@ -39,6 +40,7 @@ impl Default for AppSettings {
             theme: "system".into(),
             close_to_tray: true,
             pause_automatic_backups: false,
+            automatic_backup_check_mode: "quick".into(),
             window: WindowSettings::default(),
             content: ContentSettings::default(),
             pin_board: PinBoardSettings::default(),
@@ -247,6 +249,15 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// 自动备份默认检查方式是否为快速。仅在设置显式选择 full 时返回 false；
+    /// 设置缺失或状态损坏时保持默认的快速检查。
+    pub(crate) fn automatic_backup_quick_default(&self) -> bool {
+        self.settings
+            .read()
+            .map(|settings| settings.automatic_backup_check_mode.as_str() != "full")
+            .unwrap_or(true)
+    }
+
     /// 素材板原生纹理解码结果缓存等级（low/medium/high）。
     pub(crate) fn pin_board_texture_cache_level(&self) -> String {
         self.settings
@@ -348,6 +359,43 @@ pub(crate) fn open_log_directory(state: State<'_, AppState>) -> Result<(), Strin
 pub(crate) fn open_settings_directory(state: State<'_, AppState>) -> Result<(), String> {
     let directory = state.settings_path.parent().ok_or("设置文件路径无效")?;
     open_directory(directory, "设置")
+}
+
+/// 在系统文件管理器中打开给定文件所在的文件夹（Windows 上会选中该文件）。
+#[tauri::command]
+pub(crate) fn reveal_path_in_folder(path: String) -> Result<(), String> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err("文件路径为空".into());
+    }
+    let path = Path::new(trimmed);
+    if !path.is_file() {
+        return Err("文件不存在或已被移动".into());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.display()))
+            .spawn()
+            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .arg("-R")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let directory = path.parent().ok_or("文件路径无效")?;
+        Command::new("xdg-open")
+            .arg(directory)
+            .spawn()
+            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -529,6 +577,12 @@ fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
 fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
         return Err("主题设置无效".into());
+    }
+    if !matches!(
+        settings.automatic_backup_check_mode.as_str(),
+        "quick" | "full"
+    ) {
+        return Err("自动备份检查方式设置无效".into());
     }
     if !matches!(settings.content.density.as_str(), "comfortable" | "compact") {
         return Err("内容密度设置无效".into());
@@ -737,7 +791,7 @@ mod tests {
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '2' WHERE key = 'schema_version'",
+                "UPDATE repository_meta SET value = '3' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();

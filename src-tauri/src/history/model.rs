@@ -19,6 +19,7 @@ pub(crate) struct ArtworkBranch {
     pub(crate) created_from_history_id: Option<String>,
     pub(crate) backup_enabled: bool,
     pub(crate) backup_interval_minutes: u32,
+    pub(crate) backup_quick_enabled: bool,
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) last_success_ms: Option<i64>,
     pub(crate) last_error: Option<String>,
@@ -63,6 +64,7 @@ pub(crate) struct UpdateBranchBackupRequest {
     pub(crate) expected_backup_enabled: bool,
     pub(crate) backup_enabled: bool,
     pub(crate) backup_interval_minutes: u32,
+    pub(crate) backup_quick_enabled: bool,
     pub(crate) source_path: Option<String>,
 }
 
@@ -95,6 +97,7 @@ pub(crate) struct ScheduledBranch {
     pub(crate) id: String,
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) interval_minutes: u32,
+    pub(crate) quick_enabled: bool,
     pub(crate) retry_at_ms: Option<i64>,
 }
 

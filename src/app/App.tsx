@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import {
   AlertCircle,
   Clock3,
+  SearchCheck,
   DatabaseBackup,
   FolderOpen,
   Images,
@@ -474,6 +475,18 @@ export function App() {
                       <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
                       <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => setDraft({ ...draft, pauseAutomaticBackups: !event.target.checked })} />
                     </label>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>默认检查方式</strong><small>{draft.automaticBackupCheckMode === "quick" ? "快速：仅比较大小与修改时间，有变化再全量备份" : "全量：每次都完整校验内容"}</small></span>
+                      <select
+                        aria-label="自动备份默认检查方式"
+                        value={draft.automaticBackupCheckMode}
+                        onChange={(event) => setDraft({ ...draft, automaticBackupCheckMode: event.target.value as AppSettings["automaticBackupCheckMode"] })}
+                      >
+                        <option value="quick">快速检查（推荐）</option>
+                        <option value="full">全量校验</option>
+                      </select>
+                    </div>
                   </div>
                 </div>
                 </>

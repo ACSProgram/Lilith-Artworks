@@ -25,6 +25,7 @@ const branch: ArtworkBranch = {
   createdFromHistoryId: null,
   backupEnabled: true,
   backupIntervalMinutes: 5,
+  backupQuickEnabled: false,
   lastCheckMs: null,
   lastSuccessMs: null,
   lastError: null,

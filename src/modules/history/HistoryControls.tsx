@@ -1,11 +1,12 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, Eraser, FileOutput, FilePenLine,
-  GitBranch, GitFork, LoaderCircle, Trash2, X,
+  FolderOpen, GitBranch, GitFork, LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog as SharedConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
+import { appApi } from "../../app/api";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
@@ -32,7 +33,7 @@ export function BranchScheduleStatus({ branch }: { branch: ArtworkBranch }) {
       : branch.lastError
         ? "备份失败，将按策略重试"
         : branch.backupEnabled
-          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份 · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
+          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
           : "自动备份已关闭";
 
   return <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
@@ -80,6 +81,7 @@ export function BranchSettings({
   const [title, setTitle] = useState(branch.title);
   const [enabled, setEnabled] = useState(branch.backupEnabled);
   const [interval, setInterval] = useState(branch.backupIntervalMinutes);
+  const [quick, setQuick] = useState(branch.backupQuickEnabled);
   const [sourcePath, setSourcePath] = useState(branch.sourcePath);
   const [saveState, setSaveState] = useState<SaveState>("saved");
   const requestVersion = useRef(0);
@@ -88,6 +90,7 @@ export function BranchSettings({
     title: branch.title,
     enabled: branch.backupEnabled,
     interval: branch.backupIntervalMinutes,
+    quick: branch.backupQuickEnabled,
     sourcePath: branch.sourcePath,
   });
 
@@ -101,6 +104,9 @@ export function BranchSettings({
     setInterval((current) => branchChanged || current === previous.interval
       ? branch.backupIntervalMinutes
       : current);
+    setQuick((current) => branchChanged || current === previous.quick
+      ? branch.backupQuickEnabled
+      : current);
     setSourcePath((current) => branchChanged || current === previous.sourcePath
       ? branch.sourcePath
       : current);
@@ -109,6 +115,7 @@ export function BranchSettings({
       title: branch.title,
       enabled: branch.backupEnabled,
       interval: branch.backupIntervalMinutes,
+      quick: branch.backupQuickEnabled,
       sourcePath: branch.sourcePath,
     };
     requestVersion.current += 1;
@@ -116,6 +123,7 @@ export function BranchSettings({
   }, [
     branch.backupEnabled,
     branch.backupIntervalMinutes,
+    branch.backupQuickEnabled,
     branch.id,
     branch.sourcePath,
     branch.title,
@@ -130,6 +138,7 @@ export function BranchSettings({
   const dirty = title.trim() !== branch.title
     || effectiveEnabled !== branch.backupEnabled
     || interval !== branch.backupIntervalMinutes
+    || quick !== branch.backupQuickEnabled
     || sourcePath !== branch.sourcePath;
 
   useEffect(() => {
@@ -147,6 +156,7 @@ export function BranchSettings({
         expectedBackupEnabled: branch.backupEnabled,
         backupEnabled: effectiveEnabled,
         backupIntervalMinutes: interval,
+        backupQuickEnabled: quick,
         ...(sourcePath !== branch.sourcePath ? { sourcePath } : {}),
       }).then(() => {
         if (requestVersion.current === version) setSaveState("saved");
@@ -156,12 +166,19 @@ export function BranchSettings({
       });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, sourcePath, title, valid]);
+  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, quick, sourcePath, title, valid]);
 
   const pathActionsDisabled = disabled || branch.finalArtifactLocked;
   const chooseSource = async () => {
     const value = await open({ directory: false, multiple: false, title: "选择分支工作文件" });
     if (typeof value === "string") setSourcePath(value);
+  };
+  const revealSource = async () => {
+    try {
+      await appApi.revealPathInFolder(sourcePath);
+    } catch {
+      // 失败时静默：文件可能刚被移动，下一次保存路径时会重新校验。
+    }
   };
 
   return <div className="branch-settings">
@@ -189,6 +206,7 @@ export function BranchSettings({
           <div className="branch-source-actions">
             {hasSource
               ? <>
+                <button className="icon-button" type="button" title="打开所在文件夹" disabled={pathActionsDisabled} onClick={() => void revealSource()}><FolderOpen aria-hidden="true" size={15} /></button>
                 <button className="icon-button" type="button" title="修改工作文件" disabled={pathActionsDisabled} onClick={() => void chooseSource()}><FilePenLine aria-hidden="true" size={15} /></button>
                 <button className="icon-button" type="button" title="清除工作文件路径" disabled={pathActionsDisabled} onClick={() => setSourcePath("")}><Eraser aria-hidden="true" size={15} /></button>
               </>
@@ -204,6 +222,7 @@ export function BranchSettings({
           <small>{!hasSource ? "未选择工作文件" : effectiveEnabled ? "按间隔运行" : "当前已关闭"}</small>
         </span>
         <input
+          aria-label="自动备份"
           className="switch-input"
           type="checkbox"
           checked={effectiveEnabled}
@@ -222,6 +241,20 @@ export function BranchSettings({
           onChange={(event) => setInterval(Number(event.target.value))}
         />
         <span>分钟</span>
+      </label>
+      <label className="switch-field">
+        <span className="switch-copy">
+          <strong>快速检查</strong>
+          <small>{!hasSource || !effectiveEnabled ? "随自动备份生效" : quick ? "先比大小与修改时间" : "跟随全局设置"}</small>
+        </span>
+        <input
+          aria-label="快速检查"
+          className="switch-input"
+          type="checkbox"
+          checked={quick}
+          disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
+          onChange={(event) => setQuick(event.target.checked)}
+        />
       </label>
     </div>
   </div>;

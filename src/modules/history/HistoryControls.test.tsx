@@ -6,6 +6,9 @@ import type { ArtworkBranch } from "./types";
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
+const appApi = vi.hoisted(() => ({ revealPathInFolder: vi.fn().mockResolvedValue(undefined) }));
+vi.mock("../../app/api", () => ({ appApi }));
+
 const branch = (backupEnabled: boolean): ArtworkBranch => ({
   id: "branch-1",
   title: "Main",
@@ -14,6 +17,7 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
   createdFromHistoryId: null,
   backupEnabled,
   backupIntervalMinutes: 10,
+  backupQuickEnabled: false,
   lastCheckMs: null,
   lastSuccessMs: null,
   lastError: backupEnabled ? null : "persistent failure",
@@ -40,7 +44,7 @@ describe("BranchSettings", () => {
     view.rerender(<BranchSettings branch={branch(false)} disabled={false} onSave={onSave} />);
 
     expect((screen.getByLabelText("名称") as HTMLInputElement).value).toBe("Draft title");
-    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "自动备份" }) as HTMLInputElement).checked).toBe(false);
 
     await act(async () => {
       vi.advanceTimersByTime(650);
@@ -52,7 +56,27 @@ describe("BranchSettings", () => {
       expectedBackupEnabled: false,
       backupEnabled: false,
       backupIntervalMinutes: 10,
+      backupQuickEnabled: false,
     });
+  });
+
+  it("saves the quick-check toggle and reveals the working file folder", async () => {
+    vi.useFakeTimers();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+
+    fireEvent.click(screen.getByRole("checkbox", { name: "快速检查" }));
+    fireEvent.click(screen.getByTitle("打开所在文件夹"));
+
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+    });
+    expect(appApi.revealPathInFolder).toHaveBeenCalledWith("C:\\work\\artwork.psd");
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
+      backupEnabled: true,
+      backupQuickEnabled: true,
+    }));
   });
 
   it("restores the persisted path when a path update fails", async () => {
@@ -84,9 +108,10 @@ describe("BranchSettings", () => {
       onSave={onSave}
     />);
 
-    const toggle = screen.getByRole("checkbox") as HTMLInputElement;
+    const toggle = screen.getByRole("checkbox", { name: "自动备份" }) as HTMLInputElement;
     expect(toggle.disabled).toBe(true);
     expect(toggle.checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "快速检查" }) as HTMLInputElement).disabled).toBe(true);
     expect((screen.getByRole("spinbutton") as HTMLInputElement).disabled).toBe(true);
     expect(screen.getByLabelText("工作文件").textContent).toBe("未选择工作文件");
     expect(screen.getByRole("button", { name: "选择文件" })).toBeTruthy();
@@ -107,7 +132,7 @@ describe("BranchSettings", () => {
 
     fireEvent.click(screen.getByTitle("清除工作文件路径"));
     expect(screen.getByLabelText("工作文件").textContent).toBe("未选择工作文件");
-    expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByRole("checkbox", { name: "自动备份" }) as HTMLInputElement).checked).toBe(false);
 
     await act(async () => {
       vi.advanceTimersByTime(650);
@@ -121,8 +146,7 @@ describe("BranchSettings", () => {
 });
 
 describe("BranchScheduleStatus", () => {
-  it("keeps the status summary short and exposes the complete error for copying", async () => {
-    const writeText = vi.fn().mockResolvedValue(undefined);
+  it("keeps the status summary short and exposes the complete error for copying", async () => {    const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },
@@ -142,5 +166,10 @@ describe("BranchScheduleStatus", () => {
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(failedBranch.lastError));
     expect(await screen.findByTitle("已复制")).toBeTruthy();
+  });
+
+  it("mentions quick check for branches that opted in", () => {
+    render(<BranchScheduleStatus branch={{ ...branch(true), backupQuickEnabled: true }} />);
+    expect(screen.getByText(/每 10 分钟自动备份 · 快速检查/)).toBeTruthy();
   });
 });

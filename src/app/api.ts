@@ -18,6 +18,8 @@ export const appApi = {
   openLogDirectory: () => invokeCommand<void>("open_log_directory"),
   openLegalDirectory: () => invokeCommand<void>("open_legal_directory"),
   openSettingsDirectory: () => invokeCommand<void>("open_settings_directory"),
+  revealPathInFolder: (path: string) =>
+    invokeCommand<void>("reveal_path_in_folder", { path }),
   retryFileCleanup: (ids: string[]) =>
     invokeCommand<CleanupReport>("retry_pending_file_cleanup", { ids }),
   acknowledgeBackupDisableNotices: (artworkIds: string[]) =>
