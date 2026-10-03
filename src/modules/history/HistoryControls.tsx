@@ -11,18 +11,26 @@ import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./ty
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
 
-export function BranchScheduleStatus({ branch }: { branch: ArtworkBranch }) {
+export function BranchScheduleStatus({
+  branch,
+  onReverify,
+}: {
+  branch: ArtworkBranch;
+  onReverify?: (branchId: string) => void;
+}) {
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
+  const [verifyCopyState, setVerifyCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   useEffect(() => setCopyState("idle"), [branch.id, branch.lastError]);
+  useEffect(() => setVerifyCopyState("idle"), [branch.id, branch.verifyError]);
 
-  const copyError = async () => {
-    if (!branch.lastError) return;
+  const copyText = async (value: string | null, setState: (state: "copied" | "failed") => void) => {
+    if (!value) return;
     try {
-      await navigator.clipboard.writeText(branch.lastError);
-      setCopyState("copied");
+      await navigator.clipboard.writeText(value);
+      setState("copied");
     } catch {
-      setCopyState("failed");
+      setState("failed");
     }
   };
 
@@ -36,37 +44,74 @@ export function BranchScheduleStatus({ branch }: { branch: ArtworkBranch }) {
           ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
           : "自动备份已关闭";
 
-  return <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
-    {branch.finalArtifactLocked
-      ? <Ban aria-hidden="true" size={16} />
-      : branch.lastError
-        ? <AlertTriangle aria-hidden="true" size={16} />
-        : branch.backupEnabled
-          ? <Check aria-hidden="true" size={16} />
-          : null}
-    <span className="branch-schedule-summary">{status}</span>
-    {branch.lastError && <details className="branch-error-details">
-      <summary className="icon-button" role="button" aria-label="查看备份失败详情" title="查看备份失败详情">
-        <ChevronDown aria-hidden="true" size={14} />
-      </summary>
-      <div className="branch-error-popover">
-        <header>
-          <strong>备份失败详情</strong>
-          <button
-            className="icon-button"
-            type="button"
-            aria-label="复制备份失败详情"
-            title={copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
-            onClick={() => void copyError()}
-          >
-            {copyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
-          </button>
-        </header>
-        <pre>{branch.lastError}</pre>
-        {copyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
-      </div>
-    </details>}
-  </div>;
+  return <>
+    <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
+      {branch.finalArtifactLocked
+        ? <Ban aria-hidden="true" size={16} />
+        : branch.lastError
+          ? <AlertTriangle aria-hidden="true" size={16} />
+          : branch.backupEnabled
+            ? <Check aria-hidden="true" size={16} />
+            : null}
+      <span className="branch-schedule-summary">{status}</span>
+      {branch.lastError && <details className="branch-error-details">
+        <summary className="icon-button" role="button" aria-label="查看备份失败详情" title="查看备份失败详情">
+          <ChevronDown aria-hidden="true" size={14} />
+        </summary>
+        <div className="branch-error-popover">
+          <header>
+            <strong>备份失败详情</strong>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="复制备份失败详情"
+              title={copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
+              onClick={() => void copyText(branch.lastError, setCopyState)}
+            >
+              {copyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+            </button>
+          </header>
+          <pre>{branch.lastError}</pre>
+          {copyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
+        </div>
+      </details>}
+    </div>
+    {branch.verifyError && <div className="branch-schedule verify-error">
+      <AlertTriangle aria-hidden="true" size={16} />
+      <span className="branch-schedule-summary">链路校验失败</span>
+      <details className="branch-error-details">
+        <summary className="icon-button" role="button" aria-label="查看链路校验失败详情" title="查看链路校验失败详情">
+          <ChevronDown aria-hidden="true" size={14} />
+        </summary>
+        <div className="branch-error-popover">
+          <header>
+            <strong>链路校验失败详情</strong>
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="复制链路校验失败详情"
+              title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
+              onClick={() => void copyText(branch.verifyError, setVerifyCopyState)}
+            >
+              {verifyCopyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+            </button>
+          </header>
+          <pre>{branch.verifyError}</pre>
+          {verifyCopyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
+          <div className="branch-verify-actions">
+            <small>{branch.verifiedMs
+              ? `最近一次校验通过：${new Date(branch.verifiedMs).toLocaleString()}。该分支已跳过自动重试，可在设置页运行“仓库完整性”扫描做全量排查。`
+              : "该分支已跳过自动重试；如需全量排查，可在设置页运行“仓库完整性”扫描。"}</small>
+            {onReverify && <button
+              className="secondary-button"
+              type="button"
+              onClick={() => void onReverify(branch.id)}
+            >重新校验此分支</button>}
+          </div>
+        </div>
+      </details>
+    </div>}
+  </>;
 }
 
 export function BranchSettings({

@@ -8,13 +8,16 @@ pub(crate) use deletion_repository::{delete_branch, delete_subtree, validate_sub
 pub(crate) use model::{
     ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,
     CompactionTarget, ForkBranchRequest, HistoryCommit, HistoryDeletion, HistoryNode,
-    HistoryRecord, RenameHistoryNodeRequest, ScheduledBranch, UpdateBranchBackupRequest,
+    HistoryRecord, IdleVerifyTarget, RenameHistoryNodeRequest, ScheduledBranch,
+    UpdateBranchBackupRequest,
 };
 pub(crate) use repository::{
-    acknowledge_backup_disable_notices, all_node_ids, apply_compaction, artwork_directory, commit,
-    compaction_target, count_scheduled_files, create_branch, ensure_directories, list,
-    list_scheduled, load_branch, load_node, load_scheduled, load_source_metadata,
-    mark_automatic_backup_error, mark_checkpoint, mark_error, mark_unchanged,
-    materialization_chain, next_backup_disable_notice_target, record_source_metadata, rename_node,
-    set_snapshot, storage_path_referenced, unmark_checkpoint, update_branch,
+    acknowledge_backup_disable_notices, all_node_ids, apply_compaction, artwork_directory,
+    clear_verify_error, commit, compaction_target, count_scheduled_files, create_branch,
+    ensure_directories, list, list_idle_verify_targets, list_scheduled, load_branch,
+    load_idle_verify_target, load_node, load_scheduled, load_source_metadata,
+    mark_automatic_backup_error, mark_checkpoint, mark_error, mark_unchanged, mark_verified,
+    mark_verify_error, materialization_chain, next_backup_disable_notice_target,
+    record_source_metadata, rename_node, set_snapshot, storage_path_referenced, unmark_checkpoint,
+    update_branch,
 };

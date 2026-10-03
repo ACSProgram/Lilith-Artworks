@@ -54,6 +54,8 @@ const branches: ArtworkBranch[] = [
     backupDisableNoticePending: false,
     finalArtifactLocked: false,
     publishedCount: 0,
+    verifyError: null,
+    verifiedMs: null,
   },
   {
     id: "other",
@@ -72,6 +74,8 @@ const branches: ArtworkBranch[] = [
     backupDisableNoticePending: false,
     finalArtifactLocked: false,
     publishedCount: 0,
+    verifyError: null,
+    verifiedMs: null,
   },
 ];
 
@@ -87,25 +91,31 @@ const history: ArtworkHistory = {
   ],
 };
 
+function controllerReturn(overrides: Record<string, unknown> = {}) {
+  return {
+    history,
+    loading: false,
+    busy: false,
+    runtime: idleRuntime,
+    visibleRuntime: idleRuntime,
+    saveBranch: vi.fn().mockResolvedValue(undefined),
+    commitBranch: vi.fn(),
+    restoreNode: vi.fn(),
+    compactNodes: vi.fn(),
+    deleteBranch: vi.fn(),
+    reverifyBranch: vi.fn(),
+    deleteSubtree: vi.fn(),
+    setCheckpoint: vi.fn(),
+    forkBranch: vi.fn(),
+    renameNode: vi.fn(),
+    cancelOperation: vi.fn(),
+    ...overrides,
+  };
+}
+
 describe("HistoryModule overview interactions", () => {
   beforeEach(() => {
-    controller.useHistoryController.mockReturnValue({
-      history,
-      loading: false,
-      busy: false,
-      runtime: idleRuntime,
-      visibleRuntime: idleRuntime,
-      saveBranch: vi.fn().mockResolvedValue(undefined),
-      commitBranch: vi.fn(),
-      restoreNode: vi.fn(),
-      compactNodes: vi.fn(),
-      deleteBranch: vi.fn(),
-      deleteSubtree: vi.fn(),
-      setCheckpoint: vi.fn(),
-      forkBranch: vi.fn(),
-      renameNode: vi.fn(),
-      cancelOperation: vi.fn(),
-    });
+    controller.useHistoryController.mockReturnValue(controllerReturn());
   });
 
   afterEach(() => cleanup());
@@ -140,5 +150,31 @@ describe("HistoryModule overview interactions", () => {
     fireEvent.doubleClick(screen.getByText("Other head").closest("button")!);
     expect(onSelectBranch).toHaveBeenCalledWith("other");
     expect(screen.getByRole("button", { name: "总览" }).classList.contains("active")).toBe(true);
+  });
+
+  it("re-queues a failed chain verification from the branch status row", () => {
+    const reverifyBranch = vi.fn();
+    const failedBranch = {
+      ...branches[0],
+      verifyError: "链路校验 snapshot 摘要与历史数据库不匹配",
+      verifiedMs: null,
+    };
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      reverifyBranch,
+      history: { ...history, branches: [failedBranch, branches[1]] },
+    }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    expect(screen.getByText("链路校验失败")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看链路校验失败详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
+    expect(reverifyBranch).toHaveBeenCalledWith("main");
   });
 });

@@ -109,6 +109,16 @@ impl BackupState {
             .unwrap_or(false)
     }
 
+    /// 是否存在任意分支待处理的手动提交。空闲校验据此整体让位：用户正在主动
+    /// 提交时不与之争抢运行锁。
+    pub(crate) fn any_manual_pending(&self) -> bool {
+        self.inner
+            .manual_pending
+            .lock()
+            .map(|pending| !pending.is_empty())
+            .unwrap_or(false)
+    }
+
     /// 登记一个正在等待共享运行锁的前台命令。
     ///
     /// 计数器由 `ForegroundWait::release` 在取得运行锁后递减，因此它只反映"仍在

@@ -27,6 +27,8 @@ export const historyApi = {
   deleteSubtree: (historyId: string, branchId: string) =>
     invokeCommand<string>("delete_history_subtree", { historyId, branchId }),
   checkpoint: (historyId: string, enabled: boolean) => invokeCommand<void>("set_history_checkpoint", { historyId, enabled }),
+  reverifyBranch: (branchId: string) =>
+    invokeCommand<ArtworkHistory>("reverify_branch_history", { branchId }),
   deleteBranch: (branchId: string) => invokeCommand<ArtworkHistory>("delete_artwork_branch", { branchId }),
   runtime: () => invokeCommand<BackupRuntimeStatus>("get_backup_runtime_status"),
   cancel: () => invokeCommand<boolean>("cancel_backup_operation"),
