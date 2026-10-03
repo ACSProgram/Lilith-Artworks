@@ -8,6 +8,7 @@ import type {
 const IDLE_RUNTIME: BackupRuntimeStatus = {
   busy: false,
   activeBranchId: null,
+  taskKind: null,
   operation: null,
   progressLabel: null,
   progressCurrent: 0,
@@ -223,6 +224,7 @@ export function useHistoryController({
   const visibleRuntime: BackupRuntimeStatus = runtime.busy ? runtime : localOperation ? {
     ...IDLE_RUNTIME,
     busy: true,
+    taskKind: "userOperation",
     operation: localOperation.operation,
     progressLabel: localOperation.label,
     progressTotal: 1,

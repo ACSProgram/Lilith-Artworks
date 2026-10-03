@@ -10,6 +10,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn(), save: vi.fn() }));
 const idleRuntime: BackupRuntimeStatus = {
   busy: false,
   activeBranchId: null,
+  taskKind: null,
   operation: null,
   progressLabel: null,
   progressCurrent: 0,

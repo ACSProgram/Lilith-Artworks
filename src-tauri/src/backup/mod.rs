@@ -11,13 +11,14 @@ use serde::{Deserialize, Serialize};
 pub(crate) use commands::*;
 pub(crate) use repository_backup::{create_repository_backup, RepositoryBackupReport};
 pub(crate) use restore::{ensure_checkpoint, scrub_history};
-pub(crate) use runtime::BackupState;
+pub(crate) use runtime::{BackupState, BackupTaskKind};
 
 #[derive(Debug, Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupRuntimeStatus {
     pub(crate) busy: bool,
     pub(crate) active_branch_id: Option<String>,
+    pub(crate) task_kind: Option<BackupTaskKind>,
     pub(crate) operation: Option<String>,
     pub(crate) progress_label: Option<String>,
     pub(crate) progress_current: u64,

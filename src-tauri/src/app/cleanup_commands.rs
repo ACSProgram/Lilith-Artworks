@@ -1,6 +1,9 @@
 use tauri::State;
 
-use crate::{backup::BackupState, cleanup};
+use crate::{
+    backup::{BackupState, BackupTaskKind},
+    cleanup,
+};
 
 use super::AppState;
 
@@ -13,7 +16,7 @@ pub(crate) async fn retry_pending_file_cleanup(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_exclusive(None, || {
+        state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| cleanup::run(root, &ids))
         })
     })

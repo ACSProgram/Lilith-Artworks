@@ -6,6 +6,7 @@ use crate::{app::AppState, history, storage};
 
 use super::{
     restore, worker, BackupCommitResult, BackupNowRequest, BackupRuntimeStatus, BackupState,
+    BackupTaskKind,
 };
 
 #[tauri::command]
@@ -18,16 +19,13 @@ pub(crate) async fn run_branch_backup(
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         // 手动提交优先：先登记待处理请求，让调度器延后该分支的自动备份；
-        // 若同分支的自动备份正在运行，请求取消，让手动提交先取得运行锁，
+        // 若同分支的后台任务正在运行，请求其让位，让手动提交先取得运行锁，
         // 避免自动任务抢先记录同一内容导致手动备注丢失。
+        // `cancel_background` 只作用于后台任务，不会误取消其它用户操作。
         state.begin_manual_request(&request.branch_id);
-        if state.active_automatic() {
-            if let Ok(status) = state.status() {
-                if status.busy
-                    && status.active_branch_id.as_deref() == Some(request.branch_id.as_str())
-                {
-                    let _ = state.request_cancel();
-                }
+        if let Ok(status) = state.status() {
+            if status.active_branch_id.as_deref() == Some(request.branch_id.as_str()) {
+                let _ = state.cancel_background();
             }
         }
         let result = state.run_logged(
@@ -38,6 +36,7 @@ pub(crate) async fn run_branch_backup(
                 request.note.chars().count()
             ),
             Some(&request.branch_id),
+            BackupTaskKind::UserOperation,
             || {
                 app_state.with_ready_repository(|root| {
                     let result = worker::run_backup(
@@ -72,7 +71,7 @@ pub(crate) async fn restore_history_node(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_logged(
+        state.run_logged_foreground(
             "restore",
             &format!("history_id={history_id}, output={output_path}"),
             None,
@@ -104,7 +103,7 @@ pub(crate) async fn compact_history_node(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_logged("compact", &format!("history_id={history_id}"), None, || {
+        state.run_logged_foreground("compact", &format!("history_id={history_id}"), None, || {
             app_state.with_ready_repository(|root| {
                 restore::compact_node(
                     root,
@@ -129,7 +128,7 @@ pub(crate) async fn delete_history_subtree(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_logged(
+        state.run_logged_foreground(
             "history delete",
             &format!("history_id={history_id}, branch_id={branch_id}"),
             None,
@@ -174,7 +173,7 @@ pub(crate) async fn set_history_checkpoint(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.run_logged(
+        state.run_logged_foreground(
             "checkpoint",
             &format!("history_id={history_id}, enabled={enabled}"),
             None,
