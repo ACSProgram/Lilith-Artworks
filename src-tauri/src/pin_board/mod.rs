@@ -10,6 +10,7 @@ pub(crate) mod dds;
 pub(crate) mod repository;
 
 use serde::Serialize;
+use std::path::Path;
 use tauri::{
     ipc::{Channel, Response},
     State,
@@ -241,11 +242,37 @@ pub(crate) async fn finalize_pin_board(
     tauri::async_runtime::spawn_blocking(move || {
         state.with_ready_repository(|root| {
             let mut connection = storage::open(root)?;
-            repository::finalize_board(&mut connection, root, board_id, &expected_revision)
+            let (result, cleanup_ids) =
+                repository::finalize_board(&mut connection, root, board_id, &expected_revision)?;
+            replay_finalize_cleanup(root, &cleanup_ids);
+            Ok(result)
         })
     })
     .await
     .map_err(|error| format!("画板结算任务异常结束：{error}"))?
+}
+
+/// 结算提交成功后重放清理队列。每次调用只做单遍尝试：删除失败的条目留在
+/// `pending_file_cleanup` 中，等待下次结算、回收站操作或手动重试消化，
+/// 不循环重试、不阻断结算结果；重放本身的数据库错误同样只记日志。
+fn replay_finalize_cleanup(root: &Path, cleanup_ids: &[String]) {
+    if cleanup_ids.is_empty() {
+        return;
+    }
+    match cleanup::run(root, cleanup_ids) {
+        Ok(report) => {
+            for failure in &report.failures {
+                log::warn!(
+                    "画板结算的 DDS 清理失败，已留在待清理队列可重试：{}：{}",
+                    failure.path,
+                    failure.error
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("画板结算后的清理重放失败，条目已留在待清理队列：{error}");
+        }
+    }
 }
 
 #[tauri::command]

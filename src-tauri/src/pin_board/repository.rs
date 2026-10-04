@@ -846,21 +846,37 @@ pub(crate) fn save_board(
     })
 }
 
-/// 结算画板：截断未来步骤，清除当前为删除状态的图片记录与对应 DDS。
+/// 结算画板：截断未来步骤，清除当前为删除状态的图片记录。
+///
+/// 被删除图片的 DDS 不再在提交前删除：事务内入队 `pending_file_cleanup`，
+/// 提交成功后由调用方执行 `cleanup::run` 重放删除。若提交失败，入队随事务
+/// 一起回滚，记录与 DDS 保持一致；删除失败则条目留在队列可重试，不阻断结算
+/// （重放每次调用只做单遍尝试，不会循环重试阻塞进度）。
 pub(crate) fn finalize_board(
     connection: &mut Connection,
     root: &Path,
     board_id: i64,
     expected_revision: &str,
-) -> Result<SavePinBoardResult, String> {
+) -> Result<(SavePinBoardResult, Vec<String>), String> {
     let transaction = connection.transaction().map_err(storage::database_error)?;
-    let context = open_board_context(&transaction, root, board_id)?;
+    let outcome = finalize_board_in_transaction(&transaction, root, board_id, expected_revision)?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(outcome)
+}
+
+fn finalize_board_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root: &Path,
+    board_id: i64,
+    expected_revision: &str,
+) -> Result<(SavePinBoardResult, Vec<String>), String> {
+    let context = open_board_context(transaction, root, board_id)?;
     if context.revision != expected_revision {
         return Err("画板已被其他窗口或程序修改，请重新打开后再编辑".into());
     }
     let now_step = context.now_step;
     let mut changed = context.max_step != now_step;
-    let states = current_states(&transaction, board_id, now_step)?;
+    let states = current_states(transaction, board_id, now_step)?;
     let mut deleted_ids = Vec::new();
     for (image_id, _, _, _) in &states {
         let state = &states
@@ -889,12 +905,16 @@ pub(crate) fn finalize_board(
         .map_err(storage::database_error)?;
 
     if !changed {
-        return Ok(SavePinBoardResult {
-            saved: false,
-            revision: context.revision,
-            now_step,
-        });
+        return Ok((
+            SavePinBoardResult {
+                saved: false,
+                revision: context.revision,
+                now_step,
+            },
+            Vec::new(),
+        ));
     }
+    let mut cleanup_ids = Vec::new();
     for image_id in &deleted_ids {
         transaction
             .execute(
@@ -902,20 +922,26 @@ pub(crate) fn finalize_board(
                 params![image_id, board_id],
             )
             .map_err(storage::database_error)?;
-        let path = context.directory.join(format!("{image_id}.dds"));
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(format!("无法删除已结算的 DDS 图片：{error}")),
-        }
+        // pin_board_images 未落库 SHA-256，按清理体系规划用不带期望摘要的入队。
+        let path = format!(
+            "{}/{image_id}.dds",
+            board_relative_path(&context.artwork_id, board_id)
+        );
+        cleanup_ids.push(cleanup::enqueue_repository_file(
+            transaction,
+            &path,
+            "pin_board_finalize",
+        )?);
     }
-    let (_, revision) = bump_revision(&transaction, board_id)?;
-    transaction.commit().map_err(storage::database_error)?;
-    Ok(SavePinBoardResult {
-        saved: true,
-        revision,
-        now_step,
-    })
+    let (_, revision) = bump_revision(transaction, board_id)?;
+    Ok((
+        SavePinBoardResult {
+            saved: true,
+            revision,
+            now_step,
+        },
+        cleanup_ids,
+    ))
 }
 // ---------------------------------------------------------------------------
 // 新增图片（粘贴/导入）与读取
@@ -1611,6 +1637,188 @@ mod tests {
         let cleanup_ids = empty_trash(&mut connection).unwrap();
         assert_eq!(cleanup_ids.len(), 2);
         assert!(list_trash(&connection).unwrap().is_empty());
+    }
+
+    /// 造一块只含一张删除态图片的画板：图片记录 + step 0 删除节点 + DDS 实体。
+    fn insert_deleted_state_image(
+        connection: &Connection,
+        board_id: i64,
+        root: &Path,
+        artwork_id: &str,
+    ) -> PathBuf {
+        let now = storage::now_ms().unwrap();
+        connection
+            .execute(
+                "INSERT INTO pin_board_images (board_id, file_path, width, height, created_ms)
+                 VALUES (?1, '', 4, 4, ?2)",
+                params![board_id, now],
+            )
+            .unwrap();
+        let image_id = connection.last_insert_rowid();
+        let transform = r#"{"points":[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]],"uv":[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]]}"#;
+        connection
+            .execute(
+                "INSERT INTO pin_board_history
+                   (board_id, image_id, step, deleted, layer, sort_order, transform_json)
+                 VALUES (?1, ?2, 0, 1, 1, 0, ?3)",
+                params![board_id, image_id, transform],
+            )
+            .unwrap();
+        let directory = root
+            .join("artworks")
+            .join(artwork_id)
+            .join(BOARD_DIRECTORY)
+            .join(board_id.to_string());
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join(format!("{image_id}.dds"));
+        fs::write(&path, b"dds-bytes").unwrap();
+        path
+    }
+
+    fn board_revision(connection: &Connection, board_id: i64) -> String {
+        connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [board_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn scalar(connection: &Connection, sql: &str) -> i64 {
+        connection.query_row(sql, [], |row| row.get(0)).unwrap()
+    }
+
+    fn scalar_for_board(connection: &Connection, sql: &str, board_id: i64) -> i64 {
+        connection
+            .query_row(sql, [board_id], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn finalize_enqueues_deleted_dds_and_replay_removes_the_file() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "结算板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        let (result, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+        assert!(result.saved);
+        assert_eq!(cleanup_ids.len(), 1);
+
+        // 提交成功后、重放前：DDS 仍在磁盘上，队列恰好登记一条。
+        assert!(dds_path.is_file());
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            1
+        );
+
+        let report = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.pending_count, 0);
+        assert!(!dds_path.exists());
+
+        // 结算后图片记录与历史已删除。
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_images WHERE board_id = ?1",
+                board.board_id
+            ),
+            0
+        );
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_history WHERE board_id = ?1",
+                board.board_id
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn finalize_rollback_keeps_the_image_record_and_the_dds_file() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "回滚板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        // 模拟提交失败：结算事务中途回滚，入队与记录删除一起消失。
+        {
+            let transaction = connection.transaction().unwrap();
+            let (_, cleanup_ids) =
+                finalize_board_in_transaction(&transaction, &root, board.board_id, &revision)
+                    .unwrap();
+            assert_eq!(cleanup_ids.len(), 1);
+        }
+
+        // 记录回滚而文件保留，队列无残留条目。
+        assert!(dds_path.is_file());
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_images WHERE board_id = ?1",
+                board.board_id
+            ),
+            1
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            0
+        );
+    }
+
+    #[test]
+    fn finalize_cleanup_entry_survives_a_failed_replay_and_can_be_retried() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "重试板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        let (_, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+
+        // 用「文件被数据库引用」构造一次可重试的失败：重放拒绝删除，条目留在队列。
+        let relative = format!(
+            "{}/{}",
+            board_relative_path(&artwork_id, board.board_id),
+            dds_path.file_name().unwrap().to_string_lossy()
+        );
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO final_artifacts
+                   (id, branch_id, history_id, source_path, source_sha256, media_type,
+                    byte_size, created_ms)
+                 VALUES ('artifact', 'branch', 'history', '{relative}',
+                         '0000000000000000000000000000000000000000000000000000000000000000',
+                         'image/jpeg', 8, 0);"
+            ))
+            .unwrap();
+        let failed = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert_eq!(failed.failures.len(), 1);
+        assert!(dds_path.is_file());
+        assert_eq!(failed.pending_count, 1);
+
+        // 解除引用后单次重放即删除：不循环重试、不阻塞后续流程。
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM final_artifacts WHERE id = 'artifact';",
+            )
+            .unwrap();
+        let retried = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert!(retried.failures.is_empty());
+        assert!(!dds_path.exists());
+        assert_eq!(retried.pending_count, 0);
     }
 }
 
