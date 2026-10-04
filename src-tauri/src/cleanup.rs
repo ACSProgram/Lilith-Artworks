@@ -9,7 +9,10 @@ use rusqlite::{params, Transaction};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-use crate::storage;
+use crate::{
+    pin_board::repository::{is_dds_name, BOARD_DIRECTORY},
+    storage,
+};
 
 const REPOSITORY_FILE: &str = "repository_file";
 const REPOSITORY_DIRECTORY: &str = "repository_directory";
@@ -284,15 +287,17 @@ pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
     }
 }
 
-/// 扫描 `artworks/*/snapshots/` 与 `artworks/*/deltas/` 中未被任何数据库引用
-/// 的 snapshot/delta 文件（崩溃孤儿、手工复制或历史迁移遗留），作为清理账本的
-/// 发现机制。只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
+/// 扫描 `artworks/*/snapshots/`、`artworks/*/deltas/` 与 `artworks/*/boards/*/`
+/// 中未被任何数据库引用的 snapshot/delta 与画板 DDS 文件（崩溃孤儿、手工复制或
+/// 历史迁移遗留），作为清理账本的发现机制。只报告、不删除；确认清理由
+/// `cleanup_unreferenced` 完成。
 ///
 /// 护栏：只考虑匹配既有命名模式的文件（snapshot `<UUID>.lbc` /
-/// `<UUID>-repair-<UUID>.lbc`，delta `<UUID>-to-<UUID>.lbd`）；只报告修改时间
-/// 早于宽限期（`SCAN_GRACE_MS`）的文件，避免与进行中的提交、精简、检查点发布
-/// 赛跑；逐文件复用 `referenced_path_kind` 做反向引用检查。调用方须在仓库操作
-/// 锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
+/// `<UUID>-repair-<UUID>.lbc`，delta `<UUID>-to-<UUID>.lbd`，画板 DDS
+/// `<image-id>.dds`）；只报告修改时间早于宽限期（`SCAN_GRACE_MS`）的文件，避免
+/// 与进行中的提交、精简、检查点发布或画板写入赛跑；逐文件复用
+/// `referenced_path_kind` 做反向引用检查（含 `pin_board_images`）。调用方须在仓库
+/// 操作锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
 pub(crate) fn scan_unreferenced(
     root: &Path,
     cancelled: impl Fn() -> bool,
@@ -403,6 +408,31 @@ fn collect_scan_files(root: &Path, files: &mut Vec<(PathBuf, &'static str)>) -> 
             "历史增量未被引用",
             files,
         )?;
+        collect_board_scan_files(&directory, files)?;
+    }
+    Ok(())
+}
+
+/// 收集某个 Artwork 下全部画板目录中的 DDS 文件。目录缺失按空处理。
+fn collect_board_scan_files(
+    artwork_directory: &Path,
+    files: &mut Vec<(PathBuf, &'static str)>,
+) -> Result<(), String> {
+    let boards = artwork_directory.join(BOARD_DIRECTORY);
+    let entries = match fs::read_dir(&boards) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取画板目录：{error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("无法读取画板目录项：{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法读取画板目录项类型：{error}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        collect_scan_directory(&entry.path(), is_dds_name, "画板图片未被引用", files)?;
     }
     Ok(())
 }
@@ -498,18 +528,24 @@ pub(crate) fn referenced_path_kind(
     path: &str,
 ) -> Result<Option<String>, String> {
     let reference = match path_kind {
-        REPOSITORY_FILE => connection
-            .query_row(
-                "SELECT CASE
-                   WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path = ?1) THEN '最终成品'
-                   WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path = ?1) THEN '认证副本'
-                   WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1) THEN '历史节点'
-                   WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1) THEN '历史边'
-                 END",
-                [path],
-                |row| row.get(0),
-            )
-            .map_err(storage::database_error)?,
+        REPOSITORY_FILE => {
+            let reference = connection
+                .query_row(
+                    "SELECT CASE
+                       WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path = ?1) THEN '最终成品'
+                       WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path = ?1) THEN '认证副本'
+                       WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1) THEN '历史节点'
+                       WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1) THEN '历史边'
+                     END",
+                    [path],
+                    |row| row.get(0),
+                )
+                .map_err(storage::database_error)?;
+            match reference {
+                Some(reference) => Some(reference),
+                None => referenced_pin_board_dds(connection, path)?,
+            }
+        }
         REPOSITORY_DIRECTORY => {
             let prefix = format!("{}/%", path.trim_end_matches(['/', '\\']));
             connection
@@ -537,6 +573,41 @@ pub(crate) fn referenced_path_kind(
         _ => None,
     };
     Ok(reference)
+}
+
+/// 画板 DDS 的仓库相对路径形如
+/// `artworks/<artwork-id>/<BOARD_DIRECTORY>/<board-id>/<image-id>.dds`。命中时返回
+/// `(artwork_id, board_id, image_id)`，供 `pin_board_images` 反向引用检查使用。
+fn parse_pin_board_dds(path: &str) -> Option<(&str, i64, i64)> {
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.len() != 5 || parts[0] != "artworks" || parts[2] != BOARD_DIRECTORY {
+        return None;
+    }
+    let board_id = parts[3].parse::<i64>().ok()?;
+    let image_id = parts[4].strip_suffix(".dds")?.parse::<i64>().ok()?;
+    Some((parts[1], board_id, image_id))
+}
+
+/// 复查画板 DDS 是否仍被 `pin_board_images` 记录引用（画板记录删除后即不再引用）。
+/// 非画板 DDS 路径一律返回 `None`。
+fn referenced_pin_board_dds(
+    connection: &rusqlite::Connection,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let Some((artwork_id, board_id, image_id)) = parse_pin_board_dds(path) else {
+        return Ok(None);
+    };
+    connection
+        .query_row(
+            "SELECT CASE WHEN EXISTS(
+               SELECT 1 FROM pin_board_images i
+               JOIN pin_boards b ON b.id = i.board_id
+               WHERE i.id = ?1 AND i.board_id = ?2 AND b.artwork_id = ?3
+             ) THEN '画板图片' END",
+            params![image_id, board_id, artwork_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)
 }
 
 fn remove_repository_file(
@@ -1023,5 +1094,64 @@ mod tests {
         assert!(scan_unreferenced(&root, || false, |_, _| {})
             .unwrap()
             .is_empty());
+    }
+
+    /// 造一条画板图片记录（`pin_board_images`），供画板 DDS 引用检查使用。
+    fn insert_pin_board_image(root: &Path, artwork_id: &str, board_id: i64, image_id: i64) {
+        storage::open(root)
+            .unwrap()
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO pin_boards
+                   (id, artwork_id, name, sort_order, now_step, max_step, revision,
+                    created_ms, updated_ms)
+                 VALUES ({board_id}, '{artwork_id}', 'board', 0, 0, 0, '{}', 0, 0);
+                 INSERT INTO pin_board_images
+                   (id, board_id, file_path, width, height, created_ms)
+                 VALUES ({image_id}, {board_id}, '{image_id}.dds', 4, 4, 0);",
+                "0".repeat(64)
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn scan_reports_orphan_board_dds_and_keeps_referenced_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let artwork_id = storage::new_id();
+        let board_id = 7_i64;
+        let board = root
+            .join("artworks")
+            .join(&artwork_id)
+            .join(BOARD_DIRECTORY)
+            .join(board_id.to_string());
+        fs::create_dir_all(&board).unwrap();
+
+        let referenced = board.join("3.dds");
+        let orphan = board.join("9.dds");
+        for path in [&referenced, &orphan] {
+            fs::write(path, b"payload").unwrap();
+            age_file(path);
+        }
+        insert_pin_board_image(&root, &artwork_id, board_id, 3);
+
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+
+        // 只有无记录的 DDS 被报告；仍被 pin_board_images 引用的保留。
+        assert_eq!(candidates.len(), 1);
+        assert!(paths.contains(&storage::relative_path(&root, &orphan).unwrap()));
+        assert!(!paths.contains(&storage::relative_path(&root, &referenced).unwrap()));
+
+        // 确认清理删除孤儿、保留被引用文件。
+        let report = cleanup_unreferenced(&root, &paths).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.cleaned_count, 1);
+        assert!(!orphan.exists());
+        assert!(referenced.is_file());
     }
 }

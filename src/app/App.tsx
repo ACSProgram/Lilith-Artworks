@@ -261,8 +261,12 @@ export function App() {
     setMessage(null);
     try {
       const report = await appApi.scrubRepositoryIntegrity();
+      const pinBoardIssues =
+        report.pinBoardMissingDds + report.pinBoardCorruptDds + report.pinBoardOrphanDds;
       setMessage(
-        `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录。`,
+        pinBoardIssues > 0
+          ? `完整性检查完成，但发现画板 DDS 问题：缺失 ${report.pinBoardMissingDds}、损坏 ${report.pinBoardCorruptDds}、孤儿 ${report.pinBoardOrphanDds}（共 ${report.pinBoardImages} 张画板图片）。`
+          : `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录、${report.pinBoardImages} 张画板图片。`,
       );
     } catch (error) {
       setMessage(errorMessage(error));
@@ -483,7 +487,7 @@ export function App() {
                   <div className="settings-preference-list settings-repository-actions">
                     <div className="settings-preference-row">
                       <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
-                      <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要与 C2PA 声明</small></span>
+                      <span className="settings-row-copy"><strong>仓库完整性</strong><small>检查历史链、受控文件摘要、画板 DDS 与 C2PA 声明</small></span>
                       <button className="secondary-button" type="button" onClick={() => void scrubRepository()} disabled={settingsBusy || !repository.ready}>
                         <ShieldCheck aria-hidden="true" size={15} />开始检查
                       </button>

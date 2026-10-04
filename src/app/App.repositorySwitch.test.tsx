@@ -331,8 +331,75 @@ describe("App repository switching", () => {
     });
   });
 
-  it("shows release identity and opens the bundled legal directory", async () => {
+  it("shows the repository scrub report including pin-board DDS counts", async () => {
     const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.scrubRepositoryIntegrity.mockResolvedValue({
+      historyNodes: 3,
+      finalArtifacts: 1,
+      certificationRecords: 2,
+      pinBoardImages: 5,
+      pinBoardMissingDds: 0,
+      pinBoardCorruptDds: 0,
+      pinBoardOrphanDds: 0,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始检查" }));
+
+    expect(
+      await screen.findByText(
+        "完整性检查通过：3 个历史节点、1 个最终成品、2 条认证记录、5 张画板图片。",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("warns when the repository scrub reports pin-board DDS problems", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.scrubRepositoryIntegrity.mockResolvedValue({
+      historyNodes: 3,
+      finalArtifacts: 1,
+      certificationRecords: 2,
+      pinBoardImages: 5,
+      pinBoardMissingDds: 1,
+      pinBoardCorruptDds: 0,
+      pinBoardOrphanDds: 2,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始检查" }));
+
+    expect(
+      await screen.findByText(
+        "完整性检查完成，但发现画板 DDS 问题：缺失 1、损坏 0、孤儿 2（共 5 张画板图片）。",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("shows release identity and opens the bundled legal directory", async () => {    const repositoryPath = "C:\\repositories\\A";
     appApi.getSettings.mockResolvedValue(settings(repositoryPath));
     appApi.getRepositoryStatus.mockResolvedValue({
       configured: true,

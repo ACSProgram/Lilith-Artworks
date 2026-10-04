@@ -455,6 +455,29 @@ pub(crate) fn validate_dds_payload(bytes: &[u8], width: u32, height: u32) -> Res
     Ok(())
 }
 
+/// 解码 DDS 中的全部 BC7 块，确认数据能被解码器完整消费。
+///
+/// `bcdec_rs::bc7` 对任意 16 字节输入都是全函数（不会返回错误），因此本函数的
+/// 实际作用是遍历全部块、走一遍完整解码路径（守住边界、避免恐慌），而无法判定
+/// 像素内容是否“正确”——在没有原始素材的前提下内容语义不可判定。长度不足由
+/// `validate_dds_payload` 拦截，本函数只消费声明长度内的块。
+pub(crate) fn validate_bc7_decodable(bytes: &[u8], width: u32, height: u32) -> Result<(), String> {
+    let end = dds_payload_end(width, height)?;
+    let data = bytes
+        .get(DDS_DX10_HEADER_BYTES..end)
+        .ok_or("DDS BC7 数据不完整")?;
+    let blocks_per_row = width.div_ceil(4) as usize;
+    let block_rows = height.div_ceil(4) as usize;
+    let mut decoded = [0_u8; 64];
+    for block_y in 0..block_rows {
+        for block_x in 0..blocks_per_row {
+            let offset = (block_y * blocks_per_row + block_x) * 16;
+            bcdec_rs::bc7(&data[offset..offset + 16], &mut decoded, 16);
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn prepare_dds_import(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
     let (width, height) = dds_dimensions(bytes)?;
     validate_dds_payload(bytes, width, height)?;
@@ -756,6 +779,21 @@ mod tests {
 
         let incomplete = vec![0_u8; DDS_DX10_HEADER_BYTES + 16];
         assert!(validate_dds_payload(&incomplete, 8, 8).is_err());
+    }
+
+    #[test]
+    fn decodes_the_declared_bc7_blocks_and_rejects_truncated_data() {
+        let mut bytes = vec![0_u8; DDS_DX10_HEADER_BYTES + 4 * 16];
+        bytes[0..4].copy_from_slice(b"DDS ");
+        bytes[12..16].copy_from_slice(&8u32.to_le_bytes());
+        bytes[16..20].copy_from_slice(&8u32.to_le_bytes());
+        bytes[84..88].copy_from_slice(b"DX10");
+        bytes[128..132].copy_from_slice(&DXGI_FORMAT_BC7_UNORM.to_le_bytes());
+
+        // 8×8 声明需要 2×2×16 = 64 字节 BC7 数据，恰好完整。
+        assert!(validate_bc7_decodable(&bytes, 8, 8).is_ok());
+        // 少一个块的数据在进入解码前即被长度检查拦截。
+        assert!(validate_bc7_decodable(&bytes[..DDS_DX10_HEADER_BYTES + 3 * 16], 8, 8).is_err());
     }
 
     #[test]

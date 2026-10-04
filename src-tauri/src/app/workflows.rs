@@ -9,7 +9,7 @@ use crate::{
         PublishBranchRequest, PublishResult,
     },
     backup::{self, BackupState, BackupTaskKind},
-    cleanup, history, library,
+    cleanup, history, library, pin_board,
 };
 
 #[derive(serde::Serialize)]
@@ -18,6 +18,14 @@ pub(crate) struct RepositoryScrubReport {
     history_nodes: u64,
     final_artifacts: u64,
     certification_records: u64,
+    /// 检查的画板图片记录数。
+    pin_board_images: u64,
+    /// 记录存在但 DDS 缺失。
+    pin_board_missing_dds: u64,
+    /// DDS 存在但校验失败（路径归属、头、尺寸、长度或解码）。
+    pin_board_corrupt_dds: u64,
+    /// 磁盘上存在但无记录的孤儿 DDS。
+    pin_board_orphan_dds: u64,
 }
 
 #[tauri::command]
@@ -56,10 +64,27 @@ pub(crate) async fn scrub_repository_integrity(
                         )
                     },
                 )?;
+                state.report_progress("repository-scrub", "正在检查画板图片", 0, 0);
+                let board_dds = pin_board::scrub::scrub_board_dds(
+                    root,
+                    || state.cancelled(),
+                    |current, total| {
+                        state.report_progress(
+                            "repository-scrub",
+                            "正在检查画板图片",
+                            current,
+                            total,
+                        )
+                    },
+                )?;
                 Ok(RepositoryScrubReport {
                     history_nodes,
                     final_artifacts: controlled.0,
                     certification_records: controlled.1,
+                    pin_board_images: board_dds.images,
+                    pin_board_missing_dds: board_dds.missing,
+                    pin_board_corrupt_dds: board_dds.corrupt,
+                    pin_board_orphan_dds: board_dds.orphans,
                 })
             })
         })

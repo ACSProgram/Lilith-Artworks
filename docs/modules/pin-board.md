@@ -10,6 +10,7 @@
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
+- 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - schema v2 表定义：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`）
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
@@ -20,7 +21,7 @@
 
 素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
 
-整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板。设置页的"仓库完整性"扫描目前只覆盖历史链与认证受控文件，尚未校验画板 DDS 的内容语义，该缺口记在 `docs/planning/todo.md`。
+整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板。设置页的"仓库完整性"扫描已覆盖画板 DDS 的双向检查：逐条 `pin_board_images` 记录校验 DDS 存在、路径归属（`<image-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；`pin_board_images` 无摘要列且不做 schema 迁移，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
 前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
@@ -50,7 +51,8 @@ SQLite:
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；
-- 画板结算清除仍为删除状态的图片记录时，其 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。
+- 画板结算清除仍为删除状态的图片记录时，其 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。重放的引用检查（`cleanup::referenced_path_kind`）已覆盖 `pin_board_images`：记录删除前 DDS 视为被引用而保留，删除后才可清理；
+- 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页确认后入队清理；`cleanup::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。
 
 ## 命令面
 
