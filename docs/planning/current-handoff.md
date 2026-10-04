@@ -21,7 +21,51 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：统一清理体系批次 D——灾备暂存目录清扫（已实现，待人工验收）
+## 本轮批次：统一清理体系批次 E——DDS 扫描与双向检查（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 E（§4.5）。维护者 2026-10-04 确认三项：
+DDS 校验深度取**连 BC7 解码验证**（非只做声明校验）；因 `pin_board_images` 无 SHA-256
+列且计划不做 schema 迁移，**跳过摘要比对**；缺失/损坏 DDS **报告不失败**（计数并入报告、
+命令仍成功返回，不自动修复）。
+
+1. **新增 `pin_board::scrub::scrub_board_dds`（`pin_board/scrub.rs`）**：双向检查。
+   - 记录 → 文件：逐条 `pin_board_images` 记录，校验 DDS 存在、`file_path` 归属（须为
+     `<image_id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录宽高一致、数据长度、BC7 全块
+     解码；分别计入 `missing` / `corrupt`。
+   - 文件 → 记录：遍历 `artworks/*/boards/*/`，统计无记录的孤儿 DDS（`orphans`）。
+   - 返回 `BoardDdsReport { images, missing, corrupt, orphans }`。只报告、不修改数据库或
+     磁盘；逐条检查前响应取消、按「记录数 + 磁盘文件数」回报进度。扫描在仓库操作锁内
+     运行（与画板写入互斥），因此不设宽限期。
+2. **挂入 `scrub_repository_integrity`（`app/workflows.rs`）第三段**：在历史链
+   （`scrub_history`）与认证受控文件（`scrub_controlled_files`）之后执行，进度标签
+   「正在检查画板图片」。报告 `RepositoryScrubReport` 追加
+   `pinBoardImages` / `pinBoardMissingDds` / `pinBoardCorruptDds` / `pinBoardOrphanDds`
+   （serde camelCase）。
+3. **孤儿 DDS 并入批次 C 的发现流程**：`cleanup::scan_unreferenced` 扩展扫描
+   `artworks/*/boards/*/<image-id>.dds`；`referenced_path_kind` 的 `repository_file`
+   分支新增 `pin_board_images` 反向引用检查（画板记录删除后即不再引用），因此被引用
+   DDS 不会成为候选、确认清理的重放也不会误删。命名判定 `is_dds_name` 收敛到
+   `pin_board::repository`，扫描与完整性检查共用。
+4. **`dds::validate_bc7_decodable`**：解码声明长度内的全部 BC7 块。
+5. **前端**：`types.ts` 拆出 `RepositoryIntegrityCounts`，`RepositoryScrubReport` 追加四个
+   画板字段（`RepositoryBackupReport` 改继承计数基类，不含画板字段）；`App.tsx` 完整性
+   检查消息追加画板图片数，缺失/损坏/孤儿任一 > 0 时改报问题计数；设置页说明改为
+   「检查历史链、受控文件摘要、画板 DDS 与 C2PA 声明」。
+
+**落实偏差（已核实）**：§4.5 的「SHA-256 与导入时落库摘要比对」**未实现**——
+`pin_board_images` 无摘要列，且 §3 明确不做 schema 迁移，故按维护者确认跳过摘要比对，
+只做声明校验 + BC7 解码。另 §7 第 4 条由维护者选「连 BC7 解码验证」；`bcdec_rs::bc7`
+是**全函数**（对任意 16 字节输入不返回错误），该步骤实际是走一遍完整解码路径、守住
+边界与长度，而非判定像素内容是否“正确”——内容语义在没有原始素材时不可判定。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过（无头
+`scrub` 子命令保持只覆盖历史链，画板 DDS 检查仅经 GUI 完整性检查暴露；本批次无头侧无
+代码改动）；`cargo fmt` 已执行、`cargo fmt --check` 与 `git diff --check` 通过；
+`cargo test --lib` **150 通过**（原 145 + 新增 5：`dds` 1、`cleanup` 1、`pin_board::scrub`
+3）、1 个忽略项；`npx tsc --noEmit` 通过；`npm test` **118 通过**（原 116 + 新增 2：
+完整性检查报告展示与画板 DDS 问题警告）。
+
+## 上一批次：统一清理体系批次 D——灾备暂存目录清扫（已实现，待人工验收）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 D（§4.4）。宽限期沿用批次 C 已确认的
 **30 分钟**（与未引用文件扫描一致）；本批次只改后端，返回报告新增字段的界面展示与

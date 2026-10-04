@@ -8,6 +8,7 @@
 
 pub(crate) mod dds;
 pub(crate) mod repository;
+pub(crate) mod scrub;
 
 use serde::Serialize;
 use tauri::{

@@ -113,6 +113,13 @@ pub(crate) fn board_relative_path(artwork_id: &str, board_id: i64) -> String {
     format!("artworks/{artwork_id}/{BOARD_DIRECTORY}/{board_id}")
 }
 
+/// 画板 DDS 文件名：`<image-id>.dds`（image id 为 SQLite 自增正整数）。扫描与
+/// 完整性检查共用同一命名判定，避免两处漂移。
+pub(crate) fn is_dds_name(name: &str) -> bool {
+    name.strip_suffix(".dds")
+        .is_some_and(|stem| stem.parse::<i64>().map_or(false, |id| id > 0))
+}
+
 pub(crate) fn create_board(
     connection: &mut Connection,
     artwork_id: &str,

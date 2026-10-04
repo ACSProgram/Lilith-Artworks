@@ -54,13 +54,25 @@ export interface RepositoryStatus {
   error: string | null;
 }
 
-export interface RepositoryScrubReport {
+/** 仓库完整性检查与整仓备份报告共有的计数。 */
+export interface RepositoryIntegrityCounts {
   historyNodes: number;
   finalArtifacts: number;
   certificationRecords: number;
 }
 
-export interface RepositoryBackupReport extends RepositoryScrubReport {
+export interface RepositoryScrubReport extends RepositoryIntegrityCounts {
+  /** 检查的画板图片记录数。 */
+  pinBoardImages: number;
+  /** 记录存在但 DDS 缺失。 */
+  pinBoardMissingDds: number;
+  /** DDS 存在但校验失败（路径归属、头、尺寸、长度或解码）。 */
+  pinBoardCorruptDds: number;
+  /** 磁盘上存在但无记录的孤儿 DDS。 */
+  pinBoardOrphanDds: number;
+}
+
+export interface RepositoryBackupReport extends RepositoryIntegrityCounts {
   backupPath: string;
   repositoryPath: string;
   fileCount: number;

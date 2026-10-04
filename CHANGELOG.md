@@ -8,18 +8,32 @@ before and after the first stable release.
 ### Added
 
 - Unreferenced-file scanning for the repository. A new scan command walks
-  `artworks/*/snapshots` and `artworks/*/deltas` and reports the files that
-  match the known snapshot/delta naming patterns, are older than a 30-minute
-  grace period, and are not referenced by any database column. It only reports,
-  never deletes. Crash orphans published before `history::commit` (which were
-  never enqueued) can finally be discovered this way. A companion
-  `cleanup_repository_unreferenced` command re-registers each confirmed
-  candidate with its current SHA-256, enqueues it in `pending_file_cleanup`,
-  and replays once, so a repeated confirmation is idempotent and a candidate
-  that becomes referenced again stays queued for retry. Both commands run under
-  the shared run lock and the repository operation lock and are cancellable;
-  neither is exposed as a headless subcommand. The settings-page entry point
-  lands in a later batch.
+  `artworks/*/snapshots`, `artworks/*/deltas`, and `artworks/*/boards/*` and
+  reports the files that match the known snapshot/delta/pin-board-DDS naming
+  patterns, are older than a 30-minute grace period, and are not referenced by
+  any database column (including `pin_board_images`). It only reports, never
+  deletes. Crash orphans published before `history::commit` (which were never
+  enqueued) and pin-board DDS files left without a record can finally be
+  discovered this way. A companion `cleanup_repository_unreferenced` command
+  re-registers each confirmed candidate with its current SHA-256, enqueues it in
+  `pending_file_cleanup`, and replays once, so a repeated confirmation is
+  idempotent and a candidate that becomes referenced again stays queued for
+  retry. Both commands run under the shared run lock and the repository
+  operation lock and are cancellable; neither is exposed as a headless
+  subcommand. The settings-page entry point lands in a later batch.
+- Repository integrity checking now covers pin-board DDS files in both
+  directions. A third segment of `scrub_repository_integrity` walks every
+  `pin_board_images` record and checks that its DDS exists under its board
+  directory, is owned by the right path, carries a valid DDS/DX10/BC7 header
+  whose declared dimensions match the record, has the declared payload length,
+  and decodes as BC7; it also counts DDS files that no record references. The
+  counts are returned in the scrub report
+  (`pinBoardImages` / `pinBoardMissingDds` / `pinBoardCorruptDds` /
+  `pinBoardOrphanDds`) and shown in the settings page, which now warns when a
+  missing, corrupt, or orphan DDS is found. The scan only reports and never
+  repairs; a missing DDS is a history-migration concern. There is no SHA-256
+  comparison because `pin_board_images` stores no digest and the schema is not
+  migrated in this batch.
 
 ### Fixed
 
