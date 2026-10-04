@@ -7,15 +7,17 @@
 
 ## 当前基线
 
-- 应用版本 `0.2.0-alpha.3`（本批次**不改版本号**），repository schema **v4**：
+- 应用版本 `0.2.0-alpha.4`（2026-10-04 由维护者决定递增，**仅版本号变更**：不建 tag、
+  不发布、无行为变化，与 alpha.1/alpha.2 的做法一致；最新公开标签仍为 `v0.2.0-alpha.3`），
+  repository schema **v4**：
   v2 → v3 为 `branches` 追加 `backup_quick_enabled`、`last_source_size`、
   `last_source_modified_ms`；v3 → v4 追加 `verified_history_id`、`verified_ms`、
   `verify_error`（空闲链路校验状态）。均为追加式迁移，旧数据不变，
   `tools/release/verify-metadata.mjs` 的 schema 断言已同步为 v4。应用标识
   `com.lilith.artworks`。
-- 版本与发布：`v0.2.0-alpha.3` 标签已存在。本批次的 schema v4、调度器与前端改动
-  按规划并入现有 `## 0.2.0-alpha.3` 变更段（不新建版本段），但**不递增版本号**；
-  递增版本并正式发布由维护者在后续版本升级（维护者口径预计 `rc1`）时单独执行。
+- 版本与发布口径（2026-10-04 确立，写入 `docs/guides/release-policy.md`）：alpha 阶段
+  版本号**滞后递增**——版本号保持不变，改动并入当前版本的 CHANGELOG 段；累计足够后由
+  维护者单独递增，递增本身不需要 tag 与发布。tag 与发布是维护者的独立决定。
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 

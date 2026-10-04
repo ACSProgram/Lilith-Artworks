@@ -6,7 +6,7 @@ C2PA/TrustMark 认证）。四个领域模块共享同一个作品仓库，全�
 
 ## 当前状态
 
-`v0.1.0` 已发布；当前 `0.2.0-alpha.3` 为测试版，使用 repository schema v4 和应用标识 `com.lilith.artworks`（旧仓库打开时按追加式迁移升至当前 schema）。已发布的标签与资产一经公开即不可移动、覆盖或复用；任何发布后的代码、schema 或签名声明变化都必须使用新的版本号和标签。
+`v0.1.0` 已发布；当前 `0.2.0-alpha.4` 为测试版（版本号递增不伴随标签或发布，最新公开标签为 `v0.2.0-alpha.3`），使用 repository schema v4 和应用标识 `com.lilith.artworks`（旧仓库打开时按追加式迁移升至当前 schema）。已发布的标签与资产一经公开即不可移动、覆盖或复用；任何发布后的代码、schema 或签名声明变化都必须使用新的版本号和标签。
 
 四个领域模块（作品树 Library、分支与增量历史 History/Backup、成品与 C2PA/TrustMark 认证 Authenticity、素材板 Pin-board）及其跨模块工作流均已实现。当前功能包括：
 
