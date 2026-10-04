@@ -13,3 +13,6 @@
   报告，用于确认交互层原样迁移并定位回归。结论已并入模块文档。
 - `pin-board-migration-2026-09-13.md`：素材板迁入及后续三个修复批次的完整记录与验证结果，
   以及仍在有效设计决策的汇总。
+- `task-control-plan-2026-10-03.md`：任务调度总控与空闲链路校验（alpha3 批次 A–D）的规划，
+  含 BackupState 任务类型与取消路由、schema v4 校验状态、调度器两级选择与失败警告面。
+  已实施完毕，有效契约并入 `docs/modules/history-and-backup.md`，待人工验收项见 `../todo.md`。
