@@ -358,6 +358,68 @@ impl Running {
         let _ = stdin.write_all(line);
         let _ = stdin.flush();
     }
+
+    /// 逐检查点闸门驱动，在目标检查点出现时 `Child::kill()` 强杀进程。
+    ///
+    /// 与取消不同，强杀不要求进程有机会收尾：`at(index, stage)` 返回 true 的检查点
+    /// **不**作答，直接杀进程；其余检查点一律放行（写 `continue`）。
+    ///
+    /// 必须带闸门（`Spawn::gate`）：闸门让进程在目标检查点**阻塞**，因此强杀落在
+    /// 确定的代码位置，不受进程速度影响（非阻塞的「轮询 marker 后 kill」会与进程
+    /// 赛跑，毫秒级窗口下抖动）。`kill` 在 Windows 上等价 `TerminateProcess`，不运行
+    /// 任何清理——这正是「进程被杀」的真实模拟。
+    pub fn kill_at<F: FnMut(usize, &str) -> bool>(mut self, mut at: F) -> CrashOutcome {
+        assert!(
+            self.gate,
+            "强杀注入必须使用逐检查点闸门（Spawn::gate），否则无法确定命中窗口"
+        );
+        let started = Instant::now();
+        let mut target = None;
+        let mut timed_out = false;
+        let exit_code;
+        'outer: loop {
+            for index in self.consume_new_checkpoints() {
+                let checkpoint = self.checkpoints[index].clone();
+                if at(checkpoint.index, &checkpoint.stage) {
+                    target = Some(checkpoint);
+                    let _ = self.child.kill();
+                    exit_code = self.child.wait().ok().and_then(|status| status.code());
+                    break 'outer;
+                }
+                self.answer(false);
+            }
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    exit_code = status.code();
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => panic!("等待无头进程失败：{error}"),
+            }
+            if Instant::now() >= self.deadline {
+                timed_out = true;
+                let _ = self.child.kill();
+                exit_code = self.child.wait().ok().and_then(|status| status.code());
+                break;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        // 进程已死亡：只收集最后几行，不再作答。
+        let _ = self.consume_new_checkpoints();
+        let stderr = truncate(
+            fs::read_to_string(&self.stderr_path).unwrap_or_default(),
+            STDERR_LIMIT,
+        );
+        CrashOutcome {
+            killed: target.is_some(),
+            target,
+            timed_out,
+            exit_code,
+            checkpoints: self.checkpoints,
+            elapsed: started.elapsed(),
+            stderr,
+        }
+    }
 }
 
 fn parse_checkpoint(line: &str) -> Option<Checkpoint> {
@@ -459,6 +521,81 @@ impl Outcome {
         assert!(
             self.cancelled() && !self.ok() && self.exit_code == 2,
             "期望取消结果：\n{}",
+            self.describe()
+        );
+        self
+    }
+}
+
+/// 强杀注入的结果。与 `Outcome` 不同：进程没有机会写 `--result`，因此断言全部基于
+/// 「进程在目标检查点被强杀」这一事实，以及随后由**新的**无头进程执行的磁盘与重开断言。
+pub struct CrashOutcome {
+    /// 强杀发生时所在的检查点；进程在到达目标前自行退出时为 `None`。
+    pub target: Option<Checkpoint>,
+    pub killed: bool,
+    pub timed_out: bool,
+    pub exit_code: Option<i32>,
+    pub checkpoints: Vec<Checkpoint>,
+    pub elapsed: Duration,
+    pub stderr: String,
+}
+
+impl CrashOutcome {
+    pub fn target_stage(&self) -> &str {
+        self.target
+            .as_ref()
+            .map(|value| value.stage.as_str())
+            .unwrap_or("")
+    }
+
+    pub fn checkpoint_stages(&self) -> Vec<(usize, &str)> {
+        self.checkpoints
+            .iter()
+            .map(|checkpoint| (checkpoint.index, checkpoint.stage.as_str()))
+            .collect()
+    }
+
+    pub fn describe(&self) -> String {
+        format!(
+            "killed={} timed_out={} exit_code={:?} target={:?} elapsed_ms={}\n\
+             checkpoints={:?}\nstderr:\n{}",
+            self.killed,
+            self.timed_out,
+            self.exit_code,
+            self.target,
+            self.elapsed.as_millis(),
+            self.checkpoint_stages(),
+            self.stderr
+        )
+    }
+
+    #[track_caller]
+    pub fn expect_killed(&self) -> &Self {
+        assert!(
+            !self.timed_out,
+            "强杀等待超时（闸门可能没有被驱动）：\n{}",
+            self.describe()
+        );
+        assert!(
+            self.killed,
+            "进程在到达目标检查点前已自行退出：\n{}",
+            self.describe()
+        );
+        self
+    }
+
+    /// 断言强杀恰好落在第 `index` 个检查点。
+    #[track_caller]
+    pub fn expect_killed_at(&self, index: usize) -> &Self {
+        self.expect_killed();
+        let target = self
+            .target
+            .as_ref()
+            .expect("killed 为真时必然记录了目标检查点");
+        assert_eq!(
+            target.index,
+            index,
+            "强杀检查点与预期不符：\n{}",
             self.describe()
         );
         self
@@ -596,6 +733,20 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<String>) {
     }
 }
 
+/// 目录内条目的名字（不递归），已排序。缺失的目录返回空表。
+pub fn directory_names(directory: &Path) -> Vec<String> {
+    let mut names = fs::read_dir(directory)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
 /// 断言仓库内没有遗留的临时文件，并返回实体文件清单。
 #[track_caller]
 pub fn assert_no_stray(repository: &Path) -> StorageState {
@@ -666,6 +817,40 @@ pub fn record(scenario: &str, tier: &str, outcome: &Outcome, extra: Value) {
         "peakWorkingSetBytes": peak,
         "checkpointCount": outcome.checkpoints.len(),
         "error": if outcome.ok() { Value::Null } else { Value::String(outcome.error()) },
+        "detail": extra,
+    });
+    let lock = REPORT_LOCK.lock();
+    let opened = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| writeln!(file, "{line}"));
+    drop(lock);
+    if let Err(error) = opened {
+        eprintln!("无法写入压力测试报告：{error}");
+    }
+}
+
+/// 追加一行 B 组（崩溃）报告。强杀使进程来不及写 `--result`，因此没有峰值内存等字段，
+/// 只记录强杀位置、耗时与观察到的检查点数。
+pub fn record_crash(scenario: &str, tier: &str, outcome: &CrashOutcome, extra: Value) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("stress-report.jsonl");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let line = json!({
+        "scenario": scenario,
+        "tier": tier,
+        "group": "B",
+        "killed": outcome.killed,
+        "targetCheckpoint": outcome.target.as_ref().map(|checkpoint| checkpoint.index),
+        "targetStage": outcome.target.as_ref().map(|checkpoint| checkpoint.stage.clone()),
+        "exitCode": outcome.exit_code,
+        "timedOut": outcome.timed_out,
+        "elapsedMs": outcome.elapsed.as_millis() as u64,
+        "checkpointCount": outcome.checkpoints.len(),
         "detail": extra,
     });
     let lock = REPORT_LOCK.lock();
