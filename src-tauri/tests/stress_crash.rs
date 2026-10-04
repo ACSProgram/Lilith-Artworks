@@ -364,3 +364,87 @@ fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
         "重跑后应存在已发布 bundle：{names:?}"
     );
 }
+
+/// B4 事务中途强杀：事务已 `BEGIN`、`INSERT` 已写、尚未 `COMMIT`。
+///
+/// B1 的强杀点落在「文件已发布、事务还没开始」，本用例落在事务**内部**：无头入口在
+/// `history::commit` 的 `transaction.commit()` 之前有一个 headless-only 标记点
+/// （feature 门控，发布产物中不存在），测试在此经闸门停住后强杀。
+///
+/// 断言 `synchronous = FULL` 承诺里**可观测**的那一面：未提交事务被完整丢弃——
+/// head 不前进、父节点的 snapshot 未被释放（释放语句与提交同事务）、清理队列没有多出
+/// 条目；仓库重开（迁移 + `integrity_check` + 外键 + 语义校验）与逐块摘要链校验全过；
+/// 随后同一命令重跑成功且只前进一格。断电持久性本身不在此列（见计划 §6）。
+#[test]
+fn b4_commit_killed_inside_transaction_discards_uncommitted_writes() {
+    let fixture = Fixture::new();
+    fixture.commit(96 * 1024, 31, "first");
+    let before = assert_no_stray(&fixture.repository);
+    assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
+    assert_eq!(before.deltas.len(), 0, "{:?}", before.deltas);
+    let parent_snapshot = before.snapshots[0].clone();
+
+    // 第二次提交：1–4 号检查点在发布路径上放行，第 5 个（标记点）在事务内强杀。
+    write_work_file(&fixture.work, 72 * 1024, 32);
+    let outcome = fixture
+        .commit_command()
+        .arg("note", "killed inside the commit transaction")
+        .gate()
+        .start()
+        .kill_at(|index, _stage| index == 5);
+    outcome.expect_killed_at(5);
+    assert!(
+        outcome.target_stage().contains("尚未提交"),
+        "强杀应落在事务写入之后、提交之前：\n{}",
+        outcome.describe()
+    );
+
+    // 未提交事务被整体丢弃：head 不前进，且事务里的释放语句同样没有生效。
+    assert_eq!(fixture.healthy(), 1, "未提交事务必须被丢弃，head 不得前进");
+    let cleanup = fixture.command("cleanup").finish();
+    cleanup.expect_ok();
+    assert_eq!(
+        cleanup.data_u64("pendingCount"),
+        0,
+        "事务内的入队必须随回滚一并消失：\n{}",
+        cleanup.describe()
+    );
+    assert_eq!(
+        cleanup.data_u64("cleanedCount"),
+        0,
+        "{}",
+        cleanup.describe()
+    );
+
+    let after = assert_no_stray(&fixture.repository);
+    assert!(
+        after.snapshots.contains(&parent_snapshot),
+        "父节点 snapshot 不得被释放（释放与提交同事务，必须一并丢弃）：{:?}",
+        after.snapshots
+    );
+    // 已发布的文件仍是磁盘孤儿：与 B1 一致，崩溃发生在入队之前，不会被自动回收。
+    assert_eq!(
+        after.snapshots.len(),
+        before.snapshots.len() + 1,
+        "应多出一个孤儿 snapshot：{:?}",
+        after.snapshots
+    );
+    assert_eq!(
+        after.deltas.len(),
+        before.deltas.len() + 1,
+        "应多出一个孤儿 delta：{:?}",
+        after.deltas
+    );
+
+    record_crash(
+        "B4 commit killed inside transaction",
+        "B",
+        "small",
+        &outcome,
+        json!({ "retainedParentSnapshot": parent_snapshot }),
+    );
+
+    // 正向对照：同一仓库上重跑提交成功，节点前进一格、链路完好。
+    fixture.commit(72 * 1024, 32, "retry after crash");
+    assert_eq!(fixture.healthy(), 2);
+}

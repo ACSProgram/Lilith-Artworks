@@ -21,7 +21,42 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：压力测试批次 4（规模与灾备、参数边界）与批次 5（崩溃孤儿回收闭环）（已实现）
+## 本轮批次：压力测试批次 2 补充——事务中途崩溃（B4）（已实现）
+
+落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 2 补充」。它验证 `synchronous
+= FULL`（`storage.rs`）承诺里**可观测**的那一面：进程在事务已 `BEGIN`、`INSERT` 已写、
+尚未 `COMMIT` 时被强杀后，未提交事务必须被整体丢弃。断电持久性本身仍不做自动化（计划 §6）。
+
+1. **唯一一处为测试而触及产品代码的标记点**：`history::commit` 在 `transaction.commit()`
+   之前调用 `crate::headless::commit_marker()`，调用点由 `#[cfg(feature = "headless")]`
+   门控——**发布产物中不存在**，GUI 路径（`run_branch_backup` → `worker::run_backup` →
+   `history::commit`）的行为与文案逐位不变。标记点返回「此刻是否已请求取消」，取消时直接
+   返回错误，事务随 `Transaction` 析构被整体丢弃。
+2. **闸门改为进程级单例**：`headless.rs` 把 `Interlock` 登记进 `OnceLock` 供标记点取用——
+   标记点位于领域函数内部，拿不到调用栈上的闸门；一个无头进程只执行一条命令，进程级单例
+   足够。标记点同时是提交路径的**第 5 个取消检查点**（前 4 个在 `worker::run_backup`）。
+3. **`tests/stress_crash.rs` 新增 B4**：强杀落在第 5 个检查点（stage `事务已写入，尚未提交`）
+   后断言——`verify` + `scrub` 全过；head 与节点数不前进（事务被丢弃）；**父节点的 snapshot
+   未被释放**（事务内的释放语句同样被丢弃）；清理队列 `pendingCount` / `cleanedCount` 均为 0
+   （事务内的入队随回滚消失）；已发布的 snapshot/delta 成为磁盘孤儿（与 B1 一致：崩溃发生在
+   入队之前，不会被自动回收）；重跑提交成功且只前进一格。
+4. **`tests/stress_cancel.rs` A1 扩展为 1–5**：新增的第 5 个检查点是第二个会走到「已发布文件
+   回滚」代码的取消点——第 4 个走 `run_backup` 的回滚分支，第 5 个走 `history::commit` 的
+   错误分支——取消后仓库仍然干净、head 不前进、重跑只前进一格。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过；`cargo fmt`
+已执行、`cargo fmt --check` 与 `git diff --check` 通过；`cargo test --lib` **151 通过**、
+1 个忽略项（未改库代码，结论不变）；`npm test` **120 通过**（未改前端）。
+`stress_crash` **4 通过**（原 3 + B4）、`stress_cancel` **6 通过**（A1 扩展后仍全绿）、
+`stress_cleanup` **1 通过**、`stress_scale` **5 通过**（结论均不变）。
+实测（`target/stress-report.jsonl`，debug 档无头进程）：
+
+| 场景 | 强杀/取消位置 | 关键实测 |
+| --- | --- | --- |
+| B4 事务中途强杀 | 第 5 个检查点（`事务已写入，尚未提交`） | 耗时 83 ms；head 与节点数不前进、父节点 snapshot 保留、清理队列 0 条、孤儿 snapshot/delta 各 +1；重跑提交成功后节点数 1 → 2 |
+| A1 提交取消（新增第 5 点） | 第 5 个检查点 | exit 2、`cancelled`；错误文案「提交已取消」，与第 1–4 点的「备份操作已取消」区分开——证明取消落在 `history::commit` 的错误分支 |
+
+## 上一批次：压力测试批次 4（规模与灾备、参数边界）与批次 5（崩溃孤儿回收闭环）（已实现）
 
 规划见 `docs/planning/stress-test-plan-2026-10-04.md` 的批次 4、5 与 §0 二次订正。批次 4、5
 独立提交；两者都只扩展无头入口与测试，**不改动任何产品命令的行为**，无头入口仍 feature 门控、
@@ -470,6 +505,30 @@ GUI 行为无变化（错误仅在日志与队列中）。
    快捷键改为说明锁定后无法编辑、仅可缩放和移动视图；"创建备份"去掉"发布前"措辞。
 
 ## 验证记录
+
+### 压力测试批次 2 补充（2026-10-04）
+
+代理侧已执行：
+
+- `cargo fmt` 已执行、`cargo fmt --check` 与 `git diff --check` 通过。
+- `cargo check --lib` 无警告（标记点的调用点 feature 门控，非无头构建看不到它）；
+  `cargo check --features headless` 通过。
+- `cargo test --features headless --test stress_crash`：**4 通过**（B1–B4）。
+- `cargo test --features headless --test stress_cancel`：**6 通过**（A1 覆盖 1–5 个检查点）。
+- 回归：`stress_cleanup` **1 通过**、`stress_scale` **5 通过**（均未变化）；
+  `cargo test --lib` **151 通过**、1 个忽略项（未改库代码）；`npm test` **120 通过**（未改前端）。
+- 实测汇总（`target/stress-report.jsonl`）：
+
+| 场景 | 强杀/取消检查点 | 阶段 | 耗时 ms | 观察到的检查点数 |
+| --- | --- | --- | --- | --- |
+| B4 提交事务中途强杀 | 5 | 事务已写入，尚未提交 | 83 | 5 |
+| A1 提交取消（第 5 点） | 5 | 事务已写入，尚未提交 | 105 | 5 |
+
+  关键断言逐条成立：B4 强杀后 `verify` 与 `scrub` 全通过、head 与节点数不前进、父节点
+  snapshot 仍被引用、清理队列 0 条、孤儿 snapshot/delta 各 +1、重跑提交成功；
+  A1 第 5 点取消的退出码为 2、`cancelled` 为真、错误文案为「提交已取消」。
+- **唯一触及产品代码的改动**：`history::commit` 内的 headless-only 标记点（feature 门控，
+  发布产物中不存在）。GUI 路径行为不变，无需维护者界面确认；代理不执行 UI 自动化。
 
 ### 压力测试批次 3（2026-10-04，最终态）
 
