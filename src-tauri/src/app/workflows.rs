@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use tauri::State;
+use tauri_plugin_fs::FsExt;
 
 use crate::{
     app::AppState,
@@ -101,7 +102,7 @@ pub(crate) async fn create_repository_backup(
     window: tauri::WebviewWindow,
 ) -> Result<backup::RepositoryBackupReport, String> {
     let destination_parent = std::path::PathBuf::from(destination_parent.trim());
-    authenticity::ensure_dialog_authorized(&window, &destination_parent, "备份保存目录")
+    authenticity::ensure_dialog_authorized(&window.fs_scope(), &destination_parent, "备份保存目录")
         .map_err(|error| error.to_string())?;
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
@@ -316,7 +317,7 @@ pub(crate) async fn enter_branch_publication(
     window: tauri::WebviewWindow,
 ) -> Result<BranchPublication, String> {
     authenticity::ensure_dialog_authorized(
-        &window,
+        &window.fs_scope(),
         Path::new(request.artifact_path.trim()),
         "最终成品",
     )
@@ -376,12 +377,12 @@ pub(crate) async fn publish_branch_artifact(
     window: tauri::WebviewWindow,
 ) -> Result<PublishResult, AuthenticityError> {
     authenticity::ensure_dialog_authorized(
-        &window,
+        &window.fs_scope(),
         Path::new(request.output_path.trim()),
         "发布输出路径",
     )?;
     authenticity::ensure_dialog_authorized(
-        &window,
+        &window.fs_scope(),
         Path::new(request.config.certificate_path.trim()),
         "证书链",
     )?;

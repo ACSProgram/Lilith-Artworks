@@ -21,7 +21,71 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：压力测试批次 6——画板 DDS 完整性（H）（已实现）
+## 本轮批次：压力测试批次 7——认证模块（G）（已实现）
+
+落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 7」。它是压力测试里**唯一触及
+安全边界**的批次：把认证命令的路径授权来源抽象成可注入的作用域，使无头进程复用同一条检查
+（而不是把检查关掉），并据此补上认证发布的内存、取消、回读与受控文件校验。无头入口仍
+feature 门控、不进发布产物。
+
+1. **授权作用域重构（唯一的契约性改动）**：`authenticity::ensure_dialog_authorized` 的参数
+   从 `&tauri::WebviewWindow` 换成 `&impl PathAuthorization`。GUI 侧实现为
+   `tauri::fs::Scope`（`window.fs_scope()`），判断与文案「{label}未由文件选择器授权，请重新
+   选择」逐位不变；无头侧实现为只允许 `--workspace` 之下路径的 `HeadlessScope`。两条实现都
+   要求路径被显式授权、都拒绝空路径，**不存在可关闭该检查的开关**。
+   - **全部 8 处调用点**同步（`authenticity/commands.rs` 4 处 + `app/workflows.rs` 4 处）；
+     计划原文写「4 处」，以 `grep` 实测为准。`app/workflows.rs` 新增
+     `use tauri_plugin_fs::FsExt;`。
+2. **无头入口扩展（1:1 薄映射）**：新增 `enter-publication`（`branch_head` →
+   `ensure_checkpoint` → `store_final_artifact` → `get_publication`）、`publish`
+   （`publish_artifact`）、`cancel-publication`（`remove_artifact` + `cleanup::run`）、
+   `decode-authenticity`（`authenticity::decode`）；新增 `--models <dir>`（默认
+   `env!("CARGO_MANIFEST_DIR")/resources/models`）。`scrub` 子命令扩展为「历史链 + 认证受控
+   文件」两段，输出新增 `finalArtifacts` / `certificationRecords`。新增的子命令选项包括
+   `--artifact` / `--certificate` / `--key` / `--creator` / `--rights` / `--content` /
+   `--algorithm` / `--trustmark` / `--regions` / `--jpeg-quality` / `--background` /
+   `--strength` / `--watermark-id` / `--preview-cache-token` / `--timestamp-url` /
+   `--input` / `--region`。
+3. **第二处 headless-only 标记点（落实偏差，已核实）**：G3 需要在渲染 / 编码 / 签名三个阶段
+   **确定性**命中取消，而 `publish` 流水线内部的取消只是 `AuthenticityOperation` 的标志位、
+   没有可阻塞的检查点。因此按 `history::commit` 事务标记点的同一范式，在
+   `authenticity/pipeline.rs` 加 `auth_checkpoint`，在渲染 / 编码 / 签名三处调用
+   `crate::headless::auth_checkpoint`（feature 门控；release 下逐位等价于
+   `ensure_not_cancelled`，发布产物中不存在，GUI 路径行为不变）。这是第二处为测试而触及
+   产品代码的标记点。
+4. **`tests/stress_authenticity.rs`（4 个测试，覆盖 G1–G5）**：复用
+   `tests/fixtures/authenticity/` 的公开 ES256 凭据与 128×128 源图（复制进工作区后使用，
+   因为无头进程只授权工作区路径）；大图由测试进程用已有的 `image` 依赖按需生成（16K 级，
+   仅 `extreme` 起，用完即删、不进仓库）。
+   - **G1/G2 大图**：16K（≈268 MP）发布的峰值内存与各阶段耗时；低于 `extreme` 档时明确
+     跳过并报告。
+   - **G3 取消**：渲染 / 编码 / 签名三阶段各取消一次，断言无输出文件、输出目录无残留、
+     认证记录数为 0、`cancel-publication` 后仓库内成品与记录归零、仓库重开可用。
+   - **G4 回读**：`decode-authenticity` 读回 C2PA 与 TrustMark 绑定并与本地记录匹配。
+   - **G5 受控文件**：`scrub` 报告成品 1 / 记录 1；替换认证副本字节后校验失败。
+
+**验证**：`cargo fmt` 已执行、`cargo fmt --check` 与 `git diff --check` 通过；
+`cargo check --lib` 与 `cargo check --features headless` 均**零警告**；`cargo test --lib`
+**151 通过**、1 个忽略项（新增的 `auth_checkpoint` 在非无头构建下等价于既有函数，未改库
+测试结论）；`npm test` **121 通过**（未改前端）。
+新增 `stress_authenticity` **4 通过**；既有套件 `stress_cancel` **6 通过**、`stress_crash`
+**4 通过**、`stress_cleanup` **1 通过**、`stress_scale` **5 通过**、`stress_pin_board`
+**3 通过**（结论均不变——新增的认证检查点只在 `publish` 内，不影响既有命令的检查点编号）。
+实测（`target/stress-report.jsonl`，debug 档无头进程）：
+
+| 场景 | 档位 / 规模 | 关键实测 |
+| --- | --- | --- |
+| G1 发布峰值内存 | `extreme`，16K（16384×16384，≈268 MP） | 峰值 **1.92 GiB**（2,065,182,720 B），未超出保守上界 3.0 GiB；同量级于声明的 1.5 GiB 解码预算 |
+| G2 各阶段耗时 | 同 G1 | 整体 214.7 s；渲染 33.9 s、编码 99.6 s、签名 0.66 s；无超时与挂起 |
+| G3 发布取消 | `small`，128×128 | 渲染 / 编码 / 签名各取消一次（第 1/2/3 检查点）：exit 2、`cancelled`；输出不存在、输出目录无残留、认证记录 0；`cancel-publication` 后成品与记录归零 |
+| G4 回读 | `small` | C2PA `Valid`、`recordId`/`watermarkId`/标题/创作者/权利声明与记录一致、候选带 `c2pa` + `trustmark` 证据；228 ms、峰值约 220 MB |
+| G5 受控文件校验 | `small` | 成品 1 / 记录 1；替换认证副本后校验失败（「已损坏或被替换」）；40 ms、峰值约 38 MB |
+
+**待人工确认（触及安全控制，需单独确认）**：授权作用域重构后 GUI 路径
+`enter_branch_publication` / `publish_branch_artifact` / `create_repository_backup` 的
+行为与文案不变——代理只做程序化断言，不执行 UI 自动化。
+
+## 上一批次：压力测试批次 6——画板 DDS 完整性（H）（已实现）
 
 落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 6」。它把画板 DDS 的完整性检查
 补成可自动化断言：双向检查区分「正常 / 缺失 / 损坏 / 孤儿」四类、缺失与损坏报告不失败、
