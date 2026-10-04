@@ -5,6 +5,18 @@ before and after the first stable release.
 
 ## 0.2.0-alpha.4 - 2026-10-04
 
+### Fixed
+
+- Finalizing a pin board no longer deletes the DDS files of deleted images
+  before the SQLite commit. The deletion is now recorded in the
+  `pending_file_cleanup` queue inside the transaction (reason
+  `pin_board_finalize`) and replayed once after the commit succeeds, so a
+  failed commit can no longer leave a database record pointing at a DDS that
+  is already gone. A deletion failure keeps the entry in the queue for a later
+  single-pass retry (via the next finalize, trash operation, or the existing
+  retry command) instead of failing the finalize; retries never loop and never
+  block the board.
+
 ### Changed
 
 - The application version is incremented to `0.2.0-alpha.4`. This is a

@@ -49,7 +49,8 @@ SQLite:
 - `revision` 每次画板内容写库（`save_pin_board`/`finalize_pin_board`）后单调更新，用于保存冲突检测；`reorder_pin_boards` 只调整 `sort_order`，不改 `revision` 与 `updated_ms`，因此重排不会让已打开画板的下一次保存被误判为冲突；
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
-- 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试。
+- 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；
+- 画板结算清除仍为删除状态的图片记录时，其 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。
 
 ## 命令面
 
@@ -69,7 +70,7 @@ SQLite:
 交互层（renderer、几何、纹理策略、会话、快捷键、画布交互）原样迁移，未重写。要点：
 
 - 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `dds.rs`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；
-- 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录及对应 DDS；
+- 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录（对应 DDS 的删除走 `pending_file_cleanup` 提交后重放，见上节）；
 - 编辑自动保存：设置页"自动保存"开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。应用真正退出时原生端先发 `app_shutdown_requested`，前端在设置页"关闭时保存"开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板，无论成败都调用 `confirm_app_shutdown` 确认；webview 挂起或崩溃时由原生端 15 秒兜底强退（生命周期细节见 `docs/architecture/overview.md`）。撤销历史仍只存在于当前会话内存，重开画板后不能撤销；
 - 图层由 `layer`（底层/中层/顶层）与 `sort_order` 共同决定；新图片统一进入中层并占据最优先顺序；
 - 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；

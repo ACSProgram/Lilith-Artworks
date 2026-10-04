@@ -21,7 +21,30 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：alpha.4 版本递增与统一清理体系规划（已完成）
+## 本轮批次：统一清理体系批次 A——画板结算改提交后清理（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 A（§4.1）。维护者 2026-10-04 确认接受
+语义变化，并要求重试不得阻塞进度：实现为**单遍重放、不循环重试**，结算命令在提交
+成功后立即返回，删除失败只留队列条目等下次结算/回收站操作/手动重试消化。
+
+1. `finalize_board` 不再在提交前 `fs::remove_file` 删除被清除图片的 DDS，改为事务内
+   `cleanup::enqueue_repository_file(…, "pin_board_finalize")`（`pin_board_images`
+   未落库 SHA-256，按规划用不带期望摘要的入队）；`bump_revision` → `commit` 顺序不变。
+   提交失败时入队随事务回滚，记录与 DDS 保持一致——消除了「记录已回滚而 DDS 已消失」
+   的不可逆不一致，以及「提交成功但结算报错」的悖论状态。
+2. 命令层 `finalize_pin_board`（`pin_board/mod.rs`）在提交成功后执行一次
+   `cleanup::run`（与画板回收站删除同范式）；条目级失败与重放的数据库错误都只写
+   `log::warn`，不改变命令的成功/失败语义，队列状态的可观测展示留给批次 F。
+3. 新增三个单测（`pin_board/repository.rs`）：结算入队且重放后 DDS 与记录均被清除、
+   事务回滚时记录与 DDS 均保留且队列无残留、重放失败（引用检查拒绝）条目留队且解除
+   引用后单次重放成功。语义变化：DDS 删除失败不再使结算整体报错。
+
+**验证**：`cargo check --lib` 无警告；`cargo fmt` 已执行、`git diff --check` 通过；
+`cargo test --lib` **137 通过**（原 134 + 新增 3）、1 个忽略项；前端无代码改动，
+`npm run test:pin-board` 56 通过（结论不变）。待维护者确认项：结算成功/失败文案的
+GUI 行为无变化（错误仅在日志与队列中）。
+
+## 上一批次：alpha.4 版本递增与统一清理体系规划（已完成）
 
 1. **版本号递增到 `0.2.0-alpha.4`**：仅版本号变更，无 tag、无发布、无行为变化
    （与 alpha.1/alpha.2 一致）。同步五处版本字段、`CHANGELOG.md` 新建带日期小节、
