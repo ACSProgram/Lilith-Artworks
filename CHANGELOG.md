@@ -16,6 +16,21 @@ before and after the first stable release.
   single-pass retry (via the next finalize, trash operation, or the existing
   retry command) instead of failing the finalize; retries never loop and never
   block the board.
+- History cleanup now goes through the same `pending_file_cleanup` ledger.
+  Deleting a branch, deleting a history subtree, undoing a checkpoint,
+  committing (which releases the parent snapshot), repairing a head snapshot,
+  and compacting an intermediate node no longer delete repository files
+  directly after the commit. The released paths are reference-checked and
+  enqueued inside the same SQLite transaction (reasons
+  `history_branch_deletion`, `history_subtree_deletion`,
+  `history_checkpoint_release`, `history_commit_release`,
+  `history_snapshot_replaced`, `history_compaction`) and replayed once after
+  the commit succeeds. A failed deletion now keeps the entry in the queue with
+  its error and retry state instead of being silently dropped, and a crash
+  between the commit and the replay is recovered by the next replay. Rollback
+  deletions (a failed publish, commit, or snapshot registration) still remove
+  their own temporary files directly, because those files are never referenced
+  by the database.
 
 ### Changed
 

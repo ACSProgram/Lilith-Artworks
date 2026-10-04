@@ -3,8 +3,8 @@
 - 规划日期：2026-10-04
 - 目标版本：`0.2.0-alpha.4` 之后落实（本计划不要求版本变化；版本号按
   `release-policy.md` 的滞后口径由维护者另行决定）
-- 状态：**实施中**。批次 A 已于 2026-10-04 落实（见 `current-handoff.md`）；
-  B–F 未实施。落实后按批次在 `current-handoff.md` 记录，
+- 状态：**实施中**。批次 A、B 已于 2026-10-04 落实（见 `current-handoff.md`）；
+  C–F 未实施。落实后按批次在 `current-handoff.md` 记录，
   未完成项沉淀 `todo.md`，全部完成后本文件移入 `archive/`。
 - 覆盖范围：`todo.md` 第一节五条 P1——「结算画板时改用提交后文件清理」「历史文件清理
   失败改为可观测、可重试」「仓库完整性扫描覆盖画板 DDS 文件」「增加画板实体与 SQLite
@@ -100,6 +100,15 @@
    `enqueue_repository_file`（带删除前查询到的 SHA-256 可选），随后 `cleanup::run`。
    `history::storage_path_referenced` 的既有判断保留为入队前的快路径，真正的引用
    复查仍由 `cleanup::run` 执行。
+
+   **落实偏差（维护者 2026-10-04 确认）**：入队不在调用方、而在领域函数自身的
+   SQLite 事务内完成——`history::{delete_branch, delete_subtree, unmark_checkpoint,
+   commit, apply_compaction, set_snapshot}` 在事务内复查引用后入队并返回 cleanup id，
+   调用方只负责 `cleanup::replay`。因此 `history::storage_path_referenced` 不再作为
+   调用方快路径：引用复查改为复用 `cleanup::referenced_path_kind`（事务可见本事务
+   尚未提交的写入），该函数已随本批次移除。入队不登记期望 SHA-256——snapshot/delta
+   按 history id 命名且发布后不再改写，引用复查已是充分护栏，登记摘要需在入队前
+   完整读一遍文件（大文件代价高）。
 2. 排查全部「提交成功后直接删除仓库文件」的调用点（`backup/worker.rs` 旧 snapshot
    释放、`restore.rs` 精简后旧实体清理等），统一改为入队 + 重放。事务内的**回滚**
    删除保持直接删：回滚路径上文件本就未被数据库引用，直接删失败只留泄漏不留不一致，
@@ -205,3 +214,6 @@
 3. 宽限期取值（建议 30 分钟）。
 4. 批次 E 的 DDS 校验深度：只做头/尺寸/摘要，还是连 BC7 解码验证（解码成本高，
    建议只做声明校验，解码留给实际读取路径）。
+5. 批次 B 的入队落点与摘要：入队放在领域函数自身的 SQLite 事务内（而非调用方
+   提交后再入队）——**维护者 2026-10-04 确认**；入队不登记期望 SHA-256——
+   **维护者 2026-10-04 确认**。理由与对 §4.2.1 的偏差见该节。

@@ -3,6 +3,7 @@ use std::{fs, fs::File, io, path::Path, time::SystemTime};
 use tempfile::NamedTempFile;
 
 use crate::{
+    cleanup,
     history::{self, HistoryCommit},
     storage,
 };
@@ -159,7 +160,10 @@ pub(crate) fn run_backup(
                 "HEAD snapshot {} failed validation and will be rebuilt: {validation_error}",
                 head.id
             );
-            repair_head_snapshot(root, &artwork_directory, head, snapshot_temp)?;
+            // 被替换的旧 snapshot 已在登记事务内入队，这里单遍重放；失败只留
+            // 队列可重试，不改变"内容未变化"的成功语义。
+            let cleanup_ids = repair_head_snapshot(root, &artwork_directory, head, snapshot_temp)?;
+            cleanup::replay(root, &cleanup_ids);
         }
         history::mark_unchanged(root, branch_id, checked_ms)?;
         // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
@@ -258,8 +262,8 @@ pub(crate) fn run_backup(
     let committed_logical = snapshot.logical_size();
     let committed_chunk = snapshot_size;
     let committed_delta = delta_size;
-    let old_snapshot = match history::commit(root, commit) {
-        Ok(path) => path,
+    let cleanup_ids = match history::commit(root, commit) {
+        Ok(ids) => ids,
         Err(error) => {
             let _ = fs::remove_file(&snapshot_final);
             if let Some(path) = delta_final.as_ref() {
@@ -268,9 +272,9 @@ pub(crate) fn run_backup(
             return Err(error.into());
         }
     };
-    if let Some(relative) = old_snapshot {
-        let _ = fs::remove_file(storage::resolve_path(root, &relative)?);
-    }
+    // 提交释放的父 snapshot 已在事务内入队，这里单遍重放；失败只留队列可重试，
+    // 不影响已成功的提交结果。
+    cleanup::replay(root, &cleanup_ids);
     // 提交成功，记录基线元数据供快速检查使用。
     record_source_metadata(root, branch_id, &after);
     log::info!(
@@ -306,12 +310,17 @@ fn validate_head_snapshot(root: &Path, head: &history::HistoryRecord) -> Result<
         .map_err(|error| format!("当前 HEAD snapshot 完整性校验失败：{error}"))
 }
 
+/// 修复 head 的 snapshot：发布新文件并登记到历史节点。
+///
+/// 被替换的旧 snapshot 不再由本函数在提交后直接删除，而是由 `set_snapshot`
+/// 在同一事务内入队 `pending_file_cleanup`；返回的 cleanup id 由调用方在成功后
+/// 重放（引用复查与摘要校验仍在重放时执行）。
 fn repair_head_snapshot(
     root: &Path,
     artwork_directory: &Path,
     head: &history::HistoryRecord,
     snapshot_temp: NamedTempFile,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let repaired_path = artwork_directory.join("snapshots").join(format!(
         "{}-repair-{}.lbc",
         head.id,
@@ -324,25 +333,13 @@ fn repair_head_snapshot(
         .map_err(|error| format!("无法读取修复 snapshot 大小：{error}"))?
         .len();
     publish_temp(snapshot_temp, &repaired_path, "修复 snapshot")?;
-    if let Err(error) =
-        history::set_snapshot(root, &head.id, &repaired_relative, repaired_size, true)
-    {
-        let _ = fs::remove_file(&repaired_path);
-        return Err(format!("无法登记修复 snapshot：{error}"));
-    }
-    if let Some(previous_relative) = head.snapshot_path.as_deref() {
-        if previous_relative != repaired_relative
-            && matches!(
-                history::storage_path_referenced(root, previous_relative),
-                Ok(false)
-            )
-        {
-            if let Ok(previous_path) = storage::resolve_path(root, previous_relative) {
-                let _ = fs::remove_file(previous_path);
-            }
+    match history::set_snapshot(root, &head.id, &repaired_relative, repaired_size, true) {
+        Ok(cleanup_ids) => Ok(cleanup_ids),
+        Err(error) => {
+            let _ = fs::remove_file(&repaired_path);
+            Err(format!("无法登记修复 snapshot：{error}"))
         }
     }
-    Ok(())
 }
 
 fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), BackupRunError> {

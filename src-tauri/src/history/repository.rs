@@ -6,7 +6,7 @@ use std::{
 
 use rusqlite::{params, OptionalExtension};
 
-use crate::storage;
+use crate::{cleanup, storage};
 
 use super::{
     ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,
@@ -379,7 +379,13 @@ pub(crate) fn materialization_chain(
     Ok(chain)
 }
 
-pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<String>, String> {
+/// 提交新历史节点并切换分支 head。
+///
+/// 提交成功后会释放父节点的 snapshot（父节点不再是 head 或检查点、且没有其它
+/// 分支引用时）。该文件不再在提交后由调用方直接删除，而是在同一事务内入队
+/// `pending_file_cleanup`（引用复查见 `cleanup::enqueue_released_repository_files`），
+/// 由调用方在提交成功后重放；返回已入队的 cleanup id。
+pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<String>, String> {
     storage::validate_title(commit.title, "历史节点标题")?;
     if commit.note.chars().count() > 500 {
         return Err("提交备注不能超过 500 个字符".into());
@@ -456,7 +462,7 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<St
             params![commit.branch_id, commit.id, commit.created_ms],
         )
         .map_err(storage::database_error)?;
-    let mut old_snapshot = None;
+    let mut cleanup_ids = Vec::new();
     if let Some(parent_id) = commit.parent_id {
         let retained: bool = transaction
             .query_row(
@@ -467,7 +473,7 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<St
             )
             .map_err(storage::database_error)?;
         if !retained {
-            old_snapshot = transaction
+            let old_snapshot: Option<String> = transaction
                 .query_row(
                     "SELECT snapshot_path FROM history_nodes WHERE id = ?1",
                     [parent_id],
@@ -493,10 +499,17 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Option<St
                     [parent_id],
                 )
                 .map_err(storage::database_error)?;
+            if let Some(relative) = old_snapshot {
+                cleanup_ids = cleanup::enqueue_released_repository_files(
+                    &transaction,
+                    &[relative],
+                    "history_commit_release",
+                )?;
+            }
         }
     }
     transaction.commit().map_err(storage::database_error)?;
-    Ok(old_snapshot)
+    Ok(cleanup_ids)
 }
 
 /// Atomic SET clause that derives `delta_path` and `chunk_file_size` from the
@@ -590,15 +603,30 @@ pub(crate) fn record_source_metadata(
     Ok(())
 }
 
+/// 为一个历史节点登记（或替换）snapshot 文件。
+///
+/// 替换时旧 snapshot 不再由调用方在提交后直接删除：旧路径在同一事务内入队
+/// `pending_file_cleanup`，由调用方在成功后重放；返回已入队的 cleanup id。
+/// 首次登记（节点原本没有 snapshot，例如建立发布检查点）返回空。
 pub(crate) fn set_snapshot(
     root: &Path,
     history_id: &str,
     relative_path: &str,
     file_size: u64,
     checkpoint: bool,
-) -> Result<(), String> {
-    let connection = storage::open(root)?;
-    let changed = connection
+) -> Result<Vec<String>, String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let previous: Option<String> = transaction
+        .query_row(
+            "SELECT snapshot_path FROM history_nodes WHERE id = ?1",
+            [history_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .flatten();
+    let changed = transaction
         .execute(
             "UPDATE history_nodes SET snapshot_path = ?2, chunk_file_size = ?3,
                     is_checkpoint = CASE WHEN ?4 <> 0 THEN 1 ELSE is_checkpoint END
@@ -612,10 +640,18 @@ pub(crate) fn set_snapshot(
         )
         .map_err(storage::database_error)?;
     if changed == 0 {
-        Err("找不到历史节点".into())
-    } else {
-        Ok(())
+        return Err("找不到历史节点".into());
     }
+    let mut cleanup_ids = Vec::new();
+    if let Some(previous) = previous.filter(|path| path != relative_path) {
+        cleanup_ids = cleanup::enqueue_released_repository_files(
+            &transaction,
+            &[previous],
+            "history_snapshot_replaced",
+        )?;
+    }
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(cleanup_ids)
 }
 
 pub(crate) fn rename_node(root: &Path, history_id: &str, title: &str) -> Result<(), String> {
@@ -650,7 +686,15 @@ pub(crate) fn mark_checkpoint(root: &Path, history_id: &str) -> Result<(), Strin
     }
 }
 
-pub(crate) fn unmark_checkpoint(root: &Path, history_id: &str) -> Result<Option<String>, String> {
+/// 取消一个普通检查点，释放其 snapshot 并切回唯一子节点的反向增量。
+///
+/// 返回 `Ok(None)` 表示该节点本就不是检查点（无操作）；返回 `Ok(Some(ids))`
+/// 表示已释放，被释放的 snapshot 在同一事务内入队 `pending_file_cleanup`
+/// （原因 `history_checkpoint_release`），由调用方在提交成功后重放。
+pub(crate) fn unmark_checkpoint(
+    root: &Path,
+    history_id: &str,
+) -> Result<Option<Vec<String>>, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let forced: bool = transaction.query_row(
@@ -721,8 +765,16 @@ pub(crate) fn unmark_checkpoint(root: &Path, history_id: &str) -> Result<Option<
     if stored.is_none() {
         return Err("取消检查点后无法登记增量存储".into());
     }
+    let cleanup_ids = match snapshot_path {
+        Some(relative) => cleanup::enqueue_released_repository_files(
+            &transaction,
+            &[relative],
+            "history_checkpoint_release",
+        )?,
+        None => Vec::new(),
+    };
     transaction.commit().map_err(storage::database_error)?;
-    Ok(snapshot_path)
+    Ok(Some(cleanup_ids))
 }
 
 pub(crate) fn compaction_target(root: &Path, history_id: &str) -> Result<CompactionTarget, String> {
@@ -754,6 +806,13 @@ pub(crate) fn compaction_target(root: &Path, history_id: &str) -> Result<Compact
     })
 }
 
+/// 改接精简后的历史链：把 `target` 的父节点直接连到 `target` 的子节点，删除被
+/// 移除的节点与旧边，并登记新的反向 delta。
+///
+/// 被移除节点与旧边占用的仓库文件不再由调用方在提交后直接删除：在同一事务内
+/// 完成引用复查后入队 `pending_file_cleanup`（原因 `history_compaction`），由调用方
+/// 在提交成功后重放；返回已入队的 cleanup id。新 delta 已被本事务的边引用，
+/// 因此不会被入队。
 pub(crate) fn apply_compaction(
     root: &Path,
     target: &CompactionTarget,
@@ -817,8 +876,10 @@ pub(crate) fn apply_compaction(
     // refreshed as well because earlier builds wrote the delta size onto it.
     refresh_storage_metadata(&transaction, &target.parent_id)?;
     refresh_storage_metadata(&transaction, &target.child_id)?;
+    let cleanup_ids =
+        cleanup::enqueue_released_repository_files(&transaction, &paths, "history_compaction")?;
     transaction.commit().map_err(storage::database_error)?;
-    Ok(paths)
+    Ok(cleanup_ids)
 }
 
 pub(crate) fn delete_subtree(
@@ -1001,10 +1062,17 @@ pub(crate) fn delete_subtree(
             [],
         )
         .map_err(storage::database_error)?;
+    // 被删除节点与边占用的仓库文件在同一事务内复查引用后入队；仍被其它分支或
+    // 节点引用的路径会被跳过，由调用方在提交成功后重放清理。
+    let cleanup_ids = cleanup::enqueue_released_repository_files(
+        &transaction,
+        &paths.into_iter().collect::<Vec<_>>(),
+        "history_subtree_deletion",
+    )?;
     transaction.commit().map_err(storage::database_error)?;
     Ok(HistoryDeletion {
         artwork_id,
-        storage_paths: paths.into_iter().collect(),
+        cleanup_ids,
     })
 }
 
@@ -1090,6 +1158,12 @@ fn subtree_contains_publication(
         .map_err(storage::database_error)
 }
 
+/// 删除一个非主分支，回收只属于它的历史节点。
+///
+/// 删除前收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 与 `history_edges.delta_path`
+/// 作为候选；事务提交前复查当前图是否仍引用这些路径（事务可见本事务的删除结果），
+/// 只把已无引用的文件入队 `pending_file_cleanup`（原因 `history_branch_deletion`），
+/// 由调用方在提交成功后重放。仍被共享祖先或其它分支引用的文件保留。
 pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeletion, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
@@ -1205,10 +1279,15 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
     transaction
         .execute("DELETE FROM branches WHERE id = ?1", [branch_id])
         .map_err(storage::database_error)?;
+    let cleanup_ids = cleanup::enqueue_released_repository_files(
+        &transaction,
+        &paths.into_iter().collect::<Vec<_>>(),
+        "history_branch_deletion",
+    )?;
     transaction.commit().map_err(storage::database_error)?;
     Ok(BranchDeletion {
         artwork_id,
-        storage_paths: paths.into_iter().collect(),
+        cleanup_ids,
     })
 }
 
@@ -1302,19 +1381,6 @@ pub(crate) fn next_backup_disable_notice_target(
             },
         )
         .optional()
-        .map_err(storage::database_error)
-}
-
-pub(crate) fn storage_path_referenced(root: &Path, path: &str) -> Result<bool, String> {
-    storage::open(root)?
-        .query_row(
-            "SELECT EXISTS(
-           SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1
-           UNION ALL SELECT 1 FROM history_edges WHERE delta_path = ?1
-         )",
-            [path],
-            |row| row.get(0),
-        )
         .map_err(storage::database_error)
 }
 
@@ -1880,8 +1946,21 @@ mod tests {
         );
     }
 
+    fn queued_paths(root: &Path) -> Vec<String> {
+        let connection = storage::open(root).unwrap();
+        let mut statement = connection
+            .prepare("SELECT path FROM pending_file_cleanup ORDER BY path")
+            .unwrap();
+        let paths = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        paths
+    }
+
     #[test]
-    fn branch_deletion_collects_edge_delta_paths() {
+    fn branch_deletion_enqueues_released_edge_delta_paths() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         let main_source = directory.path().join("main.psd");
@@ -1943,10 +2022,17 @@ mod tests {
 
         let deletion = delete_branch(&root, &branch_id).unwrap();
 
-        assert!(deletion
-            .storage_paths
-            .iter()
-            .any(|path| path == "artworks/fork.delta"));
+        // 只属于该分支的 snapshot 与边 delta 在事务内入队；共享的祖先 snapshot
+        // 仍被主分支引用，因此不入队。删除本身由调用方在提交成功后重放。
+        assert!(!deletion.cleanup_ids.is_empty());
+        let queued = queued_paths(&root);
+        assert!(queued.iter().any(|path| path == "artworks/fork.delta"));
+        assert!(queued.iter().any(|path| path == "artworks/fork.snapshot"));
+        assert!(!queued.iter().any(|path| path == "artworks/root.snapshot"));
+
+        let report = crate::cleanup::run(&root, &deletion.cleanup_ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.pending_count, 0);
     }
 
     #[test]
@@ -2056,7 +2142,7 @@ mod tests {
         fixture.commit_node(&fixture.main_branch_id, "child", Some("middle"), 3);
         let target = compaction_target(&fixture.root, "middle").unwrap();
 
-        let old_paths =
+        let cleanup_ids =
             apply_compaction(&fixture.root, &target, "artworks/child-to-root.delta", 9).unwrap();
 
         let connection = storage::open(&fixture.root).unwrap();
@@ -2101,12 +2187,20 @@ mod tests {
             ("root".into(), "artworks/child-to-root.delta".into(), 9)
         );
         assert!(!middle_exists);
-        assert!(old_paths
+        // 被移除节点与旧边占用的文件在事务内入队，等待调用方提交后重放；
+        // 新 delta 已被本事务的边引用，因此不入队。
+        assert!(!cleanup_ids.is_empty());
+        let queued = queued_paths(&fixture.root);
+        assert!(queued
             .iter()
             .any(|path| path == "artworks/middle-to-root.delta"));
-        assert!(old_paths
+        assert!(queued
             .iter()
             .any(|path| path == "artworks/child-to-middle.delta"));
+        assert!(queued.iter().any(|path| path == "artworks/middle.snapshot"));
+        assert!(!queued
+            .iter()
+            .any(|path| path == "artworks/child-to-root.delta"));
     }
 
     #[test]
