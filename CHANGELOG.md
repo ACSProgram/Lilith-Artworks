@@ -3,6 +3,16 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
+## 0.2.0-alpha.4 - 2026-10-04
+
+### Changed
+
+- The application version is incremented to `0.2.0-alpha.4`. This is a
+  version-number-only bump: there is no tag and no release, matching the
+  alpha.1 and alpha.2 precedent. Product behavior is unchanged from the
+  `0.2.0-alpha.3` section below; the schema v4, scheduler, and stress-test
+  batches recorded there remain part of that section.
+
 ## 0.2.0-alpha.3 - 2026-10-03
 
 ### Added

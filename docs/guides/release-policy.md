@@ -6,6 +6,8 @@
 - `main` 只接收边界清晰、文档同步且 Windows CI 通过的变更。
 - 候选版本使用 `vX.Y.Z-rc.N` 标签；正式版本使用 `vX.Y.Z` 标签。
 - 已发布的标签、安装包和版本身份不可复用或替换。标签后任何代码、schema、应用标识或签名声明变化都必须递增版本，并同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 和锁文件。
+- 内部测试版（`0.2.0-alpha.N`）的版本号**滞后递增**：`alpha.N` 打上发布标签后，后续改动并入现有 `alpha.N` 的 CHANGELOG 段、版本号保持不变；累计足够改动后由维护者单独递增到 `alpha.N+1`。递增版本号本身不需要标签、不需要发布、不触发发布门槛（`alpha.1`、`alpha.2` 与 2026-10-04 的 `alpha.4` 均按此办理）；是否打标签、是否发布始终由维护者单独决定，一经公开即不可变。
+- 递增 alpha 版本号的固定动作：同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 五处版本字段；在 `CHANGELOG.md` 新建带日期的版本小节；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
 - 源码仓库可公开不等于安装包可正式发布。每个二进制产物必须能追溯到唯一、干净且不可变的标签。
 
 ## 自动门槛
