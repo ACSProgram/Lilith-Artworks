@@ -353,6 +353,8 @@ pub fn run() {
             app::settings::open_settings_directory,
             app::settings::reveal_path_in_folder,
             app::cleanup_commands::retry_pending_file_cleanup,
+            app::cleanup_commands::scan_repository_unreferenced,
+            app::cleanup_commands::cleanup_repository_unreferenced,
             app::workflows::acknowledge_backup_disable_notices,
             app::workflows::get_backup_disable_notice_target,
             app::workflows::scrub_repository_integrity,

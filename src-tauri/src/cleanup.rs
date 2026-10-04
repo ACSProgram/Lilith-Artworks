@@ -15,6 +15,11 @@ const REPOSITORY_FILE: &str = "repository_file";
 const REPOSITORY_DIRECTORY: &str = "repository_directory";
 const EXTERNAL_FILE: &str = "external_file";
 
+/// 未引用文件扫描的宽限期：修改时间晚于 `now - 30 分钟` 的文件视为可能仍属于
+/// 进行中的提交、精简或检查点发布，扫描跳过它们。取值明显大于空闲链路校验的
+/// 10 分钟延迟，给长操作留出余量。
+pub(crate) const SCAN_GRACE_MS: i64 = 30 * 60 * 1000;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CleanupFailure {
@@ -29,6 +34,17 @@ pub(crate) struct CleanupReport {
     pub(crate) cleaned_count: usize,
     pub(crate) pending_count: usize,
     pub(crate) failures: Vec<CleanupFailure>,
+}
+
+/// 一条未引用文件扫描候选。扫描只报告、不删除；用户在设置页确认后经
+/// `cleanup_unreferenced` 批量入队并单遍重放。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ScanCandidate {
+    /// 仓库相对路径（`/` 分隔），与 `pending_file_cleanup.path` 同一口径。
+    pub(crate) path: String,
+    pub(crate) byte_size: u64,
+    pub(crate) reason: String,
 }
 
 struct PendingCleanup {
@@ -266,6 +282,191 @@ pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
             log::warn!("清理重放失败，条目已留在待清理队列：{error}");
         }
     }
+}
+
+/// 扫描 `artworks/*/snapshots/` 与 `artworks/*/deltas/` 中未被任何数据库引用
+/// 的 snapshot/delta 文件（崩溃孤儿、手工复制或历史迁移遗留），作为清理账本的
+/// 发现机制。只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
+///
+/// 护栏：只考虑匹配既有命名模式的文件（snapshot `<UUID>.lbc` /
+/// `<UUID>-repair-<UUID>.lbc`，delta `<UUID>-to-<UUID>.lbd`）；只报告修改时间
+/// 早于宽限期（`SCAN_GRACE_MS`）的文件，避免与进行中的提交、精简、检查点发布
+/// 赛跑；逐文件复用 `referenced_path_kind` 做反向引用检查。调用方须在仓库操作
+/// 锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
+pub(crate) fn scan_unreferenced(
+    root: &Path,
+    cancelled: impl Fn() -> bool,
+    progress: impl Fn(u64, u64),
+) -> Result<Vec<ScanCandidate>, String> {
+    let connection = storage::open(root)?;
+    let cutoff = storage::now_ms()?.saturating_sub(SCAN_GRACE_MS);
+    let mut files = Vec::new();
+    collect_scan_files(root, &mut files)?;
+    files.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let total = files.len() as u64;
+    let mut candidates = Vec::new();
+    for (index, (path, reason)) in files.into_iter().enumerate() {
+        if cancelled() {
+            return Err("未引用文件扫描已取消".into());
+        }
+        let metadata = match fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                progress(index as u64 + 1, total);
+                continue;
+            }
+            Err(error) => return Err(format!("无法读取待扫描文件：{error}")),
+        };
+        let modified = metadata
+            .modified()
+            .map_err(|error| format!("无法读取文件修改时间：{error}"))?;
+        if system_time_ms(modified)? > cutoff {
+            progress(index as u64 + 1, total);
+            continue;
+        }
+        let relative = storage::relative_path(root, &path)?;
+        if referenced_path_kind(&connection, REPOSITORY_FILE, &relative)?.is_none() {
+            candidates.push(ScanCandidate {
+                path: relative,
+                byte_size: metadata.len(),
+                reason: reason.to_owned(),
+            });
+        }
+        progress(index as u64 + 1, total);
+    }
+    Ok(candidates)
+}
+
+/// 把用户确认的扫描候选批量入队并立即单遍重放删除。
+///
+/// 每条候选入队时登记当前 SHA-256 作为期望摘要（重放时内容已变即保留）；候选
+/// 文件已不存在时跳过。幂等：重复调用不会重复删除，文件已被移除也不报错；重放
+/// 前仍会复查引用，候选在确认前重新被引用时条目留队可重试。
+pub(crate) fn cleanup_unreferenced(root: &Path, paths: &[String]) -> Result<CleanupReport, String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let mut cleanup_ids = Vec::new();
+    for path in paths {
+        let absolute = safe_repository_path(root, path)?;
+        if !absolute.is_file() {
+            continue;
+        }
+        let expected = sha256_file(&absolute)?;
+        cleanup_ids.push(enqueue_repository_file_with_hash(
+            &transaction,
+            path,
+            &expected,
+            "unreferenced_scan",
+        )?);
+    }
+    transaction.commit().map_err(storage::database_error)?;
+    drop(connection);
+    if cleanup_ids.is_empty() {
+        let connection = storage::open(root)?;
+        return Ok(CleanupReport {
+            cleaned_count: 0,
+            pending_count: pending_count_with_connection(&connection)?,
+            failures: Vec::new(),
+        });
+    }
+    run(root, &cleanup_ids)
+}
+
+/// 收集扫描范围内的候选文件（仓库相对路径不在此处计算），保留其目录归属对应的
+/// 报告原因。目录缺失（如新仓库尚无任何作品）按空处理。
+fn collect_scan_files(root: &Path, files: &mut Vec<(PathBuf, &'static str)>) -> Result<(), String> {
+    let artworks = root.join("artworks");
+    let entries = match fs::read_dir(&artworks) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取作品目录：{error}")),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("无法读取作品目录项：{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法读取作品目录项类型：{error}"))?;
+        if !file_type.is_dir() {
+            continue;
+        }
+        let directory = entry.path();
+        collect_scan_directory(
+            &directory.join("snapshots"),
+            is_snapshot_name,
+            "历史快照未被引用",
+            files,
+        )?;
+        collect_scan_directory(
+            &directory.join("deltas"),
+            is_delta_name,
+            "历史增量未被引用",
+            files,
+        )?;
+    }
+    Ok(())
+}
+
+fn collect_scan_directory(
+    directory: &Path,
+    matches_name: fn(&str) -> bool,
+    reason: &'static str,
+    files: &mut Vec<(PathBuf, &'static str)>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取目录 {}：{error}", directory.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("无法读取目录项：{error}"))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("无法读取目录项类型：{error}"))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if matches_name(name) {
+            files.push((entry.path(), reason));
+        }
+    }
+    Ok(())
+}
+
+/// snapshot 命名：`<history-id>.lbc`，或修复 head snapshot 时的
+/// `<history-id>-repair-<uuid>.lbc`。
+fn is_snapshot_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".lbc") else {
+        return false;
+    };
+    if uuid::Uuid::parse_str(stem).is_ok() {
+        return true;
+    }
+    stem.split_once("-repair-").is_some_and(|(head, suffix)| {
+        uuid::Uuid::parse_str(head).is_ok() && uuid::Uuid::parse_str(suffix).is_ok()
+    })
+}
+
+/// delta 命名：`<child-id>-to-<parent-id>.lbd`。UUID 只含十六进制字符与连字符，
+/// 因此 `-to-` 不会出现在单个 UUID 内部。
+fn is_delta_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".lbd") else {
+        return false;
+    };
+    stem.split_once("-to-").is_some_and(|(child, parent)| {
+        uuid::Uuid::parse_str(child).is_ok() && uuid::Uuid::parse_str(parent).is_ok()
+    })
+}
+
+fn system_time_ms(time: std::time::SystemTime) -> Result<i64, String> {
+    let duration = time
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| format!("文件修改时间无效：{error}"))?;
+    i64::try_from(duration.as_millis()).map_err(|_| "文件修改时间超出范围".into())
 }
 
 fn remove_entry(root: &Path, entry: &PendingCleanup) -> Result<(), String> {
@@ -715,5 +916,112 @@ mod tests {
         replay(&root, &ids);
         assert_eq!(pending_count(&root), 0);
         assert!(!stored.exists());
+    }
+
+    /// 把文件的修改时间回拨 1 小时，使其越过扫描宽限期。
+    fn age_file(path: &Path) {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+    }
+
+    fn new_artwork_directory(root: &Path) -> PathBuf {
+        root.join("artworks").join(storage::new_id())
+    }
+
+    #[test]
+    fn scan_reports_unreferenced_history_files_and_keeps_referenced_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let artwork = new_artwork_directory(&root);
+        let snapshots = artwork.join("snapshots");
+        let deltas = artwork.join("deltas");
+        fs::create_dir_all(&snapshots).unwrap();
+        fs::create_dir_all(&deltas).unwrap();
+
+        let orphan_snapshot = snapshots.join(format!("{}.lbc", storage::new_id()));
+        let orphan_delta = deltas.join(format!(
+            "{}-to-{}.lbd",
+            storage::new_id(),
+            storage::new_id()
+        ));
+        let referenced = snapshots.join(format!("{}.lbc", storage::new_id()));
+        let unmatched = snapshots.join("notes.txt");
+        for path in [&orphan_snapshot, &orphan_delta, &referenced, &unmatched] {
+            fs::write(path, b"payload").unwrap();
+            age_file(path);
+        }
+        insert_history_node(&root, &storage::relative_path(&root, &referenced).unwrap());
+
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+
+        // 只报告孤儿 snapshot 与孤儿 delta：被引用的保留、命名不匹配的不报告。
+        assert_eq!(candidates.len(), 2);
+        assert!(paths.contains(&storage::relative_path(&root, &orphan_snapshot).unwrap()));
+        assert!(paths.contains(&storage::relative_path(&root, &orphan_delta).unwrap()));
+        assert!(!paths.contains(&storage::relative_path(&root, &referenced).unwrap()));
+        assert!(!paths.iter().any(|path| path.ends_with("notes.txt")));
+    }
+
+    #[test]
+    fn scan_skips_files_within_the_grace_period() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let snapshots = new_artwork_directory(&root).join("snapshots");
+        fs::create_dir_all(&snapshots).unwrap();
+        // 刚写入的文件修改时间落在宽限期内，可能仍属于进行中的提交/精简。
+        let fresh = snapshots.join(format!("{}.lbc", storage::new_id()));
+        fs::write(&fresh, b"fresh").unwrap();
+
+        assert!(scan_unreferenced(&root, || false, |_, _| {})
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn confirmed_cleanup_removes_candidates_idempotently() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let snapshots = new_artwork_directory(&root).join("snapshots");
+        fs::create_dir_all(&snapshots).unwrap();
+        let orphan = snapshots.join(format!("{}.lbc", storage::new_id()));
+        fs::write(&orphan, b"orphan").unwrap();
+        age_file(&orphan);
+
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].byte_size, 6);
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+
+        let report = cleanup_unreferenced(&root, &paths).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.cleaned_count, 1);
+        assert_eq!(report.pending_count, 0);
+        assert!(!orphan.exists());
+
+        // 幂等：再次确认清理不报错、不再删除、队列仍为空。
+        let second = cleanup_unreferenced(&root, &paths).unwrap();
+        assert!(second.failures.is_empty());
+        assert_eq!(second.cleaned_count, 0);
+        assert_eq!(second.pending_count, 0);
+
+        // 再次扫描不再有候选。
+        assert!(scan_unreferenced(&root, || false, |_, _| {})
+            .unwrap()
+            .is_empty());
     }
 }
