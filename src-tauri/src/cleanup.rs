@@ -50,6 +50,21 @@ pub(crate) struct ScanCandidate {
     pub(crate) reason: String,
 }
 
+/// 待清理队列中的一条条目，供设置页展示与重试。`last_attempt_ms` / `last_error`
+/// 只在一次删除尝试失败后写入，因此尚未尝试过的条目两者为空。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PendingCleanupEntry {
+    pub(crate) id: String,
+    pub(crate) path: String,
+    pub(crate) path_kind: String,
+    /// 入队原因（如 `history_branch_deletion`、`pin_board_finalize`）。
+    pub(crate) reason: String,
+    pub(crate) created_ms: i64,
+    pub(crate) last_attempt_ms: Option<i64>,
+    pub(crate) last_error: Option<String>,
+}
+
 struct PendingCleanup {
     id: String,
     path_kind: String,
@@ -187,6 +202,34 @@ pub(crate) fn discard(root: &Path, cleanup_ids: &[String]) -> Result<(), String>
     let transaction = connection.transaction().map_err(storage::database_error)?;
     complete(&transaction, cleanup_ids)?;
     transaction.commit().map_err(storage::database_error)
+}
+
+/// 列出待清理队列（按入队顺序）。只读，不执行任何删除，也不写 `last_attempt_ms`
+/// 或 `last_error`；设置页据此展示路径、原因与上次失败信息，再决定是否重试。
+pub(crate) fn list_pending(root: &Path) -> Result<Vec<PendingCleanupEntry>, String> {
+    let connection = storage::open(root)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT id, path, path_kind, reason, created_ms, last_attempt_ms, last_error
+             FROM pending_file_cleanup ORDER BY created_ms, id",
+        )
+        .map_err(storage::database_error)?;
+    let entries = statement
+        .query_map([], |row| {
+            Ok(PendingCleanupEntry {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                path_kind: row.get(2)?,
+                reason: row.get(3)?,
+                created_ms: row.get(4)?,
+                last_attempt_ms: row.get(5)?,
+                last_error: row.get(6)?,
+            })
+        })
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    Ok(entries)
 }
 
 pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport, String> {
@@ -828,6 +871,51 @@ mod tests {
         assert_eq!(report.failures.len(), 1);
         assert!(stored.is_file());
         assert_eq!(report.pending_count, 1);
+    }
+
+    #[test]
+    fn list_pending_reports_queue_state_and_last_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored = root.join("artworks").join("kept.bin");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"kept").unwrap();
+        let expected = sha256_file(&stored).unwrap();
+        let (kept_id, removed_id) = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let kept = enqueue_repository_file_with_hash(
+                &transaction,
+                "artworks/kept.bin",
+                &expected,
+                "history_commit_release",
+            )
+            .unwrap();
+            let removed =
+                enqueue_repository_file(&transaction, "artworks/gone.bin", "pin_board_finalize")
+                    .unwrap();
+            transaction.commit().unwrap();
+            (kept, removed)
+        };
+        insert_history_node(&root, "artworks/kept.bin");
+
+        // 一条仍被引用（重放失败并记录 last_error），一条已不存在（重放成功删除）。
+        let report = run(&root, &[]).unwrap();
+        assert_eq!(report.cleaned_count, 1);
+        assert_eq!(report.failures.len(), 1);
+
+        let pending = list_pending(&root).unwrap();
+        assert_eq!(pending.len(), 1);
+        let entry = &pending[0];
+        assert_eq!(entry.id, kept_id);
+        assert_ne!(entry.id, removed_id);
+        assert_eq!(entry.path, "artworks/kept.bin");
+        assert_eq!(entry.path_kind, REPOSITORY_FILE);
+        assert_eq!(entry.reason, "history_commit_release");
+        assert!(entry.created_ms > 0);
+        assert!(entry.last_attempt_ms.is_some());
+        assert!(entry.last_error.as_deref().unwrap().contains("仍被"));
     }
 
     #[test]

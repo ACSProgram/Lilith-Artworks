@@ -23,7 +23,7 @@
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
-- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用复查（五张表）与仓库边界校验由它提供，领域函数在事务内复用它做入队前复查。它另外提供未引用文件扫描（`scan_unreferenced`，只报告）与确认清理（`cleanup_unreferenced`，登记摘要后入队重放），作为队列的发现机制。
+- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用复查（五张表）与仓库边界校验由它提供，领域函数在事务内复用它做入队前复查。它另外提供未引用文件扫描（`scan_unreferenced`，只报告）与确认清理（`cleanup_unreferenced`，登记摘要后入队重放），作为队列的发现机制，并提供只读的队列列举（`list_pending`）供设置页展示。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
 
 `backup` 通过 `history` 切换分支 head，不直接操作作品树；`history` 不读取 ChunkFile；C2PA 与 TrustMark 实现彼此独立，只由认证流水线编排。
@@ -41,6 +41,8 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内逐项复查当前图是否仍引用该路径（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 
 清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历 `artworks/*/snapshots` 与 `artworks/*/deltas`，只报告匹配既有命名模式（snapshot `<UUID>.lbc` / `<UUID>-repair-<UUID>.lbc`、delta `<UUID>-to-<UUID>.lbd`）、修改时间早于 30 分钟宽限期且经 `referenced_path_kind` 复查确认未被引用的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256 入队并单遍重放：重复确认幂等，候选在确认前重新被引用时条目留队可重试。扫描经 GUI 命令持共享运行锁与仓库操作锁，不做无头子命令（仓库哨兵锁落地前入口只经 GUI 进程内暴露）；画板 DDS 的孤儿/缺失检查属完整性扫描，另见 `docs/modules/pin-board.md`。
+
+设置页「仓库与备份」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`，传空 id 即整队重放）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`。首次启动时应用仍会自动整队重放一次，队列中的残留条目即上次未清干净的文件。
 
 ## 存储大小语义
 
@@ -124,6 +126,10 @@ delete_history_subtree
 delete_artwork_branch
 scrub_repository_integrity
 create_repository_backup
+list_pending_file_cleanup
+retry_pending_file_cleanup
+scan_repository_unreferenced
+cleanup_repository_unreferenced
 ```
 
 应用工作流通过公开 `backup::ensure_checkpoint` 固化分支起点或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。当前批次状态见 `docs/planning/current-handoff.md`。

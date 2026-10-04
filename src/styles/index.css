@@ -323,6 +323,23 @@ button { color: inherit; }
 .cleanup-failure-banner strong { font-size: 11px; }
 .cleanup-failure-banner small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 .cleanup-failure-banner .secondary-button { flex: 0 0 auto; }
+.cleanup-queue { display: grid; margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.cleanup-queue-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 10px; padding: 9px 12px; border-bottom: 1px solid var(--border); background: var(--surface-subtle); }
+.cleanup-queue-row:last-child { border-bottom: 0; }
+.cleanup-queue-copy { min-width: 0; }
+.cleanup-queue-copy strong, .cleanup-queue-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cleanup-queue-copy strong { font-size: 11px; }
+.cleanup-queue-copy small { margin-top: 3px; color: var(--muted); font-size: 10px; }
+.cleanup-scan-result { margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; background: var(--surface-subtle); }
+.cleanup-scan-result > header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+.cleanup-scan-result > header:last-child { border-bottom: 0; }
+.cleanup-scan-result > header strong { font-size: 11px; }
+.cleanup-scan-result > header > div { display: flex; align-items: center; gap: 8px; }
+.cleanup-candidate-list { max-height: 220px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+.cleanup-candidate-list li { display: grid; gap: 3px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.cleanup-candidate-list li:last-child { border-bottom: 0; }
+.cleanup-candidate-list span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.cleanup-candidate-list small { color: var(--muted); font-size: 10px; }
 
 .spin { animation: spin 900ms linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

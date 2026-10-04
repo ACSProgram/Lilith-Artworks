@@ -17,9 +17,11 @@ import {
   MoveHorizontal,
   Palette,
   PanelLeftClose,
+  RotateCcw,
   Save,
   Settings,
   ShieldCheck,
+  Trash2,
   X,
 } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
@@ -42,6 +44,13 @@ import type {
   SettingsSnapshot,
 } from "./types";
 import { WindowTitleBar } from "./WindowTitleBar";
+import { ConfirmDialog } from "../shared/ConfirmDialog";
+import { formatBytes } from "../shared/format";
+import {
+  cleanupReasonLabel,
+  type PendingCleanupEntry,
+  type UnreferencedScanCandidate,
+} from "../shared/fileCleanup";
 import packageInfo from "../../package.json";
 
 const EMPTY_STATUS: RepositoryStatus = {
@@ -72,7 +81,7 @@ const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
   completionRevision: 0,
 };
 
-type SettingsOperation = "repository-scrub" | "repository-backup";
+type SettingsOperation = "repository-scrub" | "repository-backup" | "unreferenced-scan";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -89,6 +98,10 @@ export function App() {
   const [settingsOperation, setSettingsOperation] = useState<SettingsOperation | null>(null);
   const [backupRuntime, setBackupRuntime] = useState(IDLE_BACKUP_RUNTIME);
   const [cancelPending, setCancelPending] = useState(false);
+  const [pendingCleanup, setPendingCleanup] = useState<PendingCleanupEntry[]>([]);
+  const [scanCandidates, setScanCandidates] = useState<UnreferencedScanCandidate[] | null>(null);
+  const [scanConfirmOpen, setScanConfirmOpen] = useState(false);
+  const [cleanupBusy, setCleanupBusy] = useState(false);
 
   const load = async () => {
     setBusy(true);
@@ -188,6 +201,21 @@ export function App() {
       window.clearInterval(timer);
     };
   }, [settingsOpen, settingsOperation]);
+
+  // 打开设置或切到仓库页时读取一次待清理队列；只读，失败时保持上一次结果，
+  // 不阻塞设置页其余内容。
+  useEffect(() => {
+    if (!settingsOpen || settingsPage !== "repository" || !repository.ready) return;
+    let disposed = false;
+    void appApi.listPendingFileCleanup()
+      .then((entries) => {
+        if (!disposed) setPendingCleanup(entries);
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [settingsOpen, settingsPage, repository.ready]);
 
   const repositoryLabel = useMemo(() => {
     if (repository.ready) return "仓库就绪";
@@ -310,6 +338,92 @@ export function App() {
     }
   };
 
+  const refreshPendingCleanup = async () => {
+    if (!repository.ready) {
+      setPendingCleanup([]);
+      return;
+    }
+    try {
+      setPendingCleanup(await appApi.listPendingFileCleanup());
+    } catch {
+      // 队列读取失败保持上一次结果；重试/清理的结果已由命令返回值给出。
+    }
+  };
+
+  const retryCleanup = async (ids: string[]) => {
+    setCleanupBusy(true);
+    setMessage(null);
+    try {
+      const report = await appApi.retryFileCleanup(ids);
+      await refreshPendingCleanup();
+      if (report.failures.length > 0) {
+        setMessage(`已清理 ${report.cleanedCount} 个文件，仍有 ${report.failures.length} 个文件无法删除：${report.failures[0].error}`);
+      } else if (report.cleanedCount > 0) {
+        setMessage(`已清理 ${report.cleanedCount} 个待清理文件。`);
+      } else {
+        setMessage("待清理队列已为空。");
+      }
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
+  const scanUnreferenced = async () => {
+    let runtime: BackupRuntimeStatus;
+    try {
+      runtime = await appApi.getBackupRuntimeStatus();
+    } catch (error) {
+      setMessage(errorMessage(error));
+      return;
+    }
+    setBackupRuntime(runtime);
+    if (runtime.busy) {
+      setMessage("已有备份操作正在运行，请等待完成或先取消当前操作。");
+      return;
+    }
+    setSettingsOperation("unreferenced-scan");
+    setScanCandidates(null);
+    setMessage(null);
+    try {
+      const candidates = await appApi.scanRepositoryUnreferenced();
+      setScanCandidates(candidates);
+      setMessage(
+        candidates.length > 0
+          ? `未引用文件扫描完成：发现 ${candidates.length} 个可清理文件，请确认后清理。`
+          : "未引用文件扫描完成：没有发现可清理的未引用文件。",
+      );
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setSettingsOperation(null);
+      setCancelPending(false);
+    }
+  };
+
+  const purgeScanCandidates = async () => {
+    if (!scanCandidates || scanCandidates.length === 0) return;
+    const paths = scanCandidates.map((candidate) => candidate.path);
+    setScanConfirmOpen(false);
+    setCleanupBusy(true);
+    setMessage(null);
+    try {
+      const report = await appApi.cleanupRepositoryUnreferenced(paths);
+      setScanCandidates(null);
+      await refreshPendingCleanup();
+      if (report.failures.length > 0) {
+        setMessage(`已清理 ${report.cleanedCount} 个文件，${report.failures.length} 个文件未能删除，已加入待清理队列可重试。`);
+      } else {
+        setMessage(`已清理 ${report.cleanedCount} 个未引用文件。`);
+      }
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setCleanupBusy(false);
+    }
+  };
+
   const cancelSettingsOperation = async () => {
     setCancelPending(true);
     try {
@@ -324,7 +438,8 @@ export function App() {
 
   const runtimeMatchesSettings = backupRuntime.busy
     && (backupRuntime.operation === "repository-scrub"
-      || backupRuntime.operation === "repository-backup");
+      || backupRuntime.operation === "repository-backup"
+      || backupRuntime.operation === "unreferenced-scan");
   const visibleSettingsRuntime = runtimeMatchesSettings
     ? backupRuntime
     : settingsOperation
@@ -334,10 +449,20 @@ export function App() {
         operation: settingsOperation,
         progressLabel: settingsOperation === "repository-backup"
           ? "正在准备创建备份"
-          : "正在准备完整性检查",
+          : settingsOperation === "unreferenced-scan"
+            ? "正在准备未引用文件扫描"
+            : "正在准备完整性检查",
       }
       : null;
-  const settingsBusy = busy || settingsOperation !== null || backupRuntime.busy;
+  const settingsBusy = busy || settingsOperation !== null || backupRuntime.busy || cleanupBusy;
+  const pendingCleanupSummary = useMemo(() => {
+    if (!repository.ready) return "仓库不可用";
+    if (pendingCleanup.length === 0) return "没有待清理的文件";
+    const failed = pendingCleanup.filter((entry) => entry.lastError).length;
+    return failed > 0
+      ? `${pendingCleanup.length} 个文件待清理，其中 ${failed} 个上次删除失败`
+      : `${pendingCleanup.length} 个文件待清理`;
+  }, [pendingCleanup, repository.ready]);
 
   return (
     <main className="app-shell">
@@ -531,6 +656,93 @@ export function App() {
                     </div>
                   </div>
                 </div>
+
+                <div className="settings-section">
+                  <div className="settings-section-title"><Trash2 aria-hidden="true" size={17} /><h3>文件清理</h3></div>
+                  <div className="settings-preference-list settings-repository-actions">
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><Trash2 aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <strong>待清理队列</strong>
+                        <small>{pendingCleanupSummary}</small>
+                      </span>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => void retryCleanup([])}
+                        disabled={settingsBusy || !repository.ready || pendingCleanup.length === 0}
+                      >
+                        <RotateCcw aria-hidden="true" size={15} />全部重试
+                      </button>
+                    </div>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy is-descriptive">
+                        <strong>未引用文件扫描</strong>
+                        <small>查找未被任何记录引用的历史快照、增量与画板图片；只报告不删除，确认后才清理。</small>
+                      </span>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        onClick={() => void scanUnreferenced()}
+                        disabled={settingsBusy || !repository.ready}
+                      >
+                        <SearchCheck aria-hidden="true" size={15} />开始扫描
+                      </button>
+                    </div>
+                  </div>
+
+                  {pendingCleanup.length > 0 && (
+                    <div className="cleanup-queue" role="list" aria-label="待清理文件队列">
+                      {pendingCleanup.map((entry) => (
+                        <div className="cleanup-queue-row" role="listitem" key={entry.id}>
+                          <div className="cleanup-queue-copy">
+                            <strong title={entry.path}>{entry.path}</strong>
+                            <small>
+                              {cleanupReasonLabel(entry.reason)}
+                              {entry.lastError ? ` · 上次失败：${entry.lastError}` : " · 等待清理"}
+                              {entry.lastAttemptMs ? ` · ${new Date(entry.lastAttemptMs).toLocaleString()}` : ""}
+                            </small>
+                          </div>
+                          <button
+                            className="secondary-button"
+                            type="button"
+                            disabled={settingsBusy}
+                            onClick={() => void retryCleanup([entry.id])}
+                          >
+                            <RotateCcw aria-hidden="true" size={15} />重试
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {scanCandidates && (
+                    <div className="cleanup-scan-result" role="status">
+                      <header>
+                        <strong>{scanCandidates.length > 0 ? `发现 ${scanCandidates.length} 个未引用文件` : "没有发现未引用文件"}</strong>
+                        <div>
+                          <button className="text-button" type="button" onClick={() => setScanCandidates(null)}>关闭</button>
+                          {scanCandidates.length > 0 && (
+                            <button className="danger-button" type="button" disabled={settingsBusy} onClick={() => setScanConfirmOpen(true)}>
+                              <Trash2 aria-hidden="true" size={15} />清理这些文件
+                            </button>
+                          )}
+                        </div>
+                      </header>
+                      {scanCandidates.length > 0 && (
+                        <ul className="cleanup-candidate-list">
+                          {scanCandidates.map((candidate) => (
+                            <li key={candidate.path}>
+                              <span title={candidate.path}>{candidate.path}</span>
+                              <small>{candidate.reason} · {formatBytes(candidate.byteSize)}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
                 </>
               )}
 
@@ -698,6 +910,24 @@ export function App() {
             </footer>
           </section>
         </div>
+      )}
+
+      {scanConfirmOpen && scanCandidates && scanCandidates.length > 0 && (
+        <ConfirmDialog
+          view={{
+            icon: <Trash2 size={20} />,
+            eyebrow: "不可撤销",
+            title: "清理未引用文件",
+            subject: `${scanCandidates.length} 个未被引用的文件`,
+            description: "这些历史快照、增量或画板图片没有被任何记录引用，删除后无法恢复。",
+            detail: "清理前会再次复查引用与文件摘要；内容已变化或重新被引用的文件会被保留。",
+            action: `清理 ${scanCandidates.length} 个文件`,
+            danger: true,
+          }}
+          busy={cleanupBusy}
+          onCancel={() => setScanConfirmOpen(false)}
+          onConfirm={() => void purgeScanCandidates()}
+        />
       )}
     </main>
   );
