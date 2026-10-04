@@ -8,7 +8,10 @@ const appApi = vi.hoisted(() => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
   getRepositoryStatus: vi.fn(),
+  listPendingFileCleanup: vi.fn(),
   retryFileCleanup: vi.fn(),
+  scanRepositoryUnreferenced: vi.fn(),
+  cleanupRepositoryUnreferenced: vi.fn(),
   acknowledgeBackupDisableNotices: vi.fn(),
   getBackupDisableNoticeTarget: vi.fn(),
   scrubRepositoryIntegrity: vi.fn(),
@@ -131,6 +134,7 @@ describe("App repository switching", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    appApi.listPendingFileCleanup.mockResolvedValue([]);
     appApi.retryFileCleanup.mockResolvedValue({ failures: [] });
     appApi.acknowledgeBackupDisableNotices.mockResolvedValue(undefined);
     appApi.getBackupDisableNoticeTarget.mockResolvedValue(null);
@@ -454,5 +458,81 @@ describe("App repository switching", () => {
     fireEvent.click(screen.getByRole("button", { name: "知道了" }));
     await waitFor(() => expect(appApi.acknowledgeBackupDisableNotices)
       .toHaveBeenCalledWith(["shared-artwork-id"]));
+  });
+
+  it("lists the pending cleanup queue and retries a single entry", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.listPendingFileCleanup
+      .mockResolvedValueOnce([{
+        id: "cleanup-1",
+        path: "artworks/artwork-1/snapshots/orphan.lbc",
+        pathKind: "repository_file",
+        reason: "history_commit_release",
+        createdMs: 1,
+        lastAttemptMs: 1_700_000_000_000,
+        lastError: "文件仍被 历史节点 引用，已保留",
+      }])
+      .mockResolvedValue([]);
+    appApi.retryFileCleanup.mockResolvedValue({ cleanedCount: 1, pendingCount: 0, failures: [] });
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+
+    expect(await screen.findByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeTruthy();
+    expect(screen.getByText(/提交释放旧快照/)).toBeTruthy();
+    expect(screen.getByText(/上次失败：文件仍被 历史节点 引用，已保留/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith(["cleanup-1"]));
+    await waitFor(() => expect(screen.queryByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeNull());
+    expect(await screen.findByText("已清理 1 个待清理文件。")).toBeTruthy();
+  });
+
+  it("scans unreferenced files and cleans the confirmed candidates", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.scanRepositoryUnreferenced.mockResolvedValue([
+      { path: "artworks/artwork-1/snapshots/orphan.lbc", byteSize: 2048, reason: "历史快照未被引用" },
+      { path: "artworks/artwork-1/deltas/a-to-b.lbd", byteSize: 1024, reason: "历史增量未被引用" },
+    ]);
+    appApi.cleanupRepositoryUnreferenced.mockResolvedValue({ cleanedCount: 2, pendingCount: 0, failures: [] });
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始扫描" }));
+
+    expect(await screen.findByText("发现 2 个未引用文件")).toBeTruthy();
+    expect(screen.getByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeTruthy();
+    expect(screen.getByText("历史快照未被引用 · 2.00 KiB")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "清理这些文件" }));
+    fireEvent.click(await screen.findByRole("button", { name: "清理 2 个文件" }));
+
+    await waitFor(() => expect(appApi.cleanupRepositoryUnreferenced).toHaveBeenCalledWith([
+      "artworks/artwork-1/snapshots/orphan.lbc",
+      "artworks/artwork-1/deltas/a-to-b.lbd",
+    ]));
+    expect(await screen.findByText("已清理 2 个未引用文件。")).toBeTruthy();
   });
 });

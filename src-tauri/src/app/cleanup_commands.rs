@@ -24,6 +24,22 @@ pub(crate) async fn retry_pending_file_cleanup(
     .map_err(|error| format!("文件清理重试任务异常结束：{error}"))?
 }
 
+/// 列出待清理队列（路径、原因、上次失败信息），供设置页展示与重试。
+///
+/// 只读：走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回；
+/// 它不执行删除，也不写 `last_attempt_ms` / `last_error`。
+#[tauri::command]
+pub(crate) async fn list_pending_file_cleanup(
+    app_state: State<'_, AppState>,
+) -> Result<Vec<cleanup::PendingCleanupEntry>, String> {
+    let app_state = app_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app_state.with_repository_read(cleanup::list_pending)
+    })
+    .await
+    .map_err(|error| format!("读取待清理队列任务异常结束：{error}"))?
+}
+
 /// 扫描仓库内未被引用的历史文件（崩溃孤儿等），只报告、不删除。
 ///
 /// 与前台长命令同口径：持共享运行锁与仓库操作锁，可经统一取消入口取消；扫描

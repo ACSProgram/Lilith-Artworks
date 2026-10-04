@@ -1,5 +1,9 @@
 import { invokeCommand } from "../shared/tauri";
-import type { CleanupReport } from "../shared/fileCleanup";
+import type {
+  CleanupReport,
+  PendingCleanupEntry,
+  UnreferencedScanCandidate,
+} from "../shared/fileCleanup";
 import type {
   AppSettings,
   BackupDisableNoticeTarget,
@@ -21,8 +25,14 @@ export const appApi = {
   openSettingsDirectory: () => invokeCommand<void>("open_settings_directory"),
   revealPathInFolder: (path: string) =>
     invokeCommand<void>("reveal_path_in_folder", { path }),
+  listPendingFileCleanup: () =>
+    invokeCommand<PendingCleanupEntry[]>("list_pending_file_cleanup"),
   retryFileCleanup: (ids: string[]) =>
     invokeCommand<CleanupReport>("retry_pending_file_cleanup", { ids }),
+  scanRepositoryUnreferenced: () =>
+    invokeCommand<UnreferencedScanCandidate[]>("scan_repository_unreferenced"),
+  cleanupRepositoryUnreferenced: (paths: string[]) =>
+    invokeCommand<CleanupReport>("cleanup_repository_unreferenced", { paths }),
   acknowledgeBackupDisableNotices: (artworkIds: string[]) =>
     invokeCommand<void>("acknowledge_backup_disable_notices", { artworkIds }),
   getBackupDisableNoticeTarget: () =>
