@@ -113,6 +113,21 @@ pub(crate) fn board_relative_path(artwork_id: &str, board_id: i64) -> String {
     format!("artworks/{artwork_id}/{BOARD_DIRECTORY}/{board_id}")
 }
 
+/// 反向解析画板 DDS 的仓库相对路径
+/// `artworks/<artwork-id>/<BOARD_DIRECTORY>/<board-id>/<image-id>.dds`，返回
+/// `(artwork_id, board_id, image_id)`；不匹配时返回 `None`。它与 `board_relative_path`
+/// 是同一布局的正反两面，供 `cleanup` 的画板 DDS 反向引用检查使用，避免调用方另行
+/// 硬编码路径形状。
+pub(crate) fn parse_board_dds_path(path: &str) -> Option<(&str, i64, i64)> {
+    let parts = path.split('/').collect::<Vec<_>>();
+    if parts.len() != 5 || parts[0] != "artworks" || parts[2] != BOARD_DIRECTORY {
+        return None;
+    }
+    let board_id = parts[3].parse::<i64>().ok()?;
+    let image_id = parts[4].strip_suffix(".dds")?.parse::<i64>().ok()?;
+    Some((parts[1], board_id, image_id))
+}
+
 /// 画板 DDS 文件名：`<image-id>.dds`（image id 为 SQLite 自增正整数）。扫描与
 /// 完整性检查共用同一命名判定，避免两处漂移。
 pub(crate) fn is_dds_name(name: &str) -> bool {

@@ -104,6 +104,46 @@
 | F1 参数边界 | 8 类边界 | 备注 501、非法提交类型、标题 161、空标题、搜索 161、不存在历史节点、已存在输出、非法移动目标均被明确拒绝且不 panic |
 | B5 孤儿回收闭环 | 崩溃孤儿 2 枚 | 扫描精确报告两枚孤儿、确认清理删除、被引用文件保留、再扫描无候选 |
 
+## 上一批次：统一清理体系批次 F——可观测 UI 与文档收尾（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 F（§4.6），统一清理体系的最后一个批次。
+把清理账本与未引用扫描暴露到设置页，并同步模块文档；A–E 的落实偏差与设计决策见本文批次 F
+之前的记录。
+
+1. **新增 `cleanup::list_pending` 与 `list_pending_file_cleanup` 命令**：只读列举
+   `pending_file_cleanup`（按入队顺序），返回路径、`path_kind`、原因、入队时间、上次尝试
+   时间与 `last_error`（`PendingCleanupEntry`，serde camelCase）。命令走共享读租约
+   （`with_repository_read`）、不取运行锁，因此在备份、恢复、精简等长任务运行期间也能返回；
+   它不执行删除，也不写 `last_attempt_ms` / `last_error`。
+2. **设置页「仓库与备份」页新增「文件清理」区**：展示待清理队列（路径、原因、上次失败原因
+   与最近尝试时间），提供单条重试与全部重试（复用既有 `retry_pending_file_cleanup`，传空
+   id 即整队重放）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与
+   扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表在打开设置或切到仓库
+   页时读取一次，失败时保持上一次结果，不阻塞设置页其余内容。
+3. **共享 DTO 与展示映射**：`src/shared/fileCleanup.ts` 增加 `PendingCleanupEntry`、
+   `UnreferencedScanCandidate` 与入队原因的展示文案映射（未登记的原因回退为原字符串，新增
+   入队点不会静默丢失信息）；`src/app/api.ts` 增加三个命令的封装；`src/app/App.tsx` 增加
+   对应状态与处理；`src/styles/index.css` 增加队列与扫描结果的样式。
+4. **补齐批次 D 遗留的报告展示**：整仓灾备返回的 `reclaimedStagingDirectories` /
+   `failedStagingDirectories` 此前只在后端返回，本批次在前端 `RepositoryBackupReport` 类型
+   中补上并在备份成功文案中展示（仅在确有残留时出现）。
+5. **文档同步**：`docs/modules/history-and-backup.md` 补清理账本与未引用扫描契约段、命令
+   清单与设置页「文件清理」区说明；`docs/modules/pin-board.md` 更新画板 DDS 双向检查与
+   孤儿回收契约；`docs/architecture/overview.md` 同步设置页分页与完整性扫描范围。
+6. **收尾整理**：把画板 DDS 仓库相对路径的反向解析从 `cleanup` 收敛到
+   `pin_board::repository`（`parse_board_dds_path`），与 `board_relative_path` / `is_dds_name`
+   同处一模块，避免调用方另行硬编码路径形状；`cleanup::run` 的待清理计数只查询一次（日志与
+   返回共用同一值）；`cleanup_unreferenced` 在空候选时不再重复打开连接。同时修正
+   `history-and-backup.md` 中把未引用扫描范围误写为「仅 snapshot/delta」的表述（实际含画板
+   DDS，见 `pin_board::repository` 与 `cleanup::scan_unreferenced`）。
+7. **计划归档**：`cleanup-system-plan-2026-10-04.md` 移入 `docs/planning/archive/`，并在
+   `archive/README.md` 时间线登记。
+
+**验证**：`cargo check --lib` 无警告；`cargo fmt --check` 与 `git diff --check` 通过；
+`cargo test --lib` **151 通过**（新增 `list_pending` 用例）、1 个忽略项；`npx tsc --noEmit`
+通过；`npm test` **121 通过**（新增队列列举与单条重试、扫描与确认清理、灾备残留回收文案
+共 3 例）。
+
 ## 上一批次：统一清理体系批次 E——DDS 扫描与双向检查（已实现，待人工验收）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 E（§4.5）。维护者 2026-10-04 确认三项：

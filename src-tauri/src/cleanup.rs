@@ -10,7 +10,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    pin_board::repository::{is_dds_name, BOARD_DIRECTORY},
+    pin_board::repository::{is_dds_name, parse_board_dds_path, BOARD_DIRECTORY},
     storage,
 };
 
@@ -292,14 +292,14 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
             }
         }
     }
+    let pending_count = pending_count_with_connection(&connection)?;
     log::info!(
-        "file cleanup finished: cleaned={cleaned_count}, failed={}, pending={}",
+        "file cleanup finished: cleaned={cleaned_count}, failed={}, pending={pending_count}",
         failures.len(),
-        pending_count_with_connection(&connection)?
     );
     Ok(CleanupReport {
         cleaned_count,
-        pending_count: pending_count_with_connection(&connection)?,
+        pending_count,
         failures,
     })
 }
@@ -409,15 +409,14 @@ pub(crate) fn cleanup_unreferenced(root: &Path, paths: &[String]) -> Result<Clea
         )?);
     }
     transaction.commit().map_err(storage::database_error)?;
-    drop(connection);
     if cleanup_ids.is_empty() {
-        let connection = storage::open(root)?;
         return Ok(CleanupReport {
             cleaned_count: 0,
             pending_count: pending_count_with_connection(&connection)?,
             failures: Vec::new(),
         });
     }
+    drop(connection);
     run(root, &cleanup_ids)
 }
 
@@ -618,26 +617,14 @@ pub(crate) fn referenced_path_kind(
     Ok(reference)
 }
 
-/// 画板 DDS 的仓库相对路径形如
-/// `artworks/<artwork-id>/<BOARD_DIRECTORY>/<board-id>/<image-id>.dds`。命中时返回
-/// `(artwork_id, board_id, image_id)`，供 `pin_board_images` 反向引用检查使用。
-fn parse_pin_board_dds(path: &str) -> Option<(&str, i64, i64)> {
-    let parts = path.split('/').collect::<Vec<_>>();
-    if parts.len() != 5 || parts[0] != "artworks" || parts[2] != BOARD_DIRECTORY {
-        return None;
-    }
-    let board_id = parts[3].parse::<i64>().ok()?;
-    let image_id = parts[4].strip_suffix(".dds")?.parse::<i64>().ok()?;
-    Some((parts[1], board_id, image_id))
-}
-
 /// 复查画板 DDS 是否仍被 `pin_board_images` 记录引用（画板记录删除后即不再引用）。
-/// 非画板 DDS 路径一律返回 `None`。
+/// 路径形状交给 `pin_board::repository::parse_board_dds_path` 解析；非画板 DDS 路径
+/// 一律返回 `None`。
 fn referenced_pin_board_dds(
     connection: &rusqlite::Connection,
     path: &str,
 ) -> Result<Option<String>, String> {
-    let Some((artwork_id, board_id, image_id)) = parse_pin_board_dds(path) else {
+    let Some((artwork_id, board_id, image_id)) = parse_board_dds_path(path) else {
         return Ok(None);
     };
     connection
