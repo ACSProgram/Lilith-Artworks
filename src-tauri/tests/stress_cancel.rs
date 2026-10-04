@@ -105,13 +105,15 @@ impl Fixture {
 
 /// A1 提交取消：在提交的每一个取消检查点各取消一次。
 ///
-/// `run_backup` 的检查点依次是：载入分支后、snapshot 建成后、发布前、发布后（回滚分支）。
-/// 第四个是唯一会走到「已发布文件回滚」代码的取消点，因此逐个覆盖是必要的。
+/// `run_backup` 的检查点依次是：载入分支后、snapshot 建成后、发布前、发布后（回滚分支）；
+/// 第 5 个落在 `history::commit` 的事务内部（headless-only 标记点，见 B4）。第 4、5 个是
+/// 仅有的两个会走到「已发布文件回滚」代码的取消点——第 4 个走 `run_backup` 的回滚分支，
+/// 第 5 个走 `history::commit` 的错误分支——因此逐个覆盖是必要的。
 #[test]
 fn a1_commit_cancellation_is_clean_at_every_checkpoint() {
     let fixture = Fixture::new();
     let mut expected_nodes = 0_u64;
-    for target in 1..=4 {
+    for target in 1..=5 {
         let len = 96 * 1024 + target * 16;
         let seed = 100 + target as u64;
         write_work_file(&fixture.work, len, seed);

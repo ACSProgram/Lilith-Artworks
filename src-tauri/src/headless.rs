@@ -15,7 +15,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Mutex,
+        Mutex, OnceLock,
     },
     time::Instant,
 };
@@ -32,6 +32,29 @@ use crate::{
 const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_CANCELLED: i32 = 2;
+
+/// 进程级闸门。`history::commit` 的「事务已写入、尚未提交」标记点需要它（见
+/// [`commit_marker`]），而该标记点位于领域函数内部、拿不到调用栈上的闸门。
+/// 一个无头进程只执行一条命令，因此进程级单例足够，不必层层传参。
+static INTERLOCK: OnceLock<Interlock> = OnceLock::new();
+
+/// 「事务已 BEGIN、INSERT 已写、尚未 COMMIT」的强杀/取消标记点。
+///
+/// 这是**唯一一处**为测试而触及产品代码的标记点：`history::commit` 在
+/// `transaction.commit()` 之前调用它，调用点本身由 `feature = "headless"` 门控，
+/// 因此发布产物中不存在、GUI 路径行为逐位不变。
+///
+/// 返回「此刻是否已请求取消」：调用方据此放弃提交，让未提交事务被整体丢弃。
+/// 无头进程没有开闸门时只写一行 marker 并立即返回 `false`。
+pub(crate) fn commit_marker() -> bool {
+    match INTERLOCK.get() {
+        Some(interlock) => {
+            interlock.stage("事务已写入，尚未提交");
+            interlock.checkpoint()
+        }
+        None => false,
+    }
+}
 
 /// 命令行入口。返回进程退出码：0 成功、1 失败、2 取消。
 pub fn run(args: &[String]) -> i32 {
@@ -55,9 +78,11 @@ pub fn run(args: &[String]) -> i32 {
             return EXIT_ERROR;
         }
     };
+    // 登记为进程级单例：`history::commit` 的标记点（headless-only）据此取得闸门。
+    let interlock = INTERLOCK.get_or_init(|| interlock);
     interlock.stage(&format!("started command={}", options.command));
 
-    let outcome = dispatch(&options, &interlock);
+    let outcome = dispatch(&options, interlock);
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let cancelled = interlock.cancelled();
     let (ok, error, data) = match outcome {

@@ -508,6 +508,13 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<Strin
             }
         }
     }
+    // 无头测试的强杀标记点：事务已 BEGIN、INSERT 已写、尚未 COMMIT。仅存在于
+    // headless 构建（发布产物中不存在），GUI 与领域逻辑逐位不变；无头入口没有开
+    // 闸门时是空操作。取消时直接返回错误，事务随 `Transaction` 析构被整体丢弃。
+    #[cfg(feature = "headless")]
+    if crate::headless::commit_marker() {
+        return Err("提交已取消".into());
+    }
     transaction.commit().map_err(storage::database_error)?;
     Ok(cleanup_ids)
 }
