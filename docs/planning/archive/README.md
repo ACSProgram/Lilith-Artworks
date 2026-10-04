@@ -16,3 +16,8 @@
 - `task-control-plan-2026-10-03.md`：任务调度总控与空闲链路校验（alpha3 批次 A–D）的规划，
   含 BackupState 任务类型与取消路由、schema v4 校验状态、调度器两级选择与失败警告面。
   已实施完毕，有效契约并入 `docs/modules/history-and-backup.md`，待人工验收项见 `../todo.md`。
+- `cleanup-system-plan-2026-10-04.md`：统一清理体系（批次 A–F）的规划，覆盖画板结算改提交后
+  清理、历史文件清理入队、未引用文件扫描、灾备暂存目录清扫、完整性扫描覆盖画板 DDS 与双向
+  检查、可观测 UI 与文档收尾。六个批次已全部实施完毕，有效契约并入
+  `docs/modules/history-and-backup.md`、`docs/modules/pin-board.md` 与
+  `docs/architecture/overview.md`，待人工验收项见 `../todo.md`。

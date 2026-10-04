@@ -77,6 +77,10 @@ export interface RepositoryBackupReport extends RepositoryIntegrityCounts {
   repositoryPath: string;
   fileCount: number;
   totalBytes: number;
+  /** 本次备份启动前回收的残留灾备暂存目录数量。 */
+  reclaimedStagingDirectories: number;
+  /** 未能回收的残留暂存目录数量；不为零也不阻断本次备份。 */
+  failedStagingDirectories: number;
 }
 
 /** 当前占用共享运行锁的任务类型；与后端 `BackupTaskKind` 的序列化值一致。 */

@@ -20,7 +20,18 @@ before and after the first stable release.
   idempotent and a candidate that becomes referenced again stays queued for
   retry. Both commands run under the shared run lock and the repository
   operation lock and are cancellable; neither is exposed as a headless
-  subcommand. The settings-page entry point lands in a later batch.
+  subcommand. The settings page exposes both the scan and the confirmed
+  cleanup.
+- The repository settings page gains a "文件清理" section that surfaces the
+  cleanup ledger and its discovery mechanism. It lists every pending entry
+  (path, reason, last error, last attempt time) with per-entry and full-queue
+  retries through `retry_pending_file_cleanup`, runs the unreferenced-file scan
+  under the shared cancellable run state, and shows the reported candidates
+  with their size and reason before purging them behind an in-app
+  confirmation. The list is read-only through a new `list_pending_file_cleanup`
+  command that takes the shared repository read lease instead of the run lock,
+  so the queue still answers while a backup, restore, or compaction runs and
+  the listing never writes `last_attempt_ms` or `last_error`.
 - Repository integrity checking now covers pin-board DDS files in both
   directions. A third segment of `scrub_repository_integrity` walks every
   `pin_board_images` record and checks that its DDS exists under its board
@@ -75,11 +86,12 @@ before and after the first stable release.
 
 ### Changed
 
-- The application version is incremented to `0.2.0-alpha.4`. This is a
-  version-number-only bump: there is no tag and no release, matching the
-  alpha.1 and alpha.2 precedent. Product behavior is unchanged from the
-  `0.2.0-alpha.3` section below; the schema v4, scheduler, and stress-test
-  batches recorded there remain part of that section.
+- The application version is incremented to `0.2.0-alpha.4`. The bump itself
+  carries no behavior change and follows the alpha-stage lagging-version
+  policy (no tag, no release, matching the alpha.1 and alpha.2 precedent); the
+  unified cleanup system recorded above landed under the same version
+  afterwards. The schema v4, scheduler, and stress-test batches recorded under
+  `0.2.0-alpha.3` below remain part of that section.
 
 ## 0.2.0-alpha.3 - 2026-10-03
 

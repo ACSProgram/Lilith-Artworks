@@ -158,6 +158,8 @@ describe("App repository switching", () => {
       historyNodes: 2,
       finalArtifacts: 0,
       certificationRecords: 0,
+      reclaimedStagingDirectories: 0,
+      failedStagingDirectories: 0,
     });
   });
 
@@ -262,6 +264,40 @@ describe("App repository switching", () => {
     expect(await screen.findByText(/备份已校验：4 个文件、2 个历史节点/)).toBeTruthy();
   });
 
+  it("reports reclaimed staging directories after a repository backup", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    dialog.open.mockResolvedValue("C:\\backups");
+    appApi.createRepositoryBackup.mockResolvedValue({
+      backupPath: "C:\\backups\\Lilith-Artworks-backup-1",
+      repositoryPath: "C:\\backups\\Lilith-Artworks-backup-1\\repository",
+      fileCount: 4,
+      totalBytes: 1024,
+      historyNodes: 2,
+      finalArtifacts: 0,
+      certificationRecords: 0,
+      reclaimedStagingDirectories: 2,
+      failedStagingDirectories: 1,
+    });
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
+
+    expect(await screen.findByText(/并回收 2 个残留暂存目录/)).toBeTruthy();
+    expect(screen.getByText(/1 个残留暂存目录未能回收/)).toBeTruthy();
+  });
+
   it("shows repository backup progress and exposes cancellation", async () => {
     const repositoryPath = "C:\\repositories\\A";
     const backupRequest = deferred<{
@@ -272,6 +308,8 @@ describe("App repository switching", () => {
       historyNodes: number;
       finalArtifacts: number;
       certificationRecords: number;
+      reclaimedStagingDirectories: number;
+      failedStagingDirectories: number;
     }>();
     let backupStarted = false;
     appApi.getSettings.mockResolvedValue(settings(repositoryPath));
@@ -330,6 +368,8 @@ describe("App repository switching", () => {
         historyNodes: 2,
         finalArtifacts: 0,
         certificationRecords: 0,
+        reclaimedStagingDirectories: 0,
+        failedStagingDirectories: 0,
       });
       await backupRequest.promise;
     });

@@ -327,8 +327,14 @@ export function App() {
     setMessage(null);
     try {
       const report = await appApi.createRepositoryBackup(selected);
+      const reclaimed = report.reclaimedStagingDirectories > 0
+        ? `，并回收 ${report.reclaimedStagingDirectories} 个残留暂存目录`
+        : "";
+      const reclaimFailed = report.failedStagingDirectories > 0
+        ? `（另有 ${report.failedStagingDirectories} 个残留暂存目录未能回收，不影响本次备份）`
+        : "";
       setMessage(
-        `备份已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点。恢复时选择 ${report.repositoryPath}`,
+        `备份已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点${reclaimed}${reclaimFailed}。恢复时选择 ${report.repositoryPath}`,
       );
     } catch (error) {
       setMessage(errorMessage(error));
