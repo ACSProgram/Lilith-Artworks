@@ -26,7 +26,7 @@ use serde_json::{json, Value};
 use crate::{
     app::AppState,
     backup::{self, restore, worker, BackupState, BackupTaskKind},
-    cleanup, history, library,
+    cleanup, history, library, pin_board, storage,
 };
 
 const EXIT_OK: i32 = 0;
@@ -163,6 +163,9 @@ fn usage() -> String {
          \x20 create-branch        从历史节点分叉新分支\n\
          \x20 delete-branch        删除分支历史\n\
          \x20 list-history         列出某 Artwork 的分支与节点计数\n\
+         \x20 create-board         为 Artwork 创建画板\n\
+         \x20 import-board-images  按路径导入画板图片\n\
+         \x20 scrub-board-dds      双向检查画板 DDS（缺失/损坏/孤儿）\n\
          \x20 commit               提交分支工作文件\n\
          \x20 restore              恢复历史节点到输出文件\n\
          \x20 compact              精简中间历史节点\n\
@@ -195,7 +198,9 @@ fn usage() -> String {
          \x20 --query                                    search\n\
          \x20 --history                                  restore/compact/checkpoint\n\
          \x20 --output                                   restore\n\
-         \x20 --destination                              repository-backup\n",
+         \x20 --destination                              repository-backup\n\
+         \x20 --artwork/--title                          create-board\n\
+         \x20 --board/--revision/--paths                 import-board-images\n",
     );
     text
 }
@@ -213,7 +218,7 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 18] = [
+        const KNOWN: [&str; 21] = [
             "workspace",
             "repository",
             "result",
@@ -232,6 +237,9 @@ impl Options {
             "artwork",
             "query",
             "index",
+            "board",
+            "revision",
+            "paths",
         ];
         let command = args
             .first()
@@ -315,6 +323,23 @@ impl Options {
     /// 解析一个必须位于工作区之内的路径参数，并校验其确实在工作区内。
     fn path_within(&self, key: &str, label: &str) -> Result<PathBuf, String> {
         resolve_within(&self.workspace, Path::new(self.require(key)?), label)
+    }
+
+    /// 逗号分隔的路径列表（`--paths`）；每一项都必须位于工作区之内，与 `--source`
+    /// 同样是无头进程的安全属性。空值返回空表。
+    fn path_list(&self, key: &str, label: &str) -> Result<Vec<String>, String> {
+        let Some(value) = self.value(key) else {
+            return Ok(Vec::new());
+        };
+        value
+            .split(',')
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(|item| {
+                resolve_within(&self.workspace, Path::new(item), label)
+                    .map(|path| path.to_string_lossy().into_owned())
+            })
+            .collect()
     }
 
     /// 与 Tauri 侧同样可无 Tauri 构造的状态装配：仓库路径来自命令行，设置与日志
@@ -477,6 +502,9 @@ fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
         "create-branch" => create_branch(options),
         "delete-branch" => delete_branch(options),
         "list-history" => list_history(options),
+        "create-board" => create_board(options),
+        "import-board-images" => import_board_images(options),
+        "scrub-board-dds" => scrub_board_dds(options, interlock),
         "commit" => commit(options, interlock),
         "restore" => restore_node(options, interlock),
         "compact" => compact_node(options, interlock),
@@ -640,6 +668,98 @@ fn list_history(options: &Options) -> Result<Value, String> {
     Ok(json!({
         "branchCount": history.branches.len(),
         "nodeCount": history.nodes.len(),
+    }))
+}
+
+/// 创建画板。与 GUI 的 `create_pin_board` 走同一领域函数（`repository::create_board`），
+/// 只多返回一个修订号供后续导入做并发校验——GUI 侧修订号由前端在加载画板时取得。
+fn create_board(options: &Options) -> Result<Value, String> {
+    let artwork_id = options.require("artwork")?;
+    let name = options.require("title")?;
+    let app_state = options.app_state();
+    app_state.with_ready_repository(|root| {
+        let mut connection = storage::open(root)?;
+        let summary = pin_board::repository::create_board(&mut connection, artwork_id, name)?;
+        let summary =
+            serde_json::to_value(&summary).map_err(|error| format!("无法序列化画板：{error}"))?;
+        let board_id = summary["boardId"]
+            .as_i64()
+            .ok_or("画板创建结果缺少 boardId")?;
+        let context = pin_board::repository::open_board_context(&connection, root, board_id)?;
+        Ok(json!({
+            "boardId": board_id,
+            "revision": context.revision,
+            "name": context.name,
+        }))
+    })
+}
+
+/// 按路径导入画板图片。与 GUI 的 `import_pin_board_images` 走同一领域函数
+/// （`repository::import_images`）。布局参数（中心与间距）取固定默认值——无头进程
+/// 不驱动界面，图片摆放位置不影响 DDS 落盘与完整性检查。
+fn import_board_images(options: &Options) -> Result<Value, String> {
+    let board_id = options
+        .require("board")?
+        .parse::<i64>()
+        .map_err(|_| format!("--board 必须是整数，收到 {:?}", options.value("board")))?;
+    let revision = options.require("revision")?;
+    let paths = options.path_list("paths", "画板导入源图")?;
+    if paths.is_empty() {
+        return Err("import-board-images 需要 --paths".into());
+    }
+    let app_state = options.app_state();
+    let (view, image_ids) = app_state.with_ready_repository(|root| {
+        let mut connection = storage::open(root)?;
+        pin_board::repository::import_images(
+            &mut connection,
+            root,
+            board_id,
+            &paths,
+            0.0,
+            0.0,
+            0.0,
+            revision,
+            |_current, _total| {},
+        )
+    })?;
+    let view =
+        serde_json::to_value(&view).map_err(|error| format!("无法序列化画板视图：{error}"))?;
+    let revision = view
+        .get("revision")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned();
+    let image_count = view
+        .get("images")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    Ok(json!({
+        "imageIds": image_ids,
+        "imageCount": image_count,
+        "revision": revision,
+    }))
+}
+
+/// 双向检查画板 DDS：记录 → 文件（缺失/损坏）与文件 → 记录（孤儿）。缺失与损坏
+/// **报告不失败**——命令照常成功返回，计数交给调用方判断。走 GUI 完整性检查第三段
+/// 的同一领域函数 `pin_board::scrub::scrub_board_dds`，逐条响应取消。
+fn scrub_board_dds(options: &Options, interlock: &Interlock) -> Result<Value, String> {
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let report = state.run_foreground(None, || {
+        app_state.with_ready_repository(|root| {
+            pin_board::scrub::scrub_board_dds(
+                root,
+                || interlock.checkpoint(),
+                |current, total| interlock.stage(&format!("画板 DDS 完整性检查 {current}/{total}")),
+            )
+        })
+    })?;
+    Ok(json!({
+        "images": report.images,
+        "missing": report.missing,
+        "corrupt": report.corrupt,
+        "orphans": report.orphans,
     }))
 }
 

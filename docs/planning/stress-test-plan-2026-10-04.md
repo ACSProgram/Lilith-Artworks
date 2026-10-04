@@ -3,9 +3,10 @@
 - 规划日期：2026-10-04（同日订正并重排，见 §7 与 §11.4；2026-10-04 二次订正，见下方）
 - 目标版本：待定（落实时由维护者决定是否随 `0.2.0-alpha.4` 递增；本批次本身不要求版本变化）
 - 状态：**部分实施**。批次 1（无头入口与取消边界）、批次 2（跨进程崩溃）、批次 2 补充
-  （事务中途崩溃 B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）与批次 5
-  （崩溃孤儿回收闭环）已落实并记录于 `docs/planning/current-handoff.md`；统一清理体系
-  （`archive/cleanup-system-plan-2026-10-04.md`）亦已落实，改变了本计划的多处前提。批次 6 起待实施。
+  （事务中途崩溃 B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）、批次 5
+  （崩溃孤儿回收闭环）与批次 6（画板 DDS 完整性）已落实并记录于
+  `docs/planning/current-handoff.md`；统一清理体系
+  （`archive/cleanup-system-plan-2026-10-04.md`）亦已落实，改变了本计划的多处前提。批次 7、8 待实施。
 - 实施完成后：本文件移入 `archive/`，有效契约并入 `docs/guides/validation.md` 与相关模块文档，
   未完成项沉淀到 `todo.md`。
 
@@ -23,7 +24,7 @@
    磁盘上限默认值由 12 GiB 提到 **24 GiB**。
 4. **新增批次 5（崩溃孤儿回收闭环）与批次 6（画板 DDS 完整性）**：画板 DDS 的双向检查
    （损坏/缺失/孤儿）与崩溃孤儿回收闭环，前置已由清理体系解除；孤儿回收已随批次 5 落实，
-   画板 DDS 需要给无头入口补充画板写入命令（见 §4.1）。
+   画板 DDS 已随批次 6 落实——无头入口补齐了画板写入与校验命令（见 §4.1、§7 批次 6）。
 5. **测试内容按「现实可遇」重估**：规模场景的量级收敛到个人长期使用的真实上限
    （数百 Artwork、单作品数百节点/数十分支），见 §3.1 的评估标准与 §5 的矩阵。
 
@@ -229,6 +230,9 @@ lilith-artworks --headless <command> [options]
 | `create-branch` | `backup::ensure_checkpoint` + `history::create_branch` |
 | `delete-branch` | `history::delete_branch` + `cleanup::replay` |
 | `list-history` | `history::list` |
+| `create-board` | `pin_board::repository::create_board`（+ `open_board_context` 取修订号） |
+| `import-board-images` | `pin_board::repository::import_images` |
+| `scrub-board-dds` | `pin_board::scrub::scrub_board_dds` |
 | `enter-publication` | `authenticity::{branch_head, store_final_artifact, get_publication}` |
 | `publish` | `authenticity::publish_artifact`（C2PA 签名 + TrustMark 编码） |
 | `cancel-publication` | `authenticity::remove_artifact` + `cleanup::run` |
@@ -611,15 +615,30 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 - 验证：`cargo test --features headless --test stress_cleanup`；`cargo test --features headless
   --test stress_crash` 结论不变；`cargo check --lib`、`cargo test --lib`、`npm test` 不变。
 
-### 批次 6：画板 DDS 完整性（H）——待实施（前置：无头画板命令）
+### 批次 6：画板 DDS 完整性（H）——已落实（2026-10-04）
 
-- 需要先给无头入口补上画板命令（创建画板、导入图片），否则「记录 → 文件」的缺失/损坏路径
-  无法构造——画板记录只能由导入流程写入，测试进程不直接访问数据库。
-- 场景：H1（双向检查：正常/缺失/损坏/孤儿四类计数，缺失与损坏报告不失败）、
-  H2（孤儿 DDS 经 `scan-unreferenced` 发现 + 确认清理，被引用 DDS 不误删）、
-  H3（单画板数百张图片的规模与取消）。
-- 说明：孤儿 DDS 的**发现与清理**已可用（并入批次 5 的扫描），缺的是「记录 → 文件」方向
-  所需的画板写入入口；因此 H 拆到本批次单独做。
+- **无头入口扩展**（1:1 薄映射、feature 门控）：`create-board`（`repository::create_board`）、
+  `import-board-images`（`repository::import_images`）、`scrub-board-dds`
+  （`pin_board::scrub::scrub_board_dds`）。前两者只做参数解析、锁与状态装配、领域调用；
+  `scrub-board-dds` 桥接取消检查点与阶段名，缺失/损坏**报告不失败**（命令照常成功返回）。
+  导入的源图路径经 `--paths` 逗号切分并逐一校验位于 `--workspace` 之内，与 `--source`
+  同样是无头进程的安全属性。
+- **`tests/stress_pin_board.rs`（3 个测试）**：H1 双向检查四类计数、H2 孤儿 DDS 回收闭环、
+  H3 单画板 300 张图片的规模与取消。
+- **画板记录只能由导入流程写入**：测试进程不直接访问数据库，因此「记录 → 文件」的
+  缺失/损坏只能靠无头导入命令构造——这正是本批次必须先补画板写入入口的原因。
+- 落实偏差（已核实）：`repository::create_board` 在领域层按**相对路径**补建
+  `artworks/<id>/boards/<id>` 目录（GUI 侧的真实行为），测试编排因此把无头子进程的工作目录
+  固定到工作区内的 `scratch/`，避免在 `src-tauri/` 下留下空目录；所有路径参数都是绝对路径，
+  固定 CWD 不改变任何命令的解析结果。**未改动产品代码**（该行为属既有实现，不在本批次范围）。
+- 实测（2026-10-04，`target/stress-report.jsonl`，debug 档无头进程）：H1 37 ms、H2 47 ms、
+  H3 132 ms；H1 精确报告 images 3 / missing 1 / corrupt 1 / orphans 1；H2 扫描只报告 1 枚
+  孤儿（被引用 DDS 即便同样回拨到宽限期之外也不报告）、确认清理后归零；H3 300 张图片全部
+  命中、无缺失/损坏/孤儿，取消落在第 1 个检查点后重试成功，峰值内存约 15 MB。
+- 验证：`cargo check --lib` 无警告；`cargo check --features headless` 通过；
+  `cargo test --features headless --test stress_pin_board` 3/3 通过；
+  `cargo test --lib` 151 通过、`npm test` 121 通过（结论均不变）；既有套件
+  `stress_cancel` 6、`stress_crash` 4、`stress_cleanup` 1、`stress_scale` 5 结论不变。
 
 ### 批次 7：认证模块（G）——唯一触及安全边界的批次
 
@@ -677,8 +696,8 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
   承诺（§7；2026-10-04 已落实）。
 - 断电持久性**不做自动化**，由 OS/磁盘与 `synchronous = FULL` 声明保证（§6）。
 - 排期按 §11.4 重排（2026-10-04 二次订正）：批次 1–3 与统一清理体系已落实，批次 4（规模与
-  灾备、参数边界）、批次 5（崩溃孤儿回收闭环）随后落实；批次 6（画板 DDS）、批次 7（认证）、
-  批次 8（文档收尾）待实施。
+  灾备、参数边界）、批次 5（崩溃孤儿回收闭环）随后落实；批次 6（画板 DDS）随后落实；
+  批次 7（认证）、批次 8（文档收尾）待实施。
 
 **待维护者确认：**
 
@@ -778,8 +797,8 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 
 **结论：本计划（压力测试）完成不等于可以进入 rc1。** 它补齐的是 `release-policy.md`
 人工门槛里「可程序判定」的那一部分；rc1 还需要另外四类工作。
-截至 2026-10-04（批次 2 补充落实后），批次 1–5 与批次 2 补充已落实（含统一清理体系）；
-批次 6–8 未落实。
+截至 2026-10-04（批次 6 落实后），批次 1–6 与批次 2 补充已落实（含统一清理体系）；
+批次 7、8 未落实。
 
 ### 11.1 本批次覆盖的部分
 
@@ -792,7 +811,7 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 | 各处理阶段的取消边界（提交、恢复、精简、检查点、整仓灾备、认证签名） | ◐ 部分覆盖（A 组已落实；认证签名 G3 待批次 7） |
 | 极端大文件与高像素压力的内存、取消、退出与错误恢复 | ◐ 日常使用已通过（2 GiB 工作文件）；**错误恢复**由 C 组 + G 组覆盖 |
 | 损坏文件的恢复路径（snapshot/delta 缺失或摘要不匹配） | ◐ 部分覆盖（崩溃窗口由 B 组、事务中途由 B4、孤儿回收由 B5；缺失/摘要不匹配由既有单测）；异常时间戳服务仍需人工 |
-| 画板 DDS 损坏、缺失、孤儿文件 | ◐ 部分覆盖（清理体系已提供双向检查与孤儿回收能力；H 组待批次 6） |
+| 画板 DDS 损坏、缺失、孤儿文件 | ◐ 部分覆盖（H 组已落实：双向检查与孤儿回收已自动化；结算/仓库切换期间的保存失败恢复仍需人工） |
 | 异常 RFC 3161 时间戳服务的失败与超时行为 | ❌ 不在范围，保留人工 |
 | 普通用户账户安装、Authenticode 签名与时间戳验证 | ✅ 已实测通过（2026-10-04），不再是待验收项 |
 | 第三方工具回读 C2PA、随包模型验证 TrustMark 实图 | ✅ 已实测通过（2026-10-04），不再是待验收项 |
@@ -829,20 +848,19 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 ### 11.4 排期建议（2026-10-04，批次 2 补充落实后）
 
 **已落实**：批次 1（无头入口与取消边界）、批次 2（跨进程崩溃）、批次 2 补充（事务中途崩溃
-B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）、批次 5（崩溃孤儿回收闭环）；
-统一清理体系与任务调度总控批次亦已完成。
+B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）、批次 5（崩溃孤儿回收闭环）、
+批次 6（画板 DDS 完整性）；统一清理体系与任务调度总控批次亦已完成。
 
-**未落实**：批次 6（画板 DDS）、批次 7（认证 G）、批次 8（文档收尾），以及 §11.2 列出的
+**未落实**：批次 7（认证 G）、批次 8（文档收尾），以及 §11.2 列出的
 剩余 P1（素材板运行时结算接入）与发布链工作。
 
 **建议顺序：**
 
-1. **批次 6（画板 DDS H）**：需先补画板无头命令（创建画板、导入图片），工作量主要在无头入口。
-2. **批次 7（认证 G）**：唯一触及安全控制（授权作用域重构），需单独人工确认。
-3. **批次 8（文档与收尾）**：最后统一更新 `validation.md`、模块文档、`todo.md`、`CHANGELOG.md`
+1. **批次 7（认证 G）**：唯一触及安全控制（授权作用域重构），需单独人工确认。
+2. **批次 8（文档与收尾）**：最后统一更新 `validation.md`、模块文档、`todo.md`、`CHANGELOG.md`
    并归档本文件。
-4. **剩余 P1（素材板运行时变更结算接入）**：与压力测试写路径相关，建议在批次 6 之前完成，
-   避免画板相关断言重跑。
+3. **剩余 P1（素材板运行时变更结算接入）**：与压力测试写路径相关，可与批次 7 并行推进，
+   落地后重跑一次画板相关断言即可。
 
 **不进入自动化**：断电持久性（见 §6）。**孤儿与暂存目录的回收**已由统一清理体系提供
 （扫描报告 + 用户确认），批次 5 验证其闭环；它不再是「待落地的产品能力」。

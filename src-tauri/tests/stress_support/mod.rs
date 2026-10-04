@@ -235,7 +235,12 @@ impl<'a> Spawn<'a> {
             .arg("--marker")
             .arg(&marker)
             .arg("--result")
-            .arg(&result);
+            .arg(&result)
+            // 让子进程的工作目录落在工作区内，而不是继承 `cargo test` 的 CWD：
+            // 画板创建在领域层按相对路径补建 `artworks/<id>/boards/<id>` 目录，
+            // 若继承 CWD 会在 `src-tauri/` 下留下空目录。所有路径参数都是绝对路径，
+            // 因此固定 CWD 不改变任何命令的解析结果，只让副作用留在可回收的工作区内。
+            .current_dir(self.workspace.scratch_directory());
         if self.gate {
             command.arg("--cancel-on-stdin");
         }

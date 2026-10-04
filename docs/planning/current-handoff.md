@@ -21,7 +21,48 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：压力测试批次 2 补充——事务中途崩溃（B4）（已实现）
+## 本轮批次：压力测试批次 6——画板 DDS 完整性（H）（已实现）
+
+落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 6」。它把画板 DDS 的完整性检查
+补成可自动化断言：双向检查区分「正常 / 缺失 / 损坏 / 孤儿」四类、缺失与损坏报告不失败、
+孤儿 DDS 走「扫描发现 + 用户确认清理」闭环、单画板数百张图片下规模与取消均正确。批次 6
+只扩展无头入口与测试，**不改动任何产品命令的行为**；无头入口仍 feature 门控、不进发布产物。
+
+1. **无头入口扩展（1:1 薄映射）**：新增 `create-board`（`repository::create_board` +
+   `open_board_context` 取修订号）、`import-board-images`（`repository::import_images`）、
+   `scrub-board-dds`（`pin_board::scrub::scrub_board_dds`）。前两者与 GUI 的
+   `create_pin_board` / `import_pin_board_images` 走同一领域函数，只做参数解析、锁与状态
+   装配、领域调用；导入源图经 `--paths` 逗号切分并逐一校验位于 `--workspace` 之内，与
+   `--source` 同样是无头进程的安全属性。`scrub-board-dds` 桥接取消检查点与阶段名，
+   缺失/损坏只计数、命令仍成功返回。
+2. **`tests/stress_pin_board.rs`（3 个测试）**：
+   - **H1 双向检查**：导入 3 张图片后分别删除一张、截断一张、复制一张成无记录孤儿，
+     `scrub-board-dds` 精确报告 images 3 / missing 1 / corrupt 1 / orphans 1，且命令
+     成功返回（缺失与损坏不失败）。
+   - **H2 孤儿 DDS 回收**：复制一份被引用 DDS 成孤儿，把两份 DDS 都回拨到 30 分钟宽限期
+     之外 → `scan-unreferenced` 只报告孤儿（被引用者即便同样过期也不报告）→
+     `cleanup-unreferenced` 删除孤儿、被引用 DDS 保留 → 再扫描无候选（幂等）。
+   - **H3 规模与取消**：单画板 300 张图片（分 3 批导入，单批上限 256）全部命中、无缺失/
+     损坏/孤儿；在第 1 个检查点取消后重试成功；峰值内存有界。
+3. **测试编排的隔离性收紧**：`repository::create_board` 在领域层按相对路径补建
+   `artworks/<id>/boards/<id>` 目录（GUI 侧既有行为），共享助手据此把无头子进程的工作目录
+   固定到工作区内的 `scratch/`，避免在 `src-tauri/` 下留下空目录。所有路径参数都是绝对路径，
+   固定 CWD 不改变任何命令的解析结果。**未改动产品代码**。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过；`cargo fmt`
+已执行、`cargo fmt --check` 与 `git diff --check` 通过；`cargo test --lib` **151 通过**、
+1 个忽略项（未改库代码，结论不变）；`npm test` **121 通过**（未改前端）。
+新增 `stress_pin_board` **3 通过**；既有套件 `stress_cancel` **6 通过**、`stress_crash`
+**4 通过**、`stress_cleanup` **1 通过**、`stress_scale` **5 通过**（结论均不变）。
+实测（`target/stress-report.jsonl`，debug 档无头进程）：
+
+| 场景 | 规模 | 关键实测 |
+| --- | --- | --- |
+| H1 双向检查 | 3 张 + 1 孤儿 | images 3 / missing 1 / corrupt 1 / orphans 1；37 ms、峰值 14.8 MB；缺失与损坏不使命令失败 |
+| H2 孤儿 DDS 回收 | 2 张 + 1 孤儿 | 扫描只报告 1 枚孤儿、确认清理后归零、被引用 DDS 保留；47 ms |
+| H3 规模与取消 | 300 张 | 全部命中、无缺失/损坏/孤儿；取消落在第 1 个检查点后重试成功；600 检查点；132 ms、峰值 15.0 MB |
+
+## 上一批次：压力测试批次 2 补充——事务中途崩溃（B4）（已实现）
 
 落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 2 补充」。它验证 `synchronous
 = FULL`（`storage.rs`）承诺里**可观测**的那一面：进程在事务已 `BEGIN`、`INSERT` 已写、
