@@ -166,6 +166,7 @@ fn b1_commit_killed_after_publish_keeps_a_recoverable_orphan() {
 
     record_crash(
         "B1 commit killed before commit",
+        "B",
         "small",
         &outcome,
         json!({ "orphanSnapshot": orphans[0], "orphanBytes": orphan_bytes }),
@@ -251,6 +252,7 @@ fn b2_restore_killed_never_publishes_partial_output() {
 
         record_crash(
             "B2 restore killed",
+            "B",
             "small",
             &outcome,
             json!({ "position": label, "leavesUnpublishedTemp": leaves_temp }),
@@ -321,6 +323,7 @@ fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
 
     record_crash(
         "B3 repository backup killed",
+        "B",
         "small",
         &outcome,
         json!({ "staging": leftovers[0] }),

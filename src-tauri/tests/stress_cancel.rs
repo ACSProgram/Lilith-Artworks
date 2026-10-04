@@ -133,6 +133,7 @@ fn a1_commit_cancellation_is_clean_at_every_checkpoint() {
 
         record(
             "A1 commit cancel",
+            "A",
             "small",
             &outcome,
             json!({ "checkpoint": target }),
@@ -185,6 +186,7 @@ fn a2_restore_cancellation_never_publishes_output() {
         assert_eq!(fixture.healthy(), 3);
         record(
             "A2 restore cancel",
+            "A",
             "small",
             &outcome,
             json!({ "checkpoint": target }),
@@ -254,6 +256,7 @@ fn a3_compact_cancellation_keeps_the_history_graph() {
         fs::remove_file(&output).expect("无法清理恢复输出");
         record(
             "A3 compact cancel",
+            "A",
             "small",
             &outcome,
             json!({ "checkpoint": target }),
@@ -309,6 +312,7 @@ fn a4_checkpoint_cancellation_publishes_nothing() {
         assert_eq!(fixture.healthy(), 3);
         record(
             "A4 checkpoint cancel",
+            "A",
             "small",
             &outcome,
             json!({ "checkpoint": target }),
@@ -373,6 +377,7 @@ fn a5_repository_backup_cancellation_cleans_the_staging_bundle() {
         assert_eq!(fixture.healthy(), 2, "源仓库不受影响");
         record(
             "A5 repository backup cancel",
+            "A",
             "small",
             &outcome,
             json!({ "stage": label, "staged": staged }),
@@ -423,6 +428,7 @@ fn a6_repository_scrub_cancellation_leaves_the_repository_unchanged() {
         assert_eq!(fixture.healthy(), 3);
         record(
             "A6 repository scrub cancel",
+            "A",
             "small",
             &outcome,
             json!({ "position": label }),
