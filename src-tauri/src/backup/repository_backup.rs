@@ -3,6 +3,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    time::UNIX_EPOCH,
 };
 
 use serde::{Deserialize, Serialize};
@@ -17,6 +18,15 @@ const BACKUP_FORMAT_VERSION: u32 = 1;
 const MANIFEST_NAME: &str = "manifest.json";
 const REPOSITORY_DIRECTORY: &str = "repository";
 const COPY_BUFFER_SIZE: usize = 256 * 1024;
+/// 未发布暂存目录的命名：`<STAGING_PREFIX><32 位十六进制 backup_id><STAGING_SUFFIX>`。
+/// 前缀 + 后缀 + 定长十六进制 id 足够特异，顶层扫描的误删风险仅限于同名碰撞。
+const STAGING_PREFIX: &str = ".lilith-artworks-";
+const STAGING_SUFFIX: &str = ".tmp";
+const STAGING_ID_HEX_LEN: usize = 32;
+/// 暂存目录清扫的宽限期：修改时间晚于 `now - 30 分钟` 的暂存目录视为可能仍属于
+/// 进行中的灾备复制（本进程或另一个进程），清扫跳过它们。取值与未引用文件扫描的
+/// 宽限期一致。
+const STAGING_GRACE_MS: i64 = 30 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -28,6 +38,8 @@ pub(crate) struct RepositoryBackupReport {
     pub(crate) history_nodes: u64,
     pub(crate) final_artifacts: u64,
     pub(crate) certification_records: u64,
+    pub(crate) reclaimed_staging_directories: u64,
+    pub(crate) failed_staging_directories: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -82,6 +94,82 @@ impl Drop for StagingDirectory {
     }
 }
 
+/// 一次暂存目录清扫的结果：`reclaimed` 为成功回收的目录数，`failed` 为删除失败数。
+#[derive(Debug, Default, Clone, Copy)]
+struct StagingSweep {
+    reclaimed: u64,
+    failed: u64,
+}
+
+/// 清扫灾备目标目录**顶层**残留的未发布暂存目录。
+///
+/// 只处理名字匹配 `<STAGING_PREFIX><32 位十六进制><STAGING_SUFFIX>`、确实是目录
+/// （不跟随符号链接）、且修改时间早于 `now_ms - STAGING_GRACE_MS` 的项，逐个
+/// `remove_dir_all`。宽限期避免删除正在进行（本进程或另一进程）的灾备暂存目录；
+/// 只碰顶层、不递归匹配；删除失败只计数并写日志，绝不阻断本次备份。目标目录
+/// 不可读时按空处理。
+fn sweep_stale_staging_directories(destination_parent: &Path, now_ms: i64) -> StagingSweep {
+    let mut sweep = StagingSweep::default();
+    let cutoff_ms = now_ms.saturating_sub(STAGING_GRACE_MS);
+    let entries = match fs::read_dir(destination_parent) {
+        Ok(entries) => entries,
+        Err(error) => {
+            log::warn!(
+                "无法读取备份目标目录 {}，跳过残留暂存目录清扫：{error}",
+                storage::display_path(destination_parent)
+            );
+            return sweep;
+        }
+    };
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        if !is_staging_directory_name(name) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if !metadata.file_type().is_dir() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let modified_ms = match modified.duration_since(UNIX_EPOCH) {
+            Ok(elapsed) => i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX),
+            Err(_) => continue,
+        };
+        if modified_ms >= cutoff_ms {
+            continue;
+        }
+        match fs::remove_dir_all(&path) {
+            Ok(()) => sweep.reclaimed += 1,
+            Err(error) => {
+                sweep.failed += 1;
+                log::warn!(
+                    "无法回收残留的备份暂存目录 {}：{error}",
+                    storage::display_path(&path)
+                );
+            }
+        }
+    }
+    sweep
+}
+
+fn is_staging_directory_name(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix(STAGING_PREFIX) else {
+        return false;
+    };
+    let Some(id) = rest.strip_suffix(STAGING_SUFFIX) else {
+        return false;
+    };
+    id.len() == STAGING_ID_HEX_LEN && id.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(crate) fn create_repository_backup(
     root: &Path,
     destination_parent: &Path,
@@ -89,6 +177,13 @@ pub(crate) fn create_repository_backup(
     progress: impl Fn(&str, u64, u64),
 ) -> Result<RepositoryBackupReport, String> {
     validate_destination(root, destination_parent)?;
+    let staging_sweep = match storage::now_ms() {
+        Ok(now_ms) => sweep_stale_staging_directories(destination_parent, now_ms),
+        Err(error) => {
+            log::warn!("无法读取当前时间，跳过残留暂存目录清扫：{error}");
+            StagingSweep::default()
+        }
+    };
     ensure_not_cancelled(&cancelled)?;
     progress("正在固定数据库一致性视图", 0, 0);
     checkpoint_database(root)?;
@@ -108,7 +203,8 @@ pub(crate) fn create_repository_backup(
 
     let backup_id = uuid::Uuid::new_v4().simple().to_string();
     let created_ms = storage::now_ms()?;
-    let staging_path = destination_parent.join(format!(".lilith-artworks-{backup_id}.tmp"));
+    let staging_path =
+        destination_parent.join(format!("{STAGING_PREFIX}{backup_id}{STAGING_SUFFIX}"));
     let final_path = destination_parent.join(format!(
         "Lilith-Artworks-backup-{created_ms}-{}",
         &backup_id[..8]
@@ -216,6 +312,8 @@ pub(crate) fn create_repository_backup(
             history_nodes,
             final_artifacts,
             certification_records,
+            reclaimed_staging_directories: staging_sweep.reclaimed,
+            failed_staging_directories: staging_sweep.failed,
         })
     })();
 
@@ -564,5 +662,77 @@ mod tests {
         let error = verify_backup_bundle(&bundle, &|| false).unwrap_err();
 
         assert!(error.contains("校验失败"), "{error}");
+    }
+
+    fn staging_directory(parent: &Path) -> PathBuf {
+        parent.join(format!(
+            "{STAGING_PREFIX}{}{STAGING_SUFFIX}",
+            uuid::Uuid::new_v4().simple()
+        ))
+    }
+
+    #[test]
+    fn stale_staging_directories_are_reclaimed() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("backups");
+        fs::create_dir(&destination).unwrap();
+        let stale = staging_directory(&destination);
+        fs::create_dir(&stale).unwrap();
+        fs::write(stale.join("payload.bin"), b"leftover").unwrap();
+        // 命名不匹配的目录、以及名字像暂存目录的普通文件，都不在清扫范围内。
+        let unrelated = destination.join("Lilith-Artworks-backup-1-abcdef12");
+        fs::create_dir(&unrelated).unwrap();
+        let impostor = destination.join(format!(
+            "{STAGING_PREFIX}{}{STAGING_SUFFIX}",
+            "f".repeat(STAGING_ID_HEX_LEN)
+        ));
+        fs::write(&impostor, b"not a directory").unwrap();
+
+        // 把「当前时间」推到宽限期之后，使刚创建的暂存目录被判定为过期残留。
+        let now_ms = storage::now_ms().unwrap();
+        let sweep =
+            sweep_stale_staging_directories(&destination, now_ms + STAGING_GRACE_MS + 60_000);
+
+        assert_eq!(sweep.reclaimed, 1);
+        assert_eq!(sweep.failed, 0);
+        assert!(!stale.exists(), "过期残留暂存目录必须被回收");
+        assert!(unrelated.exists(), "命名不匹配的目录不能被删除");
+        assert!(impostor.exists(), "同名文件不能被删除");
+    }
+
+    #[test]
+    fn recent_staging_directories_survive_the_grace_period() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("backups");
+        fs::create_dir(&destination).unwrap();
+        let recent = staging_directory(&destination);
+        fs::create_dir(&recent).unwrap();
+
+        let sweep = sweep_stale_staging_directories(&destination, storage::now_ms().unwrap());
+
+        assert_eq!(sweep.reclaimed, 0);
+        assert_eq!(sweep.failed, 0);
+        assert!(recent.exists(), "宽限期内的暂存目录必须保留");
+    }
+
+    #[test]
+    fn backup_publishes_and_keeps_a_recent_staging_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let destination = directory.path().join("backups");
+        library::initialize(&root).unwrap();
+        fs::create_dir(&destination).unwrap();
+        // 模拟另一次仍在进行的灾备：宽限期内的暂存目录不能被本次备份清扫掉。
+        let recent = staging_directory(&destination);
+        fs::create_dir(&recent).unwrap();
+
+        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+
+        assert_eq!(report.reclaimed_staging_directories, 0);
+        assert_eq!(report.failed_staging_directories, 0);
+        assert!(recent.exists(), "本次备份不得删除宽限期内的暂存目录");
+        let bundle = PathBuf::from(&report.backup_path);
+        assert!(bundle.is_dir(), "本次备份必须正常发布");
+        verify_backup_bundle(&bundle, &|| false).unwrap();
     }
 }

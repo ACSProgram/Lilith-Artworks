@@ -278,8 +278,9 @@ fn b2_restore_killed_never_publishes_partial_output() {
 /// - 源仓库不受影响（只读扫描），并可独立校验；
 /// - 目标目录留下**可识别**的未发布暂存目录（以 `.tmp` 结尾），且不存在已发布 bundle。
 ///
-/// 如实记录的**缺口**：未发布的暂存目录不会被自动回收（`StagingDirectory::drop` 在进程
-/// 被杀时不会运行），本批次只测量并记录现状。
+/// 崩溃留下的未发布暂存目录由**下一次灾备启动时**清扫，且只清扫超过 30 分钟宽限期的
+/// 目录；因此本用例随后重跑灾备（发生在强杀后数秒内）时暂存目录仍在，只有真正过期的
+/// 残留才会被回收（`StagingDirectory::drop` 在进程被杀时不运行，宽限期是它之外的兜底）。
 #[test]
 fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
     let fixture = Fixture::new();
@@ -347,13 +348,14 @@ fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
     scrub.expect_ok();
     assert_eq!(scrub.data_u64("historyNodes"), 2);
 
-    // 未发布的暂存目录仍留在目标目录（当前实现不会自动回收）：如实记录。
+    // 重跑发生在强杀后数秒内，崩溃暂存目录仍在 30 分钟宽限期内，因此不会被清扫：
+    // 只有真正过期的残留才在下一次灾备启动时回收。
     let names = directory_names(&destination);
     assert!(
         names
             .iter()
             .any(|name| name.starts_with(".lilith-artworks-")),
-        "崩溃暂存目录不会被自动回收：{names:?}"
+        "宽限期内的崩溃暂存目录必须保留：{names:?}"
     );
     assert!(
         names
