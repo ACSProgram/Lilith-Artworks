@@ -21,7 +21,55 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：统一清理体系批次 E——DDS 扫描与双向检查（已实现，待人工验收）
+## 本轮批次：压力测试批次 4（规模与灾备、参数边界）与批次 5（崩溃孤儿回收闭环）（已实现）
+
+规划见 `docs/planning/stress-test-plan-2026-10-04.md` 的批次 4、5 与 §0 二次订正。批次 4、5
+独立提交；两者都只扩展无头入口与测试，**不改动任何产品命令的行为**，无头入口仍 feature 门控、
+不进发布产物。
+
+### 批次 4：规模与灾备（D、E）与参数边界（F）
+
+1. **无头入口扩展（1:1 薄映射）**：新增 `create-group` / `move-node` / `trash-node` /
+   `empty-trash` / `list-tree` / `search` / `create-branch` / `delete-branch` /
+   `list-history` 九个子命令，映射到既有的
+   `library::{create_group, move_nodes, trash_nodes, empty_trash, list_tree, search}` 与
+   `history::{create_branch, delete_branch, list}`；`list-tree` 返回完整作品树（含嵌套子节点）
+   与递归节点总数。`library/mod.rs` 新增 `#[cfg(any(test, feature = "headless"))]` 门控的
+   再导出（非无头构建不引入未使用导入）。
+2. **`tests/stress_scale.rs`（5 个测试）**：D1 深链、D2 多分支历史图、D3 库规模、E1 整仓灾备
+   规模、F1 参数边界。
+3. **规模量级按「现实可遇」选取**：单作品 300 节点、约 20 条分支、400 个 Artwork + 嵌套分组，
+   而不是为凑数量构造的数千分支或数千作品（见计划 §3.1 的新评估标准）。
+4. **D2 的删除语义按实际实现校正**：每个非根节点同时持有自己的 snapshot 与一条反向 delta，
+   因此实体数多于节点数；断言改为「删除一条分支后实体数下降、其余分支仍可完整恢复」，而不是
+   假设实体数等于节点数。
+
+### 批次 5：崩溃孤儿回收闭环（B5）
+
+1. **无头入口扩展**：新增 `scan-unreferenced`（`cleanup::scan_unreferenced`）与
+   `cleanup-unreferenced`（`cleanup::cleanup_unreferenced`）。
+2. **`tests/stress_cleanup.rs`（1 个测试）**：崩溃产生孤儿 → 把仓库内 snapshot/delta 的修改
+   时间回拨到 30 分钟宽限期之外 → 扫描**只**报告两枚孤儿（被引用文件即便同样过期也不报告，
+   证明引用复查生效）→ 确认清理删除孤儿、被引用文件保留 → 再扫描无候选（幂等）→ 重开可用、
+   后续提交正常。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过；`cargo fmt`
+已执行、`cargo fmt --check` 与 `git diff --check` 通过；`cargo test --lib` **151 通过**、
+1 个忽略项（两批次未改库代码，结论与本批次前一致）；`npm test` **120 通过**（未改前端）；
+既有套件 `stress_cancel` **6 通过**、`stress_crash` **3 通过** 结论不变。
+新增：`stress_scale` **5 通过**（51 s）、`stress_cleanup` **1 通过**（5 s）。
+实测（`target/stress-report.jsonl`，debug 档无头进程）：
+
+| 场景 | 规模 | 关键实测 |
+| --- | --- | --- |
+| D1 深链 | 300 次提交 | 提交合计 19.9 s；最深节点（穿整条链）恢复 257 ms；提交峰值内存 21.9 MB（与链深无关）；精简中间节点后最深节点仍逐位一致 |
+| D2 多分支历史图 | 21 条分支、64 节点 | 删除一条分支后实体 84 → 80、其余分支 head 仍可逐位恢复；清空回收站后实体归零、Artwork 目录被回收 |
+| D3 库规模 | 400 个 Artwork + 24 个分组 | 创建耗时 17.5 s；树计数、按标题搜索、节点移动均正确 |
+| E1 整仓灾备规模 | 8 个 Artwork、16 节点 | 清单 fileCount 17、totalBytes 2.9 MB；副本独立 `verify` + `scrub` 通过、树计数一致 |
+| F1 参数边界 | 8 类边界 | 备注 501、非法提交类型、标题 161、空标题、搜索 161、不存在历史节点、已存在输出、非法移动目标均被明确拒绝且不 panic |
+| B5 孤儿回收闭环 | 崩溃孤儿 2 枚 | 扫描精确报告两枚孤儿、确认清理删除、被引用文件保留、再扫描无候选 |
+
+## 上一批次：统一清理体系批次 E——DDS 扫描与双向检查（已实现，待人工验收）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 E（§4.5）。维护者 2026-10-04 确认三项：
 DDS 校验深度取**连 BC7 解码验证**（非只做声明校验）；因 `pin_board_images` 无 SHA-256
