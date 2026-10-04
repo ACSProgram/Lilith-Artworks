@@ -9,7 +9,7 @@ use crate::{
         PublishBranchRequest, PublishResult,
     },
     backup::{self, BackupState, BackupTaskKind},
-    cleanup, history, library, storage,
+    cleanup, history, library,
 };
 
 #[derive(serde::Serialize)]
@@ -270,11 +270,9 @@ pub(crate) async fn delete_artwork_branch(
                 state.report_progress("delete-branch", "正在删除分支历史", 0, 1);
                 let deletion = history::delete_branch(root, &branch_id)?;
                 let artwork_id = deletion.artwork_id.clone();
-                for relative in deletion.storage_paths {
-                    if !history::storage_path_referenced(root, &relative)? {
-                        let _ = std::fs::remove_file(storage::resolve_path(root, &relative)?);
-                    }
-                }
+                // 已无引用的历史文件已在删除事务内入队，提交成功后单遍重放；
+                // 删除失败只留队列可重试，不改变分支删除的成功语义。
+                cleanup::replay(root, &deletion.cleanup_ids);
                 state.report_progress("delete-branch", "分支删除完成", 1, 1);
                 history::list(root, &artwork_id)
             })

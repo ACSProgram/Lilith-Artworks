@@ -1,8 +1,6 @@
 use tauri::State;
 
-use std::fs;
-
-use crate::{app::AppState, history, storage};
+use crate::{app::AppState, cleanup, history};
 
 use super::{
     restore, worker, BackupCommitResult, BackupNowRequest, BackupRuntimeStatus, BackupState,
@@ -149,11 +147,9 @@ pub(crate) async fn delete_history_subtree(
                         state.report_progress("delete", "正在删除历史节点", 1, 1);
                     }
                     let deletion = history::delete_subtree(root, &history_id, &branch_id)?;
-                    for relative in deletion.storage_paths {
-                        if !history::storage_path_referenced(root, &relative)? {
-                            let _ = fs::remove_file(storage::resolve_path(root, &relative)?);
-                        }
-                    }
+                    // 已无引用的历史文件已在删除事务内入队，提交成功后单遍重放；
+                    // 失败只留队列可重试，不改变删除节点的成功语义。
+                    cleanup::replay(root, &deletion.cleanup_ids);
                     Ok(deletion.artwork_id)
                 })
             },
@@ -188,14 +184,18 @@ pub(crate) async fn set_history_checkpoint(
                                 state.report_progress("checkpoint", label, current, total)
                             },
                         )
-                    } else if let Some(relative) = history::unmark_checkpoint(root, &history_id)? {
-                        state.report_progress("checkpoint", "正在释放检查点并恢复增量统计", 0, 1);
-                        if !history::storage_path_referenced(root, &relative)? {
-                            let _ = fs::remove_file(storage::resolve_path(root, &relative)?);
-                        }
-                        state.report_progress("checkpoint", "检查点已取消", 1, 1);
-                        Ok(())
                     } else {
+                        // 取消检查点释放的 snapshot 已在事务内入队，提交成功后单遍重放。
+                        if let Some(cleanup_ids) = history::unmark_checkpoint(root, &history_id)? {
+                            state.report_progress(
+                                "checkpoint",
+                                "正在释放检查点并恢复增量统计",
+                                0,
+                                1,
+                            );
+                            cleanup::replay(root, &cleanup_ids);
+                            state.report_progress("checkpoint", "检查点已取消", 1, 1);
+                        }
                         Ok(())
                     }
                 })

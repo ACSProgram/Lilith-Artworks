@@ -5,7 +5,7 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::{history, storage};
+use crate::{cleanup, history, storage};
 
 use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore};
 
@@ -142,26 +142,23 @@ pub(crate) fn compact_node(
         .persist_noclobber(&delta_final)
         .map_err(|error| format!("无法发布精简 delta：{}", error.error))?;
     progress("正在改接历史链", 1, 1);
-    let old_paths = match history::apply_compaction(root, &target, &delta_relative, delta_size) {
-        Ok(paths) => paths,
+    let cleanup_ids = match history::apply_compaction(root, &target, &delta_relative, delta_size) {
+        Ok(ids) => ids,
         Err(error) => {
             let _ = fs::remove_file(&delta_final);
             return Err(error);
         }
     };
     log::info!(
-        "compacted history node: removed={}, parent={}, child={}, new_delta_bytes={delta_size}, released_artifacts={}",
+        "compacted history node: removed={}, parent={}, child={}, new_delta_bytes={delta_size}, queued_cleanup={}",
         target.node_id,
         target.parent_id,
         target.child_id,
-        old_paths.len()
+        cleanup_ids.len()
     );
-    for relative in old_paths {
-        if relative != delta_relative && !history::storage_path_referenced(root, &relative)? {
-            let path = storage::resolve_path(root, &relative)?;
-            let _ = fs::remove_file(path);
-        }
-    }
+    // 被移除节点与旧边占用的文件已在改接事务内入队，提交成功后单遍重放；
+    // 失败只留队列可重试，不改变精简的成功语义。
+    cleanup::replay(root, &cleanup_ids);
     Ok(())
 }
 
@@ -245,10 +242,16 @@ pub(crate) fn ensure_checkpoint_with_progress(
     checkpoint
         .persist_noclobber(&final_path)
         .map_err(|error| format!("无法发布 checkpoint：{}", error.error))?;
-    if let Err(error) = history::set_snapshot(root, history_id, &relative, file_size, true) {
-        let _ = fs::remove_file(&final_path);
-        return Err(error);
-    }
+    let cleanup_ids = match history::set_snapshot(root, history_id, &relative, file_size, true) {
+        Ok(ids) => ids,
+        Err(error) => {
+            let _ = fs::remove_file(&final_path);
+            return Err(error);
+        }
+    };
+    // 建立检查点时该节点原本没有 snapshot，正常返回空；若登记替换了旧 snapshot
+    // （非空）同样在提交成功后重放。
+    cleanup::replay(root, &cleanup_ids);
     log::info!("checkpoint published: history_id={history_id}, bytes={file_size}, path={relative}");
     progress("检查点已就绪", 1, 1);
     Ok(())

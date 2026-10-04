@@ -144,13 +144,17 @@ pub(crate) struct HistoryCommit<'a> {
 #[derive(Debug, Clone)]
 pub(crate) struct HistoryDeletion {
     pub(crate) artwork_id: String,
-    pub(crate) storage_paths: Vec<String>,
+    /// 事务内为已无引用的历史文件登记的 `pending_file_cleanup` id，由调用方在提交
+    /// 成功后重放。仍被引用的候选路径不入队。
+    pub(crate) cleanup_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct BranchDeletion {
     pub(crate) artwork_id: String,
-    pub(crate) storage_paths: Vec<String>,
+    /// 事务内为已无引用的历史文件登记的 `pending_file_cleanup` id，由调用方在提交
+    /// 成功后重放。仍被引用的候选路径不入队。
+    pub(crate) cleanup_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone)]

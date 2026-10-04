@@ -86,6 +86,30 @@ pub(crate) fn enqueue_external_file(
     )
 }
 
+/// 在事务内为一批「已释放引用的仓库文件」登记提交后删除意图。
+///
+/// 与直接 `enqueue_repository_file` 的差别是它先做引用复查：事务可见本事务尚未
+/// 提交的写入，因此调用方可以在删除图记录之后、提交之前调用它，仍被其它节点或
+/// 分支引用的路径会被跳过，只入队已经无引用的文件。返回已入队的 cleanup id，
+/// 调用方在提交成功后执行 `replay`。
+pub(crate) fn enqueue_released_repository_files(
+    transaction: &Transaction<'_>,
+    paths: &[String],
+    reason: &str,
+) -> Result<Vec<String>, String> {
+    let mut seen = HashSet::new();
+    let mut ids = Vec::new();
+    for path in paths {
+        if !seen.insert(path.as_str()) {
+            continue;
+        }
+        if referenced_path_kind(transaction, REPOSITORY_FILE, path)?.is_none() {
+            ids.push(enqueue_repository_file(transaction, path, reason)?);
+        }
+    }
+    Ok(ids)
+}
+
 fn enqueue(
     transaction: &Transaction<'_>,
     path_kind: &str,
@@ -218,6 +242,32 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
     })
 }
 
+/// 提交成功后重放清理队列（单遍）。
+///
+/// 与 `run` 的差别只在于失败处理：条目级删除失败与重放自身的数据库错误都只记
+/// 日志，不改变调用方的成功/失败语义——条目仍留在 `pending_file_cleanup` 中，
+/// 带 `last_error` 与 `last_attempt_ms`，等待下次重放或设置页手动重试。每次调用
+/// 只做一遍尝试，不循环重试，因此不会阻塞前台命令的进度。
+pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
+    if cleanup_ids.is_empty() {
+        return;
+    }
+    match run(root, cleanup_ids) {
+        Ok(report) => {
+            for failure in &report.failures {
+                log::warn!(
+                    "待清理条目重放失败，已留在队列可重试：{}：{}",
+                    failure.path,
+                    failure.error
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("清理重放失败，条目已留在待清理队列：{error}");
+        }
+    }
+}
+
 fn remove_entry(root: &Path, entry: &PendingCleanup) -> Result<(), String> {
     match entry.path_kind.as_str() {
         REPOSITORY_FILE => {
@@ -233,7 +283,20 @@ fn referenced_path(
     connection: &rusqlite::Connection,
     entry: &PendingCleanup,
 ) -> Result<Option<String>, String> {
-    let reference = match entry.path_kind.as_str() {
+    referenced_path_kind(connection, &entry.path_kind, &entry.path)
+}
+
+/// 复查某个路径是否仍被数据库引用（五张表），返回引用来源标签。
+///
+/// `run` 的重放与领域函数在事务内入队前的引用复查共用这一份查询：传入
+/// `&Transaction` 时可见本事务尚未提交的写入，因此「先改图、再复查、再入队」
+/// 与「提交后重放」看到的是同一套引用关系，两条路径不会得出相反结论。
+pub(crate) fn referenced_path_kind(
+    connection: &rusqlite::Connection,
+    path_kind: &str,
+    path: &str,
+) -> Result<Option<String>, String> {
+    let reference = match path_kind {
         REPOSITORY_FILE => connection
             .query_row(
                 "SELECT CASE
@@ -242,12 +305,12 @@ fn referenced_path(
                    WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1) THEN '历史节点'
                    WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1) THEN '历史边'
                  END",
-                [&entry.path],
+                [path],
                 |row| row.get(0),
             )
             .map_err(storage::database_error)?,
         REPOSITORY_DIRECTORY => {
-            let prefix = format!("{}/%", entry.path.trim_end_matches(['/', '\\']));
+            let prefix = format!("{}/%", path.trim_end_matches(['/', '\\']));
             connection
                 .query_row(
                     "SELECT CASE
@@ -266,7 +329,7 @@ fn referenced_path(
                 "SELECT CASE WHEN EXISTS(
                    SELECT 1 FROM certification_records WHERE output_path = ?1
                  ) THEN '认证导出记录' END",
-                [&entry.path],
+                [path],
                 |row| row.get(0),
             )
             .map_err(storage::database_error)?,
@@ -555,5 +618,102 @@ mod tests {
         assert_eq!(report.cleaned_count, 1);
         assert_eq!(report.pending_count, 0);
         assert!(report.failures.is_empty());
+    }
+
+    fn pending_count(root: &Path) -> i64 {
+        storage::open(root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM pending_file_cleanup", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    fn insert_history_node(root: &Path, snapshot_path: &str) {
+        storage::open(root)
+            .unwrap()
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO history_nodes
+                   (id, artwork_id, created_on_branch_id, parent_id, title, note, commit_kind,
+                    created_ms, logical_size, chunk_file_size, sha256, chunk_count, snapshot_path)
+                 VALUES ('node', 'artwork', 'branch', NULL, 'node', '', 'manual', 0, 1, 1,
+                         '0000000000000000000000000000000000000000000000000000000000000000', 1,
+                         '{snapshot_path}');"
+            ))
+            .unwrap();
+    }
+
+    #[test]
+    fn released_repository_files_skip_still_referenced_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let artworks = root.join("artworks");
+        fs::create_dir_all(&artworks).unwrap();
+        fs::write(artworks.join("kept.lbc"), b"kept").unwrap();
+        fs::write(artworks.join("released.lbc"), b"released").unwrap();
+        insert_history_node(&root, "artworks/kept.lbc");
+
+        let ids = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let ids = enqueue_released_repository_files(
+                &transaction,
+                &[
+                    "artworks/kept.lbc".to_owned(),
+                    "artworks/released.lbc".to_owned(),
+                ],
+                "test",
+            )
+            .unwrap();
+            transaction.commit().unwrap();
+            ids
+        };
+
+        // 仍被历史节点引用的路径不入队，只有已无引用的文件进入队列。
+        assert_eq!(ids.len(), 1);
+        let report = run(&root, &ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert!(artworks.join("kept.lbc").is_file());
+        assert!(!artworks.join("released.lbc").exists());
+    }
+
+    #[test]
+    fn released_file_stays_queued_while_referenced_and_can_retry() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let stored = root.join("artworks").join("released.lbc");
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, b"released").unwrap();
+        let ids = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let ids = enqueue_released_repository_files(
+                &transaction,
+                &["artworks/released.lbc".to_owned()],
+                "test",
+            )
+            .unwrap();
+            transaction.commit().unwrap();
+            ids
+        };
+        assert_eq!(ids.len(), 1);
+        insert_history_node(&root, "artworks/released.lbc");
+
+        // 重放被引用检查拒绝：条目留在队列可重试，文件保留。
+        replay(&root, &ids);
+        assert_eq!(pending_count(&root), 1);
+        assert!(stored.is_file());
+
+        // 引用消失后同一批 id 再次重放即删除并清空队列。
+        storage::open(&root)
+            .unwrap()
+            .execute("DELETE FROM history_nodes WHERE id = 'node'", [])
+            .unwrap();
+        replay(&root, &ids);
+        assert_eq!(pending_count(&root), 0);
+        assert!(!stored.exists());
     }
 }

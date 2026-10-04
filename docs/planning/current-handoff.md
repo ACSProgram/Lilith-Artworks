@@ -21,7 +21,48 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：统一清理体系批次 A——画板结算改提交后清理（已实现，待人工验收）
+## 本轮批次：统一清理体系批次 B——历史文件清理入队（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 B（§4.2）。维护者 2026-10-04 确认两项
+设计决策：**入队放在领域函数自身的 SQLite 事务内**（而非调用方提交后再入队）、
+**不登记期望 SHA-256**。理由与对 §4.2.1 字面的偏差见计划该节的落实偏差说明。
+
+1. **六处「提交成功后直接删除仓库文件」收敛到清理账本**：分支删除
+   （`history_branch_deletion`）、历史子树删除（`history_subtree_deletion`）、取消检查点
+   （`history_checkpoint_release`）、提交释放父 snapshot（`history_commit_release`）、
+   修复 head snapshot 时替换旧文件（`history_snapshot_replaced`）、精简改接释放旧实体
+   （`history_compaction`）。`history::{delete_branch, delete_subtree, unmark_checkpoint,
+   commit, apply_compaction, set_snapshot}` 在事务内复查引用后入队并返回 cleanup id，
+   调用方（`app/workflows.rs`、`backup/commands.rs`、`backup/worker.rs`、
+   `backup/restore.rs`）只调用 `cleanup::replay` 做单遍重放。提交失败时入队随事务回滚，
+   记录与文件保持一致。
+2. **`cleanup` 补上事务内能力**：`referenced_path_kind`（按 `path_kind` 复查五张表，
+   可传入 `&Transaction`，事务可见本事务尚未提交的写入）、
+   `enqueue_released_repository_files`（复查后入队，跳过仍被引用的路径、去重）、
+   `replay`（提交后单遍重放，条目级失败与重放自身的数据库错误都只记 `log::warn`，
+   不改变调用方成功语义）。`pin_board/mod.rs` 的本地重放助手收敛到 `cleanup::replay`。
+3. **移除 `history::storage_path_referenced`**：入队落点改为事务内后，调用方不再需要
+   提交后的快路径复查，引用复查统一走 `cleanup::referenced_path_kind`；旧函数已无调用点，
+   随本批次删除（避免 `cargo check --lib` 的 dead_code 警告）。
+4. **回滚路径保持直接删除**：发布失败、提交失败、登记 snapshot 失败时清理本次新文件的
+   删除保持直接 `remove_file`——这些文件本就未被数据库引用，直接删失败只留泄漏、不留
+   不一致，由批次 C 的扫描兜底（计划 §4.2.2）。
+5. **单测**：`cleanup` 新增两条——入队跳过仍被历史节点引用的路径、只删已无引用者；
+   条目重放被引用检查拒绝时留在队列，引用消失后同一批 id 再次重放即删除并清空队列。
+   `history` 的两条既有用例改为断言队列：
+   `branch_deletion_enqueues_released_edge_delta_paths` 断言只入队该分支独占的
+   snapshot/边 delta、共享祖先不入队；`compaction_atomically_rewires_child_and_edge`
+   断言被移除节点与旧边入队、新 delta 不入队。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过（无头入口
+经同一批领域函数自动覆盖，无头侧无代码改动）；`cargo fmt` 已执行、`cargo fmt --check`
+与 `git diff --check` 通过；`cargo test --lib` **139 通过**（原 137 + 新增 2）、1 个忽略项；
+前端无代码改动，`npm test` **116 通过**（结论不变）；`git grep` 确认 `src-tauri/src` 内
+已无「提交成功后直接删除仓库文件」的调用点——剩余 `remove_file` / `remove_dir_all` 均为
+回滚路径（发布/提交/登记失败）、认证预览缓存（`temp/`，计划非目标）、灾备暂存目录
+（批次 D）、SQLite sidecar 与 DDS 导入回滚，或清理实现本身。
+
+## 上一批次：统一清理体系批次 A——画板结算改提交后清理（已实现）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 A（§4.1）。维护者 2026-10-04 确认接受
 语义变化，并要求重试不得阻塞进度：实现为**单遍重放、不循环重试**，结算命令在提交
