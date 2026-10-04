@@ -21,7 +21,47 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：统一清理体系批次 C——未引用文件扫描（已实现，待人工验收）
+## 本轮批次：统一清理体系批次 D——灾备暂存目录清扫（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 D（§4.4）。宽限期沿用批次 C 已确认的
+**30 分钟**（与未引用文件扫描一致）；本批次只改后端，返回报告新增字段的界面展示与
+设置页入口留待批次 F。
+
+1. **新增暂存目录清扫（`backup/repository_backup.rs`）**：`create_repository_backup`
+   在 `validate_destination` 之后、复制之前调用 `sweep_stale_staging_directories`，扫描
+   目标目录**顶层**名字匹配 `.lilith-artworks-<32 位十六进制>.tmp` 的项。只删除**确实是
+   目录**（`symlink_metadata` 判定，不跟随符号链接）且修改时间早于 `now - 30 分钟` 的
+   目录，逐个 `remove_dir_all`；只碰顶层、不递归匹配。宽限期避免误删正在进行（本进程或
+   另一进程）的灾备暂存目录——这正是压力测试批次 2 的 B3 场景。
+2. **失败不阻断**：目标目录不可读、单个删除失败、当前时间读取失败都只写 `log::warn`，
+   不改变本次备份的成功语义；清扫结果以 `StagingSweep { reclaimed, failed }` 计数，
+   `RepositoryBackupReport` 追加 `reclaimed_staging_directories` /
+   `failed_staging_directories`（serde camelCase →
+   `reclaimedStagingDirectories` / `failedStagingDirectories`）。
+3. **命名常量收敛**：暂存目录前缀 / 后缀 / id 十六进制长度与宽限期提为模块常量，
+   暂存路径构造与清扫判定共用同一组常量，避免两处命名漂移。
+4. **不做独立入口**（计划 §4.4）：暂存目录位于仓库之外、无数据库引用可查，且应用不
+   持久化历史目标目录，因此不进 `pending_file_cleanup`、不提供针对旧目标的扫描命令。
+5. **单测**（`backup::repository_backup` 新增三条）：过期残留暂存目录被回收，且命名
+   不匹配的目录与名字像暂存目录的普通文件都不受影响；宽限期内的暂存目录保留；
+   `create_repository_backup` 正常发布、报告两个计数为 0 且不删除宽限期内的暂存目录。
+6. **同步更新 `tests/stress_crash.rs` B3 的过时注释**：崩溃留下的暂存目录现在会在超过
+   宽限期后由下一次灾备启动时回收，注释改为如实描述；断言不变——B3 的重跑发生在强杀后
+   数秒内，仍在宽限期内，因此暂存目录仍应保留。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过（无头侧无
+代码改动，灾备走同一领域函数）；`cargo fmt` 已执行、`cargo fmt --check` 与
+`git diff --check` 通过；`cargo test --lib` **145 通过**（原 142 + 新增 3）、1 个忽略项；
+本批次无前端改动，`npm test` **116 通过**（结论不变）。
+
+**落实偏差（已核实）**：计划 §5 的批次 D 单测含「残留目录被回收」，但 Windows 上 std
+无法打开目录以改写其 mtime（实测 `File::open` 对目录返回「拒绝访问」），而不引入新依赖
+是计划非目标。因此「过期 → 回收」的判定由给 `sweep_stale_staging_directories` 传入
+合成 `now_ms` 的单元测试覆盖（真实宽限期常量仍参与计算），端到端用例覆盖「本次备份正常
+发布 + 宽限期内暂存目录保留」。另：`cargo check --lib --tests` 另有 4 条既有警告
+（`pin_board/repository.rs` 与 `backup/chunk_file.rs`，非本批次文件），未在批次 D 处理。
+
+## 上一批次：统一清理体系批次 C——未引用文件扫描（已实现，待人工验收）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 C（§4.3）。维护者 2026-10-04 确认三项：
 交付形态为**报告 + 确认清理**（非仅报告）、宽限期取 **30 分钟**、扫描与确认清理的

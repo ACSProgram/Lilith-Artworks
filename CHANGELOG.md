@@ -47,6 +47,17 @@ before and after the first stable release.
   deletions (a failed publish, commit, or snapshot registration) still remove
   their own temporary files directly, because those files are never referenced
   by the database.
+- Residual backup staging directories are no longer left behind. Before a
+  repository backup starts, the destination directory's top level is scanned
+  for leftover unpublished staging directories (`.lilith-artworks-<32 hex>.tmp`).
+  A matching directory that is a real directory (symlinks are not followed) and
+  is older than a 30-minute grace period is removed one by one; the reclaimed
+  and failed counts are returned in the backup report
+  (`reclaimedStagingDirectories` / `failedStagingDirectories`). The grace period
+  keeps a concurrently running backup's staging directory safe, the sweep only
+  touches the top level and never recurses, and a failed removal only counts as
+  a failure instead of aborting the backup. The application does not persist
+  previous destinations, so no standalone sweep entry point is provided.
 
 ### Changed
 
