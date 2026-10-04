@@ -12,6 +12,7 @@
 - [成品与真实性模块](modules/authenticity.md)
 - [素材板模块](modules/pin-board.md)
 - [验证策略](guides/validation.md)
+- [可靠性压力测试报告](guides/stress-test-report.md)
 - [发行政策](guides/release-policy.md)
 
 ## 分工

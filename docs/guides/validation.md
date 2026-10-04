@@ -19,6 +19,27 @@
 - `backup/chunk_file.rs` 与 `backup/restore.rs` 只依赖 sha2、zstd、tempfile（restore 另需 history/storage 少量接口），可以在仓库外用只含这几个依赖的轻量 crate `#[path]` 引入编译并运行其测试；这是重依赖边界内验证分块与物化逻辑的标准做法。
 - `trustmark` 经 `ort-sys` 的构建脚本从 pyke CDN 下载预编译 ONNX Runtime，因此**全新环境首次构建需要网络**。改动依赖版本后必须重跑 `npm run legal` 并提交 `licenses/THIRD_PARTY_LICENSES.html`。
 
+## 压力测试：只在发布前运行
+
+`src-tauri/tests/` 下的三组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`stress_large` 大文件端到端）是**发布前手动运行**的套件，**不在 CI 中**，也**不属于日常
+开发的任何阶段**：
+
+- **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
+  `cargo test --lib`、`git diff --check`。**不要顺手运行压力测试**——即使到了收尾、整理、
+  提交前的阶段，只要不是准备发布，也不需要跑。
+- **它很耗时间与磁盘，这是设计属性而不是卡住**：测试以真实可执行文件、真实落盘路径执行，
+  覆盖「逻辑文件大小 × 单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行
+  常以十分钟计，峰值磁盘占用可达数 GiB，`extreme` 档（4 GiB 文件、每次改 1 GiB）接近十几 GiB。
+- **只在准备发布、需要产出或更新 `docs/guides/stress-test-report.md` 的实测数据时运行**，
+  并由维护者显式发起。代理不得在普通开发或收尾阶段自行运行；需要跑时先向维护者确认档位与
+  磁盘预算。
+- **大文件档按磁盘预算并发执行**：`stress_large` 的场景通过 `scenario_slot` 按「预计峰值磁盘」
+  准入，可多个并行，但保留峰值之和不超过 `LILITH_STRESS_DISK_BUDGET`（默认 24 GiB），并发数
+  不超过 `LILITH_STRESS_JOBS`（默认可用核数）。这样在有磁盘余量的机器上充分利用多核——
+  被测子进程是单线程的，串行只会用一个核——同时避免盲目并行把磁盘写满。
+- 运行方式、档位、磁盘需求与实测数据见 `docs/guides/stress-test-report.md` 第 4、6 节。
+
 ## 持续集成
 
 - `windows-ci.yml`：`dependency-audit`（ubuntu，npm audit、`rustsec/audit-check`、SBOM）与
