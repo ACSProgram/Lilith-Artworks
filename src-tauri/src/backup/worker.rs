@@ -14,8 +14,10 @@ use super::{
 
 const MAX_TITLE_CHARS: usize = 160;
 
+/// 提交失败的原因。`pub(crate)` 而不是 `pub(super)`：无头入口同样要区分
+/// 「取消」与「失败」，因此这个类型必须对它可见。
 #[derive(Debug)]
-pub(super) enum BackupRunError {
+pub(crate) enum BackupRunError {
     Cancelled,
     Failed(String),
 }

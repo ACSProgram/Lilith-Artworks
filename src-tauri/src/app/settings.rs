@@ -160,6 +160,21 @@ impl AppState {
         }
     }
 
+    /// 无头入口（`feature = "headless"`）使用的构造：仓库路径由命令行显式给定，
+    /// 不读取也不写回任何设置文件。设置与日志目录只用于填满字段，无头进程不会
+    /// 调用依赖它们的命令。
+    #[cfg(feature = "headless")]
+    pub(crate) fn for_headless_repository(repository: &Path, state_directory: &Path) -> Self {
+        let mut settings = AppSettings::default();
+        settings.repository_path = repository.to_string_lossy().into_owned();
+        Self::new(
+            settings,
+            state_directory.join("settings.json"),
+            state_directory.join("logs"),
+            None,
+        )
+    }
+
     pub(crate) fn repository_path(&self) -> Result<Option<PathBuf>, String> {
         let settings = self.settings.read().map_err(|_| "设置状态已损坏")?;
         let value = settings.repository_path.trim();

@@ -19,7 +19,52 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：任务调度总控与空闲链路校验（已实现，待人工验收）
+## 本轮批次：压力测试批次 1（无头入口骨架与取消边界，已实现）
+
+规划见 `docs/planning/stress-test-plan-2026-10-04.md`。本批次只落实该计划的
+**批次 1**；批次 2–6（跨进程崩溃、大文件端到端、规模与灾备、认证模块、文档收尾）尚未开始，
+因此「各处理阶段的取消边界」目前只覆盖到提交/恢复/精简/检查点/整仓灾备/全库扫描，
+认证签名部分要等批次 5。
+
+1. **无头入口（feature 门控，不进发布产物）**：`Cargo.toml` 新增 `[features] headless = []`
+   且**不加入 default**；`lib.rs` 新增 `pub fn run_headless`，`main.rs` 在遇到
+   `--headless` 时分派。它不创建窗口、不建托盘、不加载 webview、不经过 IPC；发布构建里
+   这一段整体不存在，因此产品行为零变化。
+2. **10 个子命令的 1:1 薄映射**：`init-repository`、`create-artwork`、`commit`、`restore`、
+   `compact`、`checkpoint`、`scrub`、`verify`、`cleanup`、`repository-backup`。每个子命令只做
+   参数解析、`BackupState::default()` 与 `AppState` 的装配、领域函数调用，不含业务判断；锁的
+   用法与 Tauri 命令层逐一对应（`run_logged` / `run_logged_foreground` / `run_foreground` /
+   `run_exclusive`）。无头进程不启动调度器，故没有手动提交优先与唤醒步骤（已在代码中注明）。
+3. **通用选项**：`--workspace`（作用域根）、`--repository`（默认 `<workspace>/repository`）、
+   `--result`（结构化 JSON 结果，用文件而非 stdout——release 下无控制台）、`--marker`
+   （逐阶段追加阶段名）、`--cancel-on-stdin`、`--peak-memory`。`--workspace` 同时是一条
+   **真实的安全属性**：无头进程拒绝解析工作区之外的路径（维护者 2026-10-04 确认的 CLI 形状）。
+4. **取消干预协议采用「逐检查点闸门」**（维护者 2026-10-04 确认，偏离计划 §4.4 原文）：
+   带 `--cancel-on-stdin` 时，进程在**每个取消检查点**先写 marker 再阻塞等待 stdin 的
+   一行判定（`cancel` / `continue`，EOF 视为取消）。计划原文的「轮询 marker 后写一行」是
+   非阻塞的，毫秒级窗口下无法稳定命中具体清理分支，而 `run_backup` 又没有任何进度回调，
+   因此改为闸门；干预仍只经文件与 stdin，不触碰内部状态。
+5. **A 组场景**：`tests/stress_cancel.rs`（A1–A6，6 个测试、27 次受控取消）与共享助手
+   `tests/stress_support/mod.rs`（工作区、进程编排、闸门策略、磁盘事实断言、JSONL 报告）。
+   断言只用「子命令返回的 JSON」与「磁盘事实」：无残留实体与临时文件、历史节点数未推进、
+   待清理队列为空、重开可用（`verify` 完整性与语义校验 + `scrub` 逐块摘要链），并且每个场景
+   末尾都用**正向对照**确认命令随后仍然可用（提交重试成功、恢复字节一致、精简成功、
+   灾备副本可独立打开）。
+6. **报告**：每次受控取消向 `target/stress-report.jsonl` 追加一行。`target/` 不进版本控制，
+   因此可长期引用的证据是本文件下方「验证记录」里的摘要。
+7. **与计划的三处偏差**（已核实，均为必要）：`--peak-memory` 除
+   `Win32_System_ProcessStatus` 还需 `Win32_System_Threading`（`GetCurrentProcess` 在其中，
+   只加 feature、不加包）；计划 §4.1 声称「不再需要任何 `pub(crate)` 可见性改动」，实际需要把
+   `backup::restore` / `backup::worker` 提升为 `pub(crate) mod`、`BackupRunError` 提升为
+   `pub(crate)`、`library::create_artwork` 由 `#[cfg(test)]` 改为
+   `#[cfg(any(test, feature = "headless"))]`（纯可见性放宽，无行为变化）；计划 §7 批次 1 的
+   子命令清单漏了 A5 必需的 `repository-backup`，已一并实现。
+8. **测试可指向任意构建档**：`LILITH_STRESS_BIN` 把整套断言指向维护者自己构建的可执行文件
+   （覆盖路径先做 `--headless help` 探针，避免误指向未启用 headless 的构建而启动 GUI）。
+   这回答了「要不要跑发布档」：取消、崩溃与一致性不变量与构建档无关；真正需要发布档的是
+   峰值内存、存储放大与耗时（C、D、G 组）。
+
+## 上一批次：任务调度总控与空闲链路校验（已实现，待人工验收）
 
 规划见 `docs/planning/archive/task-control-plan-2026-10-03.md`（已随本批次归档），
 按批次 A–C 实现、本批次 D 收尾。目标：补上“快速检查不校验 head snapshot”的完整性缺口，
@@ -98,6 +143,39 @@
 
 ## 验证记录
 
+### 压力测试批次 1（2026-10-04，最终态）
+
+代理侧已执行：
+
+- `cargo fmt --check`、`cargo check --lib`（无警告）、`git diff --check` 通过。
+- `cargo test --lib`：**134 通过**，1 个忽略项（与上一批次结论一致，未变化）。
+- `npm test`：**116 通过**（未变化）。
+- `cargo test --features headless --test stress_cancel`：**6 通过**（A1–A6）。默认二进制与
+  `LILITH_STRESS_BIN` 覆盖路径各跑一次，均通过；整套约 2 秒。
+- `npm run legal` 前后对比：`licenses/THIRD_PARTY_LICENSES.html` **逐字节不变**
+  （529 组件）。确认 `[features] headless` 与 windows-sys 的 feature 增加没有改变依赖包集合。
+- 实测汇总（`target/stress-report.jsonl`，27 次受控取消全部以取消结果退出，退出码 2）：
+
+| 场景 | 受控取消次数 | 最深检查点 | 最大耗时 | 峰值内存 |
+| --- | --- | --- | --- | --- |
+| A1 提交取消（每个检查点各一次） | 4 | 4 | 71 ms | 19.8 MiB |
+| A2 恢复取消（链解析 / 导出前 / 发布前） | 6 | 6 | 69 ms | 17.5 MiB |
+| A3 精简取消（父链 / 子链 / delta 发布前） | 6 | 6 | 59 ms | 20.2 MiB |
+| A4 检查点取消（链解析 / snapshot 发布前） | 4 | 4 | 66 ms | 17.0 MiB |
+| A5 灾备取消（扫描前 / 复制 / 校验 / 发布前） | 4 | 18 | 169 ms | 17.2 MiB |
+| A6 全库扫描取消（入口 / 逐节点 / 靠后节点） | 3 | 8 | 80 ms | 17.1 MiB |
+
+  峰值内存是 **debug 档**无头进程自报的峰值工作集（基线约 13 MiB），只作「确有数值可采」
+  的证据，**不代表发布档**；真实数值由 C、G 组在 `LILITH_STRESS_BIN` 指向 release 构建时测量。
+- 关键路径断言逐条成立：取消后 `artworks/*/snapshots`、`artworks/*/deltas` 与 `temp` 无残留、
+  历史节点数未推进、待清理队列为空、`verify` + `scrub` 全通过；灾备取消时错误附带
+  「临时备份已清理」，且建 staging 之前的取消不谎称做过清理（分开断言）。
+- 本批次另有两条缺陷由测试自身暴露并修复（都在测试侧）：报告文件并行追加时行交错
+  （改为进程内加锁），以及闸门参数没有真正传给子进程。
+- 本批次未触及 GUI 路径，也没有需要维护者确认的界面项；代理不执行 UI 自动化。
+- **尚未完成**：批次 2–6。`todo.md` 第二节的对应条目按计划在第 6 批次统一更新，
+  本批次不动它，以免清单与实际覆盖情况提前不一致。
+
 ### 任务调度总控与空闲链路校验批次（2026-10-04，最终态）
 
 代理侧已执行：
@@ -168,7 +246,7 @@
 
 任务调度总控与空闲链路校验批次的界面与交互验收项（空闲校验取消、校验失败警告与重新
 校验、快速检查与校验组合、大链校验期间前台响应性、失败不阻断提交）另行列入 `todo.md`
-第二节，见上文“本轮批次”。
+第二节，见上文“上一批次：任务调度总控与空闲链路校验”。
 
 **关于验收环境的口径：** 上述结论来自维护者本机的生产使用，不替代
 `release-policy.md` 要求的"干净 Windows 用户环境"桌面验收；后者仍在 rc1 前执行。

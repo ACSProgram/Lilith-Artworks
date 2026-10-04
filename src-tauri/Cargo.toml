@@ -10,6 +10,11 @@ license = "GPL-3.0-only"
 name = "lilith_artworks_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+# 无头命令行入口：仅供发布前的压力测试以独立进程调用真实可执行文件。
+# 不属于产品功能，不进发布产物，因此**不加入 default**。
+[features]
+headless = []
+
 [build-dependencies]
 tauri-build = { version = "2.6", features = [] }
 
@@ -48,4 +53,4 @@ lto = "thin"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_UI_Shell"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_UI_Shell"] }
