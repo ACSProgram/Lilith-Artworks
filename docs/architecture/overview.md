@@ -34,6 +34,8 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup`、`authenticity` 和 `pin_board`；需要组合 checkpoint、调度唤醒、清理队列、仓库 lease 或共享 `BackupState` 运行锁的 create Artwork、永久清理、创建分支、分支更新/删除、整仓灾备、进入/取消发布和认证发布由 `app/workflows.rs` 编排。`pin_board` 命令直接在 `lib.rs` 注册，不经应用工作流：浏览走共享读租约，变更走仓库操作锁。前端命令名和 DTO 不因内部所有权变化而改变。
 
+开发/验证期另有一个**无界面命令行入口**（`--headless`，由 `headless` feature 门控、**不进发布产物**）：它与 Tauri 命令层并列，是同一批领域函数的另一个适配器，只做参数解析、锁与状态装配、领域调用，不含业务判断。它只供发布前的压力测试以**独立进程**调用真实可执行文件，不创建窗口、不建托盘、不加载 webview、不经过 IPC，因此发布版的产品行为零变化。定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，面向使用者的结论见 `docs/guides/stress-test-report.md`。
+
 ## 应用生命周期
 
 原生端启用 Tauri 日志插件，将信息级以上事件写入操作系统应用日志目录（Windows 默认位于 `%LOCALAPPDATA%\com.lilith.artworks\logs`），单个文件达到 1 MiB 后轮转并只保留最近一份。设置页提供配置文件夹、诊断日志文件夹和 About/Legal 入口；后者显示版本与 `Copyright 2026 ACSProgram`，并打开随包法律材料。首版记录启动、退出、窗口/托盘状态保存失败和自动备份失败等诊断事件；私钥、证书内容、Artwork 内容和完整认证声明不得写入日志。

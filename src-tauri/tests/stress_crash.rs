@@ -17,76 +17,10 @@
 
 mod stress_support;
 
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf};
 
 use serde_json::json;
 use stress_support::*;
-
-/// 各场景的闸门等待上限。小规模档用 MiB 级文件，正常应在秒级完成。
-const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
-
-struct Fixture {
-    workspace: Workspace,
-    repository: PathBuf,
-    work: PathBuf,
-    branch_id: String,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let workspace = Workspace::new();
-        let repository = workspace.repository();
-        let work = workspace.work("artwork.bin");
-        write_work_file(&work, 96 * 1024, 1);
-        headless(&workspace, "init-repository").finish().expect_ok();
-        let created = headless(&workspace, "create-artwork")
-            .arg("title", "Artwork")
-            .arg("branch-title", "Main")
-            .arg("source", work.to_string_lossy())
-            .finish();
-        created.expect_ok();
-        let branch_id = created.data_str("branchId");
-        assert!(!branch_id.is_empty(), "{}", created.describe());
-        Self {
-            workspace,
-            repository,
-            work,
-            branch_id,
-        }
-    }
-
-    fn command(&self, command: &str) -> Spawn<'_> {
-        headless(&self.workspace, command)
-            .repository(&self.repository)
-            .timeout(SCENARIO_TIMEOUT)
-    }
-
-    /// 写入新内容并做一次普通提交，返回历史节点标识。
-    fn commit(&self, len: usize, seed: u64, note: &str) -> String {
-        write_work_file(&self.work, len, seed);
-        let outcome = self
-            .command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("note", note)
-            .arg("commit-kind", "manual")
-            .finish();
-        outcome.expect_ok();
-        let history_id = outcome.data_str("historyId");
-        assert!(!history_id.is_empty(), "{}", outcome.describe());
-        history_id
-    }
-
-    /// 提交命令的公共参数（分支与提交类型）。
-    fn commit_command(&self) -> Spawn<'_> {
-        self.command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("commit-kind", "manual")
-    }
-
-    fn healthy(&self) -> u64 {
-        assert_healthy(&self.workspace, &self.repository)
-    }
-}
 
 /// B1 提交中途强杀：snapshot/delta 已发布、`history::commit` 未执行。
 ///
@@ -102,7 +36,7 @@ impl Fixture {
 /// 不修改产品行为，只把这作为实测结论记录下来。
 #[test]
 fn b1_commit_killed_after_publish_keeps_a_recoverable_orphan() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 1, "first");
     let before = assert_no_stray(&fixture.repository);
     assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
@@ -192,7 +126,7 @@ fn b1_commit_killed_after_publish_keeps_a_recoverable_orphan() {
 /// 由测试自行清理。
 #[test]
 fn b2_restore_killed_never_publishes_partial_output() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     let first = fixture.commit(96 * 1024, 11, "first");
     fixture.commit(80 * 1024, 12, "second");
     fixture.commit(64 * 1024, 13, "head");
@@ -283,7 +217,7 @@ fn b2_restore_killed_never_publishes_partial_output() {
 /// 残留才会被回收（`StagingDirectory::drop` 在进程被杀时不运行，宽限期是它之外的兜底）。
 #[test]
 fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 21, "first");
     fixture.commit(80 * 1024, 22, "second");
     let destination = fixture.workspace.backup_directory();
@@ -377,7 +311,7 @@ fn b3_repository_backup_killed_during_copy_leaves_identifiable_staging() {
 /// 随后同一命令重跑成功且只前进一格。断电持久性本身不在此列（见计划 §6）。
 #[test]
 fn b4_commit_killed_inside_transaction_discards_uncommitted_writes() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 31, "first");
     let before = assert_no_stray(&fixture.repository);
     assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);

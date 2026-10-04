@@ -1384,9 +1384,8 @@ mod tests {
         let current = vec![b'A'; 64 * 1024];
         let parent = vec![b'B'; 64 * 1024];
         let unrelated = vec![b'C'; 64 * 1024];
-        let mut delta =
-            ChunkFileDelta::open(&mut Cursor::new(encode_reverse_delta(&current, &parent)))
-                .unwrap();
+        let delta = ChunkFileDelta::open(&mut Cursor::new(encode_reverse_delta(&current, &parent)))
+            .unwrap();
         let mut unrelated_snapshot = Cursor::new(Vec::new());
         let unrelated_chunk = ChunkFile::create(
             &mut Cursor::new(&unrelated),
@@ -1423,7 +1422,7 @@ mod tests {
             .create_reverse_delta(&parent, &mut parent_snapshot, &mut encoded_delta)
             .unwrap();
 
-        let mut delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
+        let delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
         let mut restored_snapshot = Cursor::new(Vec::new());
         let restored = delta
             .apply(&current, &mut current_snapshot, &mut restored_snapshot)
@@ -1512,7 +1511,7 @@ mod tests {
             .create_reverse_delta(&parent, &mut parent_snapshot, &mut encoded_delta)
             .unwrap();
 
-        let mut delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
+        let delta = ChunkFileDelta::open(&mut encoded_delta).unwrap();
         let mut restored_snapshot = Cursor::new(Vec::new());
         let restored = delta
             .apply(&current, &mut current_snapshot, &mut restored_snapshot)

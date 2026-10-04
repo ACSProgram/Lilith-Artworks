@@ -6,7 +6,8 @@
 //! 与 Tauri 命令层并列，它是同一批领域函数的**另一个适配器**，只做参数解析、锁与
 //! 状态的装配、领域函数调用，**不含任何业务判断**；GUI 路径的行为与现状逐位不变。
 //!
-//! 规格见 `docs/planning/stress-test-plan-2026-10-04.md` 的 4.1 与 4.4。
+//! 定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，
+//! 面向使用者的结论见 `docs/guides/stress-test-report.md`。
 
 use std::{
     collections::HashMap,
@@ -34,16 +35,16 @@ const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
 const EXIT_CANCELLED: i32 = 2;
 
-/// 进程级闸门。`history::commit` 的「事务已写入、尚未提交」标记点需要它（见
-/// [`commit_marker`]），而该标记点位于领域函数内部、拿不到调用栈上的闸门。
-/// 一个无头进程只执行一条命令，因此进程级单例足够，不必层层传参。
+/// 进程级闸门。两处为测试而设的标记点（[`commit_marker`] 与 [`auth_checkpoint`]）
+/// 需要它，而它们位于领域函数内部、拿不到调用栈上的闸门。一个无头进程只执行一条
+/// 命令，因此进程级单例足够，不必层层传参。
 static INTERLOCK: OnceLock<Interlock> = OnceLock::new();
 
 /// 「事务已 BEGIN、INSERT 已写、尚未 COMMIT」的强杀/取消标记点。
 ///
-/// 这是**唯一一处**为测试而触及产品代码的标记点：`history::commit` 在
-/// `transaction.commit()` 之前调用它，调用点本身由 `feature = "headless"` 门控，
-/// 因此发布产物中不存在、GUI 路径行为逐位不变。
+/// 这是为测试而触及产品代码的**两处**标记点之一（另一处是 [`auth_checkpoint`]）：
+/// `history::commit` 在 `transaction.commit()` 之前调用它，调用点本身由
+/// `feature = "headless"` 门控，因此发布产物中不存在、GUI 路径行为逐位不变。
 ///
 /// 返回「此刻是否已请求取消」：调用方据此放弃提交，让未提交事务被整体丢弃。
 /// 无头进程没有开闸门时只写一行 marker 并立即返回 `false`。
@@ -59,8 +60,9 @@ pub(crate) fn commit_marker() -> bool {
 
 /// 认证流水线的取消检查点（渲染 / 编码 / 签名）。
 ///
-/// 与 [`commit_marker`] 同一范式：调用点在领域函数 `authenticity::pipeline` 内部、
-/// 由 `feature = "headless"` 门控，发布产物中不存在，GUI 路径行为逐位不变。
+/// 与 [`commit_marker`] 同一范式，是两处为测试而触及产品代码的标记点中的**第二处**：
+/// 调用点在领域函数 `authenticity::pipeline` 内部、由 `feature = "headless"` 门控，
+/// 发布产物中不存在，GUI 路径行为逐位不变。
 /// 返回「此刻是否已请求取消」，调用方据此放弃发布。
 pub(crate) fn auth_checkpoint(stage: &str) -> bool {
     match INTERLOCK.get() {

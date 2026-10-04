@@ -14,85 +14,13 @@
 
 mod stress_support;
 
-use std::{fs, path::PathBuf, time::Duration};
-
 use serde_json::json;
 use stress_support::*;
-
-const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
-
-struct Fixture {
-    workspace: Workspace,
-    repository: PathBuf,
-    work: PathBuf,
-    branch_id: String,
-}
-
-impl Fixture {
-    fn new() -> Self {
-        let workspace = Workspace::new();
-        let repository = workspace.repository();
-        let work = workspace.work("artwork.bin");
-        write_work_file(&work, 96 * 1024, 1);
-        headless(&workspace, "init-repository").finish().expect_ok();
-        let created = headless(&workspace, "create-artwork")
-            .arg("title", "Artwork")
-            .arg("branch-title", "Main")
-            .arg("source", work.to_string_lossy())
-            .finish();
-        created.expect_ok();
-        let branch_id = created.data_str("branchId");
-        assert!(!branch_id.is_empty(), "{}", created.describe());
-        Self {
-            workspace,
-            repository,
-            work,
-            branch_id,
-        }
-    }
-
-    fn command(&self, command: &str) -> Spawn<'_> {
-        headless(&self.workspace, command)
-            .repository(&self.repository)
-            .timeout(SCENARIO_TIMEOUT)
-    }
-
-    fn commit(&self, len: usize, seed: u64, note: &str) -> String {
-        write_work_file(&self.work, len, seed);
-        let outcome = self
-            .command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("note", note)
-            .arg("commit-kind", "manual")
-            .finish();
-        outcome.expect_ok();
-        let history_id = outcome.data_str("historyId");
-        assert!(!history_id.is_empty(), "{}", outcome.describe());
-        history_id
-    }
-
-    fn commit_command(&self) -> Spawn<'_> {
-        self.command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("commit-kind", "manual")
-    }
-}
-
-/// 把文件修改时间回拨 `seconds` 秒（只改测试自有工作区里的文件）。
-fn backdate(path: &PathBuf, seconds: u64) {
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap_or_else(|error| panic!("无法打开 {} 以修改时间：{error}", path.display()));
-    let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
-    file.set_modified(when)
-        .unwrap_or_else(|error| panic!("无法修改 {} 的时间：{error}", path.display()));
-}
 
 /// B5：崩溃孤儿经「扫描发现 + 确认清理」被回收，被引用文件不受影响。
 #[test]
 fn b5_crash_orphans_are_discovered_and_reclaimed() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 1, "baseline");
     let before = assert_no_stray(&fixture.repository);
     assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);

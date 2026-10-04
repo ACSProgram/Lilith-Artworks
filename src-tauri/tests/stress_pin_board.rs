@@ -141,17 +141,6 @@ impl Fixture {
     }
 }
 
-/// 把文件修改时间回拨 `seconds` 秒（只改测试自有工作区里的文件）。
-fn backdate(path: &PathBuf, seconds: u64) {
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(path)
-        .unwrap_or_else(|error| panic!("无法打开 {} 以修改时间：{error}", path.display()));
-    let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
-    file.set_modified(when)
-        .unwrap_or_else(|error| panic!("无法修改 {} 的时间：{error}", path.display()));
-}
-
 /// H1：双向检查报告「正常 / 缺失 / 损坏 / 孤儿」四类计数，缺失与损坏不使命令失败。
 #[test]
 fn h1_board_dds_scan_reports_four_classes() {

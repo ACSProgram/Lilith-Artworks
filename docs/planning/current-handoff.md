@@ -21,9 +21,55 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：压力测试批次 7——认证模块（G）（已实现）
+## 本轮批次：压力测试批次 8——文档与收尾（已实现）
 
-落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 7」。它是压力测试里**唯一触及
+落实 `stress-test-plan-2026-10-04.md` 的「批次 8」，并叠加维护者要求的收尾审查：检查全部压力
+测试是否合理、能否补充；检查产品与测试代码的规范、废弃/测试性残留、重复与可复用结构；校对
+注释与文档是否符合事实；把结论收敛进面向使用者的 `docs/guides/stress-test-report.md`；
+最后归档计划文档。
+
+1. **测试补充（R 组）**：新增 `tests/stress_damage.rs`（2 个测试），把「损坏文件的检测与恢复」
+   从库级单测补成端到端断言——head 快照被改坏后全库校验报「块哈希不匹配」、数据库级校验
+   （不读文件内容）仍通过、恢复被拒绝且无输出、一次内容未变化的提交修复快照并恢复逐字节一致；
+   增量被改坏后全库校验报「无法读取恢复链 delta」，而 head 自身持有快照故恢复不受影响。
+   只改测试工作区里文件的字节，不触碰产品行为。
+2. **测试代码去重**：把 A/B/B5/R 四组重复的 `Fixture`（仓库 + 工作文件 + 主分支）收敛为
+   `stress_support::ArtworkFixture`；把 `stress_cleanup` 与 `stress_pin_board` 各自复制的
+   `backdate` 收敛到 `stress_support`；`stress_cancel` 的本地 `read_directory_names` 改用共享的
+   `directory_names`；修正 `stress_support` 头部「批次 4–5 会扩展」的过时说明，并说明
+   `#![allow(dead_code)]` 是「每个测试目标各自编译本模块、只用到其中一个子集」的必要产物，
+   而非废弃代码。
+3. **产品代码注释校正**：`src/headless.rs` 原称提交事务标记点是「唯一一处为测试而触及产品代码的
+   标记点」，与批次 7 新增的 `auth_checkpoint`（第二处）不符，改为如实描述两处；并把指向计划
+   文档的引用改为指向 `docs/guides/validation.md` 与 `docs/guides/stress-test-report.md`（计划已归档）。
+4. **既有警告清理**：清除 `cargo check --features headless --tests` 下 4 条既有警告
+   （`pin_board/repository.rs` 一处未使用导入、`backup/chunk_file.rs` 三处多余 `mut`），
+   使 lib 与 tests 在无头构建下**零警告**。
+5. **文档收尾**：`validation.md` 与 `release-policy.md` 写明**断电持久性不做自动化验证**，
+   并把压力测试套件由七组更新为八组（含 `stress_damage`）；`overview.md` 补无头入口的存在与
+   用途（不进发布产物）；`history-and-backup.md` 与 `authenticity.md` 新增「可靠性不变量与
+   覆盖」表，逐条命题标注证明场景；`todo.md` 第二节把取消边界、损坏文件恢复、画板 DDS、极端
+   大文件与高像素错误恢复标注为「已自动化覆盖，保留人工复核手感」，并确认断电持久性为声明项；
+   `CHANGELOG.md` 在 `0.2.0-alpha.4` 段补记压力测试套件与无头入口，并修正「stress-test 批次
+   记录在 alpha.3 下」的失实表述。
+6. **报告重写**：`docs/guides/stress-test-report.md` 收敛为面向使用者的版本（通俗语言、具体
+   数据），新增 R 组与第 8 条结论，并修正 A1 的取消次数（4 → 5，A 组合计 27 → 28）与「32 次」
+   的归属表述。
+7. **归档**：`stress-test-plan-2026-10-04.md` 移入 `docs/planning/archive/`，在
+   `archive/README.md` 时间线登记；`current-handoff.md` 内对计划的引用改为裸文件名。
+
+**验证**（维护者授权本轮运行整套压力测试）：`cargo fmt --check`、`git diff --check` 通过；
+`cargo check --lib` 与 `cargo check --features headless --tests` **零警告**；
+`cargo build --release --features headless` 成功；以发布档二进制重跑全套：
+`stress_cancel` 6、`stress_crash` 4、`stress_cleanup` 1、`stress_scale` 5、`stress_pin_board` 3、
+`stress_authenticity` 4（`extreme` 档含 G1/G2）、`stress_damage` 2 全部通过；
+`stress_large` 四档 6/6（`default` 29 s、`large` 101 s、`heavy` 277 s、`extreme` 1482 s）；
+`cargo test --lib` **151 通过**、1 个忽略项；`npm test` **121 通过**（未改前端）。
+实测数值与面向使用者的结论见 `docs/guides/stress-test-report.md`。
+
+## 上一批次：压力测试批次 7——认证模块（G）（已实现）
+
+落实 `stress-test-plan-2026-10-04.md` 的「批次 7」。它是压力测试里**唯一触及
 安全边界**的批次：把认证命令的路径授权来源抽象成可注入的作用域，使无头进程复用同一条检查
 （而不是把检查关掉），并据此补上认证发布的内存、取消、回读与受控文件校验。无头入口仍
 feature 门控、不进发布产物。
@@ -87,7 +133,7 @@ feature 门控、不进发布产物。
 
 ## 上一批次：压力测试批次 6——画板 DDS 完整性（H）（已实现）
 
-落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 6」。它把画板 DDS 的完整性检查
+落实 `stress-test-plan-2026-10-04.md` 的「批次 6」。它把画板 DDS 的完整性检查
 补成可自动化断言：双向检查区分「正常 / 缺失 / 损坏 / 孤儿」四类、缺失与损坏报告不失败、
 孤儿 DDS 走「扫描发现 + 用户确认清理」闭环、单画板数百张图片下规模与取消均正确。批次 6
 只扩展无头入口与测试，**不改动任何产品命令的行为**；无头入口仍 feature 门控、不进发布产物。
@@ -128,7 +174,7 @@ feature 门控、不进发布产物。
 
 ## 上一批次：压力测试批次 2 补充——事务中途崩溃（B4）（已实现）
 
-落实 `docs/planning/stress-test-plan-2026-10-04.md` 的「批次 2 补充」。它验证 `synchronous
+落实 `stress-test-plan-2026-10-04.md` 的「批次 2 补充」。它验证 `synchronous
 = FULL`（`storage.rs`）承诺里**可观测**的那一面：进程在事务已 `BEGIN`、`INSERT` 已写、
 尚未 `COMMIT` 时被强杀后，未提交事务必须被整体丢弃。断电持久性本身仍不做自动化（计划 §6）。
 
@@ -163,7 +209,7 @@ feature 门控、不进发布产物。
 
 ## 上一批次：压力测试批次 4（规模与灾备、参数边界）与批次 5（崩溃孤儿回收闭环）（已实现）
 
-规划见 `docs/planning/stress-test-plan-2026-10-04.md` 的批次 4、5 与 §0 二次订正。批次 4、5
+规划见 `stress-test-plan-2026-10-04.md` 的批次 4、5 与 §0 二次订正。批次 4、5
 独立提交；两者都只扩展无头入口与测试，**不改动任何产品命令的行为**，无头入口仍 feature 门控、
 不进发布产物。
 
@@ -453,7 +499,7 @@ GUI 行为无变化（错误仅在日志与队列中）。
 
 ## 上一批次：压力测试批次 3（大文件端到端，已实现）
 
-规划见 `docs/planning/stress-test-plan-2026-10-04.md` 的批次 3 与 C 组矩阵。本批次落实
+规划见 `stress-test-plan-2026-10-04.md` 的批次 3 与 C 组矩阵。本批次落实
 **批次 3**；批次 4–6（规模与灾备、认证大图、文档收尾）仍未开始。
 
 1. **只新增测试，不改产品代码。** 复用批次 1 的无头入口与批次 2 的编排：本批次没有改动
@@ -481,7 +527,7 @@ GUI 行为无变化（错误仅在日志与队列中）。
 
 ## 上一批次：压力测试批次 2（跨进程崩溃，已实现）
 
-规划见 `docs/planning/stress-test-plan-2026-10-04.md` 的批次 2 与 B 组矩阵。本批次落实 **批次 2**。
+规划见 `stress-test-plan-2026-10-04.md` 的批次 2 与 B 组矩阵。本批次落实 **批次 2**。
 
 1. **只新增测试，不改产品代码。** 复用批次 1 的无头入口与编排：本批次**没有**改动
    `headless.rs`、`Cargo.toml` 或任何领域代码，只在测试侧增加强杀编排与 B 组场景。
@@ -514,7 +560,7 @@ GUI 行为无变化（错误仅在日志与队列中）。
 ## 规划订正与重排（2026-10-04）
 
 批次 2 落实后核实出计划文档与代码的两处不符，据维护者决定订正
-`docs/planning/stress-test-plan-2026-10-04.md` 并重排批次：
+`stress-test-plan-2026-10-04.md` 并重排批次：
 
 1. **事务中途崩溃未被覆盖**：B 组强杀点落在 `history::commit` **之前**，B2/B3 不写数据库，
    因此 `WAL + synchronous = FULL` 这条承诺（计划 §1.2 本意要验证的）**仍未验证**。
@@ -529,7 +575,7 @@ GUI 行为无变化（错误仅在日志与队列中）。
 
 ## 上一批次：压力测试批次 1（无头入口骨架与取消边界，已实现）
 
-规划见 `docs/planning/stress-test-plan-2026-10-04.md`。本批次只落实该计划的
+规划见 `stress-test-plan-2026-10-04.md`。本批次只落实该计划的
 **批次 1**；批次 2–6（跨进程崩溃、大文件端到端、规模与灾备、认证模块、文档收尾）尚未开始，
 因此「各处理阶段的取消边界」目前只覆盖到提交/恢复/精简/检查点/整仓灾备/全库扫描，
 认证签名部分要等批次 5。

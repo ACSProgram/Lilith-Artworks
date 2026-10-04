@@ -15,92 +15,21 @@
 
 mod stress_support;
 
-use std::{fs, path::PathBuf, time::Duration};
+use std::{fs, path::PathBuf};
 
 use serde_json::json;
 use stress_support::*;
 
-/// 各场景的闸门等待上限。小规模档用 MiB 级文件，正常应在秒级完成。
-const SCENARIO_TIMEOUT: Duration = Duration::from_secs(180);
-
-struct Fixture {
-    workspace: Workspace,
-    repository: PathBuf,
-    work: PathBuf,
-    branch_id: String,
+/// 给一个已装配好专有参数的命令套上闸门并按策略驱动。
+fn gated(spawn: Spawn<'_>, policy: &Policy) -> Outcome {
+    spawn
+        .gate()
+        .drive(|index, stage| policy.decide(index, stage))
 }
 
-impl Fixture {
-    fn new() -> Self {
-        let workspace = Workspace::new();
-        let repository = workspace.repository();
-        let work = workspace.work("artwork.bin");
-        write_work_file(&work, 96 * 1024, 1);
-        headless(&workspace, "init-repository").finish().expect_ok();
-        let created = headless(&workspace, "create-artwork")
-            .arg("title", "Artwork")
-            .arg("branch-title", "Main")
-            .arg("source", work.to_string_lossy())
-            .finish();
-        created.expect_ok();
-        let branch_id = created.data_str("branchId");
-        assert!(!branch_id.is_empty(), "{}", created.describe());
-        Self {
-            workspace,
-            repository,
-            work,
-            branch_id,
-        }
-    }
-
-    fn command(&self, command: &str) -> Spawn<'_> {
-        headless(&self.workspace, command)
-            .repository(&self.repository)
-            .timeout(SCENARIO_TIMEOUT)
-    }
-
-    /// 写入新内容并做一次普通提交，返回历史节点标识。
-    fn commit(&self, len: usize, seed: u64, note: &str) -> String {
-        write_work_file(&self.work, len, seed);
-        let outcome = self
-            .command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("note", note)
-            .arg("commit-kind", "manual")
-            .finish();
-        outcome.expect_ok();
-        let history_id = outcome.data_str("historyId");
-        assert!(!history_id.is_empty(), "{}", outcome.describe());
-        history_id
-    }
-
-    /// 给一个已装配好专有参数的命令套上闸门并按策略驱动。
-    fn gated(&self, spawn: Spawn<'_>, policy: &Policy) -> Outcome {
-        spawn
-            .gate()
-            .drive(|index, stage| policy.decide(index, stage))
-    }
-
-    /// 提交命令的公共参数（分支与提交类型）。
-    fn commit_command(&self) -> Spawn<'_> {
-        self.command("commit")
-            .arg("branch", &self.branch_id)
-            .arg("commit-kind", "manual")
-    }
-
-    /// 在给定策略下运行一次带闸门的命令。
-    fn gated_command(&self, command: &str, policy: &Policy) -> Outcome {
-        self.gated(self.command(command), policy)
-    }
-
-    fn healthy(&self) -> u64 {
-        assert_healthy(&self.workspace, &self.repository)
-    }
-
-    fn assert_repository_clean(&self) {
-        assert_no_stray(&self.repository);
-        assert_cleanup_empty(&self.workspace, &self.repository);
-    }
+/// 在给定策略下运行一次带闸门的命令。
+fn gated_command(fixture: &ArtworkFixture, command: &str, policy: &Policy) -> Outcome {
+    gated(fixture.command(command), policy)
 }
 
 /// A1 提交取消：在提交的每一个取消检查点各取消一次。
@@ -111,14 +40,14 @@ impl Fixture {
 /// 第 5 个走 `history::commit` 的错误分支——因此逐个覆盖是必要的。
 #[test]
 fn a1_commit_cancellation_is_clean_at_every_checkpoint() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     let mut expected_nodes = 0_u64;
     for target in 1..=5 {
         let len = 96 * 1024 + target * 16;
         let seed = 100 + target as u64;
         write_work_file(&fixture.work, len, seed);
         let policy = Policy::at_index(target);
-        let outcome = fixture.gated(
+        let outcome = gated(
             fixture.commit_command().arg("note", "cancel probe"),
             &policy,
         );
@@ -154,7 +83,7 @@ fn a1_commit_cancellation_is_clean_at_every_checkpoint() {
 /// 临时文件。正向对照再确认同一节点仍能完整恢复出逐位一致的原始字节。
 #[test]
 fn a2_restore_cancellation_never_publishes_output() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     let first = fixture.commit(96 * 1024, 11, "first");
     fixture.commit(80 * 1024, 12, "second");
     fixture.commit(64 * 1024, 13, "head");
@@ -195,7 +124,7 @@ fn a2_restore_cancellation_never_publishes_output() {
         );
     }
 
-    let leftovers = read_directory_names(&fixture.workspace.out_directory());
+    let leftovers = directory_names(&fixture.workspace.out_directory());
     assert!(
         leftovers.is_empty(),
         "恢复输出目录残留临时文件：{leftovers:?}"
@@ -218,7 +147,7 @@ fn a2_restore_cancellation_never_publishes_output() {
 /// 恢复出原始字节，节点数不变，临时文件已回收。
 #[test]
 fn a3_compact_cancellation_keeps_the_history_graph() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     let first = fixture.commit(96 * 1024, 21, "first");
     let middle = fixture.commit(80 * 1024, 22, "middle");
     fixture.commit(64 * 1024, 23, "head");
@@ -279,7 +208,7 @@ fn a3_compact_cancellation_keeps_the_history_graph() {
 /// 取消后节点不得被登记为检查点，也不得留下孤儿 snapshot。
 #[test]
 fn a4_checkpoint_cancellation_publishes_nothing() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 31, "first");
     let middle = fixture.commit(80 * 1024, 32, "middle");
     fixture.commit(64 * 1024, 33, "head");
@@ -337,7 +266,7 @@ fn a4_checkpoint_cancellation_publishes_nothing() {
 /// 未发布的临时 bundle 必须被清理，返回错误要附带清理结果；源仓库不受影响。
 #[test]
 fn a5_repository_backup_cancellation_cleans_the_staging_bundle() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 41, "first");
     fixture.commit(80 * 1024, 42, "second");
     let destination = fixture.workspace.backup_directory();
@@ -371,7 +300,7 @@ fn a5_repository_backup_cancellation_cleans_the_staging_bundle() {
             );
         }
         assert_eq!(
-            read_directory_names(&destination),
+            directory_names(&destination),
             Vec::<String>::new(),
             "灾备目标目录必须被清空，不能留下未发布的 bundle"
         );
@@ -410,7 +339,7 @@ fn a5_repository_backup_cancellation_cleans_the_staging_bundle() {
 /// 扫描是纯只读操作，取消后仓库状态必须逐项不变。
 #[test]
 fn a6_repository_scrub_cancellation_leaves_the_repository_unchanged() {
-    let fixture = Fixture::new();
+    let fixture = ArtworkFixture::new();
     fixture.commit(96 * 1024, 51, "first");
     fixture.commit(80 * 1024, 52, "second");
     fixture.commit(64 * 1024, 53, "head");
@@ -422,7 +351,7 @@ fn a6_repository_scrub_cancellation_leaves_the_repository_unchanged() {
         ("late-node", Policy::at_stage("全库扫描 2/3")),
     ];
     for (label, policy) in policies {
-        let outcome = fixture.gated_command("scrub", &policy);
+        let outcome = gated_command(&fixture, "scrub", &policy);
 
         outcome.expect_cancelled();
         let after = assert_no_stray(&fixture.repository);
@@ -436,17 +365,4 @@ fn a6_repository_scrub_cancellation_leaves_the_repository_unchanged() {
             json!({ "position": label }),
         );
     }
-}
-
-fn read_directory_names(directory: &std::path::Path) -> Vec<String> {
-    let mut names = fs::read_dir(directory)
-        .map(|entries| {
-            entries
-                .flatten()
-                .map(|entry| entry.file_name().to_string_lossy().into_owned())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    names.sort();
-    names
 }

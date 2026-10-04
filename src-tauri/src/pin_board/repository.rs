@@ -1846,8 +1846,6 @@ mod tests {
 
 #[cfg(test)]
 mod migration_tests {
-    use super::*;
-
     /// v1 仓库（无素材板表、分支表也没有 v2/v3/v4 追加列）打开时必须通过追加式
     /// 迁移升级到当前版本，且既有 v1 数据保持不变。
     #[test]
