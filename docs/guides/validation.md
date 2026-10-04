@@ -21,10 +21,11 @@
 
 ## 压力测试：只在发布前运行
 
-`src-tauri/tests/` 下的七组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`src-tauri/tests/` 下的八组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
 `stress_large` 大文件端到端、`stress_scale` 规模与灾备与参数边界、`stress_cleanup` 崩溃孤儿
-回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读）
-是**发布前手动运行**的套件，**不在 CI 中**，也**不属于日常开发的任何阶段**：
+回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
+`stress_damage` 损坏文件的检测与恢复）是**发布前手动运行**的套件，**不在 CI 中**，
+也**不属于日常开发的任何阶段**：
 
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
   `cargo test --lib`、`git diff --check`。**不要顺手运行压力测试**——即使到了收尾、整理、
@@ -40,6 +41,9 @@
   不超过 `LILITH_STRESS_JOBS`（默认可用核数）。这样在有磁盘余量的机器上充分利用多核——
   被测子进程是单线程的，串行只会用一个核——同时避免盲目并行把磁盘写满。
 - 运行方式、档位、磁盘需求与实测数据见 `docs/guides/stress-test-report.md` 第 4、6 节。
+- **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
+  缓存、也不保证目录项落盘，结构上无法覆盖「断电后已提交数据是否仍在」。该保证由操作系统、
+  磁盘与 SQLite `synchronous = FULL` 声明承担，保留为声明/人工项，不列入自动化目标。
 
 ## 持续集成
 

@@ -45,6 +45,20 @@ before and after the first stable release.
   repairs; a missing DDS is a history-migration concern. There is no SHA-256
   comparison because `pin_board_images` stores no digest and the schema is not
   migrated in this batch.
+- A pre-release stress-test suite and the headless command-line entry point it
+  uses. A new `--headless <command>` mode (gated behind the `headless` Cargo
+  feature, absent from release builds) runs the real executable as a separate
+  process with no window, tray, webview, or IPC; it is a 1:1 adapter over the
+  existing domain functions and adds no business logic. The suite under
+  `src-tauri/tests/` drives that binary across a process boundary and asserts
+  only on returned JSON and on-disk facts. It covers cancel boundaries,
+  cross-process kills (including inside the SQLite commit transaction), 4 GiB
+  file round trips, scale and disaster recovery, parameter boundaries, crash
+  orphan reclamation, pin-board DDS integrity, authenticity publish memory and
+  read-back, and damaged snapshot/delta detection and repair. It runs only
+  before a release, is not part of CI, and changes no shipped command's
+  behavior. See `docs/guides/validation.md` and
+  `docs/guides/stress-test-report.md`.
 
 ### Fixed
 
@@ -89,9 +103,17 @@ before and after the first stable release.
 - The application version is incremented to `0.2.0-alpha.4`. The bump itself
   carries no behavior change and follows the alpha-stage lagging-version
   policy (no tag, no release, matching the alpha.1 and alpha.2 precedent); the
-  unified cleanup system recorded above landed under the same version
-  afterwards. The schema v4, scheduler, and stress-test batches recorded under
-  `0.2.0-alpha.3` below remain part of that section.
+  unified cleanup system and the pre-release stress-test suite recorded above
+  landed under the same version. The schema v4 and scheduler batches recorded
+  under `0.2.0-alpha.3` below remain part of that section.
+- Pre-release verification is finalized in the docs. `docs/guides/validation.md`
+  and `docs/guides/release-policy.md` state that power-loss durability is not
+  automated (a killed process does not touch OS/disk caches or directory-entry
+  persistence; the guarantee rests on the OS, the disk, and SQLite
+  `synchronous = FULL`). `docs/modules/history-and-backup.md` and
+  `docs/modules/authenticity.md` gain a "reliability invariants and coverage"
+  table mapping each guarantee to the scenario that proves it. The stress-test
+  plan is archived under `docs/planning/archive/`.
 
 ## 0.2.0-alpha.3 - 2026-10-03
 

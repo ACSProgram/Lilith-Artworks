@@ -134,6 +134,29 @@ cleanup_repository_unreferenced
 
 应用工作流通过公开 `backup::ensure_checkpoint` 固化分支起点或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。当前批次状态见 `docs/planning/current-handoff.md`。
 
+## 可靠性不变量与覆盖
+
+以下命题是历史/备份模块对使用者的承诺，每条都由发布前的自动化压力测试（`src-tauri/tests/`，
+**发布前手动运行、不进 CI**，见 `docs/guides/validation.md` 与 `docs/guides/stress-test-report.md`）
+以**独立进程调用真实可执行文件**的方式验证；断言只用子命令返回的 JSON 与磁盘事实，不读内部状态。
+
+| 不变量 | 证明场景 |
+| --- | --- |
+| 提交在任意取消检查点被取消都不留残留（无未发布的 snapshot/delta、临时文件已回收、待清理队列为空），历史图不前进，且可立即重试成功 | `stress_cancel` A1 |
+| 恢复 / 精简 / 检查点 / 全库扫描被取消后输出不存在、历史图不变、临时文件已回收 | `stress_cancel` A2–A4、A6 |
+| 整仓灾备被取消时未发布的临时 bundle 被清理，源仓库不受影响，副本重跑成功 | `stress_cancel` A5 |
+| 进程在「文件已发布、数据库未提交」之间被强杀后仓库仍可重开（迁移 + 完整性 + 外键 + 全表语义校验，以及逐块摘要链），head 不前进；已发布文件成为孤儿（不自动回收，可扫描发现） | `stress_crash` B1 |
+| 进程在 SQLite 事务中途被强杀时，未提交写入被整体丢弃（head、父快照释放、清理入队一并回滚） | `stress_crash` B4 |
+| 崩溃孤儿可被扫描发现、经用户确认后清理，被引用文件不被误删 | `stress_cleanup` B5 |
+| 4 GiB 工作文件的「提交 → 有界改动 → 恢复两端」逐位一致；磁盘增量跟随改动量而非文件大小；峰值内存不随文件大小线性增长 | `stress_large` C1–C6 |
+| 单作品 300 次提交的深链、约 20 条分支的历史图、约 400 个 Artwork 的库：计数、搜索、移动、删除与恢复均正确 | `stress_scale` D1–D3 |
+| 整仓灾备副本可独立打开并通过完整性与链路校验，树结构与源仓库一致 | `stress_scale` E1 |
+| 越界输入（备注/标题/搜索超长、非法提交类型、不存在的历史节点、已存在的输出路径、非法移动目标）被明确拒绝而非崩溃 | `stress_scale` F1 |
+| 损坏的 snapshot/delta 被内容级校验（`scrub`）发现；数据库级校验（`verify`）不读取文件内容因此仍通过；head snapshot 损坏后一次内容未变化的提交可修复；恢复损坏节点被拒绝且不留半成品 | `stress_damage` R1–R2（另有 `backup/worker.rs`、`backup/restore.rs` 单测） |
+
+**不做的**：断电持久性不做自动化验证——`Child::kill()` 不触及操作系统与磁盘的缓存、也不保证
+目录项落盘，该保证由操作系统、磁盘与 `synchronous = FULL` 声明承担。
+
 ## 历史图前端布局
 
 - 总览 mindmap 使用可横向滚动的内容画布，支持“紧凑”和“时间轴”排列模式。模式开关位于“历史总览”标题行；同一行的滑条把节点最小宽度调整在 220px 到 420px，并通过 `lilith-artworks.history-node-min-width-v1` 持久化。标题与控制行从滚动容器顶边开始吸顶，不留可透出画布内容的顶部空隙；兄弟节点水平间隔收紧，减少无效横向占用。

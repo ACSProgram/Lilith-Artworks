@@ -21,3 +21,9 @@
   检查、可观测 UI 与文档收尾。六个批次已全部实施完毕，有效契约并入
   `docs/modules/history-and-backup.md`、`docs/modules/pin-board.md` 与
   `docs/architecture/overview.md`，待人工验收项见 `../todo.md`。
+- `stress-test-plan-2026-10-04.md`：自动化压力测试规划（批次 1–8）。采用无界面命令行入口，
+  以**独立进程**调用真实可执行文件，覆盖取消边界、跨进程强杀、事务中途崩溃、大文件端到端、
+  规模与灾备、参数边界、崩溃孤儿回收、画板 DDS 完整性、认证发布内存与回读，以及损坏文件的
+  检测与恢复。八个批次已全部实施完毕，有效契约并入 `docs/guides/validation.md`、
+  `docs/guides/stress-test-report.md`，以及 `docs/modules/history-and-backup.md` 与
+  `docs/modules/authenticity.md` 的「可靠性不变量与覆盖」；待人工验收项见 `../todo.md`。

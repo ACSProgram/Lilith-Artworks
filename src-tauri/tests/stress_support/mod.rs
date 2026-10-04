@@ -1,11 +1,12 @@
-//! 压力测试共享助手：工作区、进程编排、阶段协议与磁盘事实断言。
+//! 压力测试共享助手：工作区、进程编排、阶段协议、磁盘事实断言与通用夹具。
 //!
 //! 纪律（见 `docs/guides/validation.md`）：测试只通过命令行参数、stdin 与进程退出
 //! 干预被测进程，**不读取其内部状态**。全部断言基于「子命令返回的 JSON」与
 //! 「磁盘事实」。
 //!
-//! 覆盖批次 1–3 需要的部分；批次 4–5 会在此基础上扩展（规模场景、认证大图），
-//! 因此这里允许部分助手暂时未被使用。
+//! 本模块由每个测试目标各自 `mod stress_support;` 引入并**单独编译**，因此每个二进制
+//! 只用到其中一个子集；`allow(dead_code)` 是这一结构的必要产物，并不代表这里存在
+//! 废弃代码。新增场景时优先复用本模块的夹具与断言，不要在测试文件里复制。
 #![allow(dead_code)]
 
 use std::{
@@ -170,6 +171,79 @@ impl Workspace {
 }
 
 impl Default for Workspace {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// 单作品夹具：一个仓库 + 一个已建好的 Artwork/主分支 + 它的工作文件。
+///
+/// 取消（A）、崩溃（B）、孤儿回收（B5）与损坏恢复（R）各组的起点形状相同，统一放在
+/// 这里，避免每个测试文件各复制一份。默认工作文件为 96 KiB，足够产生多块内容。
+pub struct ArtworkFixture {
+    pub workspace: Workspace,
+    pub repository: PathBuf,
+    pub work: PathBuf,
+    pub branch_id: String,
+}
+
+impl ArtworkFixture {
+    pub fn new() -> Self {
+        let workspace = Workspace::new();
+        let repository = workspace.repository();
+        let work = workspace.work("artwork.bin");
+        write_work_file(&work, 96 * 1024, 1);
+        headless(&workspace, "init-repository").finish().expect_ok();
+        let created = headless(&workspace, "create-artwork")
+            .arg("title", "Artwork")
+            .arg("branch-title", "Main")
+            .arg("source", work.to_string_lossy())
+            .finish();
+        created.expect_ok();
+        let branch_id = created.data_str("branchId");
+        assert!(!branch_id.is_empty(), "{}", created.describe());
+        Self {
+            workspace,
+            repository,
+            work,
+            branch_id,
+        }
+    }
+
+    pub fn command(&self, command: &str) -> Spawn<'_> {
+        headless(&self.workspace, command).repository(&self.repository)
+    }
+
+    /// 写入新内容并做一次普通提交，返回历史节点标识。
+    pub fn commit(&self, len: usize, seed: u64, note: &str) -> String {
+        write_work_file(&self.work, len, seed);
+        let outcome = self.commit_command().arg("note", note).finish();
+        outcome.expect_ok();
+        let history_id = outcome.data_str("historyId");
+        assert!(!history_id.is_empty(), "{}", outcome.describe());
+        history_id
+    }
+
+    /// 提交命令的公共参数（分支与提交类型）。
+    pub fn commit_command(&self) -> Spawn<'_> {
+        self.command("commit")
+            .arg("branch", &self.branch_id)
+            .arg("commit-kind", "manual")
+    }
+
+    /// 重开可用（`verify` + `scrub`）并返回历史节点数。
+    pub fn healthy(&self) -> u64 {
+        assert_healthy(&self.workspace, &self.repository)
+    }
+
+    /// 断言仓库无残留临时文件且待清理队列为空。
+    pub fn assert_repository_clean(&self) {
+        assert_no_stray(&self.repository);
+        assert_cleanup_empty(&self.workspace, &self.repository);
+    }
+}
+
+impl Default for ArtworkFixture {
     fn default() -> Self {
         Self::new()
     }
@@ -701,6 +775,20 @@ pub fn pattern_bytes(len: usize, seed: u64) -> Vec<u8> {
 
 pub fn write_work_file(path: &Path, len: usize, seed: u64) {
     fs::write(path, pattern_bytes(len, seed)).expect("无法写入工作文件");
+}
+
+/// 把文件修改时间回拨 `seconds` 秒。
+///
+/// 只用于把测试自有工作区里的文件挪到宽限期之外（例如未引用文件扫描的 30 分钟窗口），
+/// 不触碰任何产品行为。
+pub fn backdate(path: &Path, seconds: u64) {
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap_or_else(|error| panic!("无法打开 {} 以修改时间：{error}", path.display()));
+    let when = std::time::SystemTime::now() - Duration::from_secs(seconds);
+    file.set_modified(when)
+        .unwrap_or_else(|error| panic!("无法修改 {} 的时间：{error}", path.display()));
 }
 
 // ---------------------------------------------------------------------------
