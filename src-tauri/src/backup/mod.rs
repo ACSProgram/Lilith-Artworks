@@ -1,10 +1,12 @@
 pub(crate) mod chunk_file;
 mod commands;
 mod repository_backup;
-mod restore;
+// 无头入口（feature = "headless"）是这些领域函数的另一个适配器，与 Tauri 命令层
+// 并列：它需要直接调用 restore/worker，因此这两个模块对 crate 可见。
+pub(crate) mod restore;
 mod runtime;
 mod scheduler;
-mod worker;
+pub(crate) mod worker;
 
 use serde::{Deserialize, Serialize};
 

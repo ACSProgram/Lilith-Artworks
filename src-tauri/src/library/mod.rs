@@ -8,7 +8,9 @@ pub(crate) use model::{
     CreateArtworkRequest, LibrarySearchResult, LibraryTrashEntry, LibraryTree,
     MoveLibraryNodesRequest, RepositoryStatus,
 };
-#[cfg(test)]
+/// 不带列表返回的创建入口：单元测试与无头入口需要拿到新建的 artwork/branch 标识，
+/// 与产品命令使用的 [`create_artwork_and_list`] 共用同一实现。
+#[cfg(any(test, feature = "headless"))]
 pub(crate) use repository::create_artwork;
 pub(crate) use repository::{
     check_existing, create_artwork_and_list, empty_trash, initialize, open_existing,

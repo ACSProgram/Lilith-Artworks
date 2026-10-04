@@ -2,6 +2,8 @@ mod app;
 mod authenticity;
 mod backup;
 mod cleanup;
+#[cfg(feature = "headless")]
+mod headless;
 mod history;
 mod library;
 mod pin_board;
@@ -228,6 +230,13 @@ fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) ->
     }
     builder.build(application)?;
     Ok(())
+}
+
+/// 无头命令行入口（`feature = "headless"`）。规格与定位见 `src/headless.rs`；
+/// 它不进发布产物，只供发布前的压力测试以独立进程调用真实可执行文件。
+#[cfg(feature = "headless")]
+pub fn run_headless(args: &[String]) -> i32 {
+    headless::run(args)
 }
 
 pub fn run() {
