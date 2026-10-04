@@ -21,7 +21,41 @@
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：统一清理体系批次 B——历史文件清理入队（已实现，待人工验收）
+## 本轮批次：统一清理体系批次 C——未引用文件扫描（已实现，待人工验收）
+
+落实 `cleanup-system-plan-2026-10-04.md` 批次 C（§4.3）。维护者 2026-10-04 确认三项：
+交付形态为**报告 + 确认清理**（非仅报告）、宽限期取 **30 分钟**、扫描与确认清理的
+Tauri 命令**本批次加入并注册**（设置页 UI 留待批次 F）。
+
+1. **新增 `cleanup::scan_unreferenced(root, cancelled, progress)`**：遍历
+   `artworks/*/snapshots/` 与 `artworks/*/deltas/`，只报告匹配既有命名模式、修改时间早于
+   宽限期（`SCAN_GRACE_MS` = 30 分钟）且经反向引用检查判定未被引用的文件，返回
+   `ScanCandidate { path, byteSize, reason }`（仓库相对路径、字节数、原因）。引用复查复用
+   `referenced_path_kind` 的五张表查询，与重放看到同一套引用关系。**只报告不删除**；目录
+   缺失按空处理，取消经 `cancelled()` 中断。命名匹配：snapshot `<UUID>.lbc` 与修复态
+   `<UUID>-repair-<UUID>.lbc`，delta `<UUID>-to-<UUID>.lbd`。
+   - **与规划原文的偏差（已核实）**：§4.3 把 snapshot 与 delta 的扩展名都写作 `.lbd`，实际
+     代码 snapshot 为 `.lbc`（含 head 修复态的 `-repair-` 命名），delta 为 `.lbd`；本批次按
+     实际命名实现，两种 snapshot 命名都覆盖。
+2. **新增 `cleanup::cleanup_unreferenced(root, paths)`**：确认清理——每条候选入队时登记当前
+   SHA-256 作为期望摘要（重放时内容已变即保留），文件已不存在时跳过，入队后立即单遍 `run`
+   重放。**幂等**：重复确认不重复删除、不报错；重放前仍复查引用，候选在确认前重新被引用时
+   条目留队可重试。复用既有重放，不新造删除逻辑。
+3. **命令层（GUI 进程内）**：`cleanup_commands.rs` 新增 `scan_repository_unreferenced` 与
+   `cleanup_repository_unreferenced`，经 `run_exclusive(UserOperation)` + `with_ready_repository`
+   持共享运行锁与仓库操作锁，扫描进度与取消走统一运行状态；`lib.rs` 注册。**不做无头子命令**
+   （§3 非目标：仓库哨兵锁落地前扫描入口只经 GUI 进程内暴露）。设置页的队列列表、扫描按钮与
+   确认清理留待批次 F。
+4. **单测**（`cleanup` 新增三条）：孤儿 snapshot 与孤儿 delta 被识别、被历史节点引用的文件
+   保留、命名不匹配的文件不报告；宽限期内（刚写入）的文件被跳过；确认清理删除候选且重复
+   调用幂等、再扫描无候选。
+
+**验证**：`cargo check --lib` 无警告；`cargo check --features headless` 通过（无头侧无代码
+改动，扫描不暴露为子命令）；`cargo fmt` 已执行、`cargo fmt --check` 与 `git diff --check`
+通过；`cargo test --lib` **142 通过**（原 139 + 新增 3）、1 个忽略项；前端无代码改动，
+`npm test` **116 通过**（结论不变）。
+
+## 上一批次：统一清理体系批次 B——历史文件清理入队（已实现，待人工验收）
 
 落实 `cleanup-system-plan-2026-10-04.md` 批次 B（§4.2）。维护者 2026-10-04 确认两项
 设计决策：**入队放在领域函数自身的 SQLite 事务内**（而非调用方提交后再入队）、

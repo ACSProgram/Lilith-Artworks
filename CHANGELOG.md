@@ -5,6 +5,22 @@ before and after the first stable release.
 
 ## 0.2.0-alpha.4 - 2026-10-04
 
+### Added
+
+- Unreferenced-file scanning for the repository. A new scan command walks
+  `artworks/*/snapshots` and `artworks/*/deltas` and reports the files that
+  match the known snapshot/delta naming patterns, are older than a 30-minute
+  grace period, and are not referenced by any database column. It only reports,
+  never deletes. Crash orphans published before `history::commit` (which were
+  never enqueued) can finally be discovered this way. A companion
+  `cleanup_repository_unreferenced` command re-registers each confirmed
+  candidate with its current SHA-256, enqueues it in `pending_file_cleanup`,
+  and replays once, so a repeated confirmation is idempotent and a candidate
+  that becomes referenced again stays queued for retry. Both commands run under
+  the shared run lock and the repository operation lock and are cancellable;
+  neither is exposed as a headless subcommand. The settings-page entry point
+  lands in a later batch.
+
 ### Fixed
 
 - Finalizing a pin board no longer deletes the DDS files of deleted images

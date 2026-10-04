@@ -23,7 +23,7 @@
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
-- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用复查（五张表）与仓库边界校验由它提供，领域函数在事务内复用它做入队前复查。
+- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用复查（五张表）与仓库边界校验由它提供，领域函数在事务内复用它做入队前复查。它另外提供未引用文件扫描（`scan_unreferenced`，只报告）与确认清理（`cleanup_unreferenced`，登记摘要后入队重放），作为队列的发现机制。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
 
 `backup` 通过 `history` 切换分支 head，不直接操作作品树；`history` 不读取 ChunkFile；C2PA 与 TrustMark 实现彼此独立，只由认证流水线编排。
@@ -39,6 +39,8 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内逐项复查当前图是否仍引用该路径（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
+
+清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历 `artworks/*/snapshots` 与 `artworks/*/deltas`，只报告匹配既有命名模式（snapshot `<UUID>.lbc` / `<UUID>-repair-<UUID>.lbc`、delta `<UUID>-to-<UUID>.lbd`）、修改时间早于 30 分钟宽限期且经 `referenced_path_kind` 复查确认未被引用的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256 入队并单遍重放：重复确认幂等，候选在确认前重新被引用时条目留队可重试。扫描经 GUI 命令持共享运行锁与仓库操作锁，不做无头子命令（仓库哨兵锁落地前入口只经 GUI 进程内暴露）；画板 DDS 的孤儿/缺失检查属完整性扫描，另见 `docs/modules/pin-board.md`。
 
 ## 存储大小语义
 
