@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::{
     app::AppState,
+    authenticity::{self, AuthenticityState, PathAuthorization},
     backup::{self, restore, worker, BackupState, BackupTaskKind},
     cleanup, history, library, pin_board, storage,
 };
@@ -50,6 +51,21 @@ pub(crate) fn commit_marker() -> bool {
     match INTERLOCK.get() {
         Some(interlock) => {
             interlock.stage("事务已写入，尚未提交");
+            interlock.checkpoint()
+        }
+        None => false,
+    }
+}
+
+/// 认证流水线的取消检查点（渲染 / 编码 / 签名）。
+///
+/// 与 [`commit_marker`] 同一范式：调用点在领域函数 `authenticity::pipeline` 内部、
+/// 由 `feature = "headless"` 门控，发布产物中不存在，GUI 路径行为逐位不变。
+/// 返回「此刻是否已请求取消」，调用方据此放弃发布。
+pub(crate) fn auth_checkpoint(stage: &str) -> bool {
+    match INTERLOCK.get() {
+        Some(interlock) => {
+            interlock.stage(stage);
             interlock.checkpoint()
         }
         None => false,
@@ -176,10 +192,15 @@ fn usage() -> String {
          \x20 scan-unreferenced    扫描未引用文件（只报告）\n\
          \x20 cleanup-unreferenced 确认清理未引用文件（--ids）\n\
          \x20 repository-backup    整仓灾备\n\
+         \x20 enter-publication    进入发布状态（固化最终成品）\n\
+         \x20 publish              认证签名发布（C2PA + TrustMark）\n\
+         \x20 cancel-publication   取消发布并回收仓库内副本\n\
+         \x20 decode-authenticity  回读 C2PA 声明与 TrustMark 绑定\n\
          \n\
          common options:\n\
          \x20 --workspace <dir>    作用域根目录；无头进程不读写其之外的路径\n\
          \x20 --repository <dir>   作品仓库目录，默认 <workspace>/repository\n\
+         \x20 --models <dir>       TrustMark 模型目录，默认 resources/models\n\
          \x20 --result <file>      结构化 JSON 结果写入该文件\n\
          \x20 --marker <file>      逐阶段追加阶段名，供测试决定何时干预\n\
          \x20 --cancel-on-stdin    每个取消检查点写 marker 后阻塞等待 stdin 的\n\
@@ -200,7 +221,14 @@ fn usage() -> String {
          \x20 --output                                   restore\n\
          \x20 --destination                              repository-backup\n\
          \x20 --artwork/--title                          create-board\n\
-         \x20 --board/--revision/--paths                 import-board-images\n",
+         \x20 --board/--revision/--paths                 import-board-images\n\
+         \x20 --branch/--artifact                        enter-publication\n\
+         \x20 --branch/--output/--certificate/--key/--title/--creator\n\
+         \x20 --rights/--content/--algorithm/--trustmark/--regions\n\
+         \x20 --jpeg-quality/--background/--strength/--watermark-id\n\
+         \x20 --preview-cache-token/--timestamp-url      publish\n\
+         \x20 --branch                                    cancel-publication\n\
+         \x20 --input/--region                           decode-authenticity\n",
     );
     text
 }
@@ -209,6 +237,9 @@ struct Options {
     command: String,
     workspace: PathBuf,
     repository: PathBuf,
+    /// TrustMark 模型目录。无头环境没有 Tauri 资源解析，因此显式传入；默认指向仓库内
+    /// 的 `resources/models`（两个模型文件确实在仓库中）。
+    models: PathBuf,
     result: Option<PathBuf>,
     marker: Option<PathBuf>,
     cancel_on_stdin: bool,
@@ -218,9 +249,10 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 21] = [
+        const KNOWN: [&str; 39] = [
             "workspace",
             "repository",
+            "models",
             "result",
             "marker",
             "peak-memory",
@@ -240,6 +272,23 @@ impl Options {
             "board",
             "revision",
             "paths",
+            "artifact",
+            "certificate",
+            "key",
+            "creator",
+            "rights",
+            "content",
+            "algorithm",
+            "trustmark",
+            "regions",
+            "jpeg-quality",
+            "background",
+            "strength",
+            "watermark-id",
+            "preview-cache-token",
+            "timestamp-url",
+            "input",
+            "region",
         ];
         let command = args
             .first()
@@ -285,11 +334,20 @@ impl Options {
             None => workspace.join("repository"),
         };
         let repository = resolve_within(&workspace, &repository, "作品仓库")?;
+        // 模型目录是**资源**而不是工作区内的产物，因此不经过 `resolve_within`；默认值
+        // 与 `lib.rs` 的候选之一一致，指向仓库内随源码分发的模型。
+        let models = match values.get("models") {
+            Some(value) => PathBuf::from(value),
+            None => PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("resources")
+                .join("models"),
+        };
 
         Ok(Self {
             command,
             workspace,
             repository,
+            models,
             result: values.get("result").map(PathBuf::from),
             marker: values.get("marker").map(PathBuf::from),
             cancel_on_stdin,
@@ -350,6 +408,91 @@ impl Options {
 
     fn backup_state(&self) -> BackupState {
         BackupState::default()
+    }
+
+    /// 认证命令的路径授权作用域：只允许 `--workspace` 之下的路径。
+    fn authorization_scope(&self) -> HeadlessScope<'_> {
+        HeadlessScope {
+            workspace: &self.workspace,
+        }
+    }
+
+    /// 与 Tauri 侧同样可无 Tauri 构造的认证状态：模型目录来自命令行或默认值，
+    /// TrustMark 引擎按需惰性加载，与 GUI 走同一份 `AuthenticityState`。
+    fn authenticity_state(&self) -> AuthenticityState {
+        AuthenticityState::new(self.models.clone())
+    }
+
+    /// 布尔选项（`true`/`false`/`1`/`0`/`yes`/`no`）；缺省为 `false`。
+    fn flag(&self, key: &str) -> Result<bool, String> {
+        let Some(value) = self.value(key) else {
+            return Ok(false);
+        };
+        match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" => Ok(false),
+            other => Err(format!("--{key} 只接受 true/false，收到 {other:?}")),
+        }
+    }
+
+    /// 数值选项；缺省返回 `None`（由调用方决定默认值）。
+    fn number<T: std::str::FromStr>(&self, key: &str) -> Result<Option<T>, String> {
+        match self.value(key) {
+            Some(value) => value
+                .trim()
+                .parse::<T>()
+                .map(Some)
+                .map_err(|_| format!("--{key} 取值无效：{value:?}")),
+            None => Ok(None),
+        }
+    }
+
+    /// `--regions "x,y,w,h;x,y,w,h"`：归一化坐标的矩形列表，分号分隔。空值返回空表。
+    fn regions(&self, key: &str) -> Result<Vec<authenticity::NormalizedRegion>, String> {
+        let Some(value) = self.value(key) else {
+            return Ok(Vec::new());
+        };
+        let mut regions = Vec::new();
+        for group in value.split(';') {
+            let group = group.trim();
+            if group.is_empty() {
+                continue;
+            }
+            let parts = group.split(',').map(str::trim).collect::<Vec<_>>();
+            if parts.len() != 4 {
+                return Err(format!(
+                    "--{key} 的每个区域必须形如 x,y,w,h，收到 {group:?}"
+                ));
+            }
+            let mut numbers = [0.0_f32; 4];
+            for (slot, text) in numbers.iter_mut().zip(parts) {
+                *slot = text
+                    .parse::<f32>()
+                    .map_err(|_| format!("--{key} 的坐标无效：{text:?}"))?;
+            }
+            regions.push(authenticity::NormalizedRegion {
+                x: numbers[0],
+                y: numbers[1],
+                width: numbers[2],
+                height: numbers[3],
+            });
+        }
+        Ok(regions)
+    }
+}
+
+/// 无头进程的路径授权作用域：只允许 `--workspace` 之下的路径。
+///
+/// 它**不是**「跳过检查」的开关——保留「路径必须被显式授权」的语义，只把授权来源
+/// 从文件选择器换成命令行显式声明的根目录。因此无头进程无法读写工作区之外的路径，
+/// 这条属性对认证命令与其它命令一致。
+struct HeadlessScope<'a> {
+    workspace: &'a Path,
+}
+
+impl PathAuthorization for HeadlessScope<'_> {
+    fn is_path_authorized(&self, path: &Path) -> bool {
+        resolve_within(self.workspace, path, "授权路径").is_ok()
     }
 }
 
@@ -515,6 +658,10 @@ fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
         "scan-unreferenced" => scan_unreferenced(options, interlock),
         "cleanup-unreferenced" => cleanup_unreferenced(options),
         "repository-backup" => repository_backup(options, interlock),
+        "enter-publication" => enter_publication(options),
+        "publish" => publish(options),
+        "cancel-publication" => cancel_publication(options),
+        "decode-authenticity" => decode_authenticity(options),
         other => Err(format!("未知子命令：{other}")),
     }
 }
@@ -862,17 +1009,28 @@ fn checkpoint(options: &Options, interlock: &Interlock) -> Result<Value, String>
 fn scrub(options: &Options, interlock: &Interlock) -> Result<Value, String> {
     let app_state = options.app_state();
     let state = options.backup_state();
-    // 与 `scrub_repository_integrity` 的历史链部分一致；无头批次1 不覆盖认证受控文件。
-    let nodes = state.run_foreground(None, || {
+    // 与 `scrub_repository_integrity` 的两段一致：先历史链逐块校验，再认证受控文件
+    // （最终成品与认证仓库副本的摘要、C2PA 声明核对）。无认证记录的仓库第二段为 0/0。
+    let (nodes, final_artifacts, certification_records) = state.run_foreground(None, || {
         app_state.with_ready_repository(|root| {
-            restore::scrub_history(
+            let nodes = restore::scrub_history(
                 root,
                 || interlock.checkpoint(),
                 |current, total| interlock.stage(&format!("全库扫描 {current}/{total}")),
-            )
+            )?;
+            let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
+                root,
+                || interlock.checkpoint(),
+                |current, total| interlock.stage(&format!("认证受控文件检查 {current}/{total}")),
+            )?;
+            Ok((nodes, final_artifacts, certification_records))
         })
     })?;
-    Ok(json!({ "historyNodes": nodes }))
+    Ok(json!({
+        "historyNodes": nodes,
+        "finalArtifacts": final_artifacts,
+        "certificationRecords": certification_records,
+    }))
 }
 
 fn verify(options: &Options) -> Result<Value, String> {
@@ -932,6 +1090,12 @@ fn cleanup_unreferenced(options: &Options) -> Result<Value, String> {
 
 fn repository_backup(options: &Options, interlock: &Interlock) -> Result<Value, String> {
     let destination = options.path_within("destination", "备份保存目录")?;
+    authenticity::ensure_dialog_authorized(
+        &options.authorization_scope(),
+        &destination,
+        "备份保存目录",
+    )
+    .map_err(|error| error.to_string())?;
     let app_state = options.app_state();
     let state = options.backup_state();
     let report = state.run_foreground(None, || {
@@ -945,6 +1109,121 @@ fn repository_backup(options: &Options, interlock: &Interlock) -> Result<Value, 
         })
     })?;
     serde_json::to_value(&report).map_err(|error| format!("无法序列化备份结果：{error}"))
+}
+
+/// 进入发布状态。与 GUI 的 `enter_branch_publication` 走同一批领域调用：
+/// `branch_head` → `backup::ensure_checkpoint` → `store_final_artifact` →
+/// `get_publication`，在同一把运行锁下执行。最终成品路径经无头作用域授权，与其它
+/// 命令一致地只允许工作区之内的路径。
+fn enter_publication(options: &Options) -> Result<Value, String> {
+    let branch_id = options.require("branch")?;
+    let artifact = options.path_within("artifact", "最终成品")?;
+    authenticity::ensure_dialog_authorized(&options.authorization_scope(), &artifact, "最终成品")
+        .map_err(|error| error.to_string())?;
+    let artifact_value = artifact.to_string_lossy().into_owned();
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let authenticity_state = options.authenticity_state();
+    let models_ready = authenticity_state.model_files_ready();
+    let model_info = authenticity_state.model_info();
+    let publication = state.run_foreground(Some(branch_id), || {
+        app_state.with_ready_repository(|root| {
+            let (_, history_id) = authenticity::branch_head(root, branch_id)?;
+            backup::ensure_checkpoint(root, &history_id)?;
+            authenticity::store_final_artifact(root, branch_id, &history_id, &artifact_value)?;
+            authenticity::get_publication(root, branch_id, models_ready, model_info)
+        })
+    })?;
+    serde_json::to_value(&publication).map_err(|error| format!("无法序列化发布状态：{error}"))
+}
+
+/// 认证签名发布。与 GUI 的 `publish_branch_artifact` 走同一领域函数
+/// `authenticity::publish_artifact`（渲染 → TrustMark 编码 → JPEG 编码 → C2PA 签名），
+/// 在同一把运行锁与认证操作锁下执行。取消检查点在流水线内部（headless-only 门控），
+/// 因此 `--cancel-on-stdin` 的闸门能精确命中渲染 / 编码 / 签名三个阶段。
+fn publish(options: &Options) -> Result<Value, String> {
+    let branch_id = options.require("branch")?;
+    let output = options.path_within("output", "发布输出路径")?;
+    let certificate = options.path_within("certificate", "证书链")?;
+    let key_path = options.path_within("key", "私钥")?;
+    let scope = options.authorization_scope();
+    authenticity::ensure_dialog_authorized(&scope, &output, "发布输出路径")
+        .map_err(|error| error.to_string())?;
+    authenticity::ensure_dialog_authorized(&scope, &certificate, "证书链")
+        .map_err(|error| error.to_string())?;
+    let private_key =
+        std::fs::read_to_string(&key_path).map_err(|error| format!("无法读取私钥：{error}"))?;
+    let config = authenticity::CertificationConfig {
+        branch_id: branch_id.to_owned(),
+        title: options.require("title")?.to_owned(),
+        creator: options.require("creator")?.to_owned(),
+        rights_statement: options.value("rights").unwrap_or_default().to_owned(),
+        authentication_content: options.value("content").unwrap_or_default().to_owned(),
+        trustmark_enabled: options.flag("trustmark")?,
+        certificate_path: certificate.to_string_lossy().into_owned(),
+        signing_algorithm: options.value("algorithm").unwrap_or("es256").to_owned(),
+        timestamp_url: options.value("timestamp-url").map(str::to_owned),
+        jpeg_quality: options.number::<u8>("jpeg-quality")?.unwrap_or(90),
+        background_color: options.value("background").unwrap_or("#FFFFFF").to_owned(),
+        watermark_strength: options.number::<f32>("strength")?.unwrap_or(1.0),
+        additional_regions: options.regions("regions")?,
+        updated_ms: 0,
+    };
+    let request = authenticity::PublishBranchRequest {
+        branch_id: branch_id.to_owned(),
+        output_path: output.to_string_lossy().into_owned(),
+        private_key_pem: private_key,
+        config,
+        watermark_id: options.value("watermark-id").map(str::to_owned),
+        preview_cache_token: options.value("preview-cache-token").map(str::to_owned),
+    };
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let authenticity_state = options.authenticity_state();
+    let operation = authenticity_state
+        .begin_operation("认证签名发布")
+        .map_err(|error| error.to_string())?;
+    let result = state.run_foreground(Some(branch_id), || {
+        app_state.with_ready_repository(|root| {
+            authenticity::publish_artifact(root, &authenticity_state, &operation, request)
+                .map_err(|error| error.to_string())
+        })
+    })?;
+    serde_json::to_value(&result).map_err(|error| format!("无法序列化发布结果：{error}"))
+}
+
+/// 取消发布并回收仓库内副本。与 GUI 的 `cancel_branch_publication` 走同一批调用：
+/// `remove_artifact` 在事务内登记待清理项，提交后单遍 `cleanup::run`。首次导出的
+/// JPG 是用户产物，不在回收范围（与 GUI 语义一致）。
+fn cancel_publication(options: &Options) -> Result<Value, String> {
+    let branch_id = options.require("branch")?;
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let report = state.run_exclusive(Some(branch_id), BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| {
+            let cleanup_ids = authenticity::remove_artifact(root, branch_id)?;
+            cleanup::run(root, &cleanup_ids)
+        })
+    })?;
+    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+}
+
+/// 回读认证。与 GUI 的 `decode_authenticity` 走同一领域函数 `authenticity::decode`：
+/// C2PA 声明 + TrustMark 绑定 + 全库候选匹配。只读，走共享读租约。
+fn decode_authenticity(options: &Options) -> Result<Value, String> {
+    let input = options.path_within("input", "待识别图片")?;
+    authenticity::ensure_dialog_authorized(&options.authorization_scope(), &input, "待识别图片")
+        .map_err(|error| error.to_string())?;
+    let request = authenticity::DecodeRequest {
+        input_path: input.to_string_lossy().into_owned(),
+        region: options.regions("region")?.into_iter().next(),
+    };
+    let app_state = options.app_state();
+    let authenticity_state = options.authenticity_state();
+    let result = app_state.with_repository_read(|root| {
+        authenticity::decode(root, &authenticity_state, request).map_err(|error| error.to_string())
+    })?;
+    serde_json::to_value(&result).map_err(|error| format!("无法序列化识别结果：{error}"))
 }
 
 /// 进程自身的峰值工作集。Windows 用 `GetProcessMemoryInfo`；其它平台返回 `None`，

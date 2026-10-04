@@ -4,9 +4,9 @@
 - 目标版本：待定（落实时由维护者决定是否随 `0.2.0-alpha.4` 递增；本批次本身不要求版本变化）
 - 状态：**部分实施**。批次 1（无头入口与取消边界）、批次 2（跨进程崩溃）、批次 2 补充
   （事务中途崩溃 B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）、批次 5
-  （崩溃孤儿回收闭环）与批次 6（画板 DDS 完整性）已落实并记录于
+  （崩溃孤儿回收闭环）、批次 6（画板 DDS 完整性）与批次 7（认证模块 G）已落实并记录于
   `docs/planning/current-handoff.md`；统一清理体系
-  （`archive/cleanup-system-plan-2026-10-04.md`）亦已落实，改变了本计划的多处前提。批次 7、8 待实施。
+  （`archive/cleanup-system-plan-2026-10-04.md`）亦已落实，改变了本计划的多处前提。批次 8 待实施。
 - 实施完成后：本文件移入 `archive/`，有效契约并入 `docs/guides/validation.md` 与相关模块文档，
   未完成项沉淀到 `todo.md`。
 
@@ -497,6 +497,11 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 > `scan-unreferenced` / `cleanup-unreferenced` 也属无头入口扩展，但都保持
 > 1:1 薄映射、不进发布产物；认证批次（批次 7）的授权作用域重构属安全控制改动，性质不同。
 >
+> **批次 7 的第二个标记点（已落实）**：`authenticity/pipeline.rs` 的 `auth_checkpoint`
+> 在渲染 / 编码 / 签名三处调用 `crate::headless::auth_checkpoint`，调用点同样由
+> `feature = "headless"` 门控；release 构建下它逐位等价于 `ensure_not_cancelled`，
+> 发布产物中不存在。它是 G3 能在三个阶段确定性命中取消的前提。
+>
 > **不自动化验证的项**：断电持久性。`Child::kill()` 只终止进程，不触及 OS/磁盘缓存与目录项
 > 落盘，结构上无法覆盖「断电后已提交数据是否仍在」；该项由 OS/磁盘与 `synchronous = FULL`
 > 声明保证，保留为人工/声明项（见 §6 与 §7 批次 8）。
@@ -640,18 +645,27 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
   `cargo test --lib` 151 通过、`npm test` 121 通过（结论均不变）；既有套件
   `stress_cancel` 6、`stress_crash` 4、`stress_cleanup` 1、`stress_scale` 5 结论不变。
 
-### 批次 7：认证模块（G）——唯一触及安全边界的批次
+### 批次 7：认证模块（G）——唯一触及安全边界的批次——已落实（2026-10-04）
 
-- **授权作用域重构**：把 `ensure_dialog_authorized` 的路径授权来源抽象为可注入的作用域；
-  Tauri 侧仍用 `window.fs_scope()`，行为逐位不变；无头侧只允许 `--workspace` 之下的路径。
-  4 处调用点同步。
+- **授权作用域重构**：把 `ensure_dialog_authorized` 的路径授权来源抽象为可注入的作用域
+  （`authenticity::PathAuthorization`）；Tauri 侧实现为 `tauri::fs::Scope`，仍走
+  `window.fs_scope()`，行为与文案逐位不变；无头侧实现为只允许 `--workspace` 之下路径的
+  `HeadlessScope`。**全部 8 处调用点**同步（`authenticity/commands.rs` 4 处 +
+  `app/workflows.rs` 4 处）——计划原文写「4 处」，实际以 `grep` 为准。
 - 无头子命令 `enter-publication` / `publish` / `cancel-publication` / `decode-authenticity`；
-  `--models <dir>` 选项，默认 `env!("CARGO_MANIFEST_DIR")/resources/models`。
-- `tests/stress_authenticity.rs`：复用 `tests/fixtures/authenticity/` 现有材料；
-  大图由测试进程用已有的 `image` 依赖按需生成（16K 级，仅 `extreme` 起）。
+  `--models <dir>` 选项，默认 `env!("CARGO_MANIFEST_DIR")/resources/models`。`scrub`
+  子命令同步扩展为「历史链 + 认证受控文件」两段，使 G5 可在无头侧断言。
+- `tests/stress_authenticity.rs`（4 个测试）：复用 `tests/fixtures/authenticity/` 现有材料
+  （复制进工作区后使用，因为无头进程只授权工作区路径）；大图由测试进程用已有的 `image`
+  依赖按需生成（16K 级，仅 `extreme` 起，用完即删、不进仓库）。
 - 实现 G1–G5。
+- **落实偏差（已核实）**：G3 需要在渲染 / 编码 / 签名三个阶段确定性命中取消，而
+  `publish` 流水线内部的取消是 `AuthenticityOperation` 的标志位、没有可阻塞的检查点。
+  因此按 `history::commit` 事务标记点的同一范式，在 `pipeline.rs` 加了一个
+  **headless-only 的 `auth_checkpoint`**（feature 门控，release 下逐位等价于
+  `ensure_not_cancelled`，发布产物中不存在）——这是第二处为测试而触及产品代码的标记点。
 - 验证：`cargo test --features headless --test stress_authenticity`；**GUI 路径回归**——
-  确认授权作用域重构后 `enter_branch_publication` / `publish_branch_artifact` /
+  授权作用域重构后 `enter_branch_publication` / `publish_branch_artifact` /
   `create_repository_backup` 的行为与文案不变（这批改动触及安全控制，需单独人工确认）。
 
 ### 批次 8：文档与收尾
@@ -697,7 +711,7 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 - 断电持久性**不做自动化**，由 OS/磁盘与 `synchronous = FULL` 声明保证（§6）。
 - 排期按 §11.4 重排（2026-10-04 二次订正）：批次 1–3 与统一清理体系已落实，批次 4（规模与
   灾备、参数边界）、批次 5（崩溃孤儿回收闭环）随后落实；批次 6（画板 DDS）随后落实；
-  批次 7（认证）、批次 8（文档收尾）待实施。
+  批次 7（认证）随后落实；批次 8（文档收尾）待实施。
 
 **待维护者确认：**
 
@@ -797,8 +811,8 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 
 **结论：本计划（压力测试）完成不等于可以进入 rc1。** 它补齐的是 `release-policy.md`
 人工门槛里「可程序判定」的那一部分；rc1 还需要另外四类工作。
-截至 2026-10-04（批次 6 落实后），批次 1–6 与批次 2 补充已落实（含统一清理体系）；
-批次 7、8 未落实。
+截至 2026-10-04（批次 7 落实后），批次 1–7 与批次 2 补充已落实（含统一清理体系）；
+批次 8 未落实。
 
 ### 11.1 本批次覆盖的部分
 
@@ -808,8 +822,8 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 
 | 待验收项 | 状态 |
 | --- | --- |
-| 各处理阶段的取消边界（提交、恢复、精简、检查点、整仓灾备、认证签名） | ◐ 部分覆盖（A 组已落实；认证签名 G3 待批次 7） |
-| 极端大文件与高像素压力的内存、取消、退出与错误恢复 | ◐ 日常使用已通过（2 GiB 工作文件）；**错误恢复**由 C 组 + G 组覆盖 |
+| 各处理阶段的取消边界（提交、恢复、精简、检查点、整仓灾备、认证签名） | ✅ 已自动化覆盖（A 组 + 批次 7 的 G3），保留人工复核手感 |
+| 极端大文件与高像素压力的内存、取消、退出与错误恢复 | ◐ 日常使用已通过（2 GiB 工作文件）；**错误恢复**由 C 组 + G 组（批次 7）覆盖 |
 | 损坏文件的恢复路径（snapshot/delta 缺失或摘要不匹配） | ◐ 部分覆盖（崩溃窗口由 B 组、事务中途由 B4、孤儿回收由 B5；缺失/摘要不匹配由既有单测）；异常时间戳服务仍需人工 |
 | 画板 DDS 损坏、缺失、孤儿文件 | ◐ 部分覆盖（H 组已落实：双向检查与孤儿回收已自动化；结算/仓库切换期间的保存失败恢复仍需人工） |
 | 异常 RFC 3161 时间戳服务的失败与超时行为 | ❌ 不在范围，保留人工 |
@@ -849,17 +863,16 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
 
 **已落实**：批次 1（无头入口与取消边界）、批次 2（跨进程崩溃）、批次 2 补充（事务中途崩溃
 B4）、批次 3（大文件端到端）、批次 4（规模与灾备、参数边界）、批次 5（崩溃孤儿回收闭环）、
-批次 6（画板 DDS 完整性）；统一清理体系与任务调度总控批次亦已完成。
+批次 6（画板 DDS 完整性）、批次 7（认证 G）；统一清理体系与任务调度总控批次亦已完成。
 
-**未落实**：批次 7（认证 G）、批次 8（文档收尾），以及 §11.2 列出的
+**未落实**：批次 8（文档收尾），以及 §11.2 列出的
 剩余 P1（素材板运行时结算接入）与发布链工作。
 
 **建议顺序：**
 
-1. **批次 7（认证 G）**：唯一触及安全控制（授权作用域重构），需单独人工确认。
-2. **批次 8（文档与收尾）**：最后统一更新 `validation.md`、模块文档、`todo.md`、`CHANGELOG.md`
+1. **批次 8（文档与收尾）**：最后统一更新 `validation.md`、模块文档、`todo.md`、`CHANGELOG.md`
    并归档本文件。
-3. **剩余 P1（素材板运行时变更结算接入）**：与压力测试写路径相关，可与批次 7 并行推进，
+2. **剩余 P1（素材板运行时变更结算接入）**：与压力测试写路径相关，可与批次 8 并行推进，
    落地后重跑一次画板相关断言即可。
 
 **不进入自动化**：断电持久性（见 §6）。**孤儿与暂存目录的回收**已由统一清理体系提供

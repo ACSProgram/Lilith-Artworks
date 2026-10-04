@@ -52,7 +52,11 @@ pub(crate) async fn decode_authenticity(
     authenticity_state: State<'_, AuthenticityState>,
     window: tauri::WebviewWindow,
 ) -> Result<DecodeResult, AuthenticityError> {
-    ensure_dialog_authorized(&window, Path::new(request.input_path.trim()), "待识别图片")?;
+    ensure_dialog_authorized(
+        &window.fs_scope(),
+        Path::new(request.input_path.trim()),
+        "待识别图片",
+    )?;
     let state = authenticity_state.inner().clone();
     let app_state = app_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -92,7 +96,7 @@ pub(crate) async fn preview_authenticity_image(
     app_state: State<'_, AppState>,
     window: tauri::WebviewWindow,
 ) -> AuthenticityResult<PreviewImage> {
-    ensure_dialog_authorized(&window, Path::new(path.trim()), "预览图片")?;
+    ensure_dialog_authorized(&window.fs_scope(), Path::new(path.trim()), "预览图片")?;
     let app_state = app_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app_state
@@ -134,7 +138,7 @@ pub(crate) async fn preview_branch_artifact_output(
     window: tauri::WebviewWindow,
 ) -> AuthenticityResult<PublicationPreview> {
     ensure_dialog_authorized(
-        &window,
+        &window.fs_scope(),
         Path::new(request.config.certificate_path.trim()),
         "证书链",
     )?;
@@ -185,7 +189,7 @@ pub(crate) async fn export_certification_record(
     window: tauri::WebviewWindow,
 ) -> AuthenticityResult<()> {
     ensure_dialog_authorized(
-        &window,
+        &window.fs_scope(),
         Path::new(request.output_path.trim()),
         "再次导出路径",
     )?;
@@ -284,12 +288,31 @@ fn external_image_path(root: &Path, value: &str, label: &str) -> AuthenticityRes
     Ok(canonical)
 }
 
+/// 路径授权来源。
+///
+/// GUI 侧的实现是 Tauri 的 filesystem scope（`window.fs_scope()`）——它由原生文件
+/// 选择器写入，承载「该路径必须被用户显式选择过」这条语义；无头侧的实现是一个只
+/// 允许 `--workspace` 之下路径的显式作用域（见 `src/headless.rs`）。
+///
+/// 抽象成可注入的来源，是为了让无头进程复用**同一条**检查，而不是为了把检查关掉：
+/// 两条实现都仍然要求路径被显式授权，且都不接受空路径，因此不存在「安全控制可关闭」
+/// 的开关。
+pub(crate) trait PathAuthorization {
+    fn is_path_authorized(&self, path: &Path) -> bool;
+}
+
+impl PathAuthorization for tauri::fs::Scope {
+    fn is_path_authorized(&self, path: &Path) -> bool {
+        self.is_allowed(path)
+    }
+}
+
 pub(crate) fn ensure_dialog_authorized(
-    window: &tauri::WebviewWindow,
+    scope: &impl PathAuthorization,
     path: &Path,
     label: &str,
 ) -> AuthenticityResult<()> {
-    if path.as_os_str().is_empty() || !window.fs_scope().is_allowed(path) {
+    if path.as_os_str().is_empty() || !scope.is_path_authorized(path) {
         return Err(AuthenticityError::InvalidInput(format!(
             "{label}未由文件选择器授权，请重新选择"
         )));

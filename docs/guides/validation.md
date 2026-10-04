@@ -21,10 +21,10 @@
 
 ## 压力测试：只在发布前运行
 
-`src-tauri/tests/` 下的六组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`src-tauri/tests/` 下的七组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
 `stress_large` 大文件端到端、`stress_scale` 规模与灾备与参数边界、`stress_cleanup` 崩溃孤儿
-回收闭环、`stress_pin_board` 画板 DDS 完整性）是**发布前手动运行**的套件，**不在 CI 中**，
-也**不属于日常开发的任何阶段**：
+回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读）
+是**发布前手动运行**的套件，**不在 CI 中**，也**不属于日常开发的任何阶段**：
 
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
   `cargo test --lib`、`git diff --check`。**不要顺手运行压力测试**——即使到了收尾、整理、

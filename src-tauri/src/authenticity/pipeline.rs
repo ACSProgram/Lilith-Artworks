@@ -247,7 +247,7 @@ fn render_cached_rendition(
     } else {
         flattened
     };
-    ensure_not_cancelled(operation)?;
+    auth_checkpoint(operation, "认证编码")?;
     let render_ms = elapsed_ms(render_started);
     let encode_started = Instant::now();
     let (jpeg_path, metadata_path) = cache_paths(root, token)?;
@@ -396,6 +396,7 @@ pub(crate) fn publish(
         &request.config,
         rendition_identifier.as_deref(),
     )?;
+    auth_checkpoint(operation, "认证渲染")?;
     let cached = if request.preview_cache_token.as_deref() == Some(cache_token.as_str()) {
         load_cached_rendition(
             root,
@@ -422,7 +423,7 @@ pub(crate) fn publish(
             &target.source_sha256,
         )?
     };
-    ensure_not_cancelled(operation)?;
+    auth_checkpoint(operation, "认证签名")?;
     let identifier = match rendition_identifier {
         Some(identifier) => identifier,
         None => trustmark::resolve_identifier(None)?,
@@ -787,6 +788,23 @@ fn ensure_not_cancelled(operation: &AuthenticityOperation) -> AuthenticityResult
     } else {
         Ok(())
     }
+}
+
+/// 认证流水线的一个取消检查点。
+///
+/// release 构建下它**逐位等价于** [`ensure_not_cancelled`]；headless 构建下额外经过
+/// 无头进程的闸门（`crate::headless::auth_checkpoint`），使外部测试能在确定的位置取消
+/// 发布（渲染 / 编码 / 签名）——与 `history::commit` 的事务标记点同一范式：调用点由
+/// `feature = "headless"` 门控，发布产物中不存在，GUI 路径行为逐位不变。
+#[inline]
+fn auth_checkpoint(operation: &AuthenticityOperation, stage: &str) -> AuthenticityResult<()> {
+    #[cfg(feature = "headless")]
+    if crate::headless::auth_checkpoint(stage) {
+        return Err(AuthenticityError::Task("认证任务已取消".into()));
+    }
+    #[cfg(not(feature = "headless"))]
+    let _ = stage;
+    ensure_not_cancelled(operation)
 }
 
 #[cfg(test)]
