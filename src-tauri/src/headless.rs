@@ -129,6 +129,15 @@ fn usage() -> String {
          commands:\n\
          \x20 init-repository      建立或迁移作品仓库\n\
          \x20 create-artwork       创建 Artwork 与其主分支\n\
+         \x20 create-group         创建分组\n\
+         \x20 move-node            移动作品树节点\n\
+         \x20 trash-node           把节点移入回收站\n\
+         \x20 empty-trash          清空回收站并重放清理队列\n\
+         \x20 list-tree            列出作品树并返回计数\n\
+         \x20 search               按标题/工作文件路径搜索\n\
+         \x20 create-branch        从历史节点分叉新分支\n\
+         \x20 delete-branch        删除分支历史\n\
+         \x20 list-history         列出某 Artwork 的分支与节点计数\n\
          \x20 commit               提交分支工作文件\n\
          \x20 restore              恢复历史节点到输出文件\n\
          \x20 compact              精简中间历史节点\n\
@@ -136,6 +145,8 @@ fn usage() -> String {
          \x20 scrub                全库校验历史链\n\
          \x20 verify               重开仓库并做完整性与语义校验\n\
          \x20 cleanup              重放待清理文件队列\n\
+         \x20 scan-unreferenced    扫描未引用文件（只报告）\n\
+         \x20 cleanup-unreferenced 确认清理未引用文件（--ids）\n\
          \x20 repository-backup    整仓灾备\n\
          \n\
          common options:\n\
@@ -150,12 +161,16 @@ fn usage() -> String {
     // 子命令专用选项只在 --help 里概览，具体取值由调用方与 tests/ 保证。
     text.push_str(
         "\ncommand options:\n\
-         \x20 --title/--branch-title/--source/--parent   create-artwork\n\
-         \x20 --branch/--note/--commit-kind               commit\n\
+         \x20 --title/--branch-title/--source/--parent   create-artwork/create-group\n\
+         \x20 --artwork/--history/--branch-title/--source create-branch\n\
+         \x20 --branch/--note/--commit-kind               commit/delete-branch\n\
+         \x20 --artwork                                  list-history\n\
+         \x20 --ids/--parent/--index                     move-node\n\
+         \x20 --ids                                      trash-node/cleanup/cleanup-unreferenced\n\
+         \x20 --query                                    search\n\
          \x20 --history                                  restore/compact/checkpoint\n\
          \x20 --output                                   restore\n\
-         \x20 --destination                              repository-backup\n\
-         \x20 --ids                                      cleanup\n",
+         \x20 --destination                              repository-backup\n",
     );
     text
 }
@@ -173,7 +188,7 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 15] = [
+        const KNOWN: [&str; 18] = [
             "workspace",
             "repository",
             "result",
@@ -189,6 +204,9 @@ impl Options {
             "output",
             "destination",
             "parent",
+            "artwork",
+            "query",
+            "index",
         ];
         let command = args
             .first()
@@ -253,6 +271,20 @@ impl Options {
 
     fn require(&self, key: &str) -> Result<&str, String> {
         self.value(key).ok_or_else(|| format!("缺少 --{key}"))
+    }
+
+    /// 逗号分隔的标识/路径列表（`--ids`）。空值返回空表。
+    fn id_list(&self) -> Vec<String> {
+        self.value("ids")
+            .map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
     }
 
     /// 解析一个必须位于工作区之内的路径参数，并校验其确实在工作区内。
@@ -411,6 +443,15 @@ fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
     match options.command.as_str() {
         "init-repository" => init_repository(options),
         "create-artwork" => create_artwork(options),
+        "create-group" => create_group(options),
+        "move-node" => move_node(options),
+        "trash-node" => trash_node(options),
+        "empty-trash" => empty_trash(options),
+        "list-tree" => list_tree(options),
+        "search" => search(options),
+        "create-branch" => create_branch(options),
+        "delete-branch" => delete_branch(options),
+        "list-history" => list_history(options),
         "commit" => commit(options, interlock),
         "restore" => restore_node(options, interlock),
         "compact" => compact_node(options, interlock),
@@ -418,6 +459,8 @@ fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
         "scrub" => scrub(options, interlock),
         "verify" => verify(options),
         "cleanup" => cleanup_queue(options),
+        "scan-unreferenced" => scan_unreferenced(options, interlock),
+        "cleanup-unreferenced" => cleanup_unreferenced(options),
         "repository-backup" => repository_backup(options, interlock),
         other => Err(format!("未知子命令：{other}")),
     }
@@ -439,6 +482,139 @@ fn create_artwork(options: &Options) -> Result<Value, String> {
     Ok(json!({
         "artworkId": created.artwork_id,
         "branchId": created.branch_id,
+    }))
+}
+
+fn create_group(options: &Options) -> Result<Value, String> {
+    let title = options.require("title")?;
+    let app_state = options.app_state();
+    let tree = app_state.with_ready_repository(|root| {
+        library::create_group(root, options.value("parent"), title)
+    })?;
+    Ok(json!({
+        "groupCount": tree.group_count,
+        "artworkCount": tree.artwork_count,
+    }))
+}
+
+fn move_node(options: &Options) -> Result<Value, String> {
+    let ids = options.id_list();
+    if ids.is_empty() {
+        return Err("move-node 需要 --ids".into());
+    }
+    let index = match options.value("index") {
+        Some(value) => value
+            .parse::<u32>()
+            .map_err(|_| format!("--index 必须是整数，收到 {value:?}"))?,
+        None => 0,
+    };
+    let request = library::MoveLibraryNodesRequest {
+        ids,
+        parent_id: options.value("parent").map(str::to_owned),
+        index,
+    };
+    let app_state = options.app_state();
+    let tree = app_state.with_ready_repository(|root| library::move_nodes(root, request))?;
+    Ok(json!({
+        "groupCount": tree.group_count,
+        "artworkCount": tree.artwork_count,
+    }))
+}
+
+fn trash_node(options: &Options) -> Result<Value, String> {
+    let ids = options.id_list();
+    if ids.is_empty() {
+        return Err("trash-node 需要 --ids".into());
+    }
+    let app_state = options.app_state();
+    let tree = app_state.with_ready_repository(|root| library::trash_nodes(root, &ids))?;
+    Ok(json!({
+        "groupCount": tree.group_count,
+        "artworkCount": tree.artwork_count,
+    }))
+}
+
+fn empty_trash(options: &Options) -> Result<Value, String> {
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| {
+            let cleanup_ids = library::empty_trash(root)?;
+            cleanup::run(root, &cleanup_ids)
+        })
+    })?;
+    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+}
+
+fn list_tree(options: &Options) -> Result<Value, String> {
+    let app_state = options.app_state();
+    let tree = app_state.with_ready_repository(|root| library::list_tree(root))?;
+    let mut value =
+        serde_json::to_value(&tree).map_err(|error| format!("无法序列化作品树：{error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.insert("nodeCount".into(), json!(count_tree_nodes(&tree.nodes)));
+    }
+    Ok(value)
+}
+
+/// 递归统计作品树节点总数（含嵌套子节点）。
+fn count_tree_nodes(nodes: &[library::LibraryNode]) -> usize {
+    nodes
+        .iter()
+        .map(|node| 1 + count_tree_nodes(&node.children))
+        .sum()
+}
+
+fn search(options: &Options) -> Result<Value, String> {
+    let query = options.require("query")?;
+    let app_state = options.app_state();
+    let results = app_state.with_ready_repository(|root| library::search(root, query))?;
+    let matches = results
+        .iter()
+        .map(|result| json!({ "id": result.id, "kind": result.kind, "title": result.title }))
+        .collect::<Vec<_>>();
+    Ok(json!({ "count": results.len(), "results": matches }))
+}
+
+fn create_branch(options: &Options) -> Result<Value, String> {
+    let artwork_id = options.require("artwork")?;
+    let from_history_id = options.require("history")?;
+    let title = options.require("branch-title")?;
+    let source = options.path_within("source", "分支工作文件")?;
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    // 与 `fork_artwork_branch` 一致：先固化 fork 起点的检查点，再建分支。
+    let branch_id = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| {
+            backup::ensure_checkpoint(root, from_history_id)?;
+            history::create_branch(root, artwork_id, from_history_id, title, &source)
+        })
+    })?;
+    Ok(json!({ "branchId": branch_id }))
+}
+
+fn delete_branch(options: &Options) -> Result<Value, String> {
+    let branch_id = options.require("branch")?;
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let deletion = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| {
+            let deletion = history::delete_branch(root, branch_id)?;
+            // 已无引用的历史文件已在删除事务内入队，提交成功后单遍重放。
+            cleanup::replay(root, &deletion.cleanup_ids);
+            Ok(deletion)
+        })
+    })?;
+    Ok(json!({ "artworkId": deletion.artwork_id }))
+}
+
+fn list_history(options: &Options) -> Result<Value, String> {
+    let artwork_id = options.require("artwork")?;
+    let app_state = options.app_state();
+    let history = app_state.with_ready_repository(|root| history::list(root, artwork_id))?;
+    Ok(json!({
+        "branchCount": history.branches.len(),
+        "nodeCount": history.nodes.len(),
     }))
 }
 
@@ -562,21 +738,49 @@ fn verify(options: &Options) -> Result<Value, String> {
 }
 
 fn cleanup_queue(options: &Options) -> Result<Value, String> {
-    let ids = options
-        .value("ids")
-        .map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|item| !item.is_empty())
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
+    let ids = options.id_list();
     let app_state = options.app_state();
     let state = options.backup_state();
     let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
         app_state.with_ready_repository(|root| cleanup::run(root, &ids))
+    })?;
+    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+}
+
+/// 扫描未引用文件（崩溃孤儿、手工复制或历史迁移遗留）。只报告、不删除——与 GUI 的
+/// `scan_repository_unreferenced` 走同一领域函数；确认清理由 `cleanup-unreferenced` 完成。
+fn scan_unreferenced(options: &Options, interlock: &Interlock) -> Result<Value, String> {
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let candidates = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| {
+            cleanup::scan_unreferenced(
+                root,
+                || interlock.checkpoint(),
+                |current, total| interlock.stage(&format!("扫描未引用文件 {current}/{total}")),
+            )
+        })
+    })?;
+    let values = candidates
+        .iter()
+        .map(|candidate| {
+            json!({
+                "path": candidate.path,
+                "byteSize": candidate.byte_size,
+                "reason": candidate.reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(json!({ "count": candidates.len(), "candidates": values }))
+}
+
+/// 确认清理扫描候选（`--ids` 为仓库相对路径）。入队后单遍重放，幂等。
+fn cleanup_unreferenced(options: &Options) -> Result<Value, String> {
+    let paths = options.id_list();
+    let app_state = options.app_state();
+    let state = options.backup_state();
+    let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
+        app_state.with_ready_repository(|root| cleanup::cleanup_unreferenced(root, &paths))
     })?;
     serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
 }

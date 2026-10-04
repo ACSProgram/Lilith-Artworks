@@ -4,6 +4,9 @@ mod schema;
 
 use tauri::State;
 
+/// 无头 `list-tree` 子命令需要递归遍历节点统计总数；非无头构建不使用。
+#[cfg(any(test, feature = "headless"))]
+pub(crate) use model::LibraryNode;
 pub(crate) use model::{
     CreateArtworkRequest, LibrarySearchResult, LibraryTrashEntry, LibraryTree,
     MoveLibraryNodesRequest, RepositoryStatus,
@@ -16,6 +19,10 @@ pub(crate) use repository::{
     check_existing, create_artwork_and_list, empty_trash, initialize, open_existing,
     permanently_delete_trash,
 };
+/// 规模压力测试（无头入口）需要的树操作入口；产品命令走模块内的 `repository::` 直调，
+/// 因此这些再导出只在无头或测试构建下存在，避免非无头构建出现未使用导入警告。
+#[cfg(any(test, feature = "headless"))]
+pub(crate) use repository::{create_group, list_tree, move_nodes, search, trash_nodes};
 #[cfg(test)]
 pub(crate) use schema::take_integrity_check_count;
 
