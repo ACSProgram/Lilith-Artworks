@@ -22,9 +22,7 @@ use super::BackupRuntimeStatus;
 pub(crate) enum BackupTaskKind {
     /// 调度器发起的到期自动备份。
     AutomaticBackup,
-    /// 调度器发起的空闲链路校验。枚举值按取消路由的需要先行定义，构造点在后续
-    /// 接入空闲校验调度时出现。
-    #[allow(dead_code)]
+    /// 调度器发起的空闲链路校验。
     IdleVerify,
     /// 用户触发的前台命令。
     UserOperation,

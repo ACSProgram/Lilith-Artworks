@@ -150,7 +150,8 @@ describe("BranchSettings", () => {
 describe("BranchScheduleStatus", () => {
   afterEach(() => cleanup());
 
-  it("keeps the status summary short and exposes the complete error for copying", async () => {    const writeText = vi.fn().mockResolvedValue(undefined);
+  it("keeps the status summary short and exposes the complete error for copying", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
       value: { writeText },

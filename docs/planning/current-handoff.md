@@ -1,21 +1,54 @@
 # 当前任务交接
 
-更新时间：2026-10-03
+更新时间：2026-10-04
 
-本文件只记录**当前批次**的执行状态与人工验收结果。已完成批次进 `archive/`，
-未完成事项集中到 `todo.md`。
+本文件记录**当前批次**的执行状态与人工验收结果，并保留最近已验收批次的记录，供
+`todo.md` 与模块文档引用；更早的已完成计划进入 `archive/`，未完成事项集中到 `todo.md`。
 
 ## 当前基线
 
-- 应用版本 `0.2.0-alpha.3`，repository schema **v3**（v2 → v3 为 `branches`
-  追加 `backup_quick_enabled`、`last_source_size`、`last_source_modified_ms` 三列，
-  追加式迁移），应用标识 `com.lilith.artworks`。版本号已从 `0.2.0-alpha.2` 递增到
-  `0.2.0-alpha.3` 并同步五处版本字段，`tools/release/verify-metadata.mjs` 的 schema
-  断言为 v3；`v0.2.0-alpha.3` 标签尚未创建，待 Windows CI 跑通后再打标签发布。
+- 应用版本 `0.2.0-alpha.3`（本批次**不改版本号**），repository schema **v4**：
+  v2 → v3 为 `branches` 追加 `backup_quick_enabled`、`last_source_size`、
+  `last_source_modified_ms`；v3 → v4 追加 `verified_history_id`、`verified_ms`、
+  `verify_error`（空闲链路校验状态）。均为追加式迁移，旧数据不变，
+  `tools/release/verify-metadata.mjs` 的 schema 断言已同步为 v4。应用标识
+  `com.lilith.artworks`。
+- 版本与发布：`v0.2.0-alpha.3` 标签已存在。本批次的 schema v4、调度器与前端改动
+  按规划并入现有 `## 0.2.0-alpha.3` 变更段（不新建版本段），但**不递增版本号**；
+  递增版本并正式发布由维护者在后续版本升级（维护者口径预计 `rc1`）时单独执行。
 - 项目定位：平面美术个人项目的**资源、版本管理与发布**工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
-## 本轮批次：素材板退出握手与自动保存设置（退出保存已实测，开关行待验收）
+## 本轮批次：任务调度总控与空闲链路校验（已实现，待人工验收）
+
+规划见 `docs/planning/archive/task-control-plan-2026-10-03.md`（已随本批次归档），
+按批次 A–C 实现、本批次 D 收尾。目标：补上“快速检查不校验 head snapshot”的完整性缺口，
+并把后台任务与前台命令的让位、取消路由统一到一套模型。
+
+1. **任务类型与取消路由**（批次 A）：`BackupTaskKind`（`AutomaticBackup` / `IdleVerify` /
+   `UserOperation`）贯穿 `run_exclusive_typed` / `run_exclusive` / `run_logged` 与全部调用点，
+   运行状态新增 `taskKind`。`request_cancel` 取消任意任务，新增 `cancel_background` 只取消
+   后台任务，手动提交对自动任务的取消改走它。前台长命令（恢复、精简、检查点、删除子树、
+   进入发布、发布签名、全库扫描、整仓备份、仓库切换）经 `run_foreground` /
+   `run_logged_foreground` 在取锁前登记 `foreground_waiting` 并请求后台让位；调度器在候选
+   选择与取得运行锁后两处复查该计数，有前台在等即让位，避免抢先取锁吞掉取消意图。
+2. **schema v4 与单节点校验入口**（批次 B）：`branches` 追加 `verified_history_id`、
+   `verified_ms`、`verify_error`；`SCHEMA_VERSION = 4`，`verify-metadata.mjs` 断言同步为 4，
+   并修正 `pin_board/repository.rs` 与 `app/settings.rs` 两处硬编码旧版本号的既有断言。
+   分支 head 恒持有 snapshot，校验 head 等价于校验单个 snapshot，因此复用 `validate_snapshot`
+   （提升为 `pub(crate)`），`scrub_history` 保持不动。
+3. **调度器两级选择、派生队列与警告面**（批次 C）：调度器增加第二优先级——仓库空闲时从
+   派生队列取一条 head 已静默 ≥ `IDLE_VERIFY_DELAY_MS`（10 分钟）的分支，校验其 head 的
+   单个 snapshot；成功写 `verified_history_id` / `verified_ms` 并清空失败，失败写
+   `verify_error` 并退出队列（不自动重试）。前端分支状态行独立展示校验失败，含详情、
+   复制与“重新校验此分支”（`reverify_branch_history`，清空失败并唤醒调度器）。
+4. **批次 D 收尾**：`docs/modules/history-and-backup.md` 补齐任务类型、让位、空闲校验与
+   全库扫描分工契约，`docs/architecture/overview.md` 同步一句；`todo.md` 移除已实现条目并
+   登记本批人工验收项；`CHANGELOG.md`、`README.md` 的 schema 表述同步为 v4；计划文档归档。
+   同时清理 `backup/runtime.rs` 中 `IdleVerify` 上已过时的 `#[allow(dead_code)]` 与注释
+   （批次 C 已实际构造该值），并修正一处前端测试的格式。
+
+## 上一批次：素材板退出握手与自动保存设置（已人工验收）
 
 **问题**：素材板编辑（拖放摆放等）只改前端内存，保存仅在 Ctrl+S、页面隐藏、
 渲染器销毁结算时触发；而关闭窗口/托盘退出在 Rust 侧直接 `app.exit(0)`，webview
@@ -42,7 +75,7 @@
 5. **自动备份调度默认状态**：经维护者确认无需修改——全局 `pause_automatic_backups`
    默认 false、分支 `backup_enabled` 默认 1，本来就是默认开启。
 
-## 本轮批次：快速自动备份、手动提交优先与打开文件夹（已人工验收）
+## 上一批次：快速自动备份、手动提交优先与打开文件夹（已人工验收）
 
 1. **快速自动备份**：自动备份新增"快速检查"方式。全局设置 `automaticBackupCheckMode`
    （默认 `quick`）；分支设置新增"快速检查"开关，开启后即使全局为全量也对该分支使用快速。
@@ -64,6 +97,21 @@
    快捷键改为说明锁定后无法编辑、仅可缩放和移动视图；"创建备份"去掉"发布前"措辞。
 
 ## 验证记录
+
+### 任务调度总控与空闲链路校验批次（2026-10-04，最终态）
+
+代理侧已执行：
+
+- `cargo fmt --check`、`cargo check --lib`（无警告）、`git diff --check` 通过。
+- `cargo test --lib`：**134 通过**，1 个忽略项（新增 cancel_background 只对后台任务生效 /
+  用户操作不被误取消、前台等待在正常与取消与退出路径均归零、调度器两级选择与让位、
+  head 变化重新入队、失败后退出队列、NULL head 不入队、`validate_snapshot` 三例；
+  v1 全链迁移断言与设置页版本断言同步为 v4）。
+- `npx tsc --noEmit` 通过；`npm test`：**116 通过**（含分支状态行独立展示校验失败、
+  详情展开、复制与“重新校验此分支”用例）。
+- `node tools/release/verify-metadata.mjs`：schema 断言已同步为 v4（应用版本号本次不变）。
+
+### 上一批次：素材板退出握手与快速自动备份
 
 代理侧已执行：
 
@@ -117,6 +165,10 @@
 其中「各处理阶段的取消边界」「损坏文件的构造与摘要不匹配」「大文件的错误恢复」三项
 计划由 `stress-test-plan-2026-10-04.md` 的自动压力测试接管；该计划落实后必须回到
 `todo.md` 第二节更新对应条目（见该文档第 10 节）。
+
+任务调度总控与空闲链路校验批次的界面与交互验收项（空闲校验取消、校验失败警告与重新
+校验、快速检查与校验组合、大链校验期间前台响应性、失败不阻断提交）另行列入 `todo.md`
+第二节，见上文“本轮批次”。
 
 **关于验收环境的口径：** 上述结论来自维护者本机的生产使用，不替代
 `release-policy.md` 要求的"干净 Windows 用户环境"桌面验收；后者仍在 rc1 前执行。

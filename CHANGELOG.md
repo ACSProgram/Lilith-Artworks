@@ -29,6 +29,22 @@ before and after the first stable release.
   a crash or forced kill only loses the last few seconds of work. A companion
   "关闭时保存" setting (on by default) controls whether the exit handshake
   finalizes the open board before quitting.
+- Idle history chain verification. After due automatic backups, and only while
+  no foreground command waits and no manual commit is pending, the scheduler
+  verifies one branch head per idle slot once that head has been quiet for ten
+  minutes. A derived queue lists branches whose head differs from the last
+  verified head (including those never verified), so there is no stored queue
+  state to corrupt and the queue rebuilds after any restart; the outcome is
+  cached in the new branch verification columns.
+- The shared runtime status now reports the running task kind (automatic
+  backup, idle verification, or user operation). Foreground long commands
+  request background tasks to cancel and register a foreground-waiting count
+  before taking the run lock, so the scheduler yields to them instead of
+  pre-empting and swallowing their cancellation.
+- The branch status row surfaces a chain verification failure independently of
+  a backup failure, with an expandable detail, a copy action, and a
+  "重新校验此分支" button that re-queues the branch through the new
+  `reverify_branch_history` command.
 
 ### Fixed
 
@@ -42,10 +58,13 @@ before and after the first stable release.
 
 ### Changed
 
-- The repository schema moves to v3 with an append-only migration: `branches`
-  gains `backup_quick_enabled`, `last_source_size`, and
-  `last_source_modified_ms`. `tools/release/verify-metadata.mjs` now asserts
-  schema v3, so this release uses a new version and tag (`v0.2.0-alpha.3`).
+- The repository schema moves to v4 through append-only migrations: v2 → v3
+  adds the quick-check columns (`backup_quick_enabled`, `last_source_size`,
+  `last_source_modified_ms`), and v3 → v4 adds the verification-state columns
+  (`verified_history_id`, `verified_ms`, `verify_error`). Every step only
+  appends columns and leaves existing data untouched, and a repository above
+  v4 is still refused on open. `tools/release/verify-metadata.mjs` now asserts
+  schema v4.
 
 ## 0.2.0-alpha.2 - 2026-09-18
 
