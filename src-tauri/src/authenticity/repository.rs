@@ -281,6 +281,51 @@ pub(crate) fn record_source_path(root: &Path, record_id: &str) -> Result<PathBuf
     Ok(path)
 }
 
+pub(crate) fn record_branch(root: &Path, record_id: &str) -> Result<String, String> {
+    storage::open(root)?
+        .query_row(
+            "SELECT branch_id FROM certification_records WHERE id = ?1",
+            [record_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .ok_or_else(|| "找不到发布记录".to_owned())
+}
+
+/// 删除单条发布记录：事务内为仓库内认证 JPG 副本登记带哈希的清理意图，
+/// 再删除记录行；提交后由调用方执行清理，失败项留在队列中可重试。
+pub(crate) fn remove_record(root: &Path, record_id: &str) -> Result<Vec<String>, String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let stored: Option<(String, String)> = transaction
+        .query_row(
+            "SELECT stored_path, output_sha256 FROM certification_records WHERE id = ?1",
+            [record_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let (stored_path, output_sha256) = stored.ok_or("找不到发布记录")?;
+    let cleanup_id = cleanup::enqueue_repository_file_with_hash(
+        &transaction,
+        &stored_path,
+        &output_sha256,
+        "delete_certification_record",
+    )?;
+    let deleted = transaction
+        .execute(
+            "DELETE FROM certification_records WHERE id = ?1",
+            [record_id],
+        )
+        .map_err(storage::database_error)?;
+    if deleted != 1 {
+        return Err("找不到发布记录".into());
+    }
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(vec![cleanup_id])
+}
+
 fn records_for_branch(
     connection: &Connection,
     branch_id: &str,
@@ -433,5 +478,52 @@ mod tests {
         let error = record_source_path(&root, "record").unwrap_err();
 
         assert!(error.contains("已损坏或被替换"), "{error}");
+    }
+
+    #[test]
+    fn remove_record_deletes_row_and_enqueues_hashed_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let stored_path = "artworks/certified.jpg";
+        let expected = hex::encode_upper(sha2::Sha256::digest(b"original"));
+        record_fixture(&root, stored_path, &expected);
+        let absolute = storage::resolve_path(&root, stored_path).unwrap();
+        fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        fs::write(&absolute, b"original").unwrap();
+
+        assert_eq!(record_branch(&root, "record").unwrap(), "branch");
+        assert_eq!(
+            record_branch(&root, "missing").unwrap_err(),
+            "找不到发布记录"
+        );
+
+        let cleanup_ids = remove_record(&root, "record").unwrap();
+        assert_eq!(cleanup_ids.len(), 1);
+
+        // 提交后记录行已删除，带哈希的清理意图仍留在队列中等待执行。
+        let connection = storage::open(&root).unwrap();
+        let remaining: i64 = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM certification_records)
+                      + (SELECT COUNT(*) FROM pending_file_cleanup)",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert!(remove_record(&root, "record").is_err());
+        assert!(absolute.exists());
+
+        // 执行清理：副本哈希匹配，文件与队列项一并移除。
+        let report = cleanup::run(&root, &cleanup_ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert!(!absolute.exists());
+        let pending: i64 = storage::open(&root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM pending_file_cleanup", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, 0);
     }
 }

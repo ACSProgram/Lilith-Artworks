@@ -100,7 +100,21 @@ export interface PublicationPreviewRequest {
   watermarkId: string | null;
 }
 
+export type PreviewTileSource = "compressed" | "original";
+
+export interface PreviewTileRequest {
+  source: PreviewTileSource;
+  cacheToken: string | null;
+  branchId: string | null;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  maxEdge: number;
+}
+
 export interface PublicationPreview {
+  branchId: string;
   image: PreviewImage;
   originalImage: PreviewImage;
   sourceWidth: number;
@@ -111,6 +125,11 @@ export interface PublicationPreview {
   cacheHit: boolean;
   renderMs: number;
   encodeMs: number;
+}
+
+export interface DroppedImageImport {
+  fileName: string;
+  dataBase64: string;
 }
 
 export interface PublishResult {

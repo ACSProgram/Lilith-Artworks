@@ -80,6 +80,7 @@ pub(crate) struct PreviewImage {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublicationPreview {
+    pub(crate) branch_id: String,
     pub(crate) image: PreviewImage,
     pub(crate) original_image: PreviewImage,
     pub(crate) source_width: u32,
@@ -98,6 +99,40 @@ pub(crate) struct EstimateRequest {
     pub(crate) branch_id: String,
     pub(crate) jpeg_quality: u8,
     pub(crate) background_color: String,
+}
+
+/// 质量预览高清局部的像素来源。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum PreviewTileSource {
+    /// 缓存的无签名 JPEG（导出图预览）。
+    Compressed,
+    /// 分支的仓库最终成品（原始成品对比）。
+    Original,
+}
+
+/// 质量预览高清局部请求：在源分辨率坐标系内裁剪一块区域。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PreviewTileRequest {
+    pub(crate) source: PreviewTileSource,
+    #[serde(default)]
+    pub(crate) cache_token: Option<String>,
+    #[serde(default)]
+    pub(crate) branch_id: Option<String>,
+    pub(crate) x: u32,
+    pub(crate) y: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) max_edge: u32,
+}
+
+/// 拖放导入的待识别图片：前端读取的原始字节（Base64 编码）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StageImportRequest {
+    pub(crate) file_name: String,
+    pub(crate) data_base64: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

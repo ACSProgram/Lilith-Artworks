@@ -3,6 +3,60 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
+## Unreleased
+
+### Added
+
+- High-resolution region loading for the publication quality preview. A new
+  `preview_authenticity_tile` command crops a rectangle out of the source at
+  full resolution and returns it bounded by a 64–4096 px edge, reusing the
+  shared image resource budget and validating the crop rectangle and decoded
+  image size. Its `source` field selects the cached unsigned preview JPEG
+  (validated against the cache token and metadata) or the branch final
+  artifact, and a single-entry decoded-source cache keeps panning cheap.
+  Tiles are encoded as lossless PNG: the preview exists to reveal JPEG and
+  TrustMark losses, so writing the crop back as lossy JPEG would add
+  compression artifacts that the published output does not have. The preview
+  dialog requests debounced viewport crops only while the thumbnail is
+  enlarged, sizes the requested output edge to the tile's on-screen footprint
+  so a source pixel lands on exactly one screen pixel, and snaps each crop
+  rect to a "visible span × margin" grid so small pans reuse the tile they
+  already have. Tiles overlay the base image at their source-rect position
+  through an inline style and are cached client-side per source, rect, and
+  resolution. Only a tile whose key matches the current rect is rendered, so
+  panning or zooming never leaves a misaligned tile behind. The 2400 px
+  thumbnail no longer caps how sharp the enlarged export preview and
+  "显示原图" comparison can get.
+- Numeric-only zoom for the publication quality preview, measured in source
+  pixels. The dialog no longer has a separate "fit" mode: zoom is always a
+  number and 100% means one source pixel per on-screen CSS pixel, so canvas
+  dragging works from the moment the preview opens and the zoom readout
+  matches what an image viewer would show. "适应窗口" resets the numeric zoom
+  to the current fit ratio, and the wheel handler is attached as a
+  non-passive native listener so zooming no longer scrolls the outer
+  container.
+- Drag-and-drop import for the identify page. Dropping an image file onto
+  the left preview panel reads its bytes with `FileReader` and hands them to
+  a new `stage_authenticity_input` command, which writes the file into a
+  session directory under the system temp dir, adds it to the filesystem
+  scope, and returns the path for the existing external-image preview and
+  identify flow. Only PNG, JPEG, WebP, and TIFF are accepted, failures
+  surface through the shared operation notice, and a drop overlay is shown
+  while dragging. The app also cancels window-level `dragover`/`drop`
+  defaults so dropping a file never navigates the webview.
+- Per-record deletion for export certification records. A new
+  `delete_certification_record` command removes a single
+  `certification_records` row inside a transaction that first enqueues a
+  hash-checked repository-file cleanup intent for the record's stored JPG
+  copy, then runs the cleanup and reports leftovers through the existing
+  retry banner. The command resolves the owning branch for run-lock scoping
+  and executes under the exclusive backup run lock. The read-only record
+  view gains a "more actions" menu next to "退出查看" with a red
+  "删除本记录" entry that opens an in-app confirmation dialog modeled on
+  the publication deletion dialog; the first-exported JPG always stays at
+  its original path. Deleting a record exits the view and refreshes the
+  branch record list.
+
 ## 0.2.0-alpha.4 - 2026-10-04
 
 ### Added

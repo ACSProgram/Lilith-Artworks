@@ -22,6 +22,6 @@ pub(crate) use model::{CertificationConfig, DecodeRequest, NormalizedRegion};
 #[cfg(feature = "headless")]
 pub(crate) use pipeline::decode;
 pub(crate) use publication_repository::{branch_head, remove_artifact};
-pub(crate) use repository::get_publication;
+pub(crate) use repository::{get_publication, record_branch, remove_record};
 pub(crate) use scrub::scrub_controlled_files;
 pub(crate) use state::AuthenticityState;

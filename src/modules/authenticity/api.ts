@@ -4,8 +4,10 @@ import type {
   BranchPublication,
   CertificationRecord,
   DecodeResult,
+  DroppedImageImport,
   NormalizedRegion,
   PreviewImage,
+  PreviewTileRequest,
   PublicationPreview,
   PublicationPreviewRequest,
   PublishBranchRequest,
@@ -23,6 +25,12 @@ export const authenticityApi = {
     invokeCommand<PublishResult>("publish_branch_artifact", { request }),
   previewPublication: (request: PublicationPreviewRequest) =>
     invokeCommand<PublicationPreview>("preview_branch_artifact_output", { request }),
+  previewTile: (request: PreviewTileRequest) =>
+    invokeCommand<PreviewImage>("preview_authenticity_tile", { request }),
+  stageDroppedImage: (request: DroppedImageImport) =>
+    invokeCommand<string>("stage_authenticity_input", { request }),
+  deleteRecord: (recordId: string) =>
+    invokeCommand<CleanupReport>("delete_certification_record", { recordId }),
   cancelOperation: () =>
     invokeCommand<boolean>("cancel_authenticity_operation"),
   cancelPublication: (branchId: string) =>

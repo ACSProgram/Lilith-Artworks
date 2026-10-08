@@ -10,3 +10,14 @@ export function preventWebViewReload(event: KeyboardEvent) {
     || (key === "r" && (event.ctrlKey || event.metaKey));
   if (reloadRequested) event.preventDefault();
 }
+
+/**
+ * 阻止把外部文件拖进窗口时 WebView 直接导航到该文件。
+ *
+ * 只取消默认行为，不停止事件传播：识别页等模块仍可在自己的元素上处理同一次
+ * 拖放；未被任何模块处理的拖放落到 window 时被取消，避免整页跳转丢失状态。
+ * 素材板与作品树的内部 HTML5 拖拽同样不受影响。
+ */
+export function preventWebViewFileDrop(event: DragEvent) {
+  event.preventDefault();
+}
