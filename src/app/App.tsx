@@ -36,7 +36,7 @@ import {
   shortcutFromEvent,
   shortcutLabel,
 } from "./settingsShortcuts";
-import { preventWebViewReload } from "./webviewShortcuts";
+import { preventWebViewFileDrop, preventWebViewReload } from "./webviewShortcuts";
 import type {
   AppSettings,
   BackupRuntimeStatus,
@@ -139,6 +139,17 @@ export function App() {
   useEffect(() => {
     window.addEventListener("keydown", preventWebViewReload, true);
     return () => window.removeEventListener("keydown", preventWebViewReload, true);
+  }, []);
+
+  // 拖入窗口的文件默认会让 WebView 导航到该文件；统一取消默认行为，识别页等
+  // 模块仍可在自己的元素上处理拖放。
+  useEffect(() => {
+    window.addEventListener("dragover", preventWebViewFileDrop);
+    window.addEventListener("drop", preventWebViewFileDrop);
+    return () => {
+      window.removeEventListener("dragover", preventWebViewFileDrop);
+      window.removeEventListener("drop", preventWebViewFileDrop);
+    };
   }, []);
 
   // 原生端关闭窗口或托盘退出时不再直接结束进程，而是先请求 webview 结算素材板

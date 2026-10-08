@@ -369,6 +369,30 @@ pub(crate) async fn cancel_branch_publication(
 }
 
 #[tauri::command]
+pub(crate) async fn delete_certification_record(
+    record_id: String,
+    app_state: State<'_, AppState>,
+    backup_state: State<'_, BackupState>,
+) -> Result<cleanup::CleanupReport, String> {
+    let app_state = app_state.inner().clone();
+    let state = backup_state.inner().clone();
+    let record_id = record_id.trim().to_owned();
+    tauri::async_runtime::spawn_blocking(move || {
+        // 先读取记录所属分支用于运行锁作用域；真正的删除在独占锁内进行。
+        let branch_id =
+            app_state.with_repository_read(|root| authenticity::record_branch(root, &record_id))?;
+        state.run_exclusive(Some(&branch_id), BackupTaskKind::UserOperation, || {
+            app_state.with_ready_repository(|root| {
+                let cleanup_ids = authenticity::remove_record(root, &record_id)?;
+                cleanup::run(root, &cleanup_ids)
+            })
+        })
+    })
+    .await
+    .map_err(|error| format!("删除发布记录任务异常结束：{error}"))?
+}
+
+#[tauri::command]
 pub(crate) async fn publish_branch_artifact(
     request: PublishBranchRequest,
     app_state: State<'_, AppState>,

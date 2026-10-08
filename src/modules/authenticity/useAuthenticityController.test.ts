@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BranchPublication, CertificationConfig, CertificationRecord, PreviewImage, PublicationPreview,
 } from "./types";
-import { usePublicationController } from "./useAuthenticityController";
+import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 const api = vi.hoisted(() => ({
   getPublication: vi.fn(),
@@ -12,6 +12,10 @@ const api = vi.hoisted(() => ({
   previewPublication: vi.fn(),
   cancelOperation: vi.fn(),
   publish: vi.fn(),
+  deleteRecord: vi.fn(),
+  previewRecord: vi.fn(),
+  stageDroppedImage: vi.fn(),
+  previewExternal: vi.fn(),
 }));
 const dialog = vi.hoisted(() => ({ open: vi.fn(), save: vi.fn() }));
 
@@ -81,6 +85,7 @@ const publishedBranch = (branchId: string): BranchPublication => ({
 });
 
 const outputPreview = (watermarkId: string): PublicationPreview => ({
+  branchId: "first",
   image: previewImage,
   originalImage: previewImage,
   sourceWidth: previewImage.width,
@@ -140,6 +145,7 @@ describe("usePublicationController", () => {
     api.previewArtifact.mockResolvedValue(previewImage);
     api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
     api.cancelOperation.mockResolvedValue(true);
+    api.previewRecord.mockResolvedValue(previewImage);
   });
 
   afterEach(() => cleanup());
@@ -275,5 +281,93 @@ describe("usePublicationController", () => {
     expect(result.current.cancelling).toBe(false);
     expect(onError).not.toHaveBeenCalledWith("认证任务已取消");
     expect(onError).toHaveBeenCalledWith("质量预览已取消。");
+  });
+
+  it("deletes a record, leaves the view and refreshes the record list", async () => {
+    const withRecord = (branchId: string): BranchPublication => ({
+      ...publishedBranch(branchId),
+      records: [record(branchId)],
+    });
+    api.getPublication.mockImplementation((branchId: string) => Promise.resolve(withRecord(branchId)));
+    api.deleteRecord.mockResolvedValue({ failures: [] });
+    const onError = vi.fn();
+    const { result } = renderHook(() => usePublicationController(options("first", onError)));
+    await waitFor(() => expect(result.current.publication?.records).toHaveLength(1));
+
+    act(() => { result.current.openRecord(record("first")); });
+    expect(result.current.viewingRecord?.id).toBe("record-1");
+
+    await act(async () => { await result.current.deleteRecord(record("first")); });
+    expect(api.deleteRecord).toHaveBeenCalledWith("record-1");
+    expect(result.current.viewingRecord).toBeNull();
+    expect(result.current.deletingRecord).toBe(false);
+    expect(onError).not.toHaveBeenCalledWith(expect.anything());
+    // load() 重新拉取发布状态以刷新记录列表。
+    await waitFor(() => expect(api.getPublication.mock.calls.length).toBeGreaterThanOrEqual(2));
+  });
+
+  it("surfaces delete cleanup failures and reports the retry banner", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.deleteRecord.mockResolvedValue({
+      failures: [{ id: "cleanup-1", path: "artworks/certified.jpg", error: "无法删除" }],
+    });
+    const onError = vi.fn();
+    const { result } = renderHook(() => usePublicationController(options("first", onError)));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+    act(() => { result.current.openRecord(record("first")); });
+
+    await act(async () => { await result.current.deleteRecord(record("first")); });
+    expect(result.current.cleanupFailures).toHaveLength(1);
+    expect(onError).toHaveBeenCalledWith(expect.stringContaining("清理失败"));
+  });
+
+  it("reports record deletion errors without closing the view", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.deleteRecord.mockRejectedValue(new Error("找不到发布记录"));
+    const onError = vi.fn();
+    const { result } = renderHook(() => usePublicationController(options("first", onError)));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+    act(() => { result.current.openRecord(record("first")); });
+
+    await act(async () => { await result.current.deleteRecord(record("first")); });
+    expect(onError).toHaveBeenCalledWith("找不到发布记录");
+    expect(result.current.viewingRecord?.id).toBe("record-1");
+    expect(result.current.deletingRecord).toBe(false);
+  });
+});
+
+describe("useIdentificationController", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  afterEach(() => cleanup());
+
+  it("stages a dropped image before previewing it", async () => {
+    api.stageDroppedImage.mockResolvedValue("C:/tmp/staged.png");
+    api.previewExternal.mockResolvedValue(previewImage);
+    const onError = vi.fn();
+    const { result } = renderHook(() => useIdentificationController({ onError }));
+
+    await act(async () => { await result.current.importDropped("dropped.png", "AAAA"); });
+
+    expect(api.stageDroppedImage).toHaveBeenCalledWith({ fileName: "dropped.png", dataBase64: "AAAA" });
+    expect(api.previewExternal).toHaveBeenCalledWith("C:/tmp/staged.png");
+    expect(result.current.path).toBe("C:/tmp/staged.png");
+    expect(result.current.preview).toEqual(previewImage);
+    expect(result.current.busy).toBe(false);
+    expect(onError).not.toHaveBeenCalledWith(expect.any(String));
+  });
+
+  it("reports staging failures without changing the current preview", async () => {
+    api.stageDroppedImage.mockRejectedValue(new Error("拖入的图片数据无效"));
+    const onError = vi.fn();
+    const { result } = renderHook(() => useIdentificationController({ onError }));
+
+    await act(async () => { await result.current.importDropped("dropped.png", "!!"); });
+
+    expect(onError).toHaveBeenCalledWith("拖入的图片数据无效");
+    expect(result.current.preview).toBeNull();
+    expect(result.current.busy).toBe(false);
   });
 });

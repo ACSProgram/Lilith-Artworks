@@ -85,6 +85,7 @@ export function usePublicationController({
   const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
   const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
   const [exporting, setExporting] = useState(false);
+  const [deletingRecord, setDeletingRecord] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
   const loadRequest = useRef(0);
@@ -515,6 +516,26 @@ export function usePublicationController({
     finally { setExporting(false); }
   }, [onError]);
 
+  const deleteRecord = useCallback(async (record: CertificationRecord) => {
+    setDeletingRecord(true);
+    onError(null);
+    try {
+      const report = await authenticityApi.deleteRecord(record.id);
+      setCleanupFailures(report.failures);
+      if (report.failures.length > 0) {
+        onError(`记录已删除，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
+      }
+      if (selectedBranchIdRef.current === record.branchId) {
+        setViewingRecord(null);
+        await load();
+      }
+    } catch (error) {
+      onError(message(error));
+    } finally {
+      setDeletingRecord(false);
+    }
+  }, [load, onError]);
+
   return {
     publication,
     config,
@@ -554,6 +575,8 @@ export function usePublicationController({
     retryCleanup,
     openRecord,
     exportRecord,
+    deletingRecord,
+    deleteRecord,
   };
 }
 
@@ -575,15 +598,7 @@ export function useIdentificationController({ onError }: IdentificationControlle
   const decodeRequest = useRef(0);
   const searchRequest = useRef(0);
 
-  const choose = useCallback(async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }],
-    });
-    if (typeof selected !== "string") return;
-    const requestId = ++previewRequest.current;
-    decodeRequest.current += 1;
-    setPreviewBusy(true);
+  const applyPreview = useCallback(async (selected: string, requestId: number) => {
     try {
       const nextPreview = await authenticityApi.previewExternal(selected);
       if (requestId !== previewRequest.current) return;
@@ -597,6 +612,37 @@ export function useIdentificationController({ onError }: IdentificationControlle
       if (requestId === previewRequest.current) setPreviewBusy(false);
     }
   }, [onError]);
+
+  const choose = useCallback(async () => {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }],
+    });
+    if (typeof selected !== "string") return;
+    const requestId = ++previewRequest.current;
+    decodeRequest.current += 1;
+    setPreviewBusy(true);
+    await applyPreview(selected, requestId);
+  }, [applyPreview]);
+
+  // 拖放导入：前端读取原始字节后由后端落到系统临时目录并授权，再走同一条外部
+  // 图片预览路径，因此识别仍使用受控的文件路径。
+  const importDropped = useCallback(async (fileName: string, dataBase64: string) => {
+    const requestId = ++previewRequest.current;
+    decodeRequest.current += 1;
+    setPreviewBusy(true);
+    onError(null);
+    try {
+      const staged = await authenticityApi.stageDroppedImage({ fileName, dataBase64 });
+      if (requestId !== previewRequest.current) return;
+      await applyPreview(staged, requestId);
+    } catch (error) {
+      if (requestId === previewRequest.current) {
+        setPreviewBusy(false);
+        onError(message(error));
+      }
+    }
+  }, [applyPreview, onError]);
 
   const decode = useCallback(async () => {
     if (!path) return;
@@ -651,6 +697,7 @@ export function useIdentificationController({ onError }: IdentificationControlle
     busy: previewBusy || decodeBusy,
     searching,
     choose,
+    importDropped,
     decode,
     searchRecords,
   };

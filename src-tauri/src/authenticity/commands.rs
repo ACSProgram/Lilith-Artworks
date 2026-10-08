@@ -2,6 +2,7 @@ use std::{
     fs::{self, File},
     io::{Cursor, Read, Write},
     path::{Path, PathBuf},
+    sync::OnceLock,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -19,7 +20,7 @@ use super::{
     model::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult, EstimateRequest,
         ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PublicationPreview,
-        PublicationPreviewRequest, PublishBranchRequest, PublishResult,
+        PublicationPreviewRequest, PublishBranchRequest, PublishResult, StageImportRequest,
     },
     pipeline,
     publication_repository::{self, NewFinalArtifact},
@@ -111,6 +112,59 @@ pub(crate) async fn preview_authenticity_image(
     .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
+/// 拖放导入的待识别图片：前端读取原始字节后由本命令落到进程临时目录并授权。
+///
+/// 桌面 WebView 在 Windows 上启用 HTML5 拖放后无法从 `File` 对象取得绝对路径，
+/// 因此前端读取字节、这里落盘，再复用既有的外部图片预览与识别流程。落盘目录位于
+/// 系统临时目录（仓库之外），路径立即加入文件系统 scope，使后续预览与识别仍走
+/// 同一条「路径必须被显式授权」的检查，不新增可绕过的入口。
+#[tauri::command]
+pub(crate) async fn stage_authenticity_input(
+    request: StageImportRequest,
+    window: tauri::WebviewWindow,
+) -> AuthenticityResult<String> {
+    const MAX_DROP_BYTES: usize = 256 * 1024 * 1024;
+    let extension = Path::new(request.file_name.trim())
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)
+        .unwrap_or_default();
+    if !matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff"
+    ) {
+        return Err(AuthenticityError::InvalidInput(
+            "拖入的图片必须是 PNG、JPEG、WebP 或 TIFF".into(),
+        ));
+    }
+    let bytes = STANDARD
+        .decode(request.data_base64.as_bytes())
+        .map_err(|_| AuthenticityError::InvalidInput("拖入的图片数据无效".into()))?;
+    if bytes.is_empty() {
+        return Err(AuthenticityError::InvalidInput("拖入的图片为空".into()));
+    }
+    if bytes.len() > MAX_DROP_BYTES {
+        return Err(AuthenticityError::InvalidInput("拖入的图片过大".into()));
+    }
+    let directory = drop_stage_directory()?;
+    let path = directory.join(format!("{}.{}", storage::new_id(), extension));
+    fs::write(&path, &bytes)?;
+    window
+        .fs_scope()
+        .allow_file(&path)
+        .map_err(|error| AuthenticityError::Task(format!("无法授权拖入的图片：{error}")))?;
+    Ok(storage::display_path(&path))
+}
+
+static DROP_STAGE_SESSION: OnceLock<String> = OnceLock::new();
+
+fn drop_stage_directory() -> AuthenticityResult<PathBuf> {
+    let session = DROP_STAGE_SESSION.get_or_init(storage::new_id);
+    let directory = std::env::temp_dir().join(format!("lilith-artworks-drop-{session}"));
+    fs::create_dir_all(&directory)?;
+    Ok(directory)
+}
+
 #[tauri::command]
 pub(crate) async fn preview_branch_artifact(
     branch_id: String,
@@ -162,6 +216,29 @@ pub(crate) fn cancel_authenticity_operation(
     authenticity_state: State<'_, AuthenticityState>,
 ) -> AuthenticityResult<bool> {
     authenticity_state.request_cancel()
+}
+
+/// 质量预览高清局部：从缓存的无签名 JPEG 或分支最终成品裁剪一块源分辨率区域，
+/// 供预览在缩略图被降采样时叠加显示。
+///
+/// 压缩源的令牌即缓存文件名，因此先做严格格式校验；解码复用统一资源预算。
+/// 不参与认证活动任务锁——预览对话框只在空闲时请求局部图，与发布流程并发时
+/// 由前端丢弃过期响应。
+#[tauri::command]
+pub(crate) async fn preview_authenticity_tile(
+    request: super::model::PreviewTileRequest,
+    app_state: State<'_, AppState>,
+) -> AuthenticityResult<PreviewImage> {
+    let app_state = app_state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        app_state
+            .with_repository_read(|root| {
+                pipeline::preview_tile(root, &request).map_err(|error| error.to_string())
+            })
+            .map_err(AuthenticityError::Task)
+    })
+    .await
+    .map_err(|error| AuthenticityError::Task(error.to_string()))?
 }
 
 #[tauri::command]

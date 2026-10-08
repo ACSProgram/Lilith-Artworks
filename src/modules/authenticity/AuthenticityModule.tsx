@@ -4,16 +4,18 @@ import {
   ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from "react";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
+import { authenticityApi } from "./api";
 import type {
-  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PublicationPreview,
+  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PreviewTileSource, PublicationPreview,
 } from "./types";
 import {
   clampPreviewZoom, navigatorRect, navigatorScrollTarget, previewZoomFromButton,
   previewZoomFromWheel, type PreviewViewport, zoomAnchorScrollTarget,
 } from "./previewViewport";
+import { tileCacheKey, tileOverlayStyle, tileRequestForView, type TileRequest } from "./previewTile";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 interface AuthenticityModuleProps {
@@ -50,7 +52,7 @@ function PublishView({
     outputPreview, outputPreviewOpen,
     setOutputPreviewOpen, outputPreviewBusy, privateKey, setPrivateKey,
     publishing, cancelling, busy, result, publishMetrics, sizeEstimate, viewingRecord, setViewingRecord,
-    viewingPreview, exporting, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
+    viewingPreview, exporting, deletingRecord, deleteRecord, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
     selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview,
     cancelAuthenticityOperation, publish, cancelPublication,
     retryCleanup, openRecord, exportRecord,
@@ -66,7 +68,9 @@ function PublishView({
     onPublicationChanged,
   });
 
-  if (viewingRecord) return <RecordView record={viewingRecord} preview={viewingPreview} exporting={exporting} onExport={exportRecord} onClose={() => setViewingRecord(null)} />;
+  if (viewingRecord) {
+    return <RecordView record={viewingRecord} preview={viewingPreview} exporting={exporting} deleting={deletingRecord} onExport={exportRecord} onDelete={deleteRecord} onClose={() => setViewingRecord(null)} />;
+  }
 
   return <div className="auth-workspace">
     <header className="auth-header">
@@ -161,19 +165,59 @@ function PublishView({
 function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProps, "onError" | "onNavigateRecord">) {
   const {
     path, preview, region, setRegion, result, query, setQuery, records, busy, searching,
-    choose, decode, searchRecords,
+    choose, importDropped, decode, searchRecords,
   } = useIdentificationController({ onError });
+  const [dragActive, setDragActive] = useState(false);
+
+  const onDragOver = (event: ReactDragEvent<HTMLElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setDragActive(true);
+  };
+  const onDragLeave = (event: ReactDragEvent<HTMLElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDragActive(false);
+  };
+  const onDrop = (event: ReactDragEvent<HTMLElement>) => {
+    event.preventDefault();
+    setDragActive(false);
+    const file = Array.from(event.dataTransfer.files)
+      .find((item) => /\.(png|jpe?g|webp|tiff?)$/i.test(item.name));
+    if (!file) {
+      onError("请拖入 PNG、JPEG、WebP 或 TIFF 图片");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const value = typeof reader.result === "string" ? reader.result : "";
+      const base64 = value.slice(value.indexOf(",") + 1);
+      if (!base64) {
+        onError("无法读取拖入的图片");
+        return;
+      }
+      void importDropped(file.name, base64);
+    };
+    reader.onerror = () => onError("无法读取拖入的图片");
+    reader.readAsDataURL(file);
+  };
 
   return <div className="auth-workspace identify-workspace">
     <header className="auth-header"><div><span>识别与溯源</span><h1>验证发布图片</h1></div></header>
     <div className="identify-layout">
-      <section className="auth-preview-panel identify-preview">
-        {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>C2PA 会始终读取；TrustMark 可识别整图或框选区域。</span></button> : <>
+      <section
+        className={`auth-preview-panel identify-preview${dragActive ? " drop-active" : ""}`}
+        onDragOver={onDragOver}
+        onDragLeave={onDragLeave}
+        onDrop={onDrop}
+      >
+        {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>点击选择，或把图片拖到这里。C2PA 会始终读取；TrustMark 可识别整图或框选区域。</span></button> : <>
           <header><div><strong>{fileName(path)}</strong><span>{preview.width} x {preview.height}</span></div><button className="text-button" type="button" onClick={() => void choose()}>更换图片</button></header>
           <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} />
           <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" type="button" title="取消区域并识别整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>
           <button className="primary-button" type="button" disabled={busy} onClick={() => void decode()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ScanSearch size={16} />}开始识别</button>
         </>}
+        {dragActive && <div className="image-drop-hint"><ScanSearch size={22} /><span>松开以导入图片</span></div>}
       </section>
       <section className="decode-results">
         {!result ? <div className="decode-placeholder"><Fingerprint size={24} /><span>识别结果将在这里显示</span></div> : <>
@@ -271,15 +315,21 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
   </div>;
 }
 
-function RecordView({ record, preview, exporting, onExport, onClose }: {
+function RecordView({ record, preview, exporting, deleting, onExport, onDelete, onClose }: {
   record: CertificationRecord;
   preview: PreviewImage | null;
   exporting: boolean;
+  deleting: boolean;
   onExport: (record: CertificationRecord) => Promise<void>;
+  onDelete: (record: CertificationRecord) => Promise<void>;
   onClose: () => void;
 }) {
+  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   return <div className="auth-workspace record-view-mode">
-    <header className="auth-header"><div><span>发布记录 · 只读</span><h1>{record.title}</h1></div><div className="record-view-actions"><button className="secondary-button" type="button" disabled={exporting} onClick={() => void onExport(record)}>{exporting ? <LoaderCircle className="spin" size={15} /> : <ImageDown size={15} />}再次导出</button><button className="secondary-button" type="button" onClick={onClose}><X size={15} />退出查看</button></div></header>
+    <header className="auth-header"><div><span>发布记录 · 只读</span><h1>{record.title}</h1></div><div className="record-view-actions"><button className="secondary-button" type="button" disabled={exporting} onClick={() => void onExport(record)}>{exporting ? <LoaderCircle className="spin" size={15} /> : <ImageDown size={15} />}再次导出</button><button className="secondary-button" type="button" onClick={onClose}><X size={15} />退出查看</button><details className="auth-more-menu"><summary className="icon-button" title="更多记录操作"><MoreVertical size={17} /></summary><div><button className="danger" type="button" disabled={deleting} onClick={(event) => {
+      (event.currentTarget.closest("details") as HTMLDetailsElement).open = false;
+      setDeleteConfirmOpen(true);
+    }}><Trash2 size={15} />删除本记录</button></div></details></div></header>
     <div className="publish-layout record-review-layout">
       <section className="auth-preview-panel">
         <header><div><strong>{fileName(record.outputPath)}</strong><span>{preview ? `${preview.width} x ${preview.height} · ` : ""}{formatBytes(record.outputBytes)}</span></div><i><LockKeyhole size={14} />记录已锁定</i></header>
@@ -293,6 +343,17 @@ function RecordView({ record, preview, exporting, onExport, onClose }: {
       </section>
       {record.c2paManifestJson && <section className="record-manifest"><details className="manifest-details" open><summary>C2PA 报告</summary><pre>{record.c2paManifestJson}</pre></details></section>}
     </div>
+    {deleteConfirmOpen && <RecordDeleteDialog record={record} busy={deleting} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void onDelete(record)} />}
+  </div>;
+}
+
+function RecordDeleteDialog({ record, busy, onClose, onConfirm }: { record: CertificationRecord; busy: boolean; onClose: () => void; onConfirm: () => void }) {
+  return <div className="dialog-backdrop" onMouseDown={onClose}>
+    <section className="publication-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-record-title" onMouseDown={(event) => event.stopPropagation()}>
+      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-record-title">删除发布记录</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
+      <div><strong>{record.title}</strong><p>将删除这条发布记录及其仓库内认证 JPG 副本、C2PA 清单与 TrustMark ID。</p><div className="delete-detail">首次导出的 JPG 会保留在原发布路径，不会由此操作删除。</div></div>
+      <footer><button className="text-button" type="button" onClick={onClose}>保留记录</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认删除记录</button></footer>
+    </section>
   </div>;
 }
 
@@ -318,18 +379,36 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
   onCancel: () => void;
   onPublish: () => void;
 }) {
-  const [zoom, setZoom] = useState<number | "fit">("fit");
+  // 没有独立的“适应”模式：缩放始终是数值，并以最终成品像素为基准——100% 表示一个
+  // 源像素落在屏幕上的一个 CSS 像素。null 表示尚未手动缩放，此时跟随由画布尺寸算
+  // 出的适应倍率；打开预览即为数值缩放，画布拖拽从打开起即可用。
+  const [zoom, setZoom] = useState<number | null>(null);
   const [showOriginal, setShowOriginal] = useState(false);
   const [viewport, setViewport] = useState<PreviewViewport | null>(null);
+  const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
+  const [tile, setTile] = useState<{ key: string; request: TileRequest; image: PreviewImage; source: PreviewTileSource } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
   const navigatorDragRef = useRef<number | null>(null);
-  const fitZoomRef = useRef(1);
   const zoomAnchorRef = useRef<{ xRatio: number; yRatio: number; canvasX: number; canvasY: number } | null>(null);
   const decodedImagesRef = useRef(new Map<string, Promise<void>>());
+  const tileCacheRef = useRef(new Map<string, PreviewImage>());
+  const tileRequestRef = useRef(0);
   const [imageSwitching, setImageSwitching] = useState(false);
   const image = showOriginal ? preview.originalImage : preview.image;
+  const tileSource: PreviewTileSource = showOriginal ? "original" : "compressed";
+  const fitZoom = canvasSize && canvasSize.width > 0 && canvasSize.height > 0
+    && preview.sourceWidth > 0 && preview.sourceHeight > 0
+    ? Math.min(4, Math.min(canvasSize.width / preview.sourceWidth, canvasSize.height / preview.sourceHeight))
+    : 1;
+  const effectiveZoom = zoom ?? fitZoom;
+  // 内容与叠加层都以源像素尺寸为基准：显示尺寸 = 源像素 × 缩放倍率，因此缩放标签
+  // 上的 100% 就是源图 1:1，缩略图只作为放大前的底图。
+  const displayWidth = preview.sourceWidth * effectiveZoom;
+  const displayHeight = preview.sourceHeight * effectiveZoom;
+  const stateRef = useRef({ imageWidth: preview.sourceWidth, imageHeight: preview.sourceHeight, fit: fitZoom, effective: effectiveZoom });
+  stateRef.current = { imageWidth: preview.sourceWidth, imageHeight: preview.sourceHeight, fit: fitZoom, effective: effectiveZoom };
   const decodeImage = useCallback((dataUrl: string) => {
     const cached = decodedImagesRef.current.get(dataUrl);
     if (cached) return cached;
@@ -352,9 +431,13 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
   };
   const measuredZoom = () => {
     const renderedImage = imageRef.current;
-    return renderedImage && renderedImage.clientWidth > 0 ? renderedImage.clientWidth / image.width : zoom === "fit" ? fitZoomRef.current : zoom;
+    const state = stateRef.current;
+    if (renderedImage && renderedImage.clientWidth > 0 && state.imageWidth > 0) {
+      return renderedImage.clientWidth / state.imageWidth;
+    }
+    return state.effective;
   };
-  const changeZoom = (next: number, clientX?: number, clientY?: number) => {
+  const changeZoom = useCallback((next: number, clientX?: number, clientY?: number) => {
     const canvas = canvasRef.current;
     const renderedImage = imageRef.current;
     if (canvas && renderedImage) {
@@ -371,18 +454,28 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
         canvasY: anchorY - canvasBounds.top,
       };
     }
-    setZoom(clampPreviewZoom(next, fitZoomRef.current));
-  };
-  const onWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    changeZoom(previewZoomFromWheel(measuredZoom(), event.deltaY, fitZoomRef.current), event.clientX, event.clientY);
-  };
+    setZoom(clampPreviewZoom(next, stateRef.current.fit));
+  }, []);
+  // React 的 onWheel 以 passive 方式注册，preventDefault 会被忽略；改用原生非被动
+  // 监听，避免滚轮在缩放预览的同时滚动外层容器。
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const handler = (event: WheelEvent) => {
+      event.preventDefault();
+      const renderedImage = imageRef.current;
+      const state = stateRef.current;
+      const current = renderedImage && renderedImage.clientWidth > 0 && state.imageWidth > 0
+        ? renderedImage.clientWidth / state.imageWidth
+        : state.effective;
+      changeZoom(previewZoomFromWheel(current, event.deltaY, state.fit), event.clientX, event.clientY);
+    };
+    canvas.addEventListener("wheel", handler, { passive: false });
+    return () => canvas.removeEventListener("wheel", handler);
+  }, [changeZoom]);
   const syncViewport = useCallback(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    if (zoom === "fit" && imageRef.current?.clientWidth) {
-      fitZoomRef.current = imageRef.current.clientWidth / image.width;
-    }
     setViewport({
       scrollLeft: canvas.scrollLeft,
       scrollTop: canvas.scrollTop,
@@ -391,45 +484,93 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
       clientWidth: canvas.clientWidth,
       clientHeight: canvas.clientHeight,
     });
-  }, [image.width, zoom]);
-  useLayoutEffect(() => {
-    const canvas = canvasRef.current;
-    const renderedImage = imageRef.current;
-    if (!canvas || !renderedImage) return;
-    if (zoom === "fit") {
-      canvas.scrollLeft = 0;
-      canvas.scrollTop = 0;
-      zoomAnchorRef.current = null;
-      return;
-    }
-    const anchor = zoomAnchorRef.current;
-    if (!anchor) return;
-    const target = zoomAnchorScrollTarget(
-      anchor,
-      renderedImage.offsetLeft,
-      renderedImage.offsetTop,
-      renderedImage.clientWidth,
-      renderedImage.clientHeight,
-    );
-    canvas.scrollLeft = target.scrollLeft;
-    canvas.scrollTop = target.scrollTop;
-    zoomAnchorRef.current = null;
-    syncViewport();
-  }, [image.dataUrl, syncViewport, zoom]);
+  }, []);
+  // 画布尺寸变化时同步适应倍率与视口；zoom 为 null 时预览自动跟随适应倍率。
   useLayoutEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    syncViewport();
-    const observer = new ResizeObserver(syncViewport);
+    const update = () => {
+      setCanvasSize({ width: canvas.clientWidth, height: canvas.clientHeight });
+      syncViewport();
+    };
+    update();
+    const observer = new ResizeObserver(update);
     observer.observe(canvas);
-    const frame = requestAnimationFrame(syncViewport);
+    const frame = requestAnimationFrame(update);
     return () => {
       cancelAnimationFrame(frame);
       observer.disconnect();
     };
-  }, [image?.dataUrl, syncViewport, zoom]);
+  }, [image?.dataUrl, syncViewport]);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const anchor = zoomAnchorRef.current;
+    if (!anchor) return;
+    // 图片在滚动内容中由网格居中；偏移只依赖已知几何量，不依赖 offsetParent。
+    const state = stateRef.current;
+    const imageWidth = state.imageWidth * state.effective;
+    const imageHeight = state.imageHeight * state.effective;
+    const offsetLeft = Math.max(0, (Math.max(canvas.clientWidth, imageWidth) - imageWidth) / 2);
+    const offsetTop = Math.max(0, (Math.max(canvas.clientHeight, imageHeight) - imageHeight) / 2);
+    const target = zoomAnchorScrollTarget(anchor, offsetLeft, offsetTop, imageWidth, imageHeight);
+    canvas.scrollLeft = target.scrollLeft;
+    canvas.scrollTop = target.scrollTop;
+    zoomAnchorRef.current = null;
+    syncViewport();
+  }, [image.dataUrl, effectiveZoom, syncViewport]);
+  // 高清局部：只有缩略图被放大（显示尺寸超过缩略图本身）时才需要，此时按可视区域
+  // 请求源分辨率裁剪块并叠加显示，让导出图与原始成品在放大后仍从源像素渲染，而不是
+  // 插值放大 2400 px 缩略图。缩略图未被放大时直接显示缩略图即为 1:1 或更好。
+  const desiredTile = tileRequestForView({
+    displayWidth,
+    displayHeight,
+    thumbWidth: image.width,
+    thumbHeight: image.height,
+    sourceWidth: preview.sourceWidth,
+    sourceHeight: preview.sourceHeight,
+    viewport,
+  });
+  const desiredTileKey = desiredTile ? `${tileSource}|${tileCacheKey(desiredTile)}` : "";
+  const desiredTileRef = useRef<{ request: TileRequest; source: PreviewTileSource } | null>(null);
+  desiredTileRef.current = desiredTile ? { request: desiredTile, source: tileSource } : null;
+  useEffect(() => {
+    // 只有与当前对位一致（key 相同）的局部图才会被渲染，因此签名进行中可以直接保留
+    // 已加载的局部图，不必为了不请求而把它摘掉。
+    if (!desiredTileKey || busy) return;
+    const target = desiredTileRef.current;
+    if (!target) return;
+    // 每次目标矩形或来源变化都推进代次：平移途中的在途响应按代次丢弃，避免旧
+    // 矩形错位叠加。
+    const requestId = ++tileRequestRef.current;
+    const cached = tileCacheRef.current.get(desiredTileKey);
+    if (cached) {
+      setTile({ key: desiredTileKey, request: target.request, image: cached, source: target.source });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      authenticityApi.previewTile({
+        source: target.source,
+        cacheToken: target.source === "compressed" ? preview.cacheToken : null,
+        branchId: target.source === "original" ? preview.branchId : null,
+        ...target.request,
+      }).then((next) => {
+        if (requestId !== tileRequestRef.current) return;
+        const cache = tileCacheRef.current;
+        cache.set(desiredTileKey, next);
+        while (cache.size > 12) {
+          const oldest = cache.keys().next();
+          if (oldest.done) break;
+          cache.delete(oldest.value);
+        }
+        setTile({ key: desiredTileKey, request: target.request, image: next, source: target.source });
+      }).catch(() => undefined);
+    }, 180);
+    return () => window.clearTimeout(timer);
+  }, [desiredTileKey, busy, preview.cacheToken, preview.branchId]);
+  useEffect(() => () => { tileRequestRef.current += 1; }, []);
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (zoom === "fit" || event.button !== 0 || !canvasRef.current) return;
+    if (event.button !== 0 || !canvasRef.current) return;
     dragRef.current = {
       pointerId: event.pointerId,
       x: event.clientX,
@@ -449,7 +590,7 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
   const onPointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (dragRef.current?.pointerId === event.pointerId) dragRef.current = null;
   };
-  const navigable = zoom !== "fit" && viewport != null
+  const navigable = viewport != null
     && (viewport.scrollWidth > viewport.clientWidth || viewport.scrollHeight > viewport.clientHeight);
   const moveFromNavigator = (event: ReactPointerEvent<HTMLDivElement>) => {
     const canvas = canvasRef.current;
@@ -482,10 +623,10 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
       <header>
         <div><small>发布前检查</small><h2 id="publication-preview-title">导出预览</h2><span>{preview.sourceWidth} x {preview.sourceHeight} · {formatBytes(preview.outputBytes)} · {preview.cacheHit ? "复用缓存" : `渲染 ${preview.renderMs} ms / 编码 ${preview.encodeMs} ms`}</span></div>
         <div className="preview-zoom-controls">
-          <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, fitZoomRef.current))}><ZoomOut size={16} /></button>
-          <button className="zoom-value" type="button" title="按预览像素显示" onClick={() => changeZoom(1)}>{zoom === "fit" ? "适应" : `${Math.round(zoom * 100)}%`}</button>
-          <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), 1, fitZoomRef.current))}><ZoomIn size={16} /></button>
-          <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom("fit")}><Maximize2 size={16} /></button>
+          <button className="icon-button" type="button" title="缩小" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), -1, stateRef.current.fit))}><ZoomOut size={16} /></button>
+          <button className="zoom-value" type="button" title="按原始像素显示（100% 为 1:1）" onClick={() => changeZoom(1)}>{Math.round(effectiveZoom * 100)}%</button>
+          <button className="icon-button" type="button" title="放大" onClick={() => changeZoom(previewZoomFromButton(measuredZoom(), 1, stateRef.current.fit))}><ZoomIn size={16} /></button>
+          <button className="icon-button" type="button" title="适应窗口" onClick={() => setZoom(null)}><Maximize2 size={16} /></button>
           <button className={`icon-button${showOriginal ? " active" : ""}`} type="button" title={showOriginal ? "显示压缩预览" : "显示原图"} disabled={imageSwitching} onClick={() => void toggleOriginal()}><ImageIcon size={16} /></button>
           <button className="icon-button" type="button" title="关闭预览" disabled={busy} onClick={onBack}><X size={17} /></button>
         </div>
@@ -493,9 +634,8 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
       <div className="publication-preview-stage">
         <div
           ref={canvasRef}
-          className={`publication-preview-canvas${zoom === "fit" ? " fit" : ""}`}
+          className="publication-preview-canvas"
           onScroll={syncViewport}
-          onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
@@ -504,9 +644,21 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
         >
           <div
             className="publication-preview-content"
-            style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px`, height: `${image.height * zoom}px` }}
+            style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
           >
-            <img ref={imageRef} src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "导出预览"} draggable={false} onLoad={syncViewport} style={zoom === "fit" ? undefined : { width: `${image.width * zoom}px` }} />
+            <div
+              className="publication-preview-image"
+              style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }}
+            >
+              <img ref={imageRef} src={image.dataUrl} alt={showOriginal ? "原始成品预览" : "导出预览"} draggable={false} onLoad={syncViewport} style={{ width: `${displayWidth}px`, height: `${displayHeight}px` }} />
+              {tile && tile.key === desiredTileKey && <img
+                className="publication-preview-tile"
+                src={tile.image.dataUrl}
+                alt=""
+                draggable={false}
+                style={tileOverlayStyle(tile.request, preview.sourceWidth, preview.sourceHeight)}
+              />}
+            </div>
           </div>
         </div>
         {navigable && navigationRect && <div
@@ -522,7 +674,7 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
           <span style={{ left: `${navigationRect.left}%`, top: `${navigationRect.top}%`, width: `${navigationRect.width}%`, height: `${navigationRect.height}%` }} />
         </div>}
       </div>
-      <footer><span>{busy ? (cancelling ? "正在安全取消；已开始的原子发布收尾不会中断。" : "正在写入 C2PA；时间戳服务最长等待 30 秒。") : showOriginal ? "当前显示原始成品缩略图，用于快速对比。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className={busy ? "secondary-button" : "primary-button"} type="button" disabled={cancelling} onClick={busy ? onCancel : onPublish}>{busy ? (cancelling ? <LoaderCircle className="spin" size={16} /> : <X size={16} />) : <ImageDown size={16} />}{busy ? (cancelling ? "正在取消" : "取消签名") : "签名并发布"}</button></div></footer>
+      <footer><span>{busy ? (cancelling ? "正在安全取消；已开始的原子发布收尾不会中断。" : "正在写入 C2PA；时间戳服务最长等待 30 秒。") : showOriginal ? "当前显示原始成品，用于快速对比；放大后叠加源分辨率局部。" : "缩略图使用正式发布的背景合成、TrustMark 与 JPEG 编码参数；放大后叠加源分辨率局部。"}</span><div><button className="secondary-button" type="button" disabled={busy} onClick={onBack}>返回调整</button><button className={busy ? "secondary-button" : "primary-button"} type="button" disabled={cancelling} onClick={busy ? onCancel : onPublish}>{busy ? (cancelling ? <LoaderCircle className="spin" size={16} /> : <X size={16} />) : <ImageDown size={16} />}{busy ? (cancelling ? "正在取消" : "取消签名") : "签名并发布"}</button></div></footer>
     </section>
   </div>;
 }
