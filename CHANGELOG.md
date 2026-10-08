@@ -3,7 +3,7 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
-## Unreleased
+## 0.2.0-rc.1 - 2026-10-08
 
 ### Added
 
@@ -69,6 +69,33 @@ before and after the first stable release.
   updates `name` and `updated_ms` without touching `revision`, matching
   the reorder precedent that list metadata is not board content; the
   rename repository test asserts the revision stays unchanged.
+- Switching the repository now settles the open pin board before releasing the
+  previous repository. Leaving the workspace only called the renderer's
+  fire-and-forget `destroy()`, so the last edit could land on an already
+  released repository and be lost. The settings save now awaits
+  `preparePinBoardRuntimeChange()` before saving a changed repository path; a
+  failed settlement aborts the switch, keeps the old repository, and surfaces
+  the failure. The shutdown handshake path is unchanged, and switching artwork
+  within one repository still leaves the repository open.
+
+### Changed
+
+- The application version is incremented to `0.2.0-rc.1`. The bump is a
+  version-string change only: no tag, no release, no behavior change. Whether
+  to tag and publish `v0.2.0-rc.1` remains a separate maintainer decision;
+  `docs/guides/release-policy.md` now states that an untagged `rc.N` bump
+  carries no gate, while a tagged `vX.Y.Z-rc.N` is a public candidate that must
+  pass every automatic and manual gate.
+- The documentation set is split by audience. User-facing documents move to
+  `docs/user/` (`stress-test-report.md`); `architecture/`, `modules/`,
+  `guides/`, and `planning/` stay developer- and agent-facing. The 2026-09-12
+  to 2026-10-08 handoff log is archived under `docs/planning/archive/`, the
+  current handoff and todo list are condensed, and `README.md` and
+  `docs/README.md` now state the audience split.
+- A `.gitattributes` excludes the generated third-party license bundle
+  (`licenses/THIRD_PARTY_LICENSES.html`) from GitHub language statistics and
+  marks the bundled ONNX models as binary. Without it the ~4.6 MB generated
+  HTML dominated the repository's reported language share.
 
 ## 0.2.0-alpha.4 - 2026-10-04
 
@@ -125,7 +152,7 @@ before and after the first stable release.
   read-back, and damaged snapshot/delta detection and repair. It runs only
   before a release, is not part of CI, and changes no shipped command's
   behavior. See `docs/guides/validation.md` and
-  `docs/guides/stress-test-report.md`.
+  `docs/user/stress-test-report.md`.
 
 ### Fixed
 

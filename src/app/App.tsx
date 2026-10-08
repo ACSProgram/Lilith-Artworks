@@ -269,8 +269,13 @@ export function App() {
     const repositoryChanged = draft.repositoryPath.trim() !== repository.rootPath;
     setBusy(true);
     setMessage(null);
-    if (repositoryChanged) setRepository(EMPTY_STATUS);
     try {
+      if (repositoryChanged) {
+        // 切换仓库会卸载工作区并释放旧仓库，必须先结算素材板，否则最后一次
+        // 编辑会落在已经释放的仓库上而丢失。结算失败即中止切换，保持旧仓库。
+        await preparePinBoardRuntimeChange();
+        setRepository(EMPTY_STATUS);
+      }
       const next = await appApi.saveSettings(draft);
       setSnapshot(next);
       setDraft(next.settings);

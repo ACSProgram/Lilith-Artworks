@@ -116,7 +116,7 @@ cancel_authenticity_operation
 ## 可靠性不变量与覆盖
 
 认证模块的安全边界与可靠性承诺，由发布前的自动化压力测试（`stress_authenticity`，**发布前手动运行、
-不进 CI**，见 `docs/guides/validation.md` 与 `docs/guides/stress-test-report.md`）以独立进程调用
+不进 CI**，见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）以独立进程调用
 真实可执行文件验证：
 
 | 不变量 | 证明场景 |

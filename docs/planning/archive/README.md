@@ -25,5 +25,8 @@
   以**独立进程**调用真实可执行文件，覆盖取消边界、跨进程强杀、事务中途崩溃、大文件端到端、
   规模与灾备、参数边界、崩溃孤儿回收、画板 DDS 完整性、认证发布内存与回读，以及损坏文件的
   检测与恢复。八个批次已全部实施完毕，有效契约并入 `docs/guides/validation.md`、
-  `docs/guides/stress-test-report.md`，以及 `docs/modules/history-and-backup.md` 与
+  `docs/user/stress-test-report.md`，以及 `docs/modules/history-and-backup.md` 与
   `docs/modules/authenticity.md` 的「可靠性不变量与覆盖」；待人工验收项见 `../todo.md`。
+- `handoff-log-2026-09-12-to-2026-10-08.md`：2026-09-12 至 2026-10-08 各批次交接记录的归档，
+  含素材板迁入、任务调度总控、统一清理体系 A–F、压力测试批次 1–8、素材板退出握手等批次的
+  实施细节、落实偏差与验证记录。当前批次状态改看 `../current-handoff.md`。

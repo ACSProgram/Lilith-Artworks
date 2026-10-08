@@ -7,7 +7,8 @@
 - 候选版本使用 `vX.Y.Z-rc.N` 标签；正式版本使用 `vX.Y.Z` 标签。
 - 已发布的标签、安装包和版本身份不可复用或替换。标签后任何代码、schema、应用标识或签名声明变化都必须递增版本，并同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 和锁文件。
 - 内部测试版（`0.2.0-alpha.N`）的版本号**滞后递增**：`alpha.N` 打上发布标签后，后续改动并入现有 `alpha.N` 的 CHANGELOG 段、版本号保持不变；累计足够改动后由维护者单独递增到 `alpha.N+1`。递增版本号本身不需要标签、不需要发布、不触发发布门槛（`alpha.1`、`alpha.2` 与 2026-10-04 的 `alpha.4` 均按此办理）；是否打标签、是否发布始终由维护者单独决定，一经公开即不可变。
-- 递增 alpha 版本号的固定动作：同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 五处版本字段；在 `CHANGELOG.md` 新建带日期的版本小节；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
+- 候选版（`0.2.0-rc.N`）的版本号同样可以先于标签递增：未打标签的 `rc.N` 只是版本号，不触发自动门槛与人工门槛；一旦打上 `vX.Y.Z-rc.N` 标签，它就是公开候选版，必须通过「自动门槛」与「人工门槛」的全部项目。打标签与发布仍由维护者单独决定。
+- 递增版本号（alpha 与 rc）的固定动作：同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 五处版本字段；在 `CHANGELOG.md` 新建带日期的版本小节；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
 - 源码仓库可公开不等于安装包可正式发布。每个二进制产物必须能追溯到唯一、干净且不可变的标签。
 
 ## 自动门槛
@@ -32,7 +33,7 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 
 依赖更新、Tauri 权限、schema、迁移、清理队列、路径校验、C2PA 或 TrustMark 变更必须单独说明风险和针对性测试。Actions、Node、Rust 工具链和 release workflow 应固定到受支持且可复现的版本；发布测试使用锁文件。
 
-自动化压力测试（`src-tauri/tests/`，**发布前手动运行、不进 CI**）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、4 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/guides/stress-test-report.md`。
+自动化压力测试（`src-tauri/tests/`，**发布前手动运行、不进 CI**）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、4 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`。
 
 ## 人工门槛
 
