@@ -271,6 +271,9 @@ fn row_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PinBoardSummary> {
     })
 }
 
+/// 重命名画板。名字与排序一样只是列表元数据，不是画板内容，因此只改
+/// `name` / `updated_ms`，不更新 `revision`——避免“改名后已打开画板的下一次
+/// 保存被误判为冲突”，导致持续保存失败且无法切换画板。
 pub(crate) fn rename_board(
     connection: &mut Connection,
     board_id: i64,
@@ -282,8 +285,8 @@ pub(crate) fn rename_board(
     let now = storage::now_ms()?;
     transaction
         .execute(
-            "UPDATE pin_boards SET name = ?1, updated_ms = ?2, revision = ?3 WHERE id = ?4",
-            params![name, now, revision_value(board_id, now), board_id],
+            "UPDATE pin_boards SET name = ?1, updated_ms = ?2 WHERE id = ?3",
+            params![name, now, board_id],
         )
         .map_err(storage::database_error)?;
     let summary = board_summary(&transaction, board_id)?;
@@ -1529,9 +1532,27 @@ mod tests {
         let (_guard, mut connection) = test_repository();
         let artwork_id = create_test_artwork(&connection);
         let board = create_board(&mut connection, &artwork_id, "旧名").unwrap();
+        let revision_before: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [board.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         let renamed = rename_board(&mut connection, board.board_id, "  新名字  ").unwrap();
         assert_eq!(renamed.name, "新名字");
         assert!(rename_board(&mut connection, board.board_id, "   ").is_err());
+
+        // 名字不是画板内容：改名不能改 revision，否则已打开画板的下一次保存
+        // 会被误判冲突，导致持续保存失败且无法切换画板。
+        let revision_after: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [board.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(revision_before, revision_after);
     }
 
     #[test]

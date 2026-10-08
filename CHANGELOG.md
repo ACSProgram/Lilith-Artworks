@@ -57,6 +57,19 @@ before and after the first stable release.
   its original path. Deleting a record exits the view and refreshes the
   branch record list.
 
+### Fixed
+
+- Pin-board rename no longer breaks the open board's saves. Renaming a
+  board used to advance its stored `revision` while the open renderer kept
+  the revision it had loaded, so every later save failed the revision
+  check: manual saves and autosaves never recovered, paste and import were
+  gated by the same failing save, switching boards blocked on the failing
+  finalize, and closing the app or leaving the artwork silently dropped
+  unsaved edits. Only an app restart reloaded a fresh revision. Rename now
+  updates `name` and `updated_ms` without touching `revision`, matching
+  the reorder precedent that list metadata is not board content; the
+  rename repository test asserts the revision stays unchanged.
+
 ## 0.2.0-alpha.4 - 2026-10-04
 
 ### Added
