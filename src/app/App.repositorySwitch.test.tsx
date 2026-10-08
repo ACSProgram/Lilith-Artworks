@@ -37,8 +37,13 @@ const libraryApi = vi.hoisted(() => ({
   moveNodes: vi.fn(),
 }));
 
+const pinBoardLifecycle = vi.hoisted(() => ({
+  preparePinBoardRuntimeChange: vi.fn(),
+}));
+
 vi.mock("./api", () => ({ appApi }));
 vi.mock("../modules/library/api", () => ({ libraryApi }));
+vi.mock("../modules/pin-board/lifecycle", () => pinBoardLifecycle);
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
@@ -134,6 +139,7 @@ describe("App repository switching", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
+    pinBoardLifecycle.preparePinBoardRuntimeChange.mockResolvedValue(undefined);
     appApi.listPendingFileCleanup.mockResolvedValue([]);
     appApi.retryFileCleanup.mockResolvedValue({ failures: [] });
     appApi.acknowledgeBackupDisableNotices.mockResolvedValue(undefined);
@@ -574,5 +580,70 @@ describe("App repository switching", () => {
       "artworks/artwork-1/deltas/a-to-b.lbd",
     ]));
     expect(await screen.findByText("已清理 2 个未引用文件。")).toBeTruthy();
+  });
+
+  it("settles the open pin board before releasing the previous repository", async () => {
+    const repositoryA = "C:\\repositories\\A";
+    const repositoryB = "C:\\repositories\\B";
+    const settle = deferred<void>();
+    pinBoardLifecycle.preparePinBoardRuntimeChange.mockReturnValue(settle.promise);
+    appApi.getSettings.mockResolvedValue(settings(repositoryA));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryA,
+      databasePath: `${repositoryA}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.saveSettings.mockResolvedValue(settings(repositoryB));
+    libraryApi.listTree.mockResolvedValue(tree("Repository A artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository A artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: repositoryB } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => expect(pinBoardLifecycle.preparePinBoardRuntimeChange).toHaveBeenCalledOnce());
+    // 素材板结算完成之前不得释放旧仓库。
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+
+    await act(async () => {
+      settle.resolve();
+      await settle.promise;
+    });
+    await waitFor(() => expect(appApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ repositoryPath: repositoryB }),
+    ));
+  });
+
+  it("blocks the repository switch when the pin board cannot be settled", async () => {
+    const repositoryA = "C:\\repositories\\A";
+    const repositoryB = "C:\\repositories\\B";
+    pinBoardLifecycle.preparePinBoardRuntimeChange.mockRejectedValue(
+      new Error("素材板未能在运行时变更前完成结算"),
+    );
+    appApi.getSettings.mockResolvedValue(settings(repositoryA));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryA,
+      databasePath: `${repositoryA}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository A artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository A artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: repositoryB } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("素材板未能在运行时变更前完成结算")).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+    // 切换被中止，旧仓库工作区保持可用。
+    expect(screen.getByRole("treeitem", { name: /Repository A artwork/ })).toBeTruthy();
   });
 });

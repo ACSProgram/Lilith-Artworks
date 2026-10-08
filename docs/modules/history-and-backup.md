@@ -137,7 +137,7 @@ cleanup_repository_unreferenced
 ## 可靠性不变量与覆盖
 
 以下命题是历史/备份模块对使用者的承诺，每条都由发布前的自动化压力测试（`src-tauri/tests/`，
-**发布前手动运行、不进 CI**，见 `docs/guides/validation.md` 与 `docs/guides/stress-test-report.md`）
+**发布前手动运行、不进 CI**，见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）
 以**独立进程调用真实可执行文件**的方式验证；断言只用子命令返回的 JSON 与磁盘事实，不读内部状态。
 
 | 不变量 | 证明场景 |

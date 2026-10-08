@@ -7,7 +7,7 @@
 //! 状态的装配、领域函数调用，**不含任何业务判断**；GUI 路径的行为与现状逐位不变。
 //!
 //! 定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，
-//! 面向使用者的结论见 `docs/guides/stress-test-report.md`。
+//! 面向使用者的结论见 `docs/user/stress-test-report.md`。
 
 use std::{
     collections::HashMap,

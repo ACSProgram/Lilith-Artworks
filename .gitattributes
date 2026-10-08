@@ -1,0 +1,10 @@
+# Git 属性。GitHub 语言统计按字节计，默认会把生成物也算进去，
+# 因此这里显式声明生成/二进制文件，避免污染语言占比。
+
+# licenses/THIRD_PARTY_LICENSES.html 是 tools/release/generate-licenses.mjs 生成的
+# 第三方许可全文（约 4.6 MB），不是项目源码；不声明时它单独一项就占掉仓库 HTML
+# 占比的绝大部分。标记为生成且 vendored，从语言统计中排除。
+licenses/THIRD_PARTY_LICENSES.html linguist-generated=true linguist-vendored=true
+
+# 随包分发的 ONNX 模型是二进制资源，不是源码。
+src-tauri/resources/models/*.onnx binary

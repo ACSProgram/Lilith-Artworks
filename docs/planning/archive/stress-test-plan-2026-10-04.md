@@ -596,7 +596,7 @@ snapshot/delta **不会**进入 `pending_file_cleanup`，而 `cleanup::run` 只�
   （`scenario_slot`，见 §4.6）；磁盘上限默认值由 12 GiB 提到 24 GiB；工作区从 `%TEMP%`
   移到项目 `target/stress-workspaces/`（`%TEMP%` 与系统共用，实测出现过工作区中途被回收）。
 - 验证：`default`/`large`/`heavy`/`extreme` 四档 6/6 通过；账本实测增量与预期偏差 ≤ 0.03%；
-  运行结束后工作区自动清理、磁盘占用回落。实测数值见 `docs/guides/stress-test-report.md`。
+  运行结束后工作区自动清理、磁盘占用回落。实测数值见 `docs/user/stress-test-report.md`。
 
 ### 批次 4：规模与灾备（D、E）与参数边界（F）——已落实（2026-10-04）
 
