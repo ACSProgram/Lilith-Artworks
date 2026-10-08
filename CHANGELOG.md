@@ -96,6 +96,18 @@ before and after the first stable release.
   (`licenses/THIRD_PARTY_LICENSES.html`) from GitHub language statistics and
   marks the bundled ONNX models as binary. Without it the ~4.6 MB generated
   HTML dominated the repository's reported language share.
+- The `vitest` devDependency moves from 3.x to 4.1.11 to clear the advisories
+  that had started failing the Windows CI dependency-audit job: tinypool
+  prototype pollution leading to RCE (GHSA-5gmw-xhrv-c9v3,
+  GHSA-85c8-ppgw-ccpr, critical), source-map-js event-loop denial of service
+  (GHSA-68fv-2mgg-jv7q, high), and the @vitest/mocker redirect-mock path
+  traversal (GHSA-82fw-gwwq-j7x9, moderate). vitest 4.1.11 ships a patched
+  `@vitest/mocker` and no longer depends on tinypool, and `postcss` now
+  resolves `source-map-js` to 1.2.2. This is test tooling only and does not
+  change the shipped bundle; the repository's third-party license closure is
+  unchanged because it covers runtime dependencies only. Risk is limited to
+  the test runner, and the full suite, type check, production build, and
+  release-metadata check pass unchanged.
 
 ## 0.2.0-alpha.4 - 2026-10-04
 
