@@ -10,6 +10,7 @@ const api = vi.hoisted(() => ({
   previewArtifact: vi.fn(),
   estimate: vi.fn(),
   previewPublication: vi.fn(),
+  previewTile: vi.fn(),
   cancelOperation: vi.fn(),
   publish: vi.fn(),
   deleteRecord: vi.fn(),
@@ -334,6 +335,44 @@ describe("usePublicationController", () => {
     expect(result.current.viewingRecord?.id).toBe("record-1");
     expect(result.current.deletingRecord).toBe(false);
   });
+
+  it("selects the recorded branch once the branch list arrives", async () => {
+    api.getPublication.mockResolvedValue(publication("second"));
+    const { result, rerender } = renderHook(
+      ({ list, selectedBranchId }) => usePublicationController({
+        ...options(selectedBranchId),
+        branches: list,
+      }),
+      { initialProps: { list: [] as typeof branches, selectedBranchId: "second" } },
+    );
+
+    // 分支列表尚未到达：记录的 branchId 暂时没有可匹配的分支。
+    expect(result.current.selectedBranch).toBeNull();
+
+    rerender({ list: branches, selectedBranchId: "second" });
+    expect(result.current.selectedBranch?.id).toBe("second");
+  });
+
+  it("offers the branch artifact as the loupe source for framing", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.previewTile.mockResolvedValue(previewImage);
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+
+    await act(async () => {
+      await result.current.previewLoupe({ x: 1, y: 2, width: 3, height: 4, maxEdge: 72 });
+    });
+    expect(api.previewTile).toHaveBeenCalledWith({
+      source: "original",
+      cacheToken: null,
+      branchId: "first",
+      x: 1,
+      y: 2,
+      width: 3,
+      height: 4,
+      maxEdge: 72,
+    });
+  });
 });
 
 describe("useIdentificationController", () => {
@@ -369,5 +408,29 @@ describe("useIdentificationController", () => {
     expect(onError).toHaveBeenCalledWith("拖入的图片数据无效");
     expect(result.current.preview).toBeNull();
     expect(result.current.busy).toBe(false);
+  });
+
+  it("requests the loupe block from the current external image", async () => {
+    api.stageDroppedImage.mockResolvedValue("C:/tmp/staged.png");
+    api.previewExternal.mockResolvedValue(previewImage);
+    api.previewTile.mockResolvedValue(previewImage);
+    const { result } = renderHook(() => useIdentificationController({ onError: vi.fn() }));
+
+    await act(async () => { await result.current.importDropped("dropped.png", "AAAA"); });
+    await act(async () => {
+      await result.current.previewLoupe({ x: 0, y: 0, width: 72, height: 72, maxEdge: 72 });
+    });
+
+    expect(api.previewTile).toHaveBeenCalledWith({
+      source: "external",
+      cacheToken: null,
+      branchId: null,
+      path: "C:/tmp/staged.png",
+      x: 0,
+      y: 0,
+      width: 72,
+      height: 72,
+      maxEdge: 72,
+    });
   });
 });

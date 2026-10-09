@@ -101,7 +101,7 @@ pub(crate) struct EstimateRequest {
     pub(crate) background_color: String,
 }
 
-/// 质量预览高清局部的像素来源。
+/// 高清局部的像素来源。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PreviewTileSource {
@@ -109,9 +109,11 @@ pub(crate) enum PreviewTileSource {
     Compressed,
     /// 分支的仓库最终成品（原始成品对比）。
     Original,
+    /// 外部图片（识别页待识别图片的框选放大镜）。
+    External,
 }
 
-/// 质量预览高清局部请求：在源分辨率坐标系内裁剪一块区域。
+/// 高清局部请求：在源分辨率坐标系内裁剪一块区域。
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PreviewTileRequest {
@@ -120,6 +122,9 @@ pub(crate) struct PreviewTileRequest {
     pub(crate) cache_token: Option<String>,
     #[serde(default)]
     pub(crate) branch_id: Option<String>,
+    /// 外部源的绝对路径；仅 `External` 使用，且必须已由文件选择器或拖放导入授权。
+    #[serde(default)]
+    pub(crate) path: Option<String>,
     pub(crate) x: u32,
     pub(crate) y: u32,
     pub(crate) width: u32,

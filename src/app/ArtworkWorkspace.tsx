@@ -4,6 +4,7 @@ import { AuthenticityModule } from "../modules/authenticity/AuthenticityModule";
 import type { CertificationRecord } from "../modules/authenticity/types";
 import { HistoryModule } from "../modules/history/HistoryModule";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
+import { useArtworkSummary } from "../modules/history/useArtworkSummary";
 import { PinBoardModule } from "../modules/pin-board/PinBoardModule";
 import type { PinBoardModuleSettings } from "../modules/pin-board/PinBoardModule";
 import type { CleanupReport } from "../shared/fileCleanup";
@@ -39,10 +40,14 @@ export function ArtworkWorkspace({
   const [branches, setBranches] = useState<ArtworkBranch[]>([]);
   const [branchId, setBranchId] = useState<string | null>(initialBranchId);
   const [historyRefreshVersion, setHistoryRefreshVersion] = useState(0);
+  // 已填充分支数据的作品：历史页回调与摘要兜底写同一份状态，用于判断是否还需要
+  // 为当前作品补一次摘要读取。
+  const [branchesArtworkId, setBranchesArtworkId] = useState<string | null>(null);
 
   const applyWorkspaceHistory = useCallback((history: ArtworkHistory) => {
     setTitle(history.artworkTitle);
     setBranches(history.branches);
+    setBranchesArtworkId(history.artworkId);
     setBranchId((current) =>
       current && history.branches.some((branch) => branch.id === current)
         ? current
@@ -54,10 +59,23 @@ export function ArtworkWorkspace({
     setHistoryRefreshVersion((current) => current + 1);
   }, []);
 
+  // 发布页与识别页不挂载历史页，分支数据没有历史页回调可依赖；当活动视图不是历史页
+  // 且当前作品的分支尚未加载时，用摘要读取兜底。历史页为活动视图时由 HistoryModule
+  // 负责，常规的历史页 → 发布页导航因此不会产生额外请求。
+  const summaryEnabled = view !== "history" && branchesArtworkId !== artworkId;
+  const summary = useArtworkSummary(artworkId, summaryEnabled);
+  const branchesLoading = summaryEnabled && summary.loading;
+  const branchesError = summaryEnabled ? summary.error : null;
+
+  useEffect(() => {
+    if (summary.history) applyWorkspaceHistory(summary.history);
+  }, [applyWorkspaceHistory, summary.history]);
+
   useEffect(() => {
     setView(initialView);
     setTitle("");
     setBranches([]);
+    setBranchesArtworkId(null);
     setBranchId(initialBranchId);
   }, [artworkId]);
 
@@ -77,7 +95,7 @@ export function ArtworkWorkspace({
       {/* 切换作品时按 key={artworkId} 整块重置这三个标签页，与过去整棵工作区重挂载的行为一致；
           素材板窗格不带 key，跨作品保留渲染器与 GPU 设备（见文档 keep-alive 语义）。 */}
       {view === "history" && <div key={artworkId} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}
-      {view === "publish" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
+      {view === "publish" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} branchesLoading={branchesLoading} branchesError={branchesError} onRetryBranches={summary.retry} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
       {view === "identify" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>}
       {/* 素材板保持挂载：切换视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源。
           与 Client 的 keep-alive 一致，非活跃时用 visibility 隐藏而不是 display:none，

@@ -70,8 +70,41 @@ decision, so an untagged version is transitional.
   image on the board instead of only the viewport, through a new
   `renderer.selectAll()`. Selection is view state, so it neither reorders images
   nor marks the board dirty, and it is ignored while the board is locked.
+- A seamless framing loupe for TrustMark region selection. Hovering the image in
+  the publish or identify editor shows a source-resolution magnifier next to the
+  pointer, with the lens tracking the pointer, flipping at the stage edges, and a
+  crosshair plus a pixel box marking the exact location. The lens is drawn on a
+  canvas, so moving the pointer only repaints and never issues a request: pixels
+  come from the source-resolution tile covering the current window and fall back
+  to the already-loaded full-image preview, so the lens is painted immediately and
+  never shows a loading state. Tiles are 512 source pixels on a grid whose step is
+  one sampling window smaller than the tile (so the window is always fully
+  covered): after a 120 ms pause the resting cell is fetched, after 400 ms more
+  its four neighbours are prefetched, and up to 12 cells are kept in an LRU cache
+  that is cleared when the source changes. Both editors reuse
+  `preview_authenticity_tile`, which now also accepts an `external` source: the
+  publish editor samples the branch final artifact by branch id, while the
+  identify editor samples the pending image by absolute path. That path goes
+  through the same `ensure_dialog_authorized` check as `decode_authenticity` and
+  is additionally constrained to stay outside the repository and inside the
+  source rectangle. The overlay is pointer-transparent, so hit testing and
+  normalized coordinates are unchanged.
 
 ### Fixed
+
+- Jumping to a different artwork from an identification result no longer
+  misreports "此 Artwork 尚无分支". The branch list used to be filled only by
+  the history page, so a navigation that lands directly on the publish view
+  never populated it and an empty list was read as "no branches". The workspace
+  now also loads an artwork summary (title plus branch list) whenever the active
+  view is not the history page and the branches are not loaded yet, through a
+  new `useArtworkSummary` hook that consumes the same `history/api.ts` as the
+  history controller. The publish page shows "读取分支历史…" while loading,
+  disables the branch selector, and offers an inline retry on failure; the "no
+  branches" message now appears only after loading finished with a genuinely
+  empty list. The branch id carried by the navigation is preserved once the
+  summary arrives, and falls back to the first branch only when it no longer
+  exists.
 
 - Pin-board board and artwork switching no longer freezes the app. Every
   switch used to tear down the renderer and its WebGPU device and create a new

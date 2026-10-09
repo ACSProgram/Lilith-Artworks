@@ -5,6 +5,7 @@
 按问题只读取一条路径：
 
 - 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`。
+- 工作区摘要（作品标题与分支列表）的非历史页兜底读取：`src/modules/history/useArtworkSummary.ts`；由 `src/app/ArtworkWorkspace.tsx` 在活动视图不是历史页且当前作品分支尚未加载时启用，只消费同一个 `history/api.ts`。
 - 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。

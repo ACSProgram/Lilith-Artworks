@@ -1,5 +1,5 @@
 import {
-  BadgeCheck, Eye, FileImage, Fingerprint, FolderOpen, Image as ImageIcon, ImageDown, LoaderCircle,
+  AlertCircle, BadgeCheck, Eye, FileImage, Fingerprint, FolderOpen, Image as ImageIcon, ImageDown, LoaderCircle,
   LockKeyhole, Maximize2, MoreVertical, MousePointer2, RotateCcw, ScanSearch, Search,
   ShieldCheck, Trash2, X, ZoomIn, ZoomOut,
 } from "lucide-react";
@@ -16,6 +16,7 @@ import {
   previewZoomFromWheel, type PreviewViewport, zoomAnchorScrollTarget,
 } from "./previewViewport";
 import { tileCacheKey, tileOverlayStyle, tileRequestForView, type TileRequest } from "./previewTile";
+import { RegionLoupe } from "./RegionLoupe";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
 interface AuthenticityModuleProps {
@@ -23,6 +24,11 @@ interface AuthenticityModuleProps {
   artworkTitle: string;
   branches: AuthenticityBranch[];
   selectedBranchId: string | null;
+  /** 应用层注入：分支列表正在加载（发布页此前会误报「尚无分支」）。 */
+  branchesLoading?: boolean;
+  /** 应用层注入：分支列表加载失败；与 `onRetryBranches` 一起提供内联重试。 */
+  branchesError?: string | null;
+  onRetryBranches?: () => void;
   selectedRecordId?: string | null;
   recordNavigationKey?: number;
   onSelectBranch: (branchId: string) => void;
@@ -45,7 +51,7 @@ export function AuthenticityModule(props: AuthenticityModuleProps) {
 }
 
 function PublishView({
-  artworkTitle, branches, selectedBranchId, selectedRecordId, recordNavigationKey, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
+  artworkTitle, branches, selectedBranchId, branchesLoading = false, branchesError = null, onRetryBranches, selectedRecordId, recordNavigationKey, onSelectBranch, onError, onNavigateRecord, onRetryFileCleanup, onPublicationChanged,
 }: AuthenticityModuleProps) {
   const {
     publication, config, setConfig, preview, artifactPreviewBusy, artifactPreviewError,
@@ -55,7 +61,7 @@ function PublishView({
     viewingPreview, exporting, deletingRecord, deleteRecord, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
     selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview,
     cancelAuthenticityOperation, publish, cancelPublication,
-    retryCleanup, openRecord, exportRecord,
+    retryCleanup, openRecord, exportRecord, previewLoupe,
   } = usePublicationController({
     artworkTitle,
     branches,
@@ -76,7 +82,7 @@ function PublishView({
     <header className="auth-header">
       <div><span>发布与认证</span><h1>{artworkTitle}</h1></div>
       <div className="auth-header-actions">
-        <select value={selectedBranchId ?? ""} disabled={busy} onChange={(event) => onSelectBranch(event.target.value)}>
+        <select value={selectedBranchId ?? ""} disabled={busy || branchesLoading} onChange={(event) => onSelectBranch(event.target.value)}>
           {branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
         </select>
         {publication?.artifact && <details className="auth-more-menu">
@@ -89,7 +95,11 @@ function PublishView({
       </div>
     </header>
     {cleanupFailures.length > 0 && <div className="cleanup-failure-banner auth-cleanup-failure" role="status"><span><strong>{cleanupFailures.length} 个发布文件尚未清理</strong><small>{cleanupFailures[0].path}</small></span><button className="secondary-button" type="button" disabled={busy} onClick={() => void retryCleanup()}><RotateCcw size={15} />重试清理</button></div>}
-    {!selectedBranch ? <div className="auth-empty">此 Artwork 尚无分支。</div> :
+    {!selectedBranch ? (branchesLoading
+      ? <div className="auth-empty"><LoaderCircle className="spin" size={18} />读取分支历史…</div>
+      : branchesError
+        ? <div className="auth-empty auth-empty-error" role="alert"><AlertCircle size={18} /><span>{branchesError}</span>{onRetryBranches && <button className="secondary-button" type="button" onClick={onRetryBranches}><RotateCcw size={15} />重试</button>}</div>
+        : <div className="auth-empty">此 Artwork 尚无分支。</div>) :
       !publication?.artifact ? <section className="publication-gate">
         <div className="gate-icon"><LockKeyhole size={24} /></div>
         <div><h2>让“{selectedBranch.title}”进入发布状态</h2><p>选择最终发布图片后，当前 HEAD 会强制设为检查点，成品复制进仓库并锁定该分支。</p></div>
@@ -106,6 +116,7 @@ function PublishView({
             regions={config.additionalRegions}
             maxRegions={8}
             onChange={(regions) => setConfig({ ...config, additionalRegions: regions, trustmarkEnabled: regions.length > 0 })}
+            loupe={{ sourceKey: publication?.branchId ?? "", request: previewLoupe }}
           />
           <div className="artifact-proof"><span>发布检查点</span><code>{publication.artifact.historyId}</code><span>成品 SHA-256</span><code>{publication.artifact.sourceSha256}</code></div>
         </section>
@@ -165,7 +176,7 @@ function PublishView({
 function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProps, "onError" | "onNavigateRecord">) {
   const {
     path, preview, region, setRegion, result, query, setQuery, records, busy, searching,
-    choose, importDropped, decode, searchRecords,
+    choose, importDropped, decode, searchRecords, previewLoupe,
   } = useIdentificationController({ onError });
   const [dragActive, setDragActive] = useState(false);
 
@@ -213,7 +224,7 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
       >
         {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>点击选择，或把图片拖到这里。C2PA 会始终读取；TrustMark 可识别整图或框选区域。</span></button> : <>
           <header><div><strong>{fileName(path)}</strong><span>{preview.width} x {preview.height}</span></div><button className="text-button" type="button" onClick={() => void choose()}>更换图片</button></header>
-          <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} />
+          <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} loupe={{ sourceKey: path, request: previewLoupe }} />
           <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" type="button" title="取消区域并识别整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>
           <button className="primary-button" type="button" disabled={busy} onClick={() => void decode()}>{busy ? <LoaderCircle className="spin" size={16} /> : <ScanSearch size={16} />}开始识别</button>
         </>}
@@ -242,16 +253,20 @@ function IdentifyView({ onError, onNavigateRecord }: Pick<AuthenticityModuleProp
   </div>;
 }
 
-function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly = false }: {
+function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly = false, loupe }: {
   target: ImageTarget;
   preview: PreviewImage;
   regions: NormalizedRegion[];
   maxRegions: number;
   onChange: (regions: NormalizedRegion[]) => void;
   readOnly?: boolean;
+  /** 源分辨率放大镜的取样来源；只读视图不传，因而不显示放大镜。 */
+  loupe?: { sourceKey: string; request: (tile: TileRequest) => Promise<PreviewImage> };
 }) {
   const stageRef = useRef<HTMLDivElement>(null);
   const [frame, setFrame] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
+  const [stageSize, setStageSize] = useState<{ width: number; height: number } | null>(null);
+  const [pointer, setPointer] = useState<{ x: number; y: number } | null>(null);
   const [draft, setDraft] = useState<NormalizedRegion | null>(null);
   const draftRef = useRef<NormalizedRegion | null>(null);
   const drag = useRef<{ pointerId: number; x: number; y: number } | null>(null);
@@ -263,6 +278,7 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
       const width = preview.width * scale;
       const height = preview.height * scale;
       setFrame({ left: (stage.clientWidth - width) / 2, top: (stage.clientHeight - height) / 2, width, height });
+      setStageSize({ width: stage.clientWidth, height: stage.clientHeight });
     };
     update();
     const observer = new ResizeObserver(update);
@@ -280,6 +296,7 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
     if (readOnly || event.button !== 0 || (target !== "decode" && regions.length >= maxRegions)) return;
     const start = point(event);
     if (!start) return;
+    setPointer(start);
     if (target === "decode" && regions.length > 0) onChange([]);
     drag.current = { pointerId: event.pointerId, ...start };
     const next = { x: start.x, y: start.y, width: 0, height: 0 };
@@ -288,9 +305,11 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
     event.currentTarget.setPointerCapture(event.pointerId);
   };
   const onPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
-    if (!drag.current || drag.current.pointerId !== event.pointerId) return;
     const next = point(event);
     if (!next) return;
+    // 悬停即更新放大镜取样点；拖动时同一位置继续推进草稿矩形。
+    setPointer(next);
+    if (!drag.current || drag.current.pointerId !== event.pointerId) return;
     const nextDraft = { x: Math.min(drag.current.x, next.x), y: Math.min(drag.current.y, next.y), width: Math.abs(next.x - drag.current.x), height: Math.abs(next.y - drag.current.y) };
     draftRef.current = nextDraft;
     setDraft(nextDraft);
@@ -306,11 +325,29 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
   return <div className={`region-stage${readOnly ? " read-only" : ""}`} ref={stageRef}>
     {frame && <div className="region-image-frame" style={frame}>
       <img src={preview.dataUrl} alt={target === "publish" ? "最终成品预览" : "待识别图片预览"} draggable={false} />
-      <div className="region-layer" onPointerDown={onPointerDown} onPointerMove={onPointerMove} onPointerUp={finish} onPointerCancel={finish}>
+      <div
+        className="region-layer"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={finish}
+        onPointerCancel={finish}
+        onPointerLeave={() => setPointer(null)}
+      >
         {regions.map((region, index) => <div className="region-box" style={style(region)} key={`${region.x}-${region.y}-${index}`}><span>{target === "publish" ? `区域 ${index + 1}` : "识别区域"}</span>{target === "publish" && !readOnly && <button type="button" title="移除区域" onPointerDown={(event) => event.stopPropagation()} onClick={() => onChange(regions.filter((_, item) => item !== index))}><X size={12} /></button>}</div>)}
         {draft && <div className="region-box draft" style={style(draft)}><span>框选中</span></div>}
       </div>
     </div>}
+    {!readOnly && loupe && pointer && frame && stageSize && <RegionLoupe
+      pointer={pointer}
+      frame={frame}
+      stageWidth={stageSize.width}
+      stageHeight={stageSize.height}
+      sourceWidth={preview.width}
+      sourceHeight={preview.height}
+      sourceKey={loupe.sourceKey}
+      base={preview}
+      request={loupe.request}
+    />}
     {target === "publish" && regions.length > 0 && !readOnly && <button className="clear-regions" type="button" onClick={() => onChange([])}><Trash2 size={13} />清除区域</button>}
   </div>;
 }
