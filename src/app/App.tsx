@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
+  Activity,
   AlertCircle,
+  Bug,
   Clock3,
   SearchCheck,
   DatabaseBackup,
@@ -51,6 +53,12 @@ import {
   type PendingCleanupEntry,
   type UnreferencedScanCandidate,
 } from "../shared/fileCleanup";
+import {
+  diagnosticsLog,
+  isTauriRuntime,
+  startDiagnostics,
+  type DiagnosticsStatus,
+} from "../shared/diagnostics";
 import packageInfo from "../../package.json";
 
 const EMPTY_STATUS: RepositoryStatus = {
@@ -61,12 +69,13 @@ const EMPTY_STATUS: RepositoryStatus = {
   error: null,
 };
 
-type SettingsPage = "general" | "repository" | "pin-board";
+type SettingsPage = "general" | "repository" | "pin-board" | "debug";
 
 const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
   { id: "general", label: "通用" },
   { id: "repository", label: "仓库与备份" },
   { id: "pin-board", label: "素材板" },
+  { id: "debug", label: "调试" },
 ];
 
 const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
@@ -102,6 +111,7 @@ export function App() {
   const [scanCandidates, setScanCandidates] = useState<UnreferencedScanCandidate[] | null>(null);
   const [scanConfirmOpen, setScanConfirmOpen] = useState(false);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsStatus | null>(null);
 
   const load = async () => {
     setBusy(true);
@@ -134,6 +144,27 @@ export function App() {
     void load();
   }, []);
 
+  // 接入诊断体系：读取当前状态供设置页展示，并按模式启停主线程心跳。心跳是定位
+  // WebView 侧卡死的关键——冻结后日志里最后一次心跳的时间戳就是冻结时刻。
+  useEffect(() => {
+    if (!isTauriRuntime()) return undefined;
+    let disposed = false;
+    let dispose: (() => void) | null = null;
+    void appApi.getDiagnosticsStatus()
+      .then((status) => {
+        if (!disposed) setDiagnostics(status);
+      })
+      .catch(() => undefined);
+    void startDiagnostics().then((off) => {
+      if (disposed) off();
+      else dispose = off;
+    });
+    return () => {
+      disposed = true;
+      dispose?.();
+    };
+  }, []);
+
   // F5 / Ctrl+R 只会被取消默认行为，不吞掉事件；素材板“锁定画板”等模块快捷键
   // 仍能拿到同一组合键（默认 Ctrl+R），避免整页刷新丢失画布状态。
   useEffect(() => {
@@ -162,10 +193,17 @@ export function App() {
     let disposed = false;
     let unlisten: (() => void) | null = null;
     void listen("app_shutdown_requested", () => {
+      // 退出握手的前端侧埋点：与原生端「shutting down / forcing exit」对齐后，
+      // 可以区分「监听器没被调用（主线程冻结）」与「结算未返回（等待命令）」。
+      diagnosticsLog("info", `shutdown requested received: saveOnExit=${pinBoardSaveOnExit}`);
       const settle = pinBoardSaveOnExit
-        ? preparePinBoardRuntimeChange().catch(() => undefined)
-        : Promise.resolve();
+        ? preparePinBoardRuntimeChange()
+          .then(() => diagnosticsLog("info", "pin board settle finished: ok"))
+          .catch((error) =>
+            diagnosticsLog("warn", `pin board settle finished: failed (${errorMessage(error)})`))
+        : Promise.resolve(diagnosticsLog("info", "pin board settle skipped: saveOnExit disabled"));
       void settle.finally(() => {
+        diagnosticsLog("info", "confirm_app_shutdown sent");
         void appApi.confirmShutdown().catch(() => undefined);
       });
     })
@@ -264,6 +302,16 @@ export function App() {
     }).catch((error) => setMessage(errorMessage(error)));
   };
 
+  // 诊断模式只在当前进程内生效，不写入设置文件；切换后原生端会广播事件，
+  // 前端据此即时启停心跳。
+  const toggleDiagnostics = async (enabled: boolean) => {
+    try {
+      setDiagnostics(await appApi.setDiagnosticsEnabled(enabled));
+    } catch (error) {
+      setMessage(errorMessage(error));
+    }
+  };
+
   const save = async () => {
     if (!draft) return;
     const repositoryChanged = draft.repositoryPath.trim() !== repository.rootPath;
@@ -273,7 +321,9 @@ export function App() {
       if (repositoryChanged) {
         // 切换仓库会卸载工作区并释放旧仓库，必须先结算素材板，否则最后一次
         // 编辑会落在已经释放的仓库上而丢失。结算失败即中止切换，保持旧仓库。
+        diagnosticsLog("info", "repository switch: settling pin board before releasing repository");
         await preparePinBoardRuntimeChange();
+        diagnosticsLog("info", "repository switch: pin board settled");
         setRepository(EMPTY_STATUS);
       }
       const next = await appApi.saveSettings(draft);
@@ -599,11 +649,6 @@ export function App() {
                       <span className="settings-row-copy"><strong>配置文件夹</strong><small title={snapshot?.settingsPath}>{snapshot?.settingsPath ?? "设置目录尚未就绪"}</small></span>
                       <button className="secondary-button" type="button" onClick={() => void appApi.openSettingsDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
                     </div>
-                    <div className="settings-preference-row">
-                      <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
-                      <span className="settings-row-copy"><strong>诊断日志</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
-                      <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
-                    </div>
                   </div>
                 </div>
 
@@ -917,6 +962,37 @@ export function App() {
                       )}
                     </div>
                   </div>
+                  </div>
+                </div>
+              )}
+
+              {settingsPage === "debug" && (
+                <div className="settings-section">
+                  <div className="settings-section-title"><Bug aria-hidden="true" size={17} /><h3>日志与诊断</h3></div>
+                  <div className="settings-preference-list">
+                    <label className="settings-preference-row">
+                      <span className="settings-row-icon"><Activity aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy">
+                        <strong>详细日志</strong>
+                        <small>
+                          {diagnostics?.enabled
+                            ? `已开启 · 当前等级 ${diagnostics.level}`
+                            : "已关闭 · 仅记录常规事件"}
+                        </small>
+                      </span>
+                      <input
+                        className="switch-input"
+                        type="checkbox"
+                        aria-label="详细日志"
+                        checked={diagnostics?.enabled ?? false}
+                        onChange={(event) => void toggleDiagnostics(event.target.checked)}
+                      />
+                    </label>
+                    <div className="settings-preference-row">
+                      <span className="settings-row-icon"><FolderOpen aria-hidden="true" size={17} /></span>
+                      <span className="settings-row-copy"><strong>日志文件夹</strong><small title={snapshot?.logDirectory}>{snapshot?.logDirectory ?? "日志目录尚未就绪"}</small></span>
+                      <button className="secondary-button" type="button" onClick={() => void appApi.openLogDirectory().catch((error) => setMessage(error instanceof Error ? error.message : String(error)))}><FolderOpen aria-hidden="true" size={15} />打开</button>
+                    </div>
                   </div>
                 </div>
               )}

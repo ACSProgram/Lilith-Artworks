@@ -1,9 +1,76 @@
 # 当前任务交接
 
-更新时间：2026-10-08
+更新时间：2026-10-09
 
 本文件只记录当前批次状态与人工验收结果。未完成事项见 `todo.md`；已完成或被替代的批次记录
 见 `archive/`。
+
+## 日志与诊断体系（已实现，待人工验收）
+
+把日志升级为可复用的诊断体系，供后续定位「切换作品/切换素材板卡死」与「托盘退出超时」复用。
+分档原则与新增日志的取舍见 `docs/guides/logging.md`。系统分三档：常规（默认，事件驱动 + 阈值
+触发，常开）、诊断（设置页「调试」栏开关，追加周期性探针与取证通道）、追踪（仅
+`LILITH_LOG_LEVEL=trace`，不进设置页）。
+
+- 等级不再由插件在构建时固定。`tauri-plugin-log` 用 fern 的 dispatch 级别做静态过滤，构建后
+  无法提级，因此构建时刻意不调用 `.level()`，等级改由 `app::diagnostics::apply_level`
+  （`log::set_max_level`）单独控制；
+- 基线取 `LILITH_LOG_LEVEL`，未设置时调试构建为 `debug`、发布构建为 `info`；诊断模式开启时至少
+  为 `debug`，关闭时取基线，因此环境变量既可抬升也可降低等级；
+- 新增进程级「诊断模式」（不写入设置文件）。设置页新增「调试」栏目，内含「详细日志」开关与
+  「日志文件夹」，随时切换且无需重启；默认跟随基线，即调试构建默认开启、发布构建默认关闭，
+  发布版正常使用不受影响；
+- 新增 `log_frontend_diagnostics` 桥接命令：WebView 侧没有写日志文件的路径，前端事件经此转发
+  进同一份日志。常规档写入事件驱动的低频记录与阈值告警；诊断档再追加周期性探针；
+- 新增前端主线程心跳与事件循环延迟探针（500 ms），只在诊断档启用；两者都只在异常时写日志，
+  心跳平时只刷新取证通道；
+- 新增原生端 WebView 看门狗：诊断模式下每 2 秒发 ping 并要求立即 pong，前端主线程冻结时由
+  原生端线程写出 `[watchdog] webview unresponsive` 告警。这是唯一能在冻结进行中取证、且能扛过
+  15 秒兜底强退的位置；与取证记录、`shutting down` / `forcing exit` 对齐即可区分「监听器未被
+  调用（主线程冻结）」与「结算未返回（等待命令）」；
+- 每行日志前缀为「时间 + 运行标识 + 等级 + target」，探针消息带
+  `[hb]`/`[lag]`/`[task]`/`[slow]`/`[forensic]`/`[watchdog]`/`[gpu]`/`[error]` 标签，可按运行
+  切片、按标签筛选，规则见 `docs/guides/logging.md`；
+- 渲染器创建/销毁、GPU 设备序号与存活渲染器数、GPU 设备丢失、画板保存与结算、纹理批次加载、
+  退出握手各阶段与仓库切换结算均写入常规档日志；长任务观察器与慢步骤同样常开，仅超阈值时记录。
+
+### 卡死竞态保护（已实现）
+
+代码检查确认旧渲染器的纹理 IPC 可能在设备销毁后返回，并继续调用已释放的 WebGPU 设备。
+`renderer.ts` 现为设备增加 `released` 生命周期标记：读取返回后若设备已释放，直接丢弃结果并
+记录 `texture.read completed after gpu release`；销毁时先置 `released` 再解绑上下文并销毁设备，
+只允许当前 GPU owner 对 Canvas 执行 `unconfigure()`，销毁日志同时记录在飞纹理加载数。
+
+**已确认的具体竞态**：旧渲染器的纹理 IPC 可能在设备销毁后返回，原实现会继续调用已释放的
+WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rust 侧（同步命令均为轻量操作，冻结期间
+日志写入正常）。该保护是否消除冻结仍需一次人工复现确认；若仍冻结，再向浏览器呈现/GPU 路径定位。
+
+**验证**：`npx tsc --noEmit`、`npm test`（141 通过）、`cargo check --lib`、`cargo fmt --check`、
+`git diff --check` 通过。
+
+### 冻结复现结论与取证能力（已实现，待人工复现）
+
+**复现结论**：多次冻结签名一致——渲染进程**挂起而非崩溃**（Crashpad 无当日新转储），原生端
+全程健康，未闭合的步骤记录全部是 `texture.load` / `texture.read`（IPC 响应未回投），所有 GPU
+步骤均已闭合。日志中「创建过渲染器的会话」全部冻结，「从未创建的会话」无一冻结。触发条件是
+**渲染器 create/destroy churn 本身**（约 3 个切换周期、6 个设备即足够），与是否切画板、切到
+哪个作品无关；据此已实现上面的竞态保护。卡死本身**仍未解决**，修复方向见 `todo.md` 第一节（P1）。
+
+**已交付的取证能力**（均为可复用能力，非一次性探针）：
+
+| 能力 | 位置 | 用途 |
+| --- | --- | --- |
+| 取证 Worker + IndexedDB | `src/shared/diagnosticsWorker.ts`、`shared/diagnostics.ts` | 独立线程在主线程冻结期间继续计时，把最后心跳 / 最后操作 / 静默时长写入 IndexedDB，下次启动回读成 `[forensic] previous freeze`。这是唯一能给出「停在哪一步、停了多久、是否恢复」的通道，仅诊断档启用 |
+| 全局错误捕获 | `shared/diagnostics.ts` | 接管 `error` / `unhandledrejection`（此前完全不可见），脚本异常与资源加载失败分开记录 |
+| GPU 健康 | `pin-board/renderer.ts` | `device.lost` 与 `device.onuncapturederror` 捕获设备丢失与错误作用域之外被静默吞掉的 GPU 错误 |
+| 阈值告警 | `shared/diagnostics.ts`、`app/settings.rs`、`pin_board/mod.rs` | 长任务（>200 ms）、慢步骤、锁等待/持有与慢读告警；仅在超过阈值时记录 |
+| 慢读归因 | `app/settings.rs`、`pin_board/mod.rs` | `with_repository_read_labeled`：慢读告警带上具体命令 |
+
+**验证**：`npx tsc --noEmit`、`npm test`（141 通过）、`cargo check --lib`、`cargo fmt --check`、
+`git diff --check` 通过。
+
+**待人工复现**：下一次复现后优先看 `[forensic] previous freeze` 行（给出冻结时刻、最后操作、
+是否恢复）。
 
 ## 本轮批次：素材板结算边界、文档整理与 0.2.0-rc.1 版本递增（已实现，待人工验收）
 

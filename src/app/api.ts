@@ -1,4 +1,5 @@
 import { invokeCommand } from "../shared/tauri";
+import type { DiagnosticsStatus } from "../shared/diagnostics";
 import type {
   CleanupReport,
   PendingCleanupEntry,
@@ -21,6 +22,9 @@ export const appApi = {
     invokeCommand<SettingsSnapshot>("save_app_settings", { settings }),
   getRepositoryStatus: () => invokeCommand<RepositoryStatus>("get_repository_status"),
   openLogDirectory: () => invokeCommand<void>("open_log_directory"),
+  getDiagnosticsStatus: () => invokeCommand<DiagnosticsStatus>("get_diagnostics_status"),
+  setDiagnosticsEnabled: (enabled: boolean) =>
+    invokeCommand<DiagnosticsStatus>("set_diagnostics_enabled", { enabled }),
   openLegalDirectory: () => invokeCommand<void>("open_legal_directory"),
   openSettingsDirectory: () => invokeCommand<void>("open_settings_directory"),
   revealPathInFolder: (path: string) =>

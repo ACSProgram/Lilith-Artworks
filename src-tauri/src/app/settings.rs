@@ -13,10 +13,18 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State};
 use tempfile::NamedTempFile;
 
+use super::diagnostics::{self, DiagnosticsState};
 use crate::backup::{BackupState, BackupTaskKind};
 use crate::{history, library};
 
 const CURRENT_SETTINGS_VERSION: u32 = 2;
+
+/// 诊断阈值：仓库锁等待/持有超过该时长即记录一条告警。正常操作远低于此值，
+/// 因此平时零噪声；一旦出现说明存在争用或某次操作异常变慢。
+const LOCK_WAIT_WARN_MS: u128 = 300;
+const LOCK_HOLD_WARN_MS: u128 = 1_000;
+/// 只读操作持有共享租约的告警阈值；纹理解码等本身耗时，阈值放宽。
+const READ_HOLD_WARN_MS: u128 = 1_500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -137,6 +145,9 @@ pub(crate) struct AppState {
     /// Set once by the webview confirmation command before running the
     /// irreversible shutdown sequence; the fallback force-exit timer checks it.
     shutdown_confirmed: Arc<AtomicBool>,
+    /// 诊断模式开关。决定生效日志等级，以及前端桥接是否写入 info 级事件。
+    /// 只存活于当前进程，不写入设置文件，因此正常使用不受影响。
+    diagnostics: Arc<DiagnosticsState>,
 }
 
 impl AppState {
@@ -157,6 +168,7 @@ impl AppState {
             exit_requested: Arc::new(AtomicBool::new(false)),
             shutdown_handshake_started: Arc::new(AtomicBool::new(false)),
             shutdown_confirmed: Arc::new(AtomicBool::new(false)),
+            diagnostics: Arc::new(DiagnosticsState::new(diagnostics::default_enabled())),
         }
     }
 
@@ -218,13 +230,25 @@ impl AppState {
         &self,
         operation: impl FnOnce(&Path) -> Result<T, String>,
     ) -> Result<T, String> {
+        let wait_started = std::time::Instant::now();
         let _lease = self.repository_lease.read().map_err(|_| "仓库租约已损坏")?;
         let _operation = self
             .repository_operation
             .lock()
             .map_err(|_| "仓库操作锁已损坏")?;
+        // 只在真的等待时才记录：用于判断前端卡死是否伴随仓库锁争用。
+        let waited_ms = wait_started.elapsed().as_millis();
+        if waited_ms > LOCK_WAIT_WARN_MS {
+            log::warn!("[slow] repository mutation lock waited {waited_ms} ms");
+        }
         let root = self.ready_repository_path()?;
-        operation(&root)
+        let held_started = std::time::Instant::now();
+        let result = operation(&root);
+        let held_ms = held_started.elapsed().as_millis();
+        if held_ms > LOCK_HOLD_WARN_MS {
+            log::warn!("[slow] repository mutation held the lock for {held_ms} ms");
+        }
+        result
     }
 
     /// Runs a read-only repository operation.
@@ -237,9 +261,39 @@ impl AppState {
         &self,
         operation: impl FnOnce(&Path) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_repository_read_labeled("", operation)
+    }
+
+    /// 与 [`Self::with_repository_read`] 相同，但超时告警会带上 `label`。
+    ///
+    /// 用途：把「读操作自身耗时过长」归因到具体命令。素材板卡死期间曾观察到
+    /// `repository read took 3000+ ms`，但无从判断是纹理读取、树刷新还是别处；
+    /// 调用点传入 `read_pin_board_texture board=.. image=..` 这类标签即可定位。
+    pub(crate) fn with_repository_read_labeled<T>(
+        &self,
+        label: &str,
+        operation: impl FnOnce(&Path) -> Result<T, String>,
+    ) -> Result<T, String> {
+        // 空标签不打印括号，避免日志里出现无意义的 `()`。
+        let suffix = if label.is_empty() {
+            String::new()
+        } else {
+            format!(" [{label}]")
+        };
+        let wait_started = std::time::Instant::now();
         let _lease = self.repository_lease.read().map_err(|_| "仓库租约已损坏")?;
+        let waited_ms = wait_started.elapsed().as_millis();
+        if waited_ms > LOCK_WAIT_WARN_MS {
+            log::warn!("[slow] repository read lease waited {waited_ms} ms{suffix}");
+        }
         let root = self.ready_repository_path()?;
-        operation(&root)
+        let ran_started = std::time::Instant::now();
+        let result = operation(&root);
+        let ran_ms = ran_started.elapsed().as_millis();
+        if ran_ms > READ_HOLD_WARN_MS {
+            log::warn!("[slow] repository read took {ran_ms} ms{suffix}");
+        }
+        result
     }
 
     fn with_repository_switch<T>(
@@ -294,6 +348,16 @@ impl AppState {
             .read()
             .map(|settings| settings.pin_board.texture_cache_level.clone())
             .unwrap_or_else(|_| "medium".into())
+    }
+
+    /// 诊断模式状态；等级切换与前端桥接的写入门控都读这里。
+    pub(crate) fn diagnostics(&self) -> &DiagnosticsState {
+        &self.diagnostics
+    }
+
+    /// 应用日志目录，供诊断状态展示与「打开日志目录」命令使用。
+    pub(crate) fn log_directory(&self) -> &Path {
+        &self.log_directory
     }
 
     pub(crate) fn request_exit(&self) {

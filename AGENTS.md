@@ -10,6 +10,7 @@
 - 发布、成品、C2PA、TrustMark 或识别：先读 `docs/modules/authenticity.md`，再进入 `src/modules/authenticity/` 或 `src-tauri/src/authenticity/`。
 - 设置、窗口、托盘和应用生命周期：读 `docs/architecture/overview.md` 的“应用生命周期”，再进入 `src/app/` 或 `src-tauri/src/app/`、`src-tauri/src/lib.rs`。
 - 样式问题：业务模块样式优先读对应 `src/styles/<module>.css`；`src/styles/index.css` 只保留基础控件和仍未拆出的共享规则。
+- 日志与诊断（分档、新增日志的取舍、格式约定）：读 `docs/guides/logging.md`，再进入 `src/shared/diagnostics.ts` 或 `src-tauri/src/app/diagnostics.rs`。
 - 构建与验证：只读 `docs/guides/validation.md`，按用户要求选择轻量检查或完整验证；压力测试只随发布运行，不在日常开发或收尾阶段执行。
 - 本轮尚未验收的工作：读 `docs/planning/current-handoff.md`；未完成事项查 `docs/planning/todo.md`，不要从旧聊天记录重建范围。
 

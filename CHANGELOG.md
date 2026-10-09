@@ -56,8 +56,58 @@ before and after the first stable release.
   the publication deletion dialog; the first-exported JPG always stays at
   its original path. Deleting a record exits the view and refreshes the
   branch record list.
+- A reusable logging and diagnostics layer. The log plugin no longer fixes its
+  level at build time: `tauri-plugin-log` filters through fern's static
+  dispatch level, so a level chosen at build time could not be raised later.
+  The level is now owned solely by `app::diagnostics::apply_level`
+  (`log::set_max_level`), which makes diagnostics mode switchable at runtime
+  without a restart.   The baseline comes from `LILITH_LOG_LEVEL`, defaulting to
+  `debug` in debug builds and `info` in release builds; the effective level is
+  the baseline, raised to at least `debug` while diagnostics mode is on, so the
+  variable can lower the level as well as raise it. Diagnostics mode
+  is a process-scoped flag that is never written to the settings file; it
+  defaults to the baseline, and a new "详细日志" switch on a dedicated "调试"
+  settings page toggles it live through `set_diagnostics_enabled`, which
+  broadcasts `diagnostics_mode_changed`. Because the WebView has no path into
+  the log file, a new `log_frontend_diagnostics` command forwards frontend
+  events into the same log. The remaining frontend records are all
+  event-driven and low frequency (lifecycle, save, finalize, switch, GPU device
+  health), so `info`, `warn`, and `error` are all forwarded unconditionally;
+  threshold warnings (slow steps and long tasks) are always on as well because
+  they stay silent until a threshold is crossed. In diagnostics mode the
+  frontend keeps a main-thread heartbeat that refreshes the forensics channel
+  and logs only when it runs late, plus a 500 ms event-loop lag probe. A native
+  watchdog thread pings the webview every two seconds and expects an immediate
+  pong, so a frozen main thread is reported as `[watchdog] webview
+  unresponsive` from the Rust side, which is the only place that can still
+  write during a freeze and
+  survives the 15-second force-exit fallback. A separate forensics worker on
+  its own thread records the last heartbeat, last operation, and silence
+  duration into IndexedDB, so the evidence survives a frozen main thread and is
+  replayed as `[forensic] previous freeze` on the next launch. Global
+  `error` / `unhandledrejection` capture and WebGPU `device.lost` /
+  `onuncapturederror` reporting make frontend and GPU faults visible. Renderer
+  create and destroy, GPU device sequence and live-renderer count, board save
+  and finalize, texture drain batches, the shutdown handshake, and
+  repository-switch settlement are logged as well, while repository lock
+  wait/hold, slow reads, slow texture batches, and long tasks are reported only
+  past a threshold so the normal tier stays quiet. Every line is indexed by a
+  per-run id, level, and target, and probe lines carry a stable bracket tag
+  (`[hb]`, `[lag]`, `[task]`, `[slow]`, `[forensic]`, `[watchdog]`, `[gpu]`,
+  `[error]`) so signal can be filtered out of the noise.
+  `get_diagnostics_status` reports the mode, level, and log directory, and the
+  tier policy, tags, and the rule for adding new logs are documented in
+  `docs/guides/logging.md`.
 
 ### Fixed
+
+- Texture reads no longer touch a released WebGPU device. Switching boards
+  destroyed the renderer and its device while a texture IPC read could still be
+  in flight; its result then called `createTexture`/`writeTexture` on the
+  destroyed device, a dangling call on the WebView2 GPU path. The device now
+  carries a `released` flag and the read result is discarded once the device is
+  released, only the canvas's current GPU owner may unconfigure the context,
+  and the destroy log records the in-flight texture count.
 
 - Pin-board rename no longer breaks the open board's saves. Renaming a
   board used to advance its stored `revision` while the open renderer kept
@@ -108,6 +158,17 @@ before and after the first stable release.
   unchanged because it covers runtime dependencies only. Risk is limited to
   the test runner, and the full suite, type check, production build, and
   release-metadata check pass unchanged.
+
+- The log level policy now follows the build profile and is switchable at
+  runtime. Debug builds used to log at `info` unless `LILITH_LOG_LEVEL` was
+  set, so newly added `debug!` instrumentation silently disappeared during
+  development; debug builds now default to `debug` and release builds to
+  `info`, and the settings switch can raise either to `debug` without a
+  restart. A `debug`/`trace` level is not compiled out of release builds
+  either, because no dependency enables `log`'s `release_max_level_*`
+  features. `docs/architecture/overview.md` no longer claims a 1 MiB cap with a
+  single retained file and documents the level policy, diagnostics mode, and
+  frontend bridge.
 
 ## 0.2.0-alpha.4 - 2026-10-04
 

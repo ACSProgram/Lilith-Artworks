@@ -30,6 +30,9 @@
 ## 并发与锁
 
 - 普通浏览（列表、加载、纹理读取、导出 PNG 到剪贴板）走共享读租约（`with_repository_read`）；
+  素材板各读命令改用 `with_repository_read_labeled` 附带命令标签（如
+  `read_pin_board_texture board=.. image=.. dim=..`），使 `repository read took N ms` 慢读告警
+  能归因到具体命令；
 - 保存、结算、粘贴、导入、画板增删改与回收站操作走仓库操作锁（`with_ready_repository`＝仓库租约 + `repository_operation` 互斥锁）。`pin_board` 命令直接在 `lib.rs` 注册，不经 `app/workflows.rs`，因此不持有 `BackupState` 运行锁；
 - 灾备、scrub、仓库完整性操作持仓库操作锁期间，画板写入会被阻塞（读取仍可继续）。
 
