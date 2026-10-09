@@ -23,7 +23,13 @@
 
 整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板。设置页的"仓库完整性"扫描已覆盖画板 DDS 的双向检查：逐条 `pin_board_images` 记录校验 DDS 存在、路径归属（`<image-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；`pin_board_images` 无摘要列且不做 schema 迁移，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
-前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
+前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。
+
+**渲染器与 GPU 设备在模块生命周期内只创建一次**：`PinBoardRenderer.create` 只做画布生命周期内的一次性初始化（适配器/设备/上下文/管线/采样器/`ResizeObserver`/主题观察器/事件监听），画板数据由 `loadBoard(view, session)` 装载。切换画板与切换作品都只换数据、复用同一设备：`loadBoard` 先以**旧 `boardId`** 完成结算（保存 + `finalize_pin_board`，失败即中止切换、保留旧画板），再**释放旧画板的全部纹理**（切换即全释放，不跨画板保留）并装载新画板，同一 `boardId` 幂等；`unloadBoard` 用于当前作品已无画板时清空画面。`destroy()` 只用于模块真正卸载：仓库切换（`LibraryModule` 以仓库路径为 key 整块重建）、切到非作品节点或退出。这消除了旧实现「切换即创建/销毁渲染器与 WebGPU 设备」的 churn——该 churn 已确认会触发 WebView2 渲染进程冻结。
+
+**设备丢失走限流自动重建**：`device.lost` 后经 `makeGpu` 重建设备（与创建共用同一条初始化路径）并重新武装新设备的 `lost` 监听，随后按当前画板重载纹理；每个渲染器生命周期最多重建 2 次、带 600 ms × 次数退避，重建期间暂停绘制与纹理加载，超限或重建失败即保持挂起并只上报错误。
+
+工作区挂载：历史/发布/识别三个窗格以 `artworkId` 为 key 整块重置，**素材板窗格不带 key**，因此跨作品保留渲染器与设备；仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
 持久化只属于 Rust：SQLite（schema v2 三张表）保存画板、图片记录与 step 历史；BC7 DDS 实体文件存于 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`。不迁移 Lilith Client 的旧 `index.json` 画板库。
 
@@ -90,7 +96,7 @@ SQLite:
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
 - 画板列表为空或未选中画板时，画布区域显示“当前未选择素材板”等占位提示，不显示加载动画；
 - 侧栏画板支持拖放排序（沿用 Client 的拖放语义）：拖动行到目标行的上/下半区决定插入到前/后，落库前先本地乐观重排，失败回滚；`reorder_pin_boards` 要求传入的 id 集合与当前未删除画板完全一致（缺项、重复或跨作品 id 一律拒绝），顺序只是列表元数据，不影响已打开画板的编辑会话；
-- 将当前选中画板移入回收站时以 `destroy(false)` 释放渲染器，跳过针对已删除画板的 finalize 保存，避免时序上的写库失败。
+- 将当前选中画板移入回收站时渲染器不销毁，只以「跳过旧画板 finalize」的方式切换：有回退画板时 `loadBoard(..., finalizeCurrent=false)`，无可回退画板时 `unloadBoard(false)`；跳过对已删除画板的 finalize 保存，避免时序上的写库失败。
 
 ## 快速验证
 

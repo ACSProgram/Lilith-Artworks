@@ -134,6 +134,13 @@ const HISTORY_LIMIT = 100;
 const HISTORY_MERGE_MS = 350;
 /** 模型变化后静默该时长即自动保存；期间再次变化会重新计时。 */
 const AUTOSAVE_DELAY_MS = 1500;
+/**
+ * 设备丢失后的自动重建上限与退避。上限是整个渲染器生命周期（≈ 一次会话）内
+ * 允许重建的设备数，用于避免「丢设备 → 重建 → 又丢」退化成重建风暴——那正是
+ * 最初观察到的冻结触发条件（短时间连续创建设备）。超限或重建失败即回到「只上报」。
+ */
+const GPU_RECOVERY_MAX_ATTEMPTS = 2;
+const GPU_RECOVERY_BACKOFF_MS = 600;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
@@ -523,9 +530,9 @@ function clearColor(canvas: HTMLCanvasElement) {
 }
 
 export class PinBoardRenderer {
-  private readonly boardId: number;
+  private boardId = 0;
   private readonly viewport: Viewport = { ...DEFAULT_VIEWPORT };
-  private readonly images: PinBoardImage[];
+  private images: PinBoardImage[] = [];
   private readonly imageById = new Map<number, PinBoardImage>();
   private readonly textures = new Map<number, LoadedTexture>();
   /** 常驻缩略图缓存：每个访问过的图片保留一张低分辨率预览，滑动视图时
@@ -546,8 +553,8 @@ export class PinBoardRenderer {
   private readonly history: HistoryEntry[] = [];
   private visibleImages: PinBoardImage[] = [];
   private historyIndex = 0;
-  private savedStateKey: string;
-  private revision: string;
+  private savedStateKey = "";
+  private revision = "";
   private cssHeight = 0;
   private defaultWorldUnitsPerCssPixel = 1;
   private loadTimer: number | null = null;
@@ -560,6 +567,15 @@ export class PinBoardRenderer {
   private preservedWorldUnitsPerCssPixel: number | null = null;
   /** 打开画板时按图片最小包围框定位视图，等画布尺寸可用后再执行。 */
   private pendingViewportFit = false;
+  /** 是否已装载画板。未装载时所有画板级绘制/保存/会话都停用，但 GPU 设备保持存活。 */
+  private loaded = false;
+  /** 画板切换按此链串行化，避免连续切换时「结算旧画板」与「装载新画板」交错。 */
+  private boardTransition: Promise<unknown> = Promise.resolve();
+  /** 设备丢失恢复：已尝试重建次数（不重置，作为整会话上限）。 */
+  private gpuRecoveryAttempts = 0;
+  /** GPU 不可用（丢失后正在重建，或已达重建上限而放弃）：期间暂停绘制与纹理加载。 */
+  private gpuUnavailable = false;
+  private recoveryTimer: number | null = null;
   private destroyed = false;
   private saving = false;
   private finalized = false;
@@ -589,46 +605,22 @@ export class PinBoardRenderer {
     private readonly canvas: HTMLCanvasElement,
     private readonly selectionElement: HTMLElement,
     private readonly marqueeElement: HTMLElement,
-    view: PinBoardView,
-    private readonly gpu: GpuState,
-    initialSession: PinBoardViewSession | null,
-    initiallyActive: boolean,
+    private gpu: GpuState,
     private arrangementGapCssPixels: number,
     private autosaveEnabled: boolean,
     private readonly onError: (message: string) => void,
     private readonly onState: (state: PinBoardInteractionState) => void,
-    private readonly onSessionChange: (session: PinBoardViewSession) => void,
+    private readonly onSessionChange: (boardId: number, session: PinBoardViewSession) => void,
     private readonly onContextMenu: (request: PinBoardContextMenuRequest | null) => void,
     cacheBudgets: PinBoardTextureBudgets,
   ) {
-    this.boardId = view.boardId;
-    this.active = initiallyActive;
+    // 构造函数只负责画布生命周期内一次性初始化；画板数据由 `loadBoard` 装载。
+    this.active = true;
     this.textureBudgetBytes = cacheBudgets.residentBytes;
     this.previewTextureBudgetBytes = cacheBudgets.previewBytes;
-    this.images = view.images.map(cloneImage);
-    for (const image of this.images) this.imageById.set(image.imageId, image);
-    this.revision = view.revision;
     const cssHeight = Math.max(canvas.getBoundingClientRect().height, 1);
     this.cssHeight = cssHeight;
     this.defaultWorldUnitsPerCssPixel = DEFAULT_VIEWPORT.height / cssHeight;
-    if (initialSession) {
-      this.viewport.centerX = initialSession.centerX;
-      this.viewport.centerY = initialSession.centerY;
-      this.viewport.height = this.clampViewportHeight(
-        initialSession.worldUnitsPerCssPixel * cssHeight,
-      );
-      this.locked = initialSession.locked;
-      if (!this.locked) {
-        for (const imageId of initialSession.selectedImageIds) {
-          if (this.imageById.has(imageId)) this.selectedIds.add(imageId);
-        }
-      }
-    } else {
-      // 进程内没有该画板的会话：打开时按画板内全部图片的最小包围框定位视图。
-      this.locked = true;
-      this.pendingViewportFit = true;
-    }
-    this.savedStateKey = this.stateKey();
     this.resizeObserver = new ResizeObserver(() => this.resize());
     this.themeObserver = new MutationObserver(() => this.draw());
     this.resizeObserver.observe(canvas);
@@ -647,26 +639,104 @@ export class PinBoardRenderer {
     canvas.addEventListener("wheel", this.wheel, { passive: false });
     canvas.addEventListener("contextmenu", this.contextMenu);
     this.resize();
-    this.refreshViewport(0);
-    this.emitState();
 
-    void gpu.device.lost.then((info: { message?: string }) => {
-      if (!this.destroyed) this.onError(`WebGPU 设备已丢失：${info.message || "未知原因"}`);
+    this.armDeviceLossHandler(gpu);
+  }
+
+  /** 监听设备丢失（主动 destroy 产生的 "destroyed" 除外），触发限流后的自动重建。 */
+  private armDeviceLossHandler(gpu: GpuState) {
+    void gpu.device.lost.then((info: { reason?: string; message?: string }) => {
+      if (this.destroyed || gpu.released || this.gpu !== gpu) return;
+      if (info?.reason === "destroyed") return;
+      this.handleDeviceLost(gpu, info);
     });
   }
 
+  private handleDeviceLost(gpu: GpuState, info: { reason?: string; message?: string }) {
+    // 旧设备的资源已作废：标记 released 让在飞行的纹理读取拒绝旧结果，并推进代次。
+    // 同时挂起绘制与加载，直到重建完成（或确认放弃）。
+    gpu.released = true;
+    this.gpuUnavailable = true;
+    this.generation += 1;
+    const reason = info?.message || info?.reason || "未知原因";
+    const attempt = this.gpuRecoveryAttempts + 1;
+    if (this.gpuRecoveryAttempts >= GPU_RECOVERY_MAX_ATTEMPTS) {
+      diagnosticsLog(
+        "warn",
+        `pin-board gpu device lost, recovery limit reached: gpuSeq=${gpu.sequence}, attempts=${this.gpuRecoveryAttempts}, reason=${reason}`,
+      );
+      this.onError(`WebGPU 设备已丢失且重建次数已达上限：${reason}`);
+      return;
+    }
+    this.gpuRecoveryAttempts += 1;
+    diagnosticsLog(
+      "warn",
+      `pin-board gpu device lost, scheduling recovery: gpuSeq=${gpu.sequence}, attempt=${attempt}/${GPU_RECOVERY_MAX_ATTEMPTS}, reason=${reason}`,
+    );
+    const delay = GPU_RECOVERY_BACKOFF_MS * attempt;
+    this.recoveryTimer = window.setTimeout(() => {
+      this.recoveryTimer = null;
+      void this.recoverGpu();
+    }, delay);
+  }
+
+  /** 重建 GPU 设备并重新装载纹理。与 `create` 共用 `makeGpu`，避免两条创建路径分叉。 */
+  private async recoverGpu() {
+    if (this.destroyed) return;
+    try {
+      // 旧设备上的纹理与缓冲全部作废，先丢弃（destroy 在失效设备上是无操作）。
+      try {
+        for (const loaded of this.textures.values()) destroyTexture(loaded);
+        for (const loaded of this.previewTextures.values()) destroyTexture(loaded);
+        this.gpu.viewportBuffer.destroy();
+      } catch {
+        // 设备已失效时忽略释放失败。
+      }
+      this.textures.clear();
+      this.previewTextures.clear();
+      this.textureReservedBytes = 0;
+      this.failedTextureDimensions.clear();
+      this.textureQualityCaps.clear();
+
+      const next = await makeGpu(this.canvas);
+      if (this.destroyed) {
+        next.released = true;
+        try {
+          next.device.destroy();
+        } catch {
+          // 忽略。
+        }
+        return;
+      }
+      this.gpu = next;
+      this.armDeviceLossHandler(next);
+      this.gpuUnavailable = false;
+      diagnosticsLog(
+        "info",
+        `pin-board gpu device recovered: newSeq=${next.sequence}, boardId=${this.boardId}, attempts=${this.gpuRecoveryAttempts}`,
+      );
+      if (this.loaded) this.refreshViewport(0);
+      else this.draw();
+    } catch (error) {
+      // 重建失败时保持 GPU 不可用（挂起绘制），避免持续对失效设备绘图刷错误。
+      diagnosticsLog("warn", `pin-board gpu recovery failed: error=${errorMessage(error)}`);
+      this.onError(`素材板 GPU 恢复失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 创建渲染器：只做画布生命周期内一次性的 GPU 初始化。画板数据随后由 `loadBoard`
+   * 装载，因此切换画板/作品不再销毁并新建 GPU 设备。
+   */
   static async create(
     canvas: HTMLCanvasElement,
     selectionElement: HTMLElement,
     marqueeElement: HTMLElement,
-    view: PinBoardView,
-    initialSession: PinBoardViewSession | null,
-    initiallyActive: boolean,
     arrangementGapCssPixels: number,
     autosaveEnabled: boolean,
     onError: (message: string) => void,
     onState: (state: PinBoardInteractionState) => void,
-    onSessionChange: (session: PinBoardViewSession) => void,
+    onSessionChange: (boardId: number, session: PinBoardViewSession) => void,
     onContextMenu: (request: PinBoardContextMenuRequest | null) => void,
     cacheBudgets: PinBoardTextureBudgets = textureBudgetsForLevel(undefined),
   ): Promise<PinBoardRenderer> {
@@ -675,10 +745,7 @@ export class PinBoardRenderer {
       canvas,
       selectionElement,
       marqueeElement,
-      view,
       gpu,
-      initialSession,
-      initiallyActive,
       arrangementGapCssPixels,
       autosaveEnabled,
       onError,
@@ -691,21 +758,181 @@ export class PinBoardRenderer {
     return renderer;
   }
 
-  destroy(finalize = true) {
+  /** 当前装载的画板 id；未装载时为 0。 */
+  get currentBoardId(): number {
+    return this.boardId;
+  }
+
+  /**
+   * 装载一块画板。顺序为先结算旧画板（保存 + `finalize_pin_board`，语义与
+   * `destroy(true)` 一致，且**先以旧 boardId 完成**）、释放旧画板资源，再装载新画板。
+   * 传入的 boardId 与当前一致时直接返回（幂等）。结算失败时保持旧画板原样并返回 false。
+   */
+  loadBoard(
+    view: PinBoardView,
+    session: PinBoardViewSession | null,
+    finalizeCurrent = true,
+  ): Promise<boolean> {
+    const run = this.boardTransition.then(
+      () => this.performLoadBoard(view, session, finalizeCurrent),
+    );
+    this.boardTransition = run.catch(() => undefined);
+    return run;
+  }
+
+  /** 卸载当前画板（当前作品的画板已被清空等场景）：结算后清空画面，保留 GPU 设备。 */
+  unloadBoard(finalizeCurrent = true): Promise<void> {
+    const run = this.boardTransition.then(() => this.performUnloadBoard(finalizeCurrent));
+    this.boardTransition = run.catch(() => undefined);
+    return run;
+  }
+
+  private async performLoadBoard(
+    view: PinBoardView,
+    session: PinBoardViewSession | null,
+    finalizeCurrent: boolean,
+  ): Promise<boolean> {
+    if (this.destroyed) return false;
+    if (this.loaded && this.boardId === view.boardId) return true;
+    if (this.loaded) {
+      if (!await this.settleCurrentBoard(finalizeCurrent)) return false;
+    }
+    if (this.destroyed) return false;
+    this.activateBoard(view, session);
+    return true;
+  }
+
+  private async performUnloadBoard(finalizeCurrent: boolean): Promise<void> {
+    if (this.destroyed || !this.loaded) return;
+    await this.settleCurrentBoard(finalizeCurrent);
     if (this.destroyed) return;
-    // finalize 内部会先保存当前状态，挂起的防抖保存没有必要再触发。
+    this.locked = false;
+    this.canvas.classList.remove("locked");
+    this.selectionElement.hidden = true;
+    this.marqueeElement.hidden = true;
+    this.selectionScreenQuad = null;
+    this.draw();
+    this.onState(this.interactionState);
+  }
+
+  /** 结算当前画板：保存并 finalize，随后释放画板级资源并把 boardId 归零。 */
+  private async settleCurrentBoard(finalize: boolean): Promise<boolean> {
+    if (!this.loaded) return true;
+    this.finishActiveInteraction();
+    if (finalize) {
+      const saved = await this.finalize();
+      if (!saved) return false;
+    } else {
+      this.cancelAutosave();
+    }
+    this.persistSession();
+    this.releaseBoardResources();
+    this.loaded = false;
+    this.boardId = 0;
+    return true;
+  }
+
+  /** 释放画板级资源：纹理、历史、选中、拖动中间态与飞行中的加载。 */
+  private releaseBoardResources() {
+    if (this.loadTimer !== null) {
+      window.clearTimeout(this.loadTimer);
+      this.loadTimer = null;
+    }
+    this.loadRequested = false;
+    for (const loaded of this.textures.values()) destroyTexture(loaded);
+    this.textures.clear();
+    for (const loaded of this.previewTextures.values()) destroyTexture(loaded);
+    this.previewTextures.clear();
+    this.textureReservedBytes = 0;
+    this.failedTextureDimensions.clear();
+    this.textureQualityCaps.clear();
+    this.visibleImages = [];
+    this.history.length = 0;
+    this.historyIndex = 0;
+    this.images = [];
+    this.imageById.clear();
+    this.selectedIds.clear();
+    this.dragMode = null;
+    this.dragPointerId = null;
+    this.dragBefore = [];
+    this.marqueeBaseIds.clear();
+    // 递增代次，让旧画板在飞行的纹理加载在返回时按代次被丢弃。
+    this.generation += 1;
+  }
+
+  private activateBoard(view: PinBoardView, session: PinBoardViewSession | null) {
+    this.boardId = view.boardId;
+    this.images = view.images.map(cloneImage);
+    this.imageById.clear();
+    for (const image of this.images) this.imageById.set(image.imageId, image);
+    this.revision = view.revision;
+    this.finalized = false;
+    this.finalizePromise = null;
+    this.savePromise = null;
+    this.saving = false;
+    this.dirty = false;
     this.cancelAutosave();
-    if (finalize && !this.finalized) void this.finalize();
-    this.onSessionChange({
+    this.cssHeight = Math.max(this.canvas.getBoundingClientRect().height, 1);
+    this.viewport.centerX = DEFAULT_VIEWPORT.centerX;
+    this.viewport.centerY = DEFAULT_VIEWPORT.centerY;
+    this.viewport.height = DEFAULT_VIEWPORT.height;
+    this.pendingViewportFit = false;
+    this.locked = false;
+    this.selectedIds.clear();
+    if (session) {
+      this.viewport.centerX = session.centerX;
+      this.viewport.centerY = session.centerY;
+      this.viewport.height = this.clampViewportHeight(
+        session.worldUnitsPerCssPixel * this.cssHeight,
+      );
+      this.locked = session.locked;
+      if (!this.locked) {
+        for (const imageId of session.selectedImageIds) {
+          if (this.imageById.has(imageId)) this.selectedIds.add(imageId);
+        }
+      }
+    } else {
+      // 进程内没有该画板的会话：打开时按画板内全部图片的最小包围框定位视图。
+      this.locked = true;
+      this.pendingViewportFit = true;
+    }
+    this.savedStateKey = this.stateKey();
+    this.loaded = true;
+    this.resize();
+    diagnosticsLog(
+      "info",
+      `pin-board board loaded: boardId=${view.boardId}, images=${this.images.length}`,
+    );
+  }
+
+  /** 发出当前画板的视图会话（按 boardId 归属）。 */
+  private persistSession() {
+    this.onSessionChange(this.boardId, {
       centerX: this.viewport.centerX,
       centerY: this.viewport.centerY,
       worldUnitsPerCssPixel: this.worldUnitsPerCssPixel(),
       locked: this.locked,
       selectedImageIds: this.locked ? [] : this.selectedImageIds(),
     });
+  }
+
+  /**
+   * 释放整个渲染器与 GPU 设备。只用于模块真正卸载（关闭工作区、切仓库、退出），
+   * 切换画板/作品请改用 `loadBoard` / `unloadBoard`。
+   */
+  destroy(finalize = true) {
+    if (this.destroyed) return;
+    // finalize 内部会先保存当前状态，挂起的防抖保存没有必要再触发。
+    this.cancelAutosave();
+    if (finalize && this.loaded && !this.finalized) void this.finalize();
+    if (this.loaded) this.persistSession();
     this.destroyed = true;
     this.generation += 1;
     if (this.loadTimer !== null) window.clearTimeout(this.loadTimer);
+    if (this.recoveryTimer !== null) {
+      window.clearTimeout(this.recoveryTimer);
+      this.recoveryTimer = null;
+    }
     this.resizeObserver.disconnect();
     this.themeObserver.disconnect();
     window.removeEventListener("resize", this.resize);
@@ -882,7 +1109,7 @@ export class PinBoardRenderer {
   }
 
   applyMutationResult(view: PinBoardView, imageIds: number[]) {
-    if (view.boardId !== this.boardId) return;
+    if (!this.loaded || view.boardId !== this.boardId) return;
     const added = imageIds.flatMap((imageId) => view.images.filter((image) => image.imageId === imageId));
     if (added.length === 0) return;
     for (const image of view.images) {
@@ -1004,6 +1231,7 @@ export class PinBoardRenderer {
 
   save(): Promise<boolean> {
     this.cancelAutosave();
+    if (!this.loaded) return Promise.resolve(true);
     if (this.savePromise) {
       return this.savePromise.then((saved) => (
         saved && this.dirty ? this.save() : saved
@@ -1051,6 +1279,7 @@ export class PinBoardRenderer {
   }
 
   finalize(): Promise<boolean> {
+    if (!this.loaded) return Promise.resolve(true);
     if (this.finalized) return Promise.resolve(true);
     if (this.finalizePromise) return this.finalizePromise;
     diagnosticsLog(
@@ -1115,16 +1344,10 @@ export class PinBoardRenderer {
   }
 
   private emitState() {
-    if (this.destroyed) return;
+    if (this.destroyed || !this.loaded) return;
     this.canvas.classList.toggle("locked", this.locked);
     this.updateSelectionOverlay();
-    this.onSessionChange({
-      centerX: this.viewport.centerX,
-      centerY: this.viewport.centerY,
-      worldUnitsPerCssPixel: this.worldUnitsPerCssPixel(),
-      locked: this.locked,
-      selectedImageIds: this.locked ? [] : this.selectedImageIds(),
-    });
+    this.persistSession();
     this.onState(this.interactionState);
   }
 
@@ -1170,7 +1393,8 @@ export class PinBoardRenderer {
     const rect = this.canvas.getBoundingClientRect();
     const cssWidth = Math.max(rect.width, 1);
     const cssHeight = Math.max(rect.height, 1);
-    if (this.pendingViewportFit
+    if (this.loaded
+      && this.pendingViewportFit
       && cssWidth >= VIEWPORT_FIT_MIN_CANVAS_CSS_PIXELS
       && cssHeight >= VIEWPORT_FIT_MIN_CANVAS_CSS_PIXELS) {
       // 画布尺寸首次可用时执行打开适配；模块隐藏期间创建的 renderer 会在这里补做。
@@ -1180,7 +1404,7 @@ export class PinBoardRenderer {
       this.viewport.height = this.clampViewportHeight(
         this.preservedWorldUnitsPerCssPixel * cssHeight,
       );
-    } else if (this.cssHeight > 0 && cssHeight !== this.cssHeight) {
+    } else if (this.loaded && this.cssHeight > 0 && cssHeight !== this.cssHeight) {
       this.viewport.height = this.clampViewportHeight(
         this.viewport.height * cssHeight / this.cssHeight,
       );
@@ -1202,13 +1426,11 @@ export class PinBoardRenderer {
     );
     const width = Math.max(1, Math.round(cssWidth * scale));
     const height = Math.max(1, Math.round(cssHeight * scale));
-    if (this.canvas.width === width && this.canvas.height === height) {
-      this.refreshViewport(0);
-      this.emitState();
-      return;
+    if (this.canvas.width !== width || this.canvas.height !== height) {
+      this.canvas.width = width;
+      this.canvas.height = height;
     }
-    this.canvas.width = width;
-    this.canvas.height = height;
+    if (!this.loaded) return;
     this.refreshViewport(0);
     this.emitState();
   };
@@ -1794,7 +2016,7 @@ export class PinBoardRenderer {
   }
 
   private refreshViewport(loadDelay: number) {
-    if (this.destroyed || this.canvas.width < 1 || this.canvas.height < 1) return;
+    if (this.destroyed || this.gpuUnavailable || !this.loaded || this.canvas.width < 1 || this.canvas.height < 1) return;
     this.generation += 1;
     const bounds = viewportBounds(this.viewport, this.canvas.width, this.canvas.height);
     this.visibleImages = this.images.filter((image) => (
@@ -1824,7 +2046,7 @@ export class PinBoardRenderer {
   }
 
   private draw() {
-    if (this.destroyed) return;
+    if (this.destroyed || this.gpuUnavailable) return;
     try {
       const encoder = this.gpu.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({
@@ -1874,7 +2096,7 @@ export class PinBoardRenderer {
   }
 
   private scheduleLoads(delay: number) {
-    if (!this.active || this.destroyed) return;
+    if (!this.active || this.destroyed || this.gpuUnavailable || !this.loaded) return;
     if (this.loadTimer !== null) window.clearTimeout(this.loadTimer);
     this.loadTimer = window.setTimeout(() => {
       this.loadTimer = null;

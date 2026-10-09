@@ -560,7 +560,6 @@ export function App() {
           onOpenBackupDisableNotice={appApi.getBackupDisableNoticeTarget}
           renderArtworkWorkspace={(workspace) => (
             <ArtworkWorkspace
-              key={workspace.artworkId}
               artworkId={workspace.artworkId}
               initialView={workspace.initialView}
               initialBranchId={workspace.initialBranchId}

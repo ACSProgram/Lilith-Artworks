@@ -233,7 +233,7 @@ function GpuCanvas({
   onState,
   onContextMenu,
 }: {
-  view: PinBoardView;
+  view: PinBoardView | null;
   artworkId: string;
   arrangementGapCssPixels: number;
   autosaveEnabled: boolean;
@@ -247,73 +247,125 @@ function GpuCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const selectionRef = useRef<HTMLDivElement>(null);
   const marqueeRef = useRef<HTMLDivElement>(null);
+  /** 渲染器实例常驻：创建 effect 只随画布生命周期运行一次。 */
+  const rendererRef = useRef<PinBoardRenderer | null>(null);
+  const bootRef = useRef<Promise<PinBoardRenderer | null> | null>(null);
+  const unregisterLifecycleRef = useRef<(() => void) | null>(null);
+  const destroyTimerRef = useRef<number | null>(null);
+  const disposedRef = useRef(false);
+  /** 渲染器就绪后自增，触发「装载画板」effect 用最新 view 装载。 */
+  const [readyVersion, setReadyVersion] = useState(0);
+
   const activeRef = useRef(active);
   activeRef.current = active;
+  const artworkIdRef = useRef(artworkId);
+  artworkIdRef.current = artworkId;
+  const gapRef = useRef(arrangementGapCssPixels);
+  gapRef.current = arrangementGapCssPixels;
+  const autosaveRef = useRef(autosaveEnabled);
+  autosaveRef.current = autosaveEnabled;
+  const cacheBudgetsRef = useRef(cacheBudgets);
+  cacheBudgetsRef.current = cacheBudgets;
+  const setStatusRef = useRef(setStatus);
+  setStatusRef.current = setStatus;
+  const onRendererRef = useRef(onRenderer);
+  onRendererRef.current = onRenderer;
+  const onStateRef = useRef(onState);
+  onStateRef.current = onState;
+  const onContextMenuRef = useRef(onContextMenu);
+  onContextMenuRef.current = onContextMenu;
 
+  // 创建 effect 幂等化：StrictMode 的「挂载 → 清理 → 再挂载」复用同一次创建，
+  // 因此每次挂载只创建一个 GPU 设备。真正的销毁推迟到模块卸载时执行。
   useEffect(() => {
-    let cancelled = false;
-    let renderer: PinBoardRenderer | null = null;
-    let unregisterLifecycle: (() => void) | null = null;
+    disposedRef.current = false;
+    if (destroyTimerRef.current !== null) {
+      window.clearTimeout(destroyTimerRef.current);
+      destroyTimerRef.current = null;
+    }
     const canvas = canvasRef.current;
     const selection = selectionRef.current;
     const marquee = marqueeRef.current;
     if (!canvas || !selection || !marquee) return undefined;
 
-    void PinBoardRenderer.create(
-      canvas,
-      selection,
-      marquee,
-      view,
-      getBoardSession(artworkId, view.boardId),
-      activeRef.current,
-      arrangementGapCssPixels,
-      autosaveEnabled,
-      (message) => setStatus(message),
-      (state) => onState(state),
-      (session) => {
-        // 画布没有布局尺寸时（面板从未获得空间）不写入会话，避免下次进入
-        // 恢复出退化视口导致图片过小且跳过包围框适配。
-        if (canvas.getBoundingClientRect().height > 0) {
-          setBoardSession(artworkId, view.boardId, session);
-        }
-      },
-      onContextMenu,
-      cacheBudgets,
-    )
-      .then((created) => {
-        if (cancelled) {
-          created.destroy(false);
-        } else {
+    if (!bootRef.current) {
+      bootRef.current = PinBoardRenderer.create(
+        canvas,
+        selection,
+        marquee,
+        gapRef.current,
+        autosaveRef.current,
+        (message) => setStatusRef.current(message),
+        (state) => onStateRef.current(state),
+        (boardId, session) => {
+          // 画布没有布局尺寸时（面板从未获得空间）不写入会话，避免下次进入
+          // 恢复出退化视口导致图片过小且跳过包围框适配。
+          if (canvas.getBoundingClientRect().height > 0) {
+            setBoardSession(artworkIdRef.current, boardId, session);
+          }
+        },
+        (request) => onContextMenuRef.current(request),
+        cacheBudgetsRef.current,
+      )
+        .then((created) => {
+          if (disposedRef.current) {
+            created.destroy(false);
+            return null;
+          }
+          created.setArrangementGapCssPixels(gapRef.current);
+          created.setAutosaveEnabled(autosaveRef.current);
+          created.setTextureCacheBudgets(cacheBudgetsRef.current);
           created.setActive(activeRef.current);
-          renderer = created;
-          unregisterLifecycle = registerPinBoardLifecycleParticipant(created);
-          onRenderer(created);
-          onState(created.interactionState);
+          rendererRef.current = created;
+          unregisterLifecycleRef.current = registerPinBoardLifecycleParticipant(created);
+          onRendererRef.current(created);
+          onStateRef.current(created.interactionState);
+          setReadyVersion((current) => current + 1);
+          diagnosticsLog("info", `pin-board renderer created: artworkId=${artworkIdRef.current}`);
+          return created;
+        })
+        .catch((error) => {
           diagnosticsLog(
-            "info",
-            `pin-board renderer created: artworkId=${artworkId}, boardId=${view.boardId}`,
+            "warn",
+            `pin-board renderer create failed: artworkId=${artworkIdRef.current}, error=${errorMessage(error)}`,
           );
-        }
-      })
-      .catch((error) => {
-        diagnosticsLog(
-          "warn",
-          `pin-board renderer create failed: artworkId=${artworkId}, boardId=${view.boardId}, error=${errorMessage(error)}`,
-        );
-        if (!cancelled) setStatus(errorMessage(error));
-      });
+          if (!disposedRef.current) setStatusRef.current(errorMessage(error));
+          return null;
+        });
+    }
 
     return () => {
-      cancelled = true;
-      unregisterLifecycle?.();
-      onRenderer(null);
-      diagnosticsLog(
-        "info",
-        `pin-board renderer disposing: artworkId=${artworkId}, boardId=${view.boardId}`,
-      );
-      renderer?.destroy();
+      disposedRef.current = true;
+      destroyTimerRef.current = window.setTimeout(() => {
+        destroyTimerRef.current = null;
+        bootRef.current = null;
+        unregisterLifecycleRef.current?.();
+        unregisterLifecycleRef.current = null;
+        const current = rendererRef.current;
+        rendererRef.current = null;
+        onRendererRef.current(null);
+        diagnosticsLog("info", `pin-board renderer disposing: artworkId=${artworkIdRef.current}`);
+        current?.destroy();
+      }, 0);
     };
-  }, [view, artworkId, setStatus, onRenderer, onState, onContextMenu]);
+  }, []);
+
+  // 画板装载：view 变化或渲染器就绪时调用 `loadBoard`（按 boardId 幂等）。
+  useEffect(() => {
+    const renderer = rendererRef.current;
+    if (!renderer) return;
+    if (view) {
+      void renderer
+        .loadBoard(view, getBoardSession(artworkId, view.boardId))
+        .then((loaded) => {
+          if (!loaded && !disposedRef.current) {
+            setStatusRef.current("切换素材板失败：旧画板未能完成结算");
+          }
+        });
+    } else {
+      void renderer.unloadBoard();
+    }
+  }, [view, artworkId, readyVersion]);
 
   return (
     <div className="pin-board-canvas-shell">
@@ -655,18 +707,14 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     let cancelled = false;
     const sequence = ++loadSequence.current;
     const current = rendererRef.current;
-    // 切换 Artwork 会重挂载工作区；记录是否携带旧渲染器，便于与设备创建记录配对。
+    // 素材板渲染器跨作品保活：这里只换数据，不销毁渲染器/GPU 设备。
+    // 旧画板的结算由随后的 `loadBoard`（或 `unloadBoard`）完成。
     diagnosticsLog(
       "info",
       `pin-board artwork switch start: artworkId=${artworkId}, hadRenderer=${current !== null}`,
     );
-    if (current) {
-      current.destroy();
-      rendererRef.current = null;
-    }
     setBoards(null);
     setTrash([]);
-    setView(null);
     setSelected(null);
     setInteraction(DEFAULT_INTERACTION);
     setContextMenu(null);
@@ -684,7 +732,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         setTrash(await pinBoardApi.listPinBoardTrash().catch(() => []));
         const preferredId = getSelectedBoardId(artworkId);
         const first = next.find((board) => board.boardId === preferredId) ?? next[0];
-        if (!first) return;
+        if (!first) {
+          // 新作品没有画板：清空画布（渲染器保持挂载）。
+          setView(null);
+          return;
+        }
         setSelected(first.boardId);
         setSelectedBoardId(artworkId, first.boardId);
         void pinBoardApi.loadPinBoard(first.boardId)
@@ -716,21 +768,24 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       "info",
       `pin-board board select start: artworkId=${artworkId}, boardId=${board.boardId}`,
     );
-    if (rendererRef.current) {
-      const saved = await rendererRef.current.finalize();
-      if (!saved || sequence !== loadSequence.current) return;
-      rendererRef.current.destroy();
-      rendererRef.current = null;
-    }
     setContextMenu(null);
-    setSelected(board.boardId);
-    setSelectedBoardId(artworkId, board.boardId);
-    setView(null);
-    setInteraction(DEFAULT_INTERACTION);
-    setStatus(null);
     try {
       const loaded = await pinBoardApi.loadPinBoard(board.boardId);
-      if (sequence === loadSequence.current) setView(loaded);
+      if (sequence !== loadSequence.current) return;
+      const current = rendererRef.current;
+      if (current) {
+        // 复用同一渲染器与 GPU 设备：先以旧 boardId 结算旧画板再装载新画板；
+        // 结算失败则中止切换，渲染器与 UI 都停在旧画板。
+        const switched = await current.loadBoard(
+          loaded,
+          getBoardSession(artworkId, loaded.boardId),
+        );
+        if (!switched || sequence !== loadSequence.current) return;
+      }
+      setSelected(board.boardId);
+      setSelectedBoardId(artworkId, board.boardId);
+      setView(loaded);
+      setInteraction(rendererRef.current?.interactionState ?? DEFAULT_INTERACTION);
       diagnosticsLog(
         "info",
         `pin-board board select done: artworkId=${artworkId}, boardId=${board.boardId}`,
@@ -1069,18 +1124,25 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         await pinBoardApi.trashPinBoard(request.board.boardId);
         const next = await refreshBoards();
         if (selected !== null && request.board.boardId === selected) {
-          // 画板已进入回收站：跳过 destroy 默认的 finalize 保存，
-          // 否则异步 finalize 会对已删除画板再次写库并报“画板不存在”。
-          rendererRef.current?.destroy(false);
-          rendererRef.current = null;
+          // 画板已进入回收站：对旧画板跳过 finalize 保存（否则会对已删除画板再次写库）。
+          // 渲染器保持挂载，只切换到回退画板或清空。
+          const current = rendererRef.current;
           setSelected(null);
-          setView(null);
           setInteraction(DEFAULT_INTERACTION);
           const fallback = next[0];
           if (fallback) {
+            const loaded = await pinBoardApi.loadPinBoard(fallback.boardId);
+            await current?.loadBoard(
+              loaded,
+              getBoardSession(artworkId, loaded.boardId),
+              false,
+            );
             setSelected(fallback.boardId);
             setSelectedBoardId(artworkId, fallback.boardId);
-            setView(await pinBoardApi.loadPinBoard(fallback.boardId));
+            setView(loaded);
+          } else {
+            await current?.unloadBoard(false);
+            setView(null);
           }
         }
       } else if (request.kind === "permanent-delete") {
@@ -1438,29 +1500,32 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           onDragLeave={handleStageDragLeave}
           onDrop={handleStageDrop}
         >
-          {view
-            ? <GpuCanvas
-              view={view}
-              artworkId={artworkId}
-              arrangementGapCssPixels={settings.arrangementGapPx}
-              autosaveEnabled={settings.autosave}
-              cacheBudgets={textureBudgetsForLevel(settings.textureCacheLevel)}
-              active={active}
-              setStatus={setStatus}
-              onRenderer={setRenderer}
-              onState={handleRendererState}
-              onContextMenu={handleRendererContextMenu}
-            />
-            : boards === null
-              ? <LoaderCircle className="spin" size={24} />
-              : (
-                <div className="pin-board-stage-hint" role="status">
-                  <Images size={22} />
-                  <span>{boards.length === 0
-                    ? "尚无画板，点击右上角“新建画板”创建"
-                    : "当前未选择素材板，请从左侧列表选择画板"}</span>
-                </div>
-              )}
+          <GpuCanvas
+            view={view}
+            artworkId={artworkId}
+            arrangementGapCssPixels={settings.arrangementGapPx}
+            autosaveEnabled={settings.autosave}
+            cacheBudgets={textureBudgetsForLevel(settings.textureCacheLevel)}
+            active={active}
+            setStatus={setStatus}
+            onRenderer={setRenderer}
+            onState={handleRendererState}
+            onContextMenu={handleRendererContextMenu}
+          />
+          {!view && (
+            <div className="pin-board-stage-overlay" role="status">
+              {boards === null
+                ? <LoaderCircle className="spin" size={24} />
+                : (
+                  <div className="pin-board-stage-hint">
+                    <Images size={22} />
+                    <span>{boards.length === 0
+                      ? "尚无画板，点击右上角“新建画板”创建"
+                      : "当前未选择素材板，请从左侧列表选择画板"}</span>
+                  </div>
+                )}
+            </div>
+          )}
           {view && interaction.locked && (
             <span className="pin-board-lock-indicator" title="画板已锁定" aria-label="画板已锁定">
               <Lock size={16} />

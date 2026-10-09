@@ -241,7 +241,8 @@
   pointer-events: none;
 }
 
-.pin-board-canvas-shell { position: relative; width: 100%; height: 100%; overflow: hidden; background: var(--pin-board-bg); }
+.pin-board-canvas-shell { position: absolute; inset: 0; overflow: hidden; background: var(--pin-board-bg); }
+.pin-board-stage-overlay { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; pointer-events: none; }
 .pin-board-canvas { display: block; width: 100%; height: 100%; cursor: crosshair; outline: 0; touch-action: none; background: var(--pin-board-bg); }
 .pin-board-canvas.locked { cursor: grab; }
 .pin-board-canvas.dragging { cursor: grabbing; }
