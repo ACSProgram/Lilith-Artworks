@@ -53,15 +53,16 @@
 
 ## 三、待维护者决策
 
-- **Lilith Client 侧旧实现**：Client 仍保留原有的素材板模块，是否移除由维护者在本模块验收后
-  决定。
 - **旧数据迁移声明**：当前测试阶段不声明旧仓库/旧设置迁移支持。若未来要支持，需按
   `docs/guides/release-policy.md` 补齐迁移链、降级提示与人工验收项。
-- **正式版推进**：`v0.2.0-rc.1` 已打标签。是否推进到 `0.2.0` 正式版，取决于干净 Windows 用户
+- **正式版推进**：`v0.2.0-rc.2` 已打标签。是否推进到 `0.2.0` 正式版，取决于干净 Windows 用户
   环境的桌面验收（`docs/guides/release-policy.md` 的人工门槛）与后续 rc 批次结论。
-- **文档遗留项**：`alpha.1`–`alpha.4` 段含切版本之后的改动（按旧规则所为），是否追溯重排；
-  `docs/user/stress-test-report.md` 的被测版本仍记为 `0.2.0-alpha.4`（尚未重跑），是否标注；
-  该用户文档仍含运行命令与档位等开发内容，是否下沉到 `docs/guides/validation.md`。
+- **文档遗留项**：`docs/user/stress-test-report.md` 的被测版本仍记为 `0.2.0-alpha.4`（尚未重
+  跑，正式版发布前重跑），是否标注；该用户文档仍含运行命令与档位等开发内容，是否下沉到
+  `docs/guides/validation.md`。
+
+> 已处置：Lilith Client 侧旧素材板模块不属本项目；CHANGELOG `alpha.1`–`alpha.4` 段不追溯重
+> 排。决策记录见 `archive/handoff-log-2026-10-09.md`。
 
 ## 四、纪律约束（非待办，但必须遵守）
 

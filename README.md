@@ -6,8 +6,8 @@
 
 ## 当前状态
 
-当前版本 `0.2.0-rc.1`，使用 repository schema v4 和应用标识 `com.lilith.artworks`，最新发布
-标签为 `v0.2.0-rc.1`。版本号只在切版本时更新；切版本之后的改动记录在
+当前版本 `0.2.0-rc.2`，使用 repository schema v4 和应用标识 `com.lilith.artworks`，最新发布
+标签为 `v0.2.0-rc.2`。版本号只在切版本时更新；切版本之后的改动记录在
 [CHANGELOG.md](CHANGELOG.md) 的 `Unreleased` 段。
 
 四个领域模块及其跨模块工作流均已实现：

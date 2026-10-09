@@ -9,7 +9,7 @@ the five version fields move together, so the version number lags the work until
 the cut. A version can exist without a tag: tagging is a separate, later release
 decision, so an untagged version is transitional.
 
-## Unreleased
+## 0.2.0-rc.2 - 2026-10-09
 
 ### Added
 
