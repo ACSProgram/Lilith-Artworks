@@ -5,10 +5,12 @@
 - 版本使用语义化版本；`0.x` 阶段允许在次版本中调整尚未稳定的本地数据契约。只有在项目声明支持旧数据时，才必须提供显式 schema 迁移；当前测试阶段不声明旧数据迁移支持。
 - `main` 只接收边界清晰、文档同步且 Windows CI 通过的变更。
 - 候选版本使用 `vX.Y.Z-rc.N` 标签；正式版本使用 `vX.Y.Z` 标签。
-- 已发布的标签、安装包和版本身份不可复用或替换。标签后任何代码、schema、应用标识或签名声明变化都必须递增版本，并同步 `package.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 和锁文件。
-- 内部测试版（`0.2.0-alpha.N`）的版本号**滞后递增**：`alpha.N` 打上发布标签后，后续改动并入现有 `alpha.N` 的 CHANGELOG 段、版本号保持不变；累计足够改动后由维护者单独递增到 `alpha.N+1`。递增版本号本身不需要标签、不需要发布、不触发发布门槛（`alpha.1`、`alpha.2` 与 2026-10-04 的 `alpha.4` 均按此办理）；是否打标签、是否发布始终由维护者单独决定，一经公开即不可变。
-- 候选版（`0.2.0-rc.N`）的版本号同样可以先于标签递增：未打标签的 `rc.N` 只是版本号，不触发自动门槛与人工门槛；一旦打上 `vX.Y.Z-rc.N` 标签，它就是公开候选版，必须通过「自动门槛」与「人工门槛」的全部项目。打标签与发布仍由维护者单独决定。
-- 递增版本号（alpha 与 rc）的固定动作：同步 `package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock`、`src-tauri/tauri.conf.json` 五处版本字段；在 `CHANGELOG.md` 新建带日期的版本小节；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
+- 版本号**滞后**于工作：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 五处版本字段始终等于最近一次切版本时的值，日常改动不改动它们。
+- `CHANGELOG.md` 顶部维护唯一的 `## Unreleased` 暂存段：当前版本落定之后的全部改动都记入该段，不写回已带日期的版本小节。带日期的小节一经建立即冻结。
+- 维护者决定切版本时的固定动作：把 `## Unreleased` 改名为 `## X.Y.Z - 日期`；同步上述五处版本字段；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
+- 切版本不等于发布，也不触发任何门槛；是否打标签由维护者单独决定。一旦打上候选或正式标签，该版本即公开，必须通过「自动门槛」与「人工门槛」的全部项目。
+- 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.2`、`0.2.0-alpha.4`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
+- 已发布的标签、安装包和版本身份不可复用或替换。标签之后的任何代码、schema、应用标识或签名声明变化都必须切到新版本并打新标签。
 - 源码仓库可公开不等于安装包可正式发布。每个二进制产物必须能追溯到唯一、干净且不可变的标签。
 
 ## 自动门槛
@@ -54,7 +56,7 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 ## 产物与发布
 
 - Windows 发行产物为 Tauri NSIS 安装包；版本必须与 `package.json`、`src-tauri/Cargo.toml` 和 `src-tauri/tauri.conf.json` 一致。
-- 发布说明由 `tools/release/write-release-notes.mjs` 从 `CHANGELOG.md` 的当前版本段生成，并列出 schema 版本、已知限制和人工验收结果；标签前必须把版本从 `Unreleased` 落为带日期的小节。
+- 发布说明由 `tools/release/write-release-notes.mjs` 从 `CHANGELOG.md` 的带日期版本段生成，并列出 schema 版本、已知限制和人工验收结果；`Unreleased` 不参与生成，因此打标签前必须先在切版本动作中把 `Unreleased` 落为带日期的小节。
 - 公布安装包前记录 SHA-256。Authenticode 签名为可选项：配置了证书输入时安装包和主程序必须完成签名、可信时间戳和签名复核；未配置时允许未签名发布，但发布说明必须显著披露未签名状态及 SmartScreen 影响。
 - 发布资产应同时包含校验和、目标依赖许可包、SBOM 和构建来源证明；release workflow 必须由标签触发并在干净 Windows 环境构建。
 - `.github/workflows/release.yml` 校验标签、版本、标识和 schema，构建后静默安装 NSIS 并断言版本及法律资源，生成 CycloneDX SBOM、SHA-256 和 GitHub artifact attestation，最后创建草稿 release。缺少签名输入时走未签名构建，发布说明披露未签名；签名输入为 `WINDOWS_CERTIFICATE_BASE64`、`WINDOWS_CERTIFICATE_PASSWORD` 和 `WINDOWS_TIMESTAMP_URL`，三者必须同时提供。

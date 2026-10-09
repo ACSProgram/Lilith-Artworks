@@ -12,6 +12,7 @@
 - 样式问题：业务模块样式优先读对应 `src/styles/<module>.css`；`src/styles/index.css` 只保留基础控件和仍未拆出的共享规则。
 - 日志与诊断（分档、新增日志的取舍、格式约定）：读 `docs/guides/logging.md`，再进入 `src/shared/diagnostics.ts` 或 `src-tauri/src/app/diagnostics.rs`。
 - 构建与验证：只读 `docs/guides/validation.md`，按用户要求选择轻量检查或完整验证；压力测试只随发布运行，不在日常开发或收尾阶段执行。
+- 版本、CHANGELOG 与发布口径：只读 `docs/guides/release-policy.md`。
 - 本轮尚未验收的工作：读 `docs/planning/current-handoff.md`；未完成事项查 `docs/planning/todo.md`，不要从旧聊天记录重建范围。
 
 ## 边界
@@ -28,6 +29,7 @@
 - 当前有效事实写入 `docs/architecture/`、`docs/modules/` 和 `docs/guides/`。
 - 当前批次状态与人工验收结果写入 `docs/planning/current-handoff.md`；未完成事项写入 `docs/planning/todo.md`；已完成或被替代的计划移入 `docs/planning/archive/`。
 - 代码入口或契约改变时同步更新模块文档。不要把“计划实现”写成“已经验收”。
+- 版本号**滞后**：日常改动不改动五处版本字段，也不新建版本小节；改动一律写入 `CHANGELOG.md` 顶部的 `## Unreleased` 暂存段，绝不写回带日期的版本小节。切版本与打标签由用户单独决定，完整口径见 `docs/guides/release-policy.md`。
 - 默认做与改动匹配的类型、格式和静态检查；完整编译、GUI 流程与大文件测试由用户明确安排。`src-tauri/tests/` 下的压力测试（取消、崩溃、大文件端到端）只在发布前由用户显式发起，日常开发与任何收尾阶段都不运行，详见 `docs/guides/validation.md` 的「压力测试：只在发布前运行」。
 
 ## Git 管理

@@ -5,6 +5,29 @@
 本文件只记录当前批次状态与人工验收结果。未完成事项见 `todo.md`；已完成或被替代的批次记录
 见 `archive/`。
 
+## 版本口径修正与用户文档分离（已实现，待人工验收）
+
+按维护者的版本规则消除全部版本错位，并把规则写入文档，避免再出现「已发布版本的 CHANGELOG 段
+被继续追加」。
+
+- **规则**：版本号**滞后**（五处版本字段只在切版本时更新）；`CHANGELOG.md` 顶部维护唯一的
+  `## Unreleased` 暂存段，切版本时改名为带日期小节；切版本不等于发布，是否打标签由维护者单独
+  决定，未打标签的版本是过渡版本。全文见 `docs/guides/release-policy.md`，并在 `AGENTS.md`
+  增加硬约束与路由。
+- **修正**：把 `v0.2.0-rc.1` 打标签之后并入 `0.2.0-rc.1` 段的 7 条改动移入 `## Unreleased`，
+  rc.1 段随之冻结（18→11 条，`CHANGELOG.md` 总条目数不变）。
+- **版本错位修正**：`README.md` 最新标签改为 `v0.2.0-rc.1`；本文与 `todo.md` 的「未打标签」
+  表述改为「已打标签，待推进正式版」；`SECURITY.md` 受支持版本 `0.1.x` → `0.2.x`；
+  `docs/modules/pin-board.md` 澄清素材板表自仓库 schema v2 引入。
+- **面向用户文档分离**：`README.md`、`SECURITY.md`、`THIRD_PARTY_NOTICES.md`、
+  `docs/user/stress-test-report.md` 去除自我描述、营销语气与「应当 / 不要」类要求，内部批次
+  状态不再进入用户文档。
+
+**验证**：`node tools/release/verify-metadata.mjs` 通过（v0.2.0-rc.1、schema v4）；`CHANGELOG.md`
+条目集合前后一致（63→63）；面向用户文档的第二人称与营销词扫描为 0。
+
+**待人工确认**：措辞与规则是否符合预期；遗留决策项见 `todo.md` 第三节。
+
 ## 日志与诊断体系（已实现，待人工验收）
 
 把日志升级为可复用的诊断体系，供后续定位「切换作品/切换素材板卡死」与「托盘退出超时」复用。
@@ -99,7 +122,7 @@ WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rus
 
 **已知取舍**：切换即全释放纹理，因此疯狂切换时会出现 2–4 s 的**异步**纹理装载批次（含 DDS 解码与磁盘 IO 等待，而非主线程阻塞——事件循环健康、看门狗无告警）。如后续要更顺滑的切回，可评估文档 `todo.md` 中的「跨画板保留纹理」方向。
 
-## 本轮批次：素材板结算边界、文档整理与 0.2.0-rc.1 版本递增（已实现，待人工验收）
+## 素材板结算边界、文档整理与 0.2.0-rc.1 版本切分（已实现，待人工验收）
 
 ### 素材板运行时结算（P1）
 
@@ -116,9 +139,9 @@ WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rus
 `docs/README.md` 与本文，把 2026-09-12 至 2026-10-08 的历史交接日志归档为
 `archive/handoff-log-2026-09-12-to-2026-10-08.md`，并精简各文档的元叙述与重复内容。
 
-### 版本递增
+### 版本切分
 
-应用版本递增到 `0.2.0-rc.1`（仅版本号，不建 tag、不发布）。
+应用版本切到 `0.2.0-rc.1`（切版本动作本身只改版本号；`v0.2.0-rc.1` 标签由维护者后续单独创建）。
 
 **验证**：`npm test`、`npx tsc --noEmit`、`cargo fmt --check`、`cargo test --lib`、
 `git diff --check`、`node tools/release/verify-metadata.mjs` 通过；新增「切换仓库前先结算素材板」
@@ -129,8 +152,8 @@ WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rus
 
 ## 当前基线
 
-- 版本 `0.2.0-rc.1`，repository schema v4，应用标识 `com.lilith.artworks`。
-- 版本与发布口径见 `docs/guides/release-policy.md`。
+- 版本 `0.2.0-rc.1`（已打 `v0.2.0-rc.1` 标签），repository schema v4，应用标识 `com.lilith.artworks`。
+- 版本口径（滞后版本号、`Unreleased` 暂存段与标签的关系）见 `docs/guides/release-policy.md`；切版本之后的改动记录在 `CHANGELOG.md` 的 `## Unreleased` 暂存段。
 - 项目定位：平面美术个人项目的资源、版本管理与发布工具。领域模块为 Library（作品树）、
   History/Backup（分支与增量历史）、Authenticity（成品与 C2PA/TrustMark）、Pin-board（素材板）。
 
@@ -175,6 +198,7 @@ WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rus
 
 | 批次 | 内容 | 验证 |
 | --- | --- | --- |
+| 版本口径修正与用户文档分离 | 滞后版本号与 `Unreleased` 暂存段规则入文档；修正 README/todo/current-handoff/`SECURITY.md` 版本错位；用户文档去 AI 味与分离 | `verify-metadata` 通过；`CHANGELOG.md` 条目数不变 |
 | 素材板切换卡死修复 | 复用渲染器与 GPU 设备（`create`/`loadBoard` 拆分、`GpuCanvas` 常驻、工作区 key 下移）与设备丢失限流自动重建 | 维护者实测；`npm test` 145 |
 | 统一清理体系 A–F | 画板结算改提交后清理、历史清理入队、未引用文件扫描、灾备暂存目录清扫、完整性扫描覆盖画板 DDS、设置页可观测 UI | `cargo test --lib` 151；`npm test` 121 |
 | 压力测试批次 1–8 | 无头命令行入口与 A–R 组压力测试：取消边界、跨进程强杀、事务中途崩溃、大文件端到端、规模与灾备、参数边界、崩溃孤儿回收、画板 DDS、认证发布、损坏恢复 | 全套实测通过，见 `docs/user/stress-test-report.md` |

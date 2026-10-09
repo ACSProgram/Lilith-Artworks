@@ -3,59 +3,16 @@
 All notable changes are recorded here. The project uses semantic versioning
 before and after the first stable release.
 
-## 0.2.0-rc.1 - 2026-10-08
+Changes since the last stamped version are collected under `Unreleased`. When
+the maintainer cuts a version, that section becomes a dated version heading and
+the five version fields move together, so the version number lags the work until
+the cut. A version can exist without a tag: tagging is a separate, later release
+decision, so an untagged version is transitional.
+
+## Unreleased
 
 ### Added
 
-- High-resolution region loading for the publication quality preview. A new
-  `preview_authenticity_tile` command crops a rectangle out of the source at
-  full resolution and returns it bounded by a 64–4096 px edge, reusing the
-  shared image resource budget and validating the crop rectangle and decoded
-  image size. Its `source` field selects the cached unsigned preview JPEG
-  (validated against the cache token and metadata) or the branch final
-  artifact, and a single-entry decoded-source cache keeps panning cheap.
-  Tiles are encoded as lossless PNG: the preview exists to reveal JPEG and
-  TrustMark losses, so writing the crop back as lossy JPEG would add
-  compression artifacts that the published output does not have. The preview
-  dialog requests debounced viewport crops only while the thumbnail is
-  enlarged, sizes the requested output edge to the tile's on-screen footprint
-  so a source pixel lands on exactly one screen pixel, and snaps each crop
-  rect to a "visible span × margin" grid so small pans reuse the tile they
-  already have. Tiles overlay the base image at their source-rect position
-  through an inline style and are cached client-side per source, rect, and
-  resolution. Only a tile whose key matches the current rect is rendered, so
-  panning or zooming never leaves a misaligned tile behind. The 2400 px
-  thumbnail no longer caps how sharp the enlarged export preview and
-  "显示原图" comparison can get.
-- Numeric-only zoom for the publication quality preview, measured in source
-  pixels. The dialog no longer has a separate "fit" mode: zoom is always a
-  number and 100% means one source pixel per on-screen CSS pixel, so canvas
-  dragging works from the moment the preview opens and the zoom readout
-  matches what an image viewer would show. "适应窗口" resets the numeric zoom
-  to the current fit ratio, and the wheel handler is attached as a
-  non-passive native listener so zooming no longer scrolls the outer
-  container.
-- Drag-and-drop import for the identify page. Dropping an image file onto
-  the left preview panel reads its bytes with `FileReader` and hands them to
-  a new `stage_authenticity_input` command, which writes the file into a
-  session directory under the system temp dir, adds it to the filesystem
-  scope, and returns the path for the existing external-image preview and
-  identify flow. Only PNG, JPEG, WebP, and TIFF are accepted, failures
-  surface through the shared operation notice, and a drop overlay is shown
-  while dragging. The app also cancels window-level `dragover`/`drop`
-  defaults so dropping a file never navigates the webview.
-- Per-record deletion for export certification records. A new
-  `delete_certification_record` command removes a single
-  `certification_records` row inside a transaction that first enqueues a
-  hash-checked repository-file cleanup intent for the record's stored JPG
-  copy, then runs the cleanup and reports leftovers through the existing
-  retry banner. The command resolves the owning branch for run-lock scoping
-  and executes under the exclusive backup run lock. The read-only record
-  view gains a "more actions" menu next to "退出查看" with a red
-  "删除本记录" entry that opens an in-app confirmation dialog modeled on
-  the publication deletion dialog; the first-exported JPG always stays at
-  its original path. Deleting a record exits the view and refreshes the
-  branch record list.
 - A reusable logging and diagnostics layer. The log plugin no longer fixes its
   level at build time: `tauri-plugin-log` filters through fern's static
   dispatch level, so a level chosen at build time could not be raised later.
@@ -148,25 +105,6 @@ before and after the first stable release.
   released, only the canvas's current GPU owner may unconfigure the context,
   and the destroy log records the in-flight texture count.
 
-- Pin-board rename no longer breaks the open board's saves. Renaming a
-  board used to advance its stored `revision` while the open renderer kept
-  the revision it had loaded, so every later save failed the revision
-  check: manual saves and autosaves never recovered, paste and import were
-  gated by the same failing save, switching boards blocked on the failing
-  finalize, and closing the app or leaving the artwork silently dropped
-  unsaved edits. Only an app restart reloaded a fresh revision. Rename now
-  updates `name` and `updated_ms` without touching `revision`, matching
-  the reorder precedent that list metadata is not board content; the
-  rename repository test asserts the revision stays unchanged.
-- Switching the repository now settles the open pin board before releasing the
-  previous repository. Leaving the workspace only called the renderer's
-  fire-and-forget `destroy()`, so the last edit could land on an already
-  released repository and be lost. The settings save now awaits
-  `preparePinBoardRuntimeChange()` before saving a changed repository path; a
-  failed settlement aborts the switch, keeps the old repository, and surfaces
-  the failure. The shutdown handshake path is unchanged, and switching artwork
-  within one repository still leaves the repository open.
-
 ### Changed
 
 - Pin-board device loss now recovers automatically within a bounded budget.
@@ -181,22 +119,118 @@ before and after the first stable release.
   replaces the previous report-only behavior; reusing the device also releases
   the open board's textures on every switch instead of keeping them resident.
 
-- The application version is incremented to `0.2.0-rc.1`. The bump is a
-  version-string change only: no tag, no release, no behavior change. Whether
-  to tag and publish `v0.2.0-rc.1` remains a separate maintainer decision;
-  `docs/guides/release-policy.md` now states that an untagged `rc.N` bump
-  carries no gate, while a tagged `vX.Y.Z-rc.N` is a public candidate that must
-  pass every automatic and manual gate.
+- Changelog and versioning now follow a lagging model, and user-facing documents
+  are separated from developer documents. The five version fields keep the last
+  cut version until the maintainer cuts the next one; every change since the cut
+  accumulates under a single `## Unreleased` section, which a version cut renames
+  to a dated heading; tagging (the actual release) stays a separate, later
+  decision, so an untagged version is transitional. `docs/guides/release-policy.md`
+  states the model and `AGENTS.md` enforces it. The `0.2.0-rc.1` section is frozen:
+  the seven entries committed after the `v0.2.0-rc.1` tag moved to `Unreleased`.
+  Stale version references are corrected (`README.md` names `v0.2.0-rc.1` as the
+  latest tag, `SECURITY.md` lists `0.2.x` as the supported line,
+  `docs/modules/pin-board.md` notes the pin-board tables arrived at repository
+  schema v2). `README.md`, `SECURITY.md`, `THIRD_PARTY_NOTICES.md`, and
+  `docs/user/stress-test-report.md` drop self-description, marketing phrasing,
+  and imperative requirements.
+
+## 0.2.0-rc.1 - 2026-10-08
+
+### Added
+
+- High-resolution region loading for the publication quality preview. A new
+  `preview_authenticity_tile` command crops a rectangle out of the source at
+  full resolution and returns it bounded by a 64–4096 px edge, reusing the
+  shared image resource budget and validating the crop rectangle and decoded
+  image size. Its `source` field selects the cached unsigned preview JPEG
+  (validated against the cache token and metadata) or the branch final
+  artifact, and a single-entry decoded-source cache keeps panning cheap.
+  Tiles are encoded as lossless PNG: the preview exists to reveal JPEG and
+  TrustMark losses, so writing the crop back as lossy JPEG would add
+  compression artifacts that the published output does not have. The preview
+  dialog requests debounced viewport crops only while the thumbnail is
+  enlarged, sizes the requested output edge to the tile's on-screen footprint
+  so a source pixel lands on exactly one screen pixel, and snaps each crop
+  rect to a "visible span × margin" grid so small pans reuse the tile they
+  already have. Tiles overlay the base image at their source-rect position
+  through an inline style and are cached client-side per source, rect, and
+  resolution. Only a tile whose key matches the current rect is rendered, so
+  panning or zooming never leaves a misaligned tile behind. The 2400 px
+  thumbnail no longer caps how sharp the enlarged export preview and
+  "显示原图" comparison can get.
+- Numeric-only zoom for the publication quality preview, measured in source
+  pixels. The dialog no longer has a separate "fit" mode: zoom is always a
+  number and 100% means one source pixel per on-screen CSS pixel, so canvas
+  dragging works from the moment the preview opens and the zoom readout
+  matches what an image viewer would show. "适应窗口" resets the numeric zoom
+  to the current fit ratio, and the wheel handler is attached as a
+  non-passive native listener so zooming no longer scrolls the outer
+  container.
+- Drag-and-drop import for the identify page. Dropping an image file onto
+  the left preview panel reads its bytes with `FileReader` and hands them to
+  a new `stage_authenticity_input` command, which writes the file into a
+  session directory under the system temp dir, adds it to the filesystem
+  scope, and returns the path for the existing external-image preview and
+  identify flow. Only PNG, JPEG, WebP, and TIFF are accepted, failures
+  surface through the shared operation notice, and a drop overlay is shown
+  while dragging. The app also cancels window-level `dragover`/`drop`
+  defaults so dropping a file never navigates the webview.
+- Per-record deletion for export certification records. A new
+  `delete_certification_record` command removes a single
+  `certification_records` row inside a transaction that first enqueues a
+  hash-checked repository-file cleanup intent for the record's stored JPG
+  copy, then runs the cleanup and reports leftovers through the existing
+  retry banner. The command resolves the owning branch for run-lock scoping
+  and executes under the exclusive backup run lock. The read-only record
+  view gains a "more actions" menu next to "退出查看" with a red
+  "删除本记录" entry that opens an in-app confirmation dialog modeled on
+  the publication deletion dialog; the first-exported JPG always stays at
+  its original path. Deleting a record exits the view and refreshes the
+  branch record list.
+
+### Fixed
+
+- Pin-board rename no longer breaks the open board's saves. Renaming a
+  board used to advance its stored `revision` while the open renderer kept
+  the revision it had loaded, so every later save failed the revision
+  check: manual saves and autosaves never recovered, paste and import were
+  gated by the same failing save, switching boards blocked on the failing
+  finalize, and closing the app or leaving the artwork silently dropped
+  unsaved edits. Only an app restart reloaded a fresh revision. Rename now
+  updates `name` and `updated_ms` without touching `revision`, matching
+  the reorder precedent that list metadata is not board content; the
+  rename repository test asserts the revision stays unchanged.
+
+- Switching the repository now settles the open pin board before releasing the
+  previous repository. Leaving the workspace only called the renderer's
+  fire-and-forget `destroy()`, so the last edit could land on an already
+  released repository and be lost. The settings save now awaits
+  `preparePinBoardRuntimeChange()` before saving a changed repository path; a
+  failed settlement aborts the switch, keeps the old repository, and surfaces
+  the failure. The shutdown handshake path is unchanged, and switching artwork
+  within one repository still leaves the repository open.
+
+### Changed
+
+- The application version is incremented to `0.2.0-rc.1`. The bump changes only
+  the version string and does not by itself tag or release anything. Tagging and
+  publishing `v0.2.0-rc.1` is a separate, later maintainer step;
+  `docs/guides/release-policy.md` states that an untagged `rc.N` carries no
+  gate, while a tagged `vX.Y.Z-rc.N` is a public candidate that must pass every
+  automatic and manual gate.
+
 - The documentation set is split by audience. User-facing documents move to
   `docs/user/` (`stress-test-report.md`); `architecture/`, `modules/`,
   `guides/`, and `planning/` stay developer- and agent-facing. The 2026-09-12
   to 2026-10-08 handoff log is archived under `docs/planning/archive/`, the
   current handoff and todo list are condensed, and `README.md` and
   `docs/README.md` now state the audience split.
+
 - A `.gitattributes` excludes the generated third-party license bundle
   (`licenses/THIRD_PARTY_LICENSES.html`) from GitHub language statistics and
   marks the bundled ONNX models as binary. Without it the ~4.6 MB generated
   HTML dominated the repository's reported language share.
+
 - The `vitest` devDependency moves from 3.x to 4.1.11 to clear the advisories
   that had started failing the Windows CI dependency-audit job: tinypool
   prototype pollution leading to RCE (GHSA-5gmw-xhrv-c9v3,
