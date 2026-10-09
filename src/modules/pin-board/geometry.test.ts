@@ -10,6 +10,7 @@ import {
   quadIntersectsBounds,
   rotateQuad,
   screenToWorld,
+  snapRotationDelta,
   viewportBounds,
   worldToScreen,
   type Quad,
@@ -60,6 +61,36 @@ describe("pin-board geometry", () => {
     expect(pointInQuad([20, 20], rotated)).toBe(false);
     expect(quadIntersectsBounds(rotated, { minX: 8, minY: -2, maxX: 16, maxY: 2 }))
       .toBe(true);
+  });
+
+  it("snaps the absolute rotation angle so a tilted image can return to 0°", () => {
+    const square: Quad = [[0, 0], [100, 0], [100, 100], [0, 100]];
+    const tilted = rotateQuad(square, (7 * Math.PI) / 180, [50, 50]);
+
+    // 指针拖回 0° 附近（还差一点没到）。增量吸附会停在 7°+n×15°，绝对吸附应回到 0°。
+    const delta = snapRotationDelta(tilted, (-7 * Math.PI) / 180 + 0.005);
+    const snapped = rotateQuad(tilted, delta, [50, 50]);
+    const angle = Math.atan2(
+      snapped[1][1] - snapped[0][1],
+      snapped[1][0] - snapped[0][0],
+    );
+
+    expect(angle).toBeCloseTo(0, 9);
+  });
+
+  it("snaps a tilted image to the nearest 15° multiple rather than keeping the tilt", () => {
+    const square: Quad = [[0, 0], [100, 0], [100, 100], [0, 100]];
+    const tilted = rotateQuad(square, (7 * Math.PI) / 180, [50, 50]);
+
+    // 拖到 16° 附近：应落到 15°，而不是 7° + 15° = 22°。
+    const delta = snapRotationDelta(tilted, (9 * Math.PI) / 180);
+    const snapped = rotateQuad(tilted, delta, [50, 50]);
+    const angle = Math.atan2(
+      snapped[1][1] - snapped[0][1],
+      snapped[1][0] - snapped[0][0],
+    );
+
+    expect((angle * 180) / Math.PI).toBeCloseTo(15, 6);
   });
 
   it("arranges images at a common height around the requested center", () => {

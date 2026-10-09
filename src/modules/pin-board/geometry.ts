@@ -257,6 +257,26 @@ export function rotateQuad(quad: Quad, radians: number, center: Point): Quad {
   });
 }
 
+/** 旋转吸附步长：15°。Shift 旋转会把图片的绝对角度吸附到它的整数倍。 */
+export const ROTATION_SNAP_RADIANS = Math.PI / 12;
+
+/**
+ * 把 Shift 旋转的拖拽增量换算成「绝对角度吸附」后的增量。
+ *
+ * 传入图片旋转前的四角 `points` 与本次拖拽的增量 `delta`，先推算出图片的目标
+ * 绝对角度，再吸附到最近的 `ROTATION_SNAP_RADIANS` 整数倍，最后反推回需要施加
+ * 的增量。与「对增量取整」不同，即使图片原本已带偏角（如 7°），也能被精确转回
+ * 0°，不会恒留偏角。
+ */
+export function snapRotationDelta(points: Quad, delta: number): number {
+  const base = Math.atan2(
+    points[1][1] - points[0][1],
+    points[1][0] - points[0][0],
+  );
+  const snapped = Math.round((base + delta) / ROTATION_SNAP_RADIANS) * ROTATION_SNAP_RADIANS;
+  return snapped - base;
+}
+
 export function imagesCenter(images: Pick<PinBoardImage, "points">[]): Point {
   if (images.length === 0) return [0, 0];
   const centers = images.map((image) => quadCenter(image.points));

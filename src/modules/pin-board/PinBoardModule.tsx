@@ -40,6 +40,7 @@ import {
   useRef,
   useState,
 } from "react";
+import type { DragEvent as ReactDragEvent } from "react";
 import { errorMessage } from "../../shared/errors";
 import { ConfirmDialog, type ConfirmView } from "../../shared/ConfirmDialog";
 import { diagnosticsLog } from "../../shared/diagnostics";
@@ -109,6 +110,12 @@ function actionTitle(action: string, shortcut: string): string {
 }
 
 const IMAGE_PATH_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif|tga|dds)$/i;
+
+/**
+ * 拖入导入走「原始字节解码」路径（`import_pin_board_clipboard_image`），只能接受
+ * 可被内容嗅探识别的位图格式；DDS/TGA 需要文件路径，仍通过「导入图片」选择器处理。
+ */
+const DROP_IMAGE_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif)$/i;
 
 /** 侧栏画板拖放排序使用的自定义 dataTransfer 类型。 */
 const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
@@ -504,6 +511,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [view, setView] = useState<PinBoardView | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  /** 拖入文件悬停在画布上时显示投放提示。 */
+  const [dropActive, setDropActive] = useState(false);
   const [sidebar, setSidebar] = useState(getSidebarVisible);
   const [fullscreen, setFullscreen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
@@ -604,6 +613,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     if (!active) {
       setContextMenu(null);
       setListContextMenu(null);
+      setDropActive(false);
     }
   }, [active]);
 
@@ -737,20 +747,22 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const replaceAfterImageMutation = useCallback(async (
     action: (renderer: PinBoardRenderer, revision: string) => Promise<PinBoardMutationResult>,
     success: (count: number) => string,
-  ) => {
+  ): Promise<PinBoardMutationResult | null> => {
     const current = rendererRef.current;
-    if (!current || current.interactionState.locked) return;
+    if (!current || current.interactionState.locked) return null;
     const sequence = ++loadSequence.current;
-    if (!await current.save() || sequence !== loadSequence.current) return;
+    if (!await current.save() || sequence !== loadSequence.current) return null;
     try {
       const result = await action(current, current.boardRevision);
-      if (sequence !== loadSequence.current) return;
+      if (sequence !== loadSequence.current) return null;
       setContextMenu(null);
       current.applyMutationResult(result.view, result.imageIds);
       setInteraction(current.interactionState);
       setStatus(success(result.imageIds.length));
+      return result;
     } catch (error) {
       if (sequence === loadSequence.current) setStatus(errorMessage(error));
+      return null;
     }
   }, []);
 
@@ -848,6 +860,88 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       transferBusyRef.current = false;
     }
   }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
+
+  /**
+   * 拖放导入：把拖进画板的图片文件读成字节后逐个导入。窗口以 `dragDropEnabled: false`
+   * 运行（HTML5 拖放可用），浏览器不再暴露文件系统路径，因此只能走字节导入命令；
+   * 多张一起拖入时按前一张的显示宽度向右排开，避免完全重叠。
+   */
+  const importDroppedFiles = useCallback(async (
+    files: FileList,
+    clientX: number,
+    clientY: number,
+  ) => {
+    const current = rendererRef.current;
+    if (!current || selected === null || transferBusyRef.current) return;
+    if (current.interactionState.locked) {
+      setStatus("画板已锁定，无法导入图片");
+      return;
+    }
+    const images = Array.from(files).filter((file) => DROP_IMAGE_PATTERN.test(file.name));
+    if (images.length === 0) {
+      setStatus("请拖入 PNG、JPEG、WebP、BMP 或 GIF 图片");
+      return;
+    }
+    transferBusyRef.current = true;
+    current.setPlacementFromClient(clientX, clientY);
+    const gap = current.placementGap(settings.arrangementGapPx);
+    let [centerX, centerY] = current.placementPoint;
+    try {
+      let imported = 0;
+      for (const file of images) {
+        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+        if (bytes.length === 0) continue;
+        setTransferProgress({ label: "正在导入图片", current: imported, total: images.length });
+        const result = await replaceAfterImageMutation(
+          (renderer, revision) => pinBoardApi.importPinBoardClipboardImage(
+            selected,
+            bytes,
+            centerX,
+            centerY,
+            revision,
+            setTransferProgress,
+          ),
+          (count) => `已导入 ${count} 张图片`,
+        );
+        if (!result) break;
+        imported += result.imageIds.length;
+        const placed = result.view.images.find((image) => result.imageIds.includes(image.imageId));
+        if (placed) {
+          centerX += Math.hypot(
+            placed.points[1][0] - placed.points[0][0],
+            placed.points[1][1] - placed.points[0][1],
+          ) + gap;
+        }
+      }
+      if (imported > 0) setStatus(`已导入 ${imported} 张图片`);
+    } catch (error) {
+      setStatus(errorMessage(error));
+    } finally {
+      setTransferProgress(null);
+      transferBusyRef.current = false;
+    }
+  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
+
+  const handleStageDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes("Files")) return;
+    // 必须取消默认行为，否则浏览器会把它当成导航并拒绝这次放置。
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    const current = rendererRef.current;
+    if (current && !current.interactionState.locked) setDropActive(true);
+  }, []);
+
+  const handleStageDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
+    setDropActive(false);
+  }, []);
+
+  const handleStageDrop = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    setDropActive(false);
+    if (event.dataTransfer.files.length === 0) return;
+    void importDroppedFiles(event.dataTransfer.files, event.clientX, event.clientY);
+  }, [importDroppedFiles]);
 
   const addText = useCallback(async (text: string, fontSize: number, color: string) => {
     const current = rendererRef.current;
@@ -1338,7 +1432,12 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <progress value={transferProgress.current} max={Math.max(transferProgress.total, 1)} />
           </div>
         )}
-        <div className="pin-board-stage">
+        <div
+          className={`pin-board-stage${dropActive ? " drop-active" : ""}`}
+          onDragOver={handleStageDragOver}
+          onDragLeave={handleStageDragLeave}
+          onDrop={handleStageDrop}
+        >
           {view
             ? <GpuCanvas
               view={view}
@@ -1366,6 +1465,12 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <span className="pin-board-lock-indicator" title="画板已锁定" aria-label="画板已锁定">
               <Lock size={16} />
             </span>
+          )}
+          {dropActive && (
+            <div className="pin-board-drop-hint" role="status">
+              <Upload size={15} />
+              <span>松开以导入图片</span>
+            </div>
           )}
         </div>
         {textDialogOpen && (

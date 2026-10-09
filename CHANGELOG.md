@@ -98,8 +98,30 @@ before and after the first stable release.
   `get_diagnostics_status` reports the mode, level, and log directory, and the
   tier policy, tags, and the rule for adding new logs are documented in
   `docs/guides/logging.md`.
+- Drag-and-drop image import for the pin board. The canvas area had no drop
+  handling while the window cancelled the webview's file-drop defaults, so
+  dropping an image onto a board did nothing. The stage now accepts dropped
+  image files, reads their bytes, and imports them through the existing
+  `import_pin_board_clipboard_image` command. Multiple files are placed to the
+  right of the previous one, the placement follows the drop point, and a small
+  pill plus a gradient frame mark the drop target without covering the canvas.
+  Because the window runs with `dragDropEnabled: false` (required for HTML5
+  drag and drop on Windows), the webview exposes no filesystem path, so only
+  byte-sniffable bitmaps (PNG, JPEG, WebP, BMP, GIF) are accepted; DDS and TGA
+  still import through the file picker.
+- Select-all for the pin board. `Ctrl`/`Cmd`+`A` now selects every non-deleted
+  image on the board instead of only the viewport, through a new
+  `renderer.selectAll()`. Selection is view state, so it neither reorders images
+  nor marks the board dirty, and it is ignored while the board is locked.
 
 ### Fixed
+
+- Shift rotation now snaps the absolute angle instead of the drag increment.
+  Snapping the increment meant an image already tilted by 7° could only ever
+  land on `7° + n×15°` and could never return to 0°. The renderer now derives
+  each image's target absolute angle from its pre-drag points, snaps it to the
+  nearest 15° multiple, and converts that back into an increment
+  (`geometry.snapRotationDelta`), so a tilted image rotates exactly back to 0°.
 
 - Texture reads no longer touch a released WebGPU device. Switching boards
   destroyed the renderer and its device while a texture IPC read could still be

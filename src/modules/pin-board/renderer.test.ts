@@ -506,3 +506,43 @@ describe("pin-board renderer autosave", () => {
     expect(renderer.destroyed).toBe(true);
   });
 });
+
+type SelectionTestRenderer = {
+  selectedIds: Set<number>;
+  selectAll: () => void;
+};
+
+describe("pin-board renderer select-all", () => {
+  const quad: PinBoardImage["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
+
+  it("selects every non-deleted image on the whole board", () => {
+    const refreshSelectionVisuals = vi.fn();
+    const renderer = rendererWith({
+      locked: false,
+      images: [boardImage(1, quad), boardImage(2, quad), boardImage(3, quad, true)],
+      selectedIds: new Set<number>([2]),
+      refreshSelectionVisuals,
+    });
+
+    (renderer as unknown as SelectionTestRenderer).selectAll();
+
+    const selected = [...(renderer as unknown as SelectionTestRenderer).selectedIds];
+    expect(selected.sort((left, right) => left - right)).toEqual([1, 2]);
+    expect(refreshSelectionVisuals).toHaveBeenCalledOnce();
+  });
+
+  it("ignores select-all while the board is locked", () => {
+    const refreshSelectionVisuals = vi.fn();
+    const renderer = rendererWith({
+      locked: true,
+      images: [boardImage(1, quad)],
+      selectedIds: new Set<number>(),
+      refreshSelectionVisuals,
+    });
+
+    (renderer as unknown as SelectionTestRenderer).selectAll();
+
+    expect([...(renderer as unknown as SelectionTestRenderer).selectedIds]).toEqual([]);
+    expect(refreshSelectionVisuals).not.toHaveBeenCalled();
+  });
+});
