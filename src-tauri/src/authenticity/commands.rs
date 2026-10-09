@@ -218,17 +218,29 @@ pub(crate) fn cancel_authenticity_operation(
     authenticity_state.request_cancel()
 }
 
-/// 质量预览高清局部：从缓存的无签名 JPEG 或分支最终成品裁剪一块源分辨率区域，
-/// 供预览在缩略图被降采样时叠加显示。
+/// 高清局部：从缓存的无签名 JPEG、分支最终成品或已授权的外部图片裁剪一块源分辨率
+/// 区域，供预览与框选放大镜叠加显示。
 ///
-/// 压缩源的令牌即缓存文件名，因此先做严格格式校验；解码复用统一资源预算。
+/// 压缩源的令牌即缓存文件名，因此先做严格格式校验；原始源按分支解析受控成品路径；
+/// 外部源与 `decode_authenticity` 使用同一条 `ensure_dialog_authorized` 授权检查，
+/// 再由流水线做仓库边界与矩形范围校验。解码复用统一资源预算。
 /// 不参与认证活动任务锁——预览对话框只在空闲时请求局部图，与发布流程并发时
 /// 由前端丢弃过期响应。
 #[tauri::command]
 pub(crate) async fn preview_authenticity_tile(
     request: super::model::PreviewTileRequest,
     app_state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
 ) -> AuthenticityResult<PreviewImage> {
+    if request.source == super::model::PreviewTileSource::External {
+        let path = request
+            .path
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| AuthenticityError::InvalidInput("缺少待识别图片路径".into()))?;
+        ensure_dialog_authorized(&window.fs_scope(), Path::new(path), "待识别图片")?;
+    }
     let app_state = app_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         app_state
@@ -561,5 +573,36 @@ fn recover_failed_artifact(root: &Path, cleanup_id: &str, error: String) -> Stri
             report.failures.len()
         ),
         Err(cleanup_error) => format!("{}；最终成品清理任务失败：{}", error, cleanup_error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 显式授权的作用域替身：只有被列出的路径才算已授权，用于验证外部源局部
+    /// 与 `decode_authenticity` 共用同一条路径检查。
+    struct StubScope(Vec<PathBuf>);
+
+    impl PathAuthorization for StubScope {
+        fn is_path_authorized(&self, path: &Path) -> bool {
+            self.0.iter().any(|allowed| allowed == path)
+        }
+    }
+
+    #[test]
+    fn external_tile_source_requires_an_authorized_path() {
+        let authorized = PathBuf::from("C:/authorized/staged.png");
+        let scope = StubScope(vec![authorized.clone()]);
+
+        assert!(ensure_dialog_authorized(&scope, &authorized, "待识别图片").is_ok());
+        assert!(ensure_dialog_authorized(
+            &scope,
+            Path::new("C:/elsewhere/secret.png"),
+            "待识别图片",
+        )
+        .is_err());
+        // 空路径始终拒绝，不存在「未选择即放行」的分支。
+        assert!(ensure_dialog_authorized(&scope, Path::new(""), "待识别图片").is_err());
     }
 }

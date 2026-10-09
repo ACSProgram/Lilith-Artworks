@@ -388,12 +388,13 @@ fn open_tile_source(path: &Path) -> AuthenticityResult<std::sync::Arc<image::Dyn
     Ok(shared)
 }
 
-/// 从质量预览缓存的无签名 JPEG 或分支最终成品中裁剪一块高清区域。
+/// 从质量预览缓存的无签名 JPEG、分支最终成品或已授权的外部图片中裁剪一块高清区域。
 ///
 /// 压缩源要求令牌完整命中本进程会话的缓存文件名，并按缓存元数据的像素尺寸
-/// 校验；原始源按分支解析受控成品路径。裁剪矩形按源像素尺寸校验，解码复用
-/// 统一的资源预算，输出按 `max_edge` 只缩不放，供界面在缩略图分辨率不足时
-/// 叠加显示。
+/// 校验；原始源按分支解析受控成品路径；外部源按绝对路径解析，先做仓库边界校验
+/// （路径授权检查在命令层与 `decode_authenticity` 同源），因此框选放大镜不会
+/// 放宽任何安全边界。裁剪矩形按源像素尺寸校验，解码复用统一的资源预算，
+/// 输出按 `max_edge` 只缩不放，供界面在缩略图分辨率不足时叠加显示。
 ///
 /// 局部统一编码为无损 PNG：预览的用途就是观察 JPEG 与 TrustMark 造成的损失，
 /// 若再按有损 JPEG 回写一次，界面会额外叠加一层并非成品本身带来的压缩痕迹。
@@ -450,6 +451,27 @@ pub(crate) fn preview_tile(
                 .with_guessed_format()?
                 .into_dimensions()?;
             (artifact, (width, height))
+        }
+        PreviewTileSource::External => {
+            let value = request
+                .path
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| AuthenticityError::InvalidInput("缺少待识别图片路径".into()))?;
+            let path = PathBuf::from(value);
+            if !path.is_file() {
+                return Err(AuthenticityError::InvalidInput(
+                    "待识别图片不存在或不是普通文件".into(),
+                ));
+            }
+            let canonical = path.canonicalize()?;
+            storage::ensure_outside_repository(root, &canonical, "待识别图片")
+                .map_err(AuthenticityError::InvalidInput)?;
+            let (width, height) = image::ImageReader::open(&canonical)?
+                .with_guessed_format()?
+                .into_dimensions()?;
+            (canonical, (width, height))
         }
     };
     let right = request
@@ -1198,6 +1220,7 @@ mod tests {
             source: super::super::model::PreviewTileSource::Compressed,
             cache_token: Some(token.into()),
             branch_id: None,
+            path: None,
             x,
             y,
             width,
@@ -1216,8 +1239,30 @@ mod tests {
             source: super::super::model::PreviewTileSource::Original,
             cache_token: None,
             branch_id: Some(branch_id.into()),
+            path: None,
             x: 0,
             y: 0,
+            width,
+            height,
+            max_edge,
+        }
+    }
+
+    fn external_tile_request(
+        path: &Path,
+        x: u32,
+        y: u32,
+        width: u32,
+        height: u32,
+        max_edge: u32,
+    ) -> super::super::model::PreviewTileRequest {
+        super::super::model::PreviewTileRequest {
+            source: super::super::model::PreviewTileSource::External,
+            cache_token: None,
+            branch_id: None,
+            path: Some(path.to_string_lossy().into_owned()),
+            x,
+            y,
             width,
             height,
             max_edge,
@@ -1361,6 +1406,54 @@ mod tests {
         );
         assert!(
             super::preview_tile(&root, &original_tile_request("missing", 300, 200, 120)).is_err()
+        );
+    }
+
+    #[test]
+    fn preview_tile_crops_external_source_with_repo_boundary_checks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        // 外部源必须位于仓库之外，因此与仓库同级摆放（拖放导入也落在系统临时目录）。
+        let external = directory.path().join("staged.png");
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(200, 150))
+            .save(&external)
+            .unwrap();
+
+        let tile =
+            super::preview_tile(&root, &external_tile_request(&external, 20, 30, 72, 72, 72))
+                .unwrap();
+        assert_eq!((tile.width, tile.height), (72, 72));
+        assert!(tile.data_url.starts_with("data:image/png;base64,"));
+
+        // 只缩不放：请求矩形小于 max_edge 时保留原生分辨率。
+        let native =
+            super::preview_tile(&root, &external_tile_request(&external, 0, 0, 32, 32, 72))
+                .unwrap();
+        assert_eq!((native.width, native.height), (32, 32));
+
+        // 矩形越界、文件缺失与缺少路径都明确拒绝。
+        assert!(
+            super::preview_tile(&root, &external_tile_request(&external, 190, 0, 72, 72, 72))
+                .is_err()
+        );
+        assert!(super::preview_tile(
+            &root,
+            &external_tile_request(&directory.path().join("missing.png"), 0, 0, 32, 32, 72),
+        )
+        .is_err());
+        let mut missing = external_tile_request(&external, 0, 0, 32, 32, 72);
+        missing.path = None;
+        assert!(super::preview_tile(&root, &missing).is_err());
+
+        // 仓库内路径被边界校验拒绝，外部源通道不会成为读取仓库文件的旁路。
+        let inside = storage::resolve_path(&root, "artworks/inside.png").unwrap();
+        fs::create_dir_all(inside.parent().unwrap()).unwrap();
+        image::DynamicImage::ImageRgb8(image::RgbImage::new(64, 64))
+            .save(&inside)
+            .unwrap();
+        assert!(
+            super::preview_tile(&root, &external_tile_request(&inside, 0, 0, 32, 32, 72)).is_err()
         );
     }
 

@@ -313,4 +313,96 @@ describe("PublicationPreviewDialog", () => {
     }));
     await waitFor(() => expect(api.previewExternal).toHaveBeenCalledWith("C:/tmp/staged.png"));
   });
+
+  it("distinguishes loading, error and empty branch states on the publish view", async () => {
+    const onRetryBranches = vi.fn();
+    const base = {
+      mode: "publish" as const,
+      artworkTitle: "Artwork",
+      selectedBranchId: null,
+      onSelectBranch: vi.fn(),
+      onError: vi.fn(),
+      onNavigateRecord: vi.fn(),
+      onRetryFileCleanup: vi.fn().mockResolvedValue({ failures: [] }),
+    };
+    const { rerender } = render(<AuthenticityModule {...base} branches={[]} branchesLoading />);
+
+    // 加载中：不再误报「尚无分支」，并且分支选择被禁用。
+    expect(screen.getByText("读取分支历史…")).toBeTruthy();
+    expect(screen.queryByText("此 Artwork 尚无分支。")).toBeNull();
+    expect((screen.getByRole("combobox") as HTMLSelectElement).disabled).toBe(true);
+
+    rerender(<AuthenticityModule {...base} branches={[]} branchesError="无法读取作品历史" onRetryBranches={onRetryBranches} />);
+    expect(screen.getByText("无法读取作品历史")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "重试" }));
+    expect(onRetryBranches).toHaveBeenCalledOnce();
+
+    // 加载完成且确实没有分支：保留原文案。
+    rerender(<AuthenticityModule {...base} branches={[]} />);
+    expect(screen.getByText("此 Artwork 尚无分支。")).toBeTruthy();
+
+    api.getPublication.mockResolvedValue({ ...brokenPreviewPublication, artifact: null });
+    rerender(<AuthenticityModule
+      {...base}
+      branches={[{ id: "branch-1", title: "Main", headHistoryId: "history-1" }]}
+      selectedBranchId="branch-1"
+    />);
+    expect(await screen.findByText(/进入发布状态/)).toBeTruthy();
+  });
+
+  it("shows the source-resolution loupe while hovering the identify image", async () => {
+    vi.stubGlobal("PointerEvent", window.MouseEvent);
+    // jsdom 没有 2D 上下文；镜片绘制逻辑由 loupe 单测覆盖，这里只验证交互与请求。
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    api.stageDroppedImage.mockResolvedValue("C:/tmp/staged.png");
+    api.previewExternal.mockResolvedValue(preview.image);
+    api.previewTile.mockResolvedValue(preview.image);
+    render(<AuthenticityModule
+      mode="identify"
+      artworkTitle="Artwork"
+      branches={[]}
+      selectedBranchId={null}
+      onSelectBranch={vi.fn()}
+      onError={vi.fn()}
+      onNavigateRecord={vi.fn()}
+      onRetryFileCleanup={vi.fn().mockResolvedValue({ failures: [] })}
+    />);
+
+    const dropZone = screen.getByText("选择待识别图片").closest("section");
+    const file = new File([new Uint8Array([1, 2, 3])], "art.png", { type: "image/png" });
+    fireEvent.drop(dropZone!, { dataTransfer: { files: [file], types: ["Files"] } });
+
+    const layer = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".region-layer");
+      expect(node).not.toBeNull();
+      return node as HTMLElement;
+    });
+    // jsdom 没有布局，显式给出图片显示矩形，让归一化坐标可换算成源像素。
+    layer.getBoundingClientRect = () => ({
+      left: 0, top: 0, right: 200, bottom: 150, width: 200, height: 150, x: 0, y: 0,
+      toJSON: () => ({}),
+    }) as DOMRect;
+    fireEvent.pointerMove(layer, { clientX: 100, clientY: 75 });
+
+    // 镜片立即出现（底图先出画），源分辨率瓦片在后台补齐。
+    await waitFor(() => expect(document.querySelector(".region-loupe")).not.toBeNull());
+    await waitFor(() => expect(api.previewTile).toHaveBeenCalledWith(expect.objectContaining({
+      source: "external",
+      path: "C:/tmp/staged.png",
+      width: 512,
+      height: 512,
+      maxEdge: 512,
+    })));
+
+    // 在瓦片到位前移动指针不会重新请求：同一格内移动只是重绘。
+    const calls = api.previewTile.mock.calls.length;
+    fireEvent.pointerMove(layer, { clientX: 104, clientY: 78 });
+    await act(async () => { await Promise.resolve(); });
+    expect(api.previewTile.mock.calls.length).toBe(calls);
+
+    // React 由 pointerout/pointerover 合成 pointerenter/pointerleave，因此两个事件都派发。
+    fireEvent.pointerOut(layer, { relatedTarget: document.body });
+    fireEvent.pointerLeave(layer);
+    expect(document.querySelector(".region-loupe")).toBeNull();
+  });
 });

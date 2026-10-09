@@ -14,6 +14,7 @@ import type {
   PublishResult,
 } from "./types";
 import { publicationPreviewError, publicationPreviewSignature } from "./publicationValidation";
+import type { TileRequest } from "./previewTile";
 
 const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
 
@@ -498,6 +499,14 @@ export function usePublicationController({
     }
   }, [cleanupFailures, onError, onRetryFileCleanup]);
 
+  // 框选放大镜：发布页的取样源是分支最终成品，由后端按 branchId 解析受控路径裁剪，
+  // 因此复用既有的「原始成品」局部通道，不引入新的路径参数。
+  const previewLoupe = useCallback((tile: TileRequest) => {
+    const branchId = selectedBranchIdRef.current;
+    if (!branchId) return Promise.reject(new Error("当前分支尚未加载完成"));
+    return authenticityApi.previewTile({ source: "original", cacheToken: null, branchId, ...tile });
+  }, []);
+
   const openRecord = useCallback((record: CertificationRecord) => {
     setViewingRecord(record);
     onNavigateRecord(record);
@@ -573,6 +582,7 @@ export function usePublicationController({
     publish,
     cancelPublication,
     retryCleanup,
+    previewLoupe,
     openRecord,
     exportRecord,
     deletingRecord,
@@ -685,6 +695,13 @@ export function useIdentificationController({ onError }: IdentificationControlle
     return () => window.clearTimeout(timer);
   }, [searchRecords]);
 
+  // 框选放大镜：识别页的取样源是待识别图片本身（仓库之外的外部文件），
+  // 由后端按同一条路径授权检查访问。
+  const previewLoupe = useCallback((tile: TileRequest) => {
+    if (!path) return Promise.reject(new Error("尚未选择待识别图片"));
+    return authenticityApi.previewTile({ source: "external", cacheToken: null, branchId: null, path, ...tile });
+  }, [path]);
+
   return {
     path,
     preview,
@@ -700,5 +717,6 @@ export function useIdentificationController({ onError }: IdentificationControlle
     importDropped,
     decode,
     searchRecords,
+    previewLoupe,
   };
 }

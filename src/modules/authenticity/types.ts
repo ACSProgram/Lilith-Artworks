@@ -100,12 +100,14 @@ export interface PublicationPreviewRequest {
   watermarkId: string | null;
 }
 
-export type PreviewTileSource = "compressed" | "original";
+export type PreviewTileSource = "compressed" | "original" | "external";
 
 export interface PreviewTileRequest {
   source: PreviewTileSource;
   cacheToken: string | null;
   branchId: string | null;
+  /** 外部源（识别页待识别图片）的绝对路径；仅 `source === "external"` 时使用。 */
+  path?: string | null;
   x: number;
   y: number;
   width: number;
