@@ -11,7 +11,7 @@
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
-- schema v2 表定义：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`）
+- 素材板表定义（自仓库 schema v2 引入）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`）
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -31,7 +31,7 @@
 
 工作区挂载：历史/发布/识别三个窗格以 `artworkId` 为 key 整块重置，**素材板窗格不带 key**，因此跨作品保留渲染器与设备；仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
-持久化只属于 Rust：SQLite（schema v2 三张表）保存画板、图片记录与 step 历史；BC7 DDS 实体文件存于 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`。不迁移 Lilith Client 的旧 `index.json` 画板库。
+持久化只属于 Rust：SQLite（仓库 schema v2 引入的三张素材板表）保存画板、图片记录与 step 历史；BC7 DDS 实体文件存于 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`。不迁移 Lilith Client 的旧 `index.json` 画板库。
 
 ## 并发与锁
 
@@ -42,7 +42,7 @@
 - 保存、结算、粘贴、导入、画板增删改与回收站操作走仓库操作锁（`with_ready_repository`＝仓库租约 + `repository_operation` 互斥锁）。`pin_board` 命令直接在 `lib.rs` 注册，不经 `app/workflows.rs`，因此不持有 `BackupState` 运行锁；
 - 灾备、scrub、仓库完整性操作持仓库操作锁期间，画板写入会被阻塞（读取仍可继续）。
 
-## 存储布局（schema v2）
+## 存储布局
 
 ```text
 <repository>/artworks/<artwork-id>/
