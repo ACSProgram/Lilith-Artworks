@@ -56,8 +56,9 @@ pub(crate) async fn list_pin_boards(
     artwork_id: String,
 ) -> Result<Vec<PinBoardSummary>, String> {
     let state = state.inner().clone();
+    let label = format!("list_pin_boards artwork={artwork_id}");
     tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| {
+        state.with_repository_read_labeled(&label, |root| {
             let connection = storage::open(root)?;
             repository::list_boards(&connection, &artwork_id)
         })
@@ -72,7 +73,7 @@ pub(crate) async fn list_pin_board_trash(
 ) -> Result<Vec<PinBoardSummary>, String> {
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| {
+        state.with_repository_read_labeled("list_pin_board_trash", |root| {
             let connection = storage::open(root)?;
             repository::list_trash(&connection)
         })
@@ -204,8 +205,9 @@ pub(crate) async fn load_pin_board(
     board_id: i64,
 ) -> Result<PinBoardView, String> {
     let state = state.inner().clone();
+    let label = format!("load_pin_board board={board_id}");
     tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| {
+        state.with_repository_read_labeled(&label, |root| {
             let connection = storage::open(root)?;
             repository::load_view(&connection, root, board_id)
         })
@@ -387,8 +389,9 @@ pub(crate) async fn read_pin_board_image_png(
     image_id: i64,
 ) -> Result<Response, String> {
     let state = state.inner().clone();
+    let label = format!("read_pin_board_image_png board={board_id} image={image_id}");
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| {
+        state.with_repository_read_labeled(&label, |root| {
             let connection = storage::open(root)?;
             repository::read_image_png(&connection, root, board_id, image_id)
         })
@@ -407,8 +410,10 @@ pub(crate) async fn read_pin_board_texture(
 ) -> Result<Response, String> {
     let state = state.inner().clone();
     let cache_level = state.pin_board_texture_cache_level();
+    let label =
+        format!("read_pin_board_texture board={board_id} image={image_id} dim={max_dimension}");
     let bytes = tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| {
+        state.with_repository_read_labeled(&label, |root| {
             let connection = storage::open(root)?;
             repository::read_texture(
                 &connection,

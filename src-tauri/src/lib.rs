@@ -31,21 +31,6 @@ const LOG_KEPT_FILES: usize = 5;
 /// timeout only covers a hung or crashed webview so the window can still close.
 const SHUTDOWN_CONFIRM_TIMEOUT_MS: u64 = 15_000;
 
-/// Operations log at Info; `LILITH_LOG_LEVEL=debug|trace` (or warn|error) turns
-/// the per-step detail on or off without rebuilding the application.
-fn log_level_from_env() -> log::LevelFilter {
-    match std::env::var("LILITH_LOG_LEVEL")
-        .unwrap_or_default()
-        .as_str()
-    {
-        "error" => log::LevelFilter::Error,
-        "warn" => log::LevelFilter::Warn,
-        "debug" => log::LevelFilter::Debug,
-        "trace" => log::LevelFilter::Trace,
-        _ => log::LevelFilter::Info,
-    }
-}
-
 struct RuntimeIcons {
     window: Image<'static>,
     tray: Image<'static>,
@@ -131,6 +116,7 @@ fn show_main_window(app: &AppHandle) {
 /// `confirm_app_shutdown`. A fallback thread force-exits when the confirmation
 /// never arrives, so a hung webview cannot keep the application alive.
 fn begin_webview_shutdown(app: &AppHandle) {
+    log::info!("shutdown handshake: emitting app_shutdown_requested");
     if let Err(error) = app.emit("app_shutdown_requested", ()) {
         log::error!("failed to emit shutdown request: {error}");
     }
@@ -153,6 +139,7 @@ fn begin_webview_shutdown(app: &AppHandle) {
 /// lock, stop the scheduler threads, then exit the process.
 #[tauri::command]
 async fn confirm_app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
+    log::info!("confirm_app_shutdown invoked");
     let state = app.state::<app::AppState>();
     if !state.mark_shutdown_confirmed() {
         // Another confirmation is already running the exit sequence.
@@ -245,21 +232,48 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(
+            // 刻意不调用 `.level()`：插件用 fern 的 dispatch 级别做静态过滤，
+            // 一旦在此固定，运行时切换诊断模式（`log::set_max_level`）就无法让
+            // 更低的等级通过。等级完全由 `app::diagnostics::apply_level` 控制，
+            // 见 `src-tauri/src/app/diagnostics.rs` 的模块说明。
+            //
+            // 自定义格式在默认的「时间 + 等级 + target」之前插入本次运行标识，
+            // 使轮转文件可以按运行切片；target 与等级本身就是可筛选的索引。
             tauri_plugin_log::Builder::new()
-                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
+                .format(|out, message, record| {
+                    let now = tauri_plugin_log::TimezoneStrategy::UseLocal.get_now();
+                    out.finish(format_args!(
+                        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}[run:{}][{}][{}] {}",
+                        now.year(),
+                        now.month() as u8,
+                        now.day(),
+                        now.hour(),
+                        now.minute(),
+                        now.second(),
+                        app::diagnostics::run_id(),
+                        record.level(),
+                        record.target(),
+                        message,
+                    ))
+                })
                 .max_file_size(LOG_MAX_FILE_SIZE)
                 .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(LOG_KEPT_FILES))
-                .level(log_level_from_env())
                 .build(),
         )
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|application| {
             let started = std::time::Instant::now();
+            // 插件构建时没有固定等级，这里在最早的时机把生效等级写入全局过滤器。
+            let diagnostics_enabled = app::diagnostics::default_enabled();
+            app::diagnostics::apply_level(diagnostics_enabled);
             log::info!(
-                "Lilith Artworks starting: version={}, log_level={}",
+                "Lilith Artworks starting: version={}, diagnostics={}, log_level={}",
                 env!("CARGO_PKG_VERSION"),
-                log_level_from_env()
+                if diagnostics_enabled { "on" } else { "off" },
+                app::diagnostics::effective_level(diagnostics_enabled)
+                    .as_str()
+                    .to_ascii_lowercase()
             );
             let config_directory = application
                 .path()
@@ -277,6 +291,8 @@ pub fn run() {
                 log_directory,
                 warning,
             ));
+            // 诊断模式下由原生端线程看护 WebView 主线程，冻结期间仍能留下证据。
+            app::diagnostics::start_webview_watchdog(application.handle().clone());
             let backup_state = backup::BackupState::default();
             backup_state.start_scheduler(application.handle().clone())?;
             application.manage(backup_state);
@@ -346,6 +362,10 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             confirm_app_shutdown,
+            app::diagnostics::get_diagnostics_status,
+            app::diagnostics::set_diagnostics_enabled,
+            app::diagnostics::log_frontend_diagnostics,
+            app::diagnostics::diagnostics_pong,
             app::settings::get_app_settings,
             app::settings::save_app_settings,
             app::settings::open_log_directory,

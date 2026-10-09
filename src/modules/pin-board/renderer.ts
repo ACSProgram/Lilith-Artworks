@@ -1,4 +1,5 @@
 import { errorMessage } from "../../shared/errors";
+import { diagnosticsLog, diagnosticsSlowStep } from "../../shared/diagnostics";
 import { pinBoardApi } from "./api";
 import type {
   PinBoardClipboardImage,
@@ -51,6 +52,7 @@ import {
 } from "./texturePolicy";
 
 type GpuState = {
+  canvas: HTMLCanvasElement;
   device: any;
   context: any;
   pipeline: any;
@@ -58,6 +60,10 @@ type GpuState = {
   sampler: any;
   viewportBuffer: any;
   viewportBindGroup: any;
+  /** 诊断用：本设备的创建序号，便于在日志里与销毁记录配对。 */
+  sequence: number;
+  /** 设备释放后，异步纹理读取返回时不得再次触碰 WebGPU 对象。 */
+  released: boolean;
 };
 
 type LoadedTexture = {
@@ -248,6 +254,19 @@ function createGeometryBuffers(
   }
 }
 
+/**
+ * 诊断计数：`gpuDevicesCreated` 单调递增，`liveRenderers` 反映未销毁的渲染器。
+ * 与 `destroy()` 的记录配对后可判断切换作品/画板时是否在累积 GPU 设备。
+ */
+let gpuDevicesCreated = 0;
+let liveRenderers = 0;
+
+/**
+ * 每块 canvas 当前的 GPU 设备序号。同一块 canvas 会被反复 configure 到不同设备，
+ * 销毁旧渲染器时只允许当前 owner 解绑上下文，避免旧设备影响新渲染器的 surface。
+ */
+const canvasGpuOwners = new WeakMap<HTMLCanvasElement, number>();
+
 async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
   const browserGpu = (navigator as any).gpu;
   if (!browserGpu) throw new Error("当前 WebView 不支持 WebGPU");
@@ -258,6 +277,28 @@ async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
   }
 
   const device = await adapter.requestDevice({ requiredFeatures: ["texture-compression-bc"] });
+  // 设备序号在设备登记之前确定，使下面两个异步回调带上与实际登记一致的序号。
+  const deviceSequence = gpuDevicesCreated + 1;
+  // 设备丢失是显存压力或驱动重置的信号；主动 destroy 产生的 "destroyed" 不算异常。
+  if (device.lost) {
+    void device.lost.then((info: { reason?: string; message?: string }) => {
+      const reason = info?.reason ?? "unknown";
+      if (reason === "destroyed") return;
+      diagnosticsLog(
+        "warn",
+        `[gpu] pin-board gpu device lost: seq=${deviceSequence}, reason=${reason}, message=${info?.message ?? ""}`,
+      );
+    });
+  }
+  // 未被错误作用域捕获的 GPU 错误默认被静默吞掉（异步校验失败、队列被回收等）。
+  if ("onuncapturederror" in device) {
+    device.onuncapturederror = (event: { error?: { message?: string } }) => {
+      diagnosticsLog(
+        "warn",
+        `[gpu] pin-board gpu uncaptured error: seq=${deviceSequence}, message=${event?.error?.message ?? "unknown"}`,
+      );
+    };
+  }
   const context = (canvas as any).getContext("webgpu");
   const format = browserGpu.getPreferredCanvasFormat();
   context.configure({ device, format, alphaMode: "opaque" });
@@ -320,7 +361,14 @@ async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
     layout: viewportLayout,
     entries: [{ binding: 0, resource: { buffer: viewportBuffer } }],
   });
+  gpuDevicesCreated = deviceSequence;
+  canvasGpuOwners.set(canvas, gpuDevicesCreated);
+  diagnosticsLog(
+    "info",
+    `pin-board gpu device created: seq=${gpuDevicesCreated}, liveRenderers=${liveRenderers}`,
+  );
   return {
+    canvas,
     device,
     context,
     pipeline,
@@ -328,6 +376,8 @@ async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
     sampler,
     viewportBuffer,
     viewportBindGroup,
+    sequence: gpuDevicesCreated,
+    released: false,
   };
 }
 
@@ -337,6 +387,16 @@ async function loadTexture(
   maxDimension: number,
 ): Promise<LoadedTexture> {
   const response = await pinBoardApi.readPinBoardTexture(image.boardId, image.imageId, maxDimension);
+  // 画板切换会先销毁旧设备，但旧 IPC 读取可能稍后才返回。不要让这个返回值继续
+  // 触碰已经释放的 WebGPU 对象——此前会直接进入 createTexture/writeTexture，在
+  // WebView2 的 GPU 路径上形成悬空设备调用。
+  if (gpu.released) {
+    diagnosticsLog(
+      "warn",
+      `texture.read completed after gpu release: gpuSeq=${gpu.sequence}, imageId=${image.imageId}, dim=${maxDimension}`,
+    );
+    throw new Error("纹理读取所属的 GPU 设备已释放");
+  }
   const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
   let width: number;
   let height: number;
@@ -493,6 +553,8 @@ export class PinBoardRenderer {
   private loadRequested = false;
   private loading = false;
   private textureReservedBytes = 0;
+  /** 已发起但尚未完成的纹理读取；用于销毁日志确认旧任务是否越过生命周期边界。 */
+  private inFlightTextureLoads = 0;
   private generation = 0;
   private preservedWorldUnitsPerCssPixel: number | null = null;
   /** 打开画板时按图片最小包围框定位视图，等画布尺寸可用后再执行。 */
@@ -608,7 +670,7 @@ export class PinBoardRenderer {
     cacheBudgets: PinBoardTextureBudgets = textureBudgetsForLevel(undefined),
   ): Promise<PinBoardRenderer> {
     const gpu = await makeGpu(canvas);
-    return new PinBoardRenderer(
+    const renderer = new PinBoardRenderer(
       canvas,
       selectionElement,
       marqueeElement,
@@ -624,6 +686,8 @@ export class PinBoardRenderer {
       onContextMenu,
       cacheBudgets,
     );
+    liveRenderers += 1;
+    return renderer;
   }
 
   destroy(finalize = true) {
@@ -659,6 +723,32 @@ export class PinBoardRenderer {
     this.previewTextures.clear();
     this.textureReservedBytes = 0;
     this.gpu.viewportBuffer.destroy();
+    // 先标记设备已释放，再解绑 canvas 上下文并销毁设备。在飞行的纹理读取返回后，
+    // loadTexture 会在任何 GPU 调用之前拒绝旧结果。
+    this.gpu.released = true;
+    if (canvasGpuOwners.get(this.gpu.canvas) === this.gpu.sequence) {
+      try {
+        this.gpu.context.unconfigure();
+      } catch {
+        // 上下文已失效时忽略。
+      }
+      canvasGpuOwners.delete(this.gpu.canvas);
+    } else {
+      diagnosticsLog(
+        "info",
+        `gpu unconfigure skipped for stale owner: gpuSeq=${this.gpu.sequence}, currentOwner=${canvasGpuOwners.get(this.gpu.canvas) ?? "none"}`,
+      );
+    }
+    try {
+      this.gpu.device.destroy();
+    } catch {
+      // 设备已丢失时忽略。
+    }
+    liveRenderers = Math.max(0, liveRenderers - 1);
+    diagnosticsLog(
+      "info",
+      `pin-board renderer destroyed: gpuSeq=${this.gpu.sequence}, liveRenderers=${liveRenderers}, finalized=${this.finalized}, finalizeRequested=${finalize}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
+    );
   }
 
   setActive(active: boolean) {
@@ -900,6 +990,11 @@ export class PinBoardRenderer {
     const images = this.editableImages();
     this.saving = true;
     this.emitState();
+    const started = performance.now();
+    diagnosticsLog(
+      "info",
+      `pin-board save start: boardId=${this.boardId}, revision=${revision}, images=${images.length}`,
+    );
     const task = pinBoardApi.savePinBoard(this.boardId, images, revision)
       .then((result) => {
         this.revision = result.revision;
@@ -907,9 +1002,17 @@ export class PinBoardRenderer {
         this.dirty = this.stateKey() !== stateKey;
         // 保存期间又有编辑时，恢复自动保存排程。
         if (this.dirty) this.scheduleAutosave();
+        diagnosticsLog(
+          "info",
+          `pin-board save done: boardId=${this.boardId}, revision=${result.revision}, elapsedMs=${Math.round(performance.now() - started)}`,
+        );
         return true;
       })
       .catch((error) => {
+        diagnosticsLog(
+          "warn",
+          `pin-board save failed: boardId=${this.boardId}, elapsedMs=${Math.round(performance.now() - started)}, error=${errorMessage(error)}`,
+        );
         this.onError(`画板保存失败：${errorMessage(error)}`);
         return false;
       })
@@ -925,17 +1028,35 @@ export class PinBoardRenderer {
   finalize(): Promise<boolean> {
     if (this.finalized) return Promise.resolve(true);
     if (this.finalizePromise) return this.finalizePromise;
+    diagnosticsLog(
+      "info",
+      `pin-board finalize start: boardId=${this.boardId}, revision=${this.revision}`,
+    );
     const task = this.save()
       .then((saved) => {
-        if (!saved) return false;
+        if (!saved) {
+          diagnosticsLog(
+            "warn",
+            `pin-board finalize aborted: boardId=${this.boardId}, save failed`,
+          );
+          return false;
+        }
         return pinBoardApi.finalizePinBoard(this.boardId, this.revision)
           .then((result) => {
             this.revision = result.revision;
             this.finalized = true;
+            diagnosticsLog(
+              "info",
+              `pin-board finalize done: boardId=${this.boardId}, revision=${result.revision}`,
+            );
             return true;
           });
       })
       .catch((error) => {
+        diagnosticsLog(
+          "warn",
+          `pin-board finalize failed: boardId=${this.boardId}, error=${errorMessage(error)}`,
+        );
         this.onError(`画板结算失败：${errorMessage(error)}`);
         return false;
       })
@@ -1740,7 +1861,30 @@ export class PinBoardRenderer {
       while (this.loadRequested && this.active && !this.destroyed) {
         this.loadRequested = false;
         const generation = this.generation;
-        await this.loadCandidates(this.textureLoadCandidates(), generation);
+        const candidates = this.textureLoadCandidates();
+        // 只有非空批次会记录：空批次会立即结束循环，不构成自旋。
+        if (candidates.length > 0) {
+          diagnosticsLog(
+            "info",
+            `pin-board texture drain start: boardId=${this.boardId}, candidates=${candidates.length}, generation=${generation}`,
+          );
+        }
+        const batchStarted = performance.now();
+        await this.loadCandidates(candidates, generation);
+        // 常速时不产生日志；一旦某批明显变慢即点名（显存压力 / 加载退化的前兆）。
+        diagnosticsSlowStep(
+          `texture drain batch boardId=${this.boardId} candidates=${candidates.length}`,
+          batchStarted,
+          2_000,
+        );
+        if (candidates.length > 0) {
+          diagnosticsLog(
+            "info",
+            `pin-board texture drain done: boardId=${this.boardId}, candidates=${candidates.length},`
+            + ` textures=${this.textures.size}, previews=${this.previewTextures.size},`
+            + ` reservedBytes=${this.textureReservedBytes}, generation=${this.generation}`,
+          );
+        }
       }
     } finally {
       this.loading = false;
@@ -1819,7 +1963,15 @@ export class PinBoardRenderer {
           nextIndex += 1;
           activeCount += 1;
           activeBytes += candidate.estimatedBytes;
+          this.inFlightTextureLoads += 1;
           void this.loadCandidate(candidate, generation).finally(() => {
+            this.inFlightTextureLoads = Math.max(0, this.inFlightTextureLoads - 1);
+            if (this.destroyed) {
+              diagnosticsLog(
+                "info",
+                `texture load settled after renderer destroy: boardId=${this.boardId}, gpuSeq=${this.gpu.sequence}, imageId=${candidate.image.imageId}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
+              );
+            }
             activeCount -= 1;
             activeBytes -= candidate.estimatedBytes;
             if (activeCount === 0 && nextIndex >= candidates.length) resolve();

@@ -1,4 +1,5 @@
 pub(crate) mod cleanup_commands;
+pub(crate) mod diagnostics;
 pub(crate) mod settings;
 pub(crate) mod workflows;
 

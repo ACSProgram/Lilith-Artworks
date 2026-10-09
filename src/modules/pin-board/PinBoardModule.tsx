@@ -42,6 +42,7 @@ import {
 } from "react";
 import { errorMessage } from "../../shared/errors";
 import { ConfirmDialog, type ConfirmView } from "../../shared/ConfirmDialog";
+import { diagnosticsLog } from "../../shared/diagnostics";
 import { ContextMenu, type ContextMenuItem } from "../../shared/ui/ContextMenu";
 import { PromptDialog } from "../../shared/ui/PromptDialog";
 import {
@@ -281,9 +282,17 @@ function GpuCanvas({
           unregisterLifecycle = registerPinBoardLifecycleParticipant(created);
           onRenderer(created);
           onState(created.interactionState);
+          diagnosticsLog(
+            "info",
+            `pin-board renderer created: artworkId=${artworkId}, boardId=${view.boardId}`,
+          );
         }
       })
       .catch((error) => {
+        diagnosticsLog(
+          "warn",
+          `pin-board renderer create failed: artworkId=${artworkId}, boardId=${view.boardId}, error=${errorMessage(error)}`,
+        );
         if (!cancelled) setStatus(errorMessage(error));
       });
 
@@ -291,6 +300,10 @@ function GpuCanvas({
       cancelled = true;
       unregisterLifecycle?.();
       onRenderer(null);
+      diagnosticsLog(
+        "info",
+        `pin-board renderer disposing: artworkId=${artworkId}, boardId=${view.boardId}`,
+      );
       renderer?.destroy();
     };
   }, [view, artworkId, setStatus, onRenderer, onState, onContextMenu]);
@@ -632,6 +645,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     let cancelled = false;
     const sequence = ++loadSequence.current;
     const current = rendererRef.current;
+    // 切换 Artwork 会重挂载工作区；记录是否携带旧渲染器，便于与设备创建记录配对。
+    diagnosticsLog(
+      "info",
+      `pin-board artwork switch start: artworkId=${artworkId}, hadRenderer=${current !== null}`,
+    );
     if (current) {
       current.destroy();
       rendererRef.current = null;
@@ -649,6 +667,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       .then(async (next) => {
         if (cancelled || sequence !== loadSequence.current) return;
         setBoards(next);
+        diagnosticsLog(
+          "info",
+          `pin-board artwork switch done: artworkId=${artworkId}, boards=${next.length}`,
+        );
         setTrash(await pinBoardApi.listPinBoardTrash().catch(() => []));
         const preferredId = getSelectedBoardId(artworkId);
         const first = next.find((board) => board.boardId === preferredId) ?? next[0];
@@ -680,6 +702,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const select = async (board: PinBoardSummary) => {
     if (board.boardId === selected) return;
     const sequence = ++loadSequence.current;
+    diagnosticsLog(
+      "info",
+      `pin-board board select start: artworkId=${artworkId}, boardId=${board.boardId}`,
+    );
     if (rendererRef.current) {
       const saved = await rendererRef.current.finalize();
       if (!saved || sequence !== loadSequence.current) return;
@@ -695,7 +721,15 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     try {
       const loaded = await pinBoardApi.loadPinBoard(board.boardId);
       if (sequence === loadSequence.current) setView(loaded);
+      diagnosticsLog(
+        "info",
+        `pin-board board select done: artworkId=${artworkId}, boardId=${board.boardId}`,
+      );
     } catch (error) {
+      diagnosticsLog(
+        "warn",
+        `pin-board board select failed: artworkId=${artworkId}, boardId=${board.boardId}, error=${errorMessage(error)}`,
+      );
       if (sequence === loadSequence.current) setStatus(errorMessage(error));
     }
   };

@@ -33,6 +33,7 @@
 
 - [验证策略](guides/validation.md)：分层验证、压力测试边界与持续集成。
 - [发行政策](guides/release-policy.md)：版本、发布门槛与产物。
+- [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。
 - [0.3 架构与核心算法改进计划](planning/0.3-architecture-algorithm-plan-2026-10-05.md)：提案，
   尚未实施。
 - [规划归档](planning/archive/README.md)：已完成或被替代的规划与批次记录，不再作为执行依据。
@@ -41,7 +42,7 @@
 
 - `architecture/`：跨模块的分层、生命周期、存储布局与运行锁等长期有效的约束。
 - `modules/`：各领域模块的上下文入口、契约（DTO / 命令 / 表结构）与领域行为。
-- `guides/`：验证与发布流程。
+- `guides/`：验证、发布与日志规范。
 - `planning/current-handoff.md`：当前批次状态与人工验收结果，只写"现在"。
 - `planning/todo.md`：未完成、未验证或待决策事项的唯一清单。
 - `planning/archive/`：已完成或被替代的规划与批次记录，不再作为执行依据。
