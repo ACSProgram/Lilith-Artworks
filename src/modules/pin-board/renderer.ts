@@ -23,6 +23,7 @@ import {
   rotateQuad,
   scaleQuad,
   screenToWorld,
+  snapRotationDelta,
   translateQuad,
   viewportBounds,
   worldToScreen,
@@ -839,6 +840,30 @@ export class PinBoardRenderer {
     return this.selectedImages().map((image) => image.imageId);
   }
 
+  /**
+   * 选中画板内全部未删除图片（Ctrl+A 全选整个画布）。锁定时不生效；选中态不属于
+   * 模型状态，所以这里不调整图片顺序、也不标记 dirty。
+   */
+  selectAll() {
+    if (this.locked) return;
+    this.finishActiveInteraction();
+    this.selectedIds.clear();
+    for (const image of this.images) {
+      if (!image.deleted) this.selectedIds.add(image.imageId);
+    }
+    this.refreshSelectionVisuals();
+  }
+
+  /** 拖放导入时把放置点对齐到鼠标落点，避免沿用上一次悬停位置。 */
+  setPlacementFromClient(clientX: number, clientY: number) {
+    this.cursorWorld = screenToWorld(
+      clientX,
+      clientY,
+      this.canvas.getBoundingClientRect(),
+      this.viewport,
+    );
+  }
+
   copyImageToClipboardId(): number | null {
     const selected = this.selectedImages();
     return selected.length === 1 ? selected[0].imageId : null;
@@ -1126,6 +1151,9 @@ export class PinBoardRenderer {
       event.preventDefault();
       this.finishActiveInteraction();
       void this.save();
+    } else if (key === "a" && !event.shiftKey) {
+      event.preventDefault();
+      this.selectAll();
     } else if (key === "z" && !event.shiftKey) {
       event.preventDefault();
       this.finishActiveInteraction();
@@ -1330,17 +1358,17 @@ export class PinBoardRenderer {
         }
         this.afterLiveChange(this.dragBefore.map((image) => image.imageId));
       } else if (this.dragMode === "rotate") {
-        let radians = Math.atan2(
+        const delta = Math.atan2(
           world[1] - this.rotateCenter[1],
           world[0] - this.rotateCenter[0],
         ) - this.rotateStartAngle;
-        if (event.shiftKey) {
-          const increment = Math.PI / 12;
-          radians = Math.round(radians / increment) * increment;
-        }
         for (const snapshot of this.dragBefore) {
           const image = this.imageById.get(snapshot.imageId);
-          if (image) image.points = rotateQuad(snapshot.points, radians, this.rotateCenter);
+          if (!image) continue;
+          // Shift 吸附图片的**绝对角度**（0°/15°/30°…）而非本次拖拽的增量：
+          // 增量吸附会让已带偏角的图片停在「偏角 + n×15°」，永远回不到 0°。
+          const radians = event.shiftKey ? snapRotationDelta(snapshot.points, delta) : delta;
+          image.points = rotateQuad(snapshot.points, radians, this.rotateCenter);
         }
         this.afterLiveChange(this.dragBefore.map((image) => image.imageId));
       } else if (this.dragMode === "scale") {

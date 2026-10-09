@@ -66,7 +66,7 @@ SQLite:
 画板内容：
 
 - `load_pin_board`、`save_pin_board`、`finalize_pin_board`
-- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图/文字素材）——三者统一写入归一化 BC7 DDS，导入/导出使用 Tauri IPC channel 逐项回传进度
+- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图/文字素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出使用 Tauri IPC channel 逐项回传进度
 - `export_pin_board_images`（PNG 到用户选择目录）、`read_pin_board_image_png`（系统剪贴板复制）、`read_pin_board_texture`（画板 ID + 图片 ID + 请求长边）
 - `read_pin_board_clipboard_paths`（Windows `CF_HDROP`）
 
@@ -81,6 +81,9 @@ SQLite:
 - 撤销历史只存在于当前会话内存，重开画板后不能撤销。
 - 图层由 `layer`（底层/中层/顶层）与 `sort_order` 共同决定；新图片统一进入中层并占据最优先顺序；
 - 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；
+- 拖放导入：把图片文件拖到画布区（`.pin-board-stage`）即可导入，放置点对齐鼠标落点，多张一起拖入时按前一张的显示宽度向右排开；悬停时只描一圈渐变边并在底部显示小胶囊提示，不遮盖画布内容。窗口以 `dragDropEnabled: false` 运行（Windows 上使用 HTML5 拖放的前提），因此 webview **不暴露文件系统路径**，导入走 `import_pin_board_clipboard_image` 的字节链路，只接受可被内容嗅探识别的位图（PNG/JPEG/WebP/BMP/GIF）；需要路径的 DDS/TGA 仍通过「导入图片」选择器处理。画板锁定时不导入并提示；
+- Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
+- Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
 - “添加文字”生成透明 PNG 素材，尺寸补齐到 4 像素压缩块边界，走普通图片导入链路；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
@@ -91,6 +94,6 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序/迁移（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用）由维护者执行，结果记录在 `docs/planning/current-handoff.md`。
