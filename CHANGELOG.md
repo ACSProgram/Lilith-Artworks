@@ -116,6 +116,23 @@ before and after the first stable release.
 
 ### Fixed
 
+- Pin-board board and artwork switching no longer freezes the app. Every
+  switch used to tear down the renderer and its WebGPU device and create a new
+  one, and that create/destroy churn was confirmed to hang the WebView2 render
+  process (frozen UI, tray-only force quit after a 15 s timeout). The renderer's
+  GPU setup (`create`) is now separated from board loading (`loadBoard`): one
+  device is created per module lifetime and reused, so switching a board or an
+  artwork only swaps data. `loadBoard` settles the previous board (save plus
+  `finalize_pin_board`, aborting the switch on failure) and releases its
+  textures before loading the next board, and is idempotent per `boardId`. The
+  canvas stays mounted instead of unmounting on a null view, the creation effect
+  is idempotent so StrictMode no longer doubles the device count, and the
+  workspace `key` moved from `ArtworkWorkspace` to the history/publish/identify
+  panes so the pin-board pane survives artwork switches. A stress session with
+  8 artwork switches and 27 board switches now reports exactly one GPU device
+  created and zero renderer destroys, with no unresponsive-webview warning and
+  an instant shutdown handshake.
+
 - Shift rotation now snaps the absolute angle instead of the drag increment.
   Snapping the increment meant an image already tilted by 7° could only ever
   land on `7° + n×15°` and could never return to 0°. The renderer now derives
@@ -151,6 +168,18 @@ before and after the first stable release.
   within one repository still leaves the repository open.
 
 ### Changed
+
+- Pin-board device loss now recovers automatically within a bounded budget.
+  Reusing one device for the whole session means a lost device no longer heals
+  itself on the next switch, so `device.lost` now rebuilds the device through
+  the same `makeGpu` path used at creation, re-arms the new device's `lost`
+  handler, and reloads the current board's textures. Recovery is throttled to at
+  most two rebuilds per renderer lifetime with a 600 ms × attempt backoff, and
+  drawing and texture loading are suspended while a rebuild is in flight; beyond
+  the limit or on rebuild failure the renderer stays suspended and only reports
+  the error, so repeated losses cannot turn into a device rebuild storm. This
+  replaces the previous report-only behavior; reusing the device also releases
+  the open board's textures on every switch instead of keeping them resident.
 
 - The application version is incremented to `0.2.0-rc.1`. The bump is a
   version-string change only: no tag, no release, no behavior change. Whether
