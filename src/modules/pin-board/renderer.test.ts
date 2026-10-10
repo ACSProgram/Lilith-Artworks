@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { viewportBounds, type Viewport } from "./geometry";
 import { PinBoardRenderer } from "./renderer";
+import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
 import type { PinBoardImage } from "./types";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
@@ -544,5 +545,60 @@ describe("pin-board renderer select-all", () => {
 
     expect([...(renderer as unknown as SelectionTestRenderer).selectedIds]).toEqual([]);
     expect(refreshSelectionVisuals).not.toHaveBeenCalled();
+  });
+});
+
+describe("pin-board additive marquee selection", () => {
+  const topLeft: PinBoardImage["points"] = [[-450, 450], [-350, 450], [-350, 350], [-450, 350]];
+  const bottomRight: PinBoardImage["points"] = [[350, -350], [450, -350], [450, -450], [350, -450]];
+  const topLeftBounds = { minX: -500, minY: 300, maxX: -300, maxY: 500 };
+  const bottomRightBounds = { minX: 300, minY: -500, maxX: 500, maxY: -300 };
+
+  it("treats Ctrl, Cmd and Shift as additive-selection modifiers", () => {
+    expect(isAdditiveSelectionModifier({ ctrlKey: true, metaKey: false, shiftKey: false })).toBe(true);
+    expect(isAdditiveSelectionModifier({ ctrlKey: false, metaKey: true, shiftKey: false })).toBe(true);
+    expect(isAdditiveSelectionModifier({ ctrlKey: false, metaKey: false, shiftKey: true })).toBe(true);
+    expect(isAdditiveSelectionModifier({ ctrlKey: false, metaKey: false, shiftKey: false })).toBe(false);
+  });
+
+  it("adds framed images on top of the base while a plain marquee replaces it", () => {
+    const images = [boardImage(1, topLeft), boardImage(2, bottomRight)];
+
+    const additive = marqueeSelection(images, topLeftBounds, [2]);
+    expect([...additive].sort((left, right) => left - right)).toEqual([1, 2]);
+
+    const replacing = marqueeSelection(images, topLeftBounds, []);
+    expect([...replacing]).toEqual([1]);
+  });
+
+  it("accumulates across repeated marquees without dropping the earlier selection", () => {
+    const images = [boardImage(1, topLeft), boardImage(2, bottomRight)];
+
+    const first = marqueeSelection(images, topLeftBounds, []);
+    expect([...first]).toEqual([1]);
+
+    const second = marqueeSelection(images, bottomRightBounds, first);
+    expect([...second].sort((left, right) => left - right)).toEqual([1, 2]);
+  });
+
+  it("skips deleted images and images outside the marquee", () => {
+    const images = [boardImage(1, topLeft), boardImage(2, bottomRight), boardImage(3, topLeft, true)];
+
+    expect([...marqueeSelection(images, topLeftBounds, [])]).toEqual([1]);
+  });
+
+  it("leaves the base set untouched", () => {
+    const base = new Set<number>([2]);
+
+    marqueeSelection([boardImage(1, topLeft)], topLeftBounds, base);
+
+    expect([...base]).toEqual([2]);
+  });
+
+  it("detects whether two selections are identical regardless of order", () => {
+    expect(sameSelection(new Set([1, 2]), new Set([2, 1]))).toBe(true);
+    expect(sameSelection(new Set(), new Set())).toBe(true);
+    expect(sameSelection(new Set([1, 2]), new Set([1]))).toBe(false);
+    expect(sameSelection(new Set([1, 2]), new Set([1, 3]))).toBe(false);
   });
 });
