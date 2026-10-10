@@ -17,16 +17,29 @@ import type { TileRequest } from "./previewTile";
  * 清晰度，而不是每移动一次就等一次 IO。
  */
 
-/** 取样窗口的源像素跨度（正方形）。 */
-export const LOUPE_SPAN = 72;
-/** 固定放大倍率：一个源像素在镜内占用的 CSS 像素数。 */
+/**
+ * 镜片相对主视图的固定放大倍率。
+ *
+ * 主视图（`RegionEditor` 的图片舞台）用 `object-fit: contain` 把整幅图缩放到固定
+ * 尺寸，因此「镜片比主视图大 LOUPE_ZOOM 倍」等价于「镜片始终覆盖源图的固定比例」：
+ * 源图越大、主视图越小，取样跨度越大。若改用固定的源像素跨度，大画布会被放大到无法
+ * 与主视图对照。
+ */
 export const LOUPE_ZOOM = 3;
 /** 镜片边长（CSS 像素）。 */
-export const LOUPE_SIZE = LOUPE_SPAN * LOUPE_ZOOM;
+export const LOUPE_SIZE = 216;
+/** 取样跨度的下限（源像素），避免极小源图被放大到无意义的程度。 */
+export const LOUPE_SPAN_MIN = 8;
+/** 取样跨度的上限（源像素），避免超大源图把瓦片裁剪范围推到后端难以承受的量级。 */
+export const LOUPE_SPAN_MAX = 4096;
 /** 镜片与指针之间的间隙（CSS 像素）。 */
 export const LOUPE_GAP = 16;
-/** 源分辨率瓦片的边长（源像素）；源图更小时退化为整幅。 */
+/** 源分辨率瓦片的边长下限（源像素）；源图更小时退化为整幅。 */
 export const LOUPE_REGION_EDGE = 512;
+/** 覆盖取样窗口所需的瓦片边距（相对取样跨度）；同时保证网格步长非零。 */
+const LOUPE_REGION_MARGIN = 1.25;
+/** 瓦片输出边长的兜底上限（源像素），与后端 `TILE_MAX_EDGE` 量级一致。 */
+const LOUPE_TILE_MAX_EDGE = 1024;
 /** 客户端瓦片缓存块数上限。 */
 export const LOUPE_REGION_CACHE = 12;
 /** 指针停下后取当前格的延迟；扫过时不会为中途经过的格子发请求。 */
@@ -36,11 +49,28 @@ export const LOUPE_PREFETCH_DELAY_MS = 400;
 /** 后端裁剪的输出边长下限，与 `pipeline::TILE_MIN_EDGE` 一致。 */
 const LOUPE_MIN_EDGE = 64;
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+/**
+ * 取样窗口的源像素跨度。
+ *
+ * `displayScale` 是主视图的显示比例（CSS 像素 / 源像素）。镜片以固定的 {@link LOUPE_ZOOM}
+ * 倍放大主视图，因此跨度 = 镜片边长 / (倍率 × 显示比例)：源图越大、主视图越小，跨度越大，
+ * 从而始终覆盖源图的固定比例，而不是固定的一小片源像素。显示比例缺失或非法（画布尚未测量）
+ * 时退化为 1，等价于 1:1 主视图。
+ */
+export function loupeSpan(displayScale: number): number {
+  const scale = Number.isFinite(displayScale) && displayScale > 0 ? displayScale : 1;
+  return clamp(LOUPE_SIZE / (LOUPE_ZOOM * scale), LOUPE_SPAN_MIN, LOUPE_SPAN_MAX);
+}
+
 export interface LoupeTarget {
   /** 镜片显示的源矩形左上角；贴边时窗口会被裁剪到源图内。 */
   x: number;
   y: number;
-  /** 窗口跨度；源图小于 {@link LOUPE_SPAN} 时退化为源图边长。 */
+  /** 窗口跨度；源图小于取样跨度时退化为源图边长。 */
   width: number;
   height: number;
 }
@@ -56,14 +86,17 @@ export function loupeTarget(
   sourceY: number,
   sourceWidth: number,
   sourceHeight: number,
+  span: number,
 ): LoupeTarget | null {
   if (!Number.isFinite(sourceX) || !Number.isFinite(sourceY)) return null;
   if (sourceWidth <= 0 || sourceHeight <= 0) return null;
+  const spanX = Math.min(span, sourceWidth);
+  const spanY = Math.min(span, sourceHeight);
   return {
-    x: Math.min(Math.max(sourceX - LOUPE_SPAN / 2, 0), Math.max(0, sourceWidth - LOUPE_SPAN)),
-    y: Math.min(Math.max(sourceY - LOUPE_SPAN / 2, 0), Math.max(0, sourceHeight - LOUPE_SPAN)),
-    width: Math.min(LOUPE_SPAN, sourceWidth),
-    height: Math.min(LOUPE_SPAN, sourceHeight),
+    x: Math.min(Math.max(sourceX - spanX / 2, 0), Math.max(0, sourceWidth - spanX)),
+    y: Math.min(Math.max(sourceY - spanY / 2, 0), Math.max(0, sourceHeight - spanY)),
+    width: spanX,
+    height: spanY,
   };
 }
 
@@ -72,17 +105,25 @@ export interface LoupeRegion {
   y: number;
   width: number;
   height: number;
-  /** 后端裁剪输出边长：等于该格的源尺寸，因此输出为 1:1、不会被放大。 */
+  /** 后端裁剪输出边长：按该格在镜片内的显示尺寸给出，不超过源分辨率与后端上限。 */
   maxEdge: number;
 }
 
+/**
+ * 覆盖取样窗口的瓦片边长：至少 {@link LOUPE_REGION_EDGE}，窗口更大时按边距放大，
+ * 保证瓦片始终完整覆盖窗口；源图更小时退化为源图边长。
+ */
+function regionEdge(sourceSize: number, span: number): number {
+  return Math.min(sourceSize, Math.max(LOUPE_REGION_EDGE, Math.ceil(span * LOUPE_REGION_MARGIN)));
+}
+
 /** 瓦片网格的步长：必须小于瓦片边长，重叠量正好覆盖一个镜片窗口。 */
-function regionSteps(sourceWidth: number, sourceHeight: number): [number, number] {
-  const edgeX = Math.min(LOUPE_REGION_EDGE, sourceWidth);
-  const edgeY = Math.min(LOUPE_REGION_EDGE, sourceHeight);
+function regionSteps(sourceWidth: number, sourceHeight: number, span: number): [number, number] {
+  const edgeX = regionEdge(sourceWidth, span);
+  const edgeY = regionEdge(sourceHeight, span);
   return [
-    Math.max(1, edgeX - Math.min(LOUPE_SPAN, sourceWidth)),
-    Math.max(1, edgeY - Math.min(LOUPE_SPAN, sourceHeight)),
+    Math.max(1, edgeX - Math.min(span, sourceWidth)),
+    Math.max(1, edgeY - Math.min(span, sourceHeight)),
   ];
 }
 
@@ -96,17 +137,28 @@ export function loupeRegion(
   target: LoupeTarget,
   sourceWidth: number,
   sourceHeight: number,
+  span: number,
+  pixelRatio = 1,
 ): LoupeRegion | null {
   if (sourceWidth <= 0 || sourceHeight <= 0) return null;
-  const edgeX = Math.min(LOUPE_REGION_EDGE, sourceWidth);
-  const edgeY = Math.min(LOUPE_REGION_EDGE, sourceHeight);
-  const [stepX, stepY] = regionSteps(sourceWidth, sourceHeight);
+  const edgeX = regionEdge(sourceWidth, span);
+  const edgeY = regionEdge(sourceHeight, span);
+  const [stepX, stepY] = regionSteps(sourceWidth, sourceHeight, span);
+  // 瓦片只需在镜片内看起来正确：输出边长取该格在屏幕上的显示尺寸（含设备像素比），
+  // 上限为源分辨率（放大时再大也不会更清晰）与后端上限。大画布下镜片是缩小取样，
+  // 因此这里会把输出压到显示分辨率，而不是传输用不到的源像素。
+  const edge = Math.max(edgeX, edgeY);
+  const maxEdge = clamp(
+    Math.ceil(edge * (LOUPE_SIZE / span) * pixelRatio),
+    LOUPE_MIN_EDGE,
+    Math.max(LOUPE_MIN_EDGE, Math.min(edge, LOUPE_TILE_MAX_EDGE)),
+  );
   return {
     x: Math.min(Math.floor(target.x / stepX) * stepX, Math.max(0, sourceWidth - edgeX)),
     y: Math.min(Math.floor(target.y / stepY) * stepY, Math.max(0, sourceHeight - edgeY)),
     width: edgeX,
     height: edgeY,
-    maxEdge: Math.max(LOUPE_MIN_EDGE, edgeX, edgeY),
+    maxEdge,
   };
 }
 
@@ -115,8 +167,9 @@ export function loupeNeighbours(
   region: LoupeRegion,
   sourceWidth: number,
   sourceHeight: number,
+  span: number,
 ): LoupeRegion[] {
-  const [stepX, stepY] = regionSteps(sourceWidth, sourceHeight);
+  const [stepX, stepY] = regionSteps(sourceWidth, sourceHeight, span);
   const offsets: Array<[number, number]> = [[-1, 0], [1, 0], [0, -1], [0, 1]];
   const seen = new Set<string>();
   const neighbours: LoupeRegion[] = [];
@@ -155,8 +208,9 @@ export function loupePlacement(
   };
 }
 
+/** 缓存键：输出边长也参与标识，因为同一格在不同设备像素比下的瓦片内容不同。 */
 export function regionKey(sourceKey: string, region: LoupeRegion): string {
-  return `${sourceKey}|${region.x},${region.y},${region.width},${region.height}`;
+  return `${sourceKey}|${region.x},${region.y},${region.width},${region.height},${region.maxEdge}`;
 }
 
 /** 镜片当前可用的像素来源。 */
@@ -167,7 +221,7 @@ export interface LoupeFrame {
   originY: number;
   /** 图像像素 / 源像素；1 表示源分辨率。 */
   scale: number;
-  /** 源分辨率瓦片用像素化取样，降采样底图用平滑取样。 */
+  /** 源分辨率瓦片用像素化取样，降采样底图或缩小的瓦片用平滑取样。 */
   sharp: boolean;
 }
 
@@ -175,6 +229,10 @@ export interface LoupeFrameOptions {
   pointer: { x: number; y: number } | null;
   sourceWidth: number;
   sourceHeight: number;
+  /** 取样窗口的源像素跨度，由镜片相对主视图的倍率决定（见 {@link loupeSpan}）。 */
+  span: number;
+  /** 设备像素比（已按画布缓冲上限收敛）；决定瓦片的输出分辨率，缺省为 1。 */
+  pixelRatio?: number;
   /** 源标识（分支或待识别图片路径）；变化即隔离缓存。 */
   sourceKey: string;
   /** 已加载的整幅降采样底图，用于在瓦片到位前立即出画。 */
@@ -189,15 +247,15 @@ export interface LoupeFrameOptions {
  * 都不会阻塞：瓦片在后台补齐，镜片在这期间显示底图，因此不存在「加载中」的观感。
  */
 export function useLoupeFrame({
-  pointer, sourceWidth, sourceHeight, sourceKey, base, request,
+  pointer, sourceWidth, sourceHeight, span, pixelRatio = 1, sourceKey, base, request,
 }: LoupeFrameOptions): LoupeFrame | null {
   const target = useMemo(
-    () => (pointer ? loupeTarget(pointer.x * sourceWidth, pointer.y * sourceHeight, sourceWidth, sourceHeight) : null),
-    [pointer, sourceWidth, sourceHeight],
+    () => (pointer ? loupeTarget(pointer.x * sourceWidth, pointer.y * sourceHeight, sourceWidth, sourceHeight, span) : null),
+    [pointer, sourceWidth, sourceHeight, span],
   );
   const region = useMemo(
-    () => (target ? loupeRegion(target, sourceWidth, sourceHeight) : null),
-    [sourceHeight, sourceWidth, target],
+    () => (target ? loupeRegion(target, sourceWidth, sourceHeight, span, pixelRatio) : null),
+    [pixelRatio, sourceHeight, sourceWidth, span, target],
   );
   const key = region ? regionKey(sourceKey, region) : "";
   const baseKey = `${sourceKey}|base`;
@@ -295,19 +353,21 @@ export function useLoupeFrame({
     const timer = window.setTimeout(() => {
       const current = regionRef.current;
       if (!current || regionKey(sourceKey, current) !== key) return;
-      for (const neighbour of loupeNeighbours(current, sourceWidth, sourceHeight)) {
+      for (const neighbour of loupeNeighbours(current, sourceWidth, sourceHeight, span)) {
         fetchRegion(regionKey(sourceKey, neighbour), neighbour);
       }
     }, LOUPE_PREFETCH_DELAY_MS);
     return () => window.clearTimeout(timer);
-  }, [fetchRegion, key, sourceHeight, sourceKey, sourceWidth]);
+  }, [fetchRegion, key, sourceHeight, sourceWidth, span, sourceKey]);
 
   return useMemo<LoupeFrame | null>(() => {
     if (!target || !region) return null;
     const cachedTile = tiles.current.get(key);
     const tileImage = cachedTile ? images.current.get(key) : undefined;
     if (cachedTile && tileImage) {
-      return { image: tileImage, originX: region.x, originY: region.y, scale: 1, sharp: true };
+      // 瓦片输出边长可能被上限收缩（窗口很大时），此时按实际像素比缩放并改用平滑取样。
+      const tileScale = cachedTile.width > 0 && region.width > 0 ? cachedTile.width / region.width : 1;
+      return { image: tileImage, originX: region.x, originY: region.y, scale: tileScale, sharp: tileScale >= 1 };
     }
     const baseImage = images.current.get(baseKey);
     const naturalWidth = baseImage instanceof HTMLImageElement ? baseImage.naturalWidth : 0;
