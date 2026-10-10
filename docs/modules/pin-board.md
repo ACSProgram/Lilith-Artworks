@@ -6,6 +6,7 @@
 - WebGPU/Canvas 渲染与编辑状态：`renderer.ts`
 - 纹理请求尺寸与两级缓存预算：`texturePolicy.ts`
 - 纯几何：`geometry.ts`
+- 选择判定（加选修饰键、框选命中）：`selection.ts`
 - 进程内视图恢复：`session.ts`
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
@@ -89,6 +90,7 @@ SQLite:
 - 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；
 - 拖放导入：把图片文件拖到画布区（`.pin-board-stage`）即可导入，放置点对齐鼠标落点，多张一起拖入时按前一张的显示宽度向右排开；悬停时只描一圈渐变边并在底部显示小胶囊提示，不遮盖画布内容。窗口以 `dragDropEnabled: false` 运行（Windows 上使用 HTML5 拖放的前提），因此 webview **不暴露文件系统路径**，导入走 `import_pin_board_clipboard_image` 的字节链路，只接受可被内容嗅探识别的位图（PNG/JPEG/WebP/BMP/GIF）；需要路径的 DDS/TGA 仍通过「导入图片」选择器处理。画板锁定时不导入并提示；
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
+- 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
 - “添加文字”生成透明 PNG 素材，尺寸补齐到 4 像素压缩块边界，走普通图片导入链路；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
@@ -100,6 +102,6 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序/迁移（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用）由维护者执行，结果记录在 `docs/planning/current-handoff.md`。

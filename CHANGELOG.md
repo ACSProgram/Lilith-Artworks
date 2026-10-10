@@ -11,6 +11,27 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Added
+
+- Shift now works as an additive-selection modifier in the pin board, matching
+  Ctrl/Cmd. Holding it while clicking an image toggles that image, and holding
+  it while dragging on empty canvas starts a marquee that adds to the current
+  selection instead of replacing it, so several marquees can be chained:
+  already-selected images stay selected and newly framed images are added. A
+  plain drag still replaces the selection. The modifier predicate and the
+  marquee hit test live in a new `pin-board/selection.ts` helper.
+- The pin-board settings page now includes an operation manual. It documents
+  viewing, selection, editing, and board/file operations as grouped rows with
+  key chips, placed next to the lock and fullscreen shortcut fields.
+
+### Changed
+
+- Marquee moves in the pin board that leave the selected set unchanged now skip
+  the canvas redraw and state broadcast. Dragging the marquee across empty space
+  or over already-selected images no longer re-renders and re-sorts the whole
+  board on every pointer event; the marquee rectangle itself is a separate
+  overlay and still follows the pointer.
+
 ### Fixed
 
 - The framing loupe now samples a fixed ratio of the source instead of a fixed

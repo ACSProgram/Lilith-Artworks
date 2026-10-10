@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   Activity,
   AlertCircle,
+  BookOpen,
   Bug,
   Clock3,
+  Eye,
   SearchCheck,
   DatabaseBackup,
   FolderOpen,
@@ -16,15 +18,18 @@ import {
   LoaderCircle,
   LogOut,
   MonitorCog,
+  MousePointer2,
   MoveHorizontal,
   Palette,
   PanelLeftClose,
+  Pencil,
   RotateCcw,
   Save,
   Settings,
   ShieldCheck,
   Trash2,
   X,
+  type LucideIcon,
 } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
 import { ArtworkWorkspace } from "./ArtworkWorkspace";
@@ -76,6 +81,65 @@ const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
   { id: "repository", label: "仓库与备份" },
   { id: "pin-board", label: "素材板" },
   { id: "debug", label: "调试" },
+];
+
+/**
+ * 素材板操作手册内容。与 `renderer.ts` 的交互实现一一对应：改动交互时同步更新此处，
+ * 保证设置页展示的操作说明与实际行为一致。`keys` 中的每一项渲染为一个按键胶囊。
+ */
+const PIN_BOARD_MANUAL: Array<{
+  title: string;
+  icon: LucideIcon;
+  items: Array<{ label: string; detail: string; keys?: string[] }>;
+}> = [
+  {
+    title: "视图",
+    icon: Eye,
+    items: [
+      { label: "缩放视图", detail: "以光标为中心缩放，滚轮向前放大、向后缩小。", keys: ["滚轮"] },
+      { label: "平移视图", detail: "画板锁定时无需按住修饰键，直接拖拽即可平移。", keys: ["中键拖拽"] },
+      { label: "重置视图", detail: "回到全部内容的最小包围框；打开画板时也会自动适配。" },
+    ],
+  },
+  {
+    title: "选择",
+    icon: MousePointer2,
+    items: [
+      { label: "单选", detail: "点击一张图片将其选中。", keys: ["左键点击"] },
+      { label: "加选 / 减选", detail: "按住修饰键点击图片，切换该图片的选中状态。", keys: ["Ctrl / Shift", "点击"] },
+      { label: "框选", detail: "在画布空白处按住左键拖拽，框住即选中。", keys: ["空白拖拽"] },
+      { label: "连续加选框选", detail: "按住修饰键在空白处拖拽，可多次框选累加；已选中的图片不会取消，框到的新图加入。", keys: ["Ctrl / Shift", "拖拽"] },
+      { label: "全选", detail: "选中整块画板的全部图片，不限当前视口。", keys: ["Ctrl", "A"] },
+      { label: "取消选择", detail: "在空白处单击清空选择。", keys: ["空白单击"] },
+    ],
+  },
+  {
+    title: "编辑",
+    icon: Pencil,
+    items: [
+      { label: "移动", detail: "拖动选中的图片。", keys: ["拖拽图片"] },
+      { label: "旋转", detail: "拖拽选中框上方的旋转手柄；按住 Shift 吸附到 15° 整数倍。", keys: ["拖拽手柄"] },
+      { label: "缩放", detail: "拖拽选中框四角的缩放手柄。", keys: ["拖拽手柄"] },
+      { label: "阵列排序", detail: "按设置的间距平铺选中的图片（需选中两张以上）。" },
+      { label: "删除", detail: "删除当前选中的图片。", keys: ["Delete"] },
+      { label: "撤销", detail: "撤销上一步编辑。", keys: ["Ctrl", "Z"] },
+      { label: "重做", detail: "重做已撤销的编辑。", keys: ["Ctrl", "Y"] },
+      { label: "复制", detail: "复制选中的图片。", keys: ["Ctrl", "C"] },
+      { label: "粘贴", detail: "把复制的图片粘贴到画板。", keys: ["Ctrl", "V"] },
+    ],
+  },
+  {
+    title: "画板与文件",
+    icon: FolderOpen,
+    items: [
+      { label: "导入图片", detail: "把图片文件拖到画布，或使用工具栏「导入图片」。", keys: ["拖入文件"] },
+      { label: "添加文字", detail: "生成透明 PNG 文字素材并导入画板。" },
+      { label: "导出图片", detail: "把选中的图片导出为 PNG 到指定目录。" },
+      { label: "复制到剪贴板", detail: "把选中的单张图片复制到系统剪贴板。" },
+      { label: "保存", detail: "立即保存画板；可在上方开启自动保存。", keys: ["Ctrl", "S"] },
+      { label: "锁定 / 全屏", detail: "使用上方「锁定画板快捷键」与「画板全屏快捷键」。" },
+    ],
+  },
 ];
 
 const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
@@ -813,6 +877,7 @@ export function App() {
               )}
 
               {settingsPage === "pin-board" && (
+                <>
                 <div className="settings-section">
                   <div className="settings-section-title"><Images aria-hidden="true" size={17} /><h3>素材板</h3></div>
                   <div className="settings-preference-list">
@@ -963,6 +1028,36 @@ export function App() {
                   </div>
                   </div>
                 </div>
+                <div className="settings-section">
+                  <div className="settings-section-title"><BookOpen aria-hidden="true" size={17} /><h3>操作手册</h3></div>
+                  <div className="pin-board-manual">
+                    {PIN_BOARD_MANUAL.map((group) => {
+                      const GroupIcon = group.icon;
+                      return (
+                        <section className="pin-board-manual-group" key={group.title}>
+                          <header><GroupIcon aria-hidden="true" size={15} /><h4>{group.title}</h4></header>
+                          <div className="pin-board-manual-rows">
+                            {group.items.map((item) => (
+                              <div className="pin-board-manual-row" key={item.label}>
+                                <span className="pin-board-manual-label">{item.label}</span>
+                                <span className="pin-board-manual-detail">{item.detail}</span>
+                                <span className="pin-board-manual-keys">
+                                  {item.keys?.map((key, index) => (
+                                    <Fragment key={key}>
+                                      {index > 0 && <span className="pin-board-manual-plus" aria-hidden="true">+</span>}
+                                      <kbd>{key}</kbd>
+                                    </Fragment>
+                                  ))}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        </section>
+                      );
+                    })}
+                  </div>
+                </div>
+                </>
               )}
 
               {settingsPage === "debug" && (

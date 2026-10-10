@@ -296,6 +296,19 @@ button { color: inherit; }
 .settings-preference-row .segmented-control.pin-board-cache-control button { flex-direction: column; gap: 1px; min-height: 38px; padding: 5px 14px; line-height: 1.25; }
 .settings-preference-row .segmented-control.pin-board-cache-control button strong { font-size: 12px; font-weight: 600; }
 .settings-preference-row .segmented-control.pin-board-cache-control button small { font-size: 11px; opacity: .72; }
+.pin-board-manual { display: grid; gap: 12px; }
+.pin-board-manual-group { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface-subtle); }
+.pin-board-manual-group > header { display: flex; align-items: center; gap: 8px; padding: 9px 14px; border-bottom: 1px solid var(--border); background: var(--surface); }
+.pin-board-manual-group > header svg { color: var(--accent); }
+.pin-board-manual-group > header h4 { margin: 0; color: var(--text); font-size: 12px; font-weight: 600; }
+.pin-board-manual-rows { display: grid; }
+.pin-board-manual-row { display: grid; grid-template-columns: 112px minmax(0, 1fr) max-content; align-items: baseline; gap: 14px; padding: 8px 14px; }
+.pin-board-manual-row + .pin-board-manual-row { border-top: 1px dashed var(--border); }
+.pin-board-manual-label { color: var(--text); font-size: 12px; font-weight: 500; }
+.pin-board-manual-detail { color: var(--muted); font-size: 11px; line-height: 1.6; }
+.pin-board-manual-keys { display: inline-flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 5px; }
+.pin-board-manual-plus { color: var(--muted); font-size: 10px; }
+.pin-board-manual-keys kbd { min-width: 22px; padding: 2px 8px; border: 1px solid var(--control-border); border-bottom-width: 2px; border-radius: 5px; color: var(--text); background: var(--control-bg); font-family: inherit; font-size: 10px; line-height: 1.5; text-align: center; white-space: nowrap; }
 .settings-dialog footer { display: flex; justify-content: flex-end; gap: 8px; min-height: 54px; padding: 10px 18px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
 .node-editor, .trash-dialog { width: min(540px, 100%); max-height: calc(100vh - 48px); overflow: auto; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 56px rgb(0 0 0 / 20%); }
 .node-editor > header, .trash-dialog > header { display: flex; align-items: center; justify-content: space-between; padding: 15px 18px; border-bottom: 1px solid var(--border); }

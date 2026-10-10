@@ -18,7 +18,6 @@ import {
   imagesCenter,
   intersects,
   pointInQuad,
-  quadIntersectsBounds,
   quadCenter,
   rotateQuad,
   scaleQuad,
@@ -33,6 +32,7 @@ import {
   type Viewport,
 } from "./geometry";
 import type { PinBoardViewSession } from "./session";
+import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
 import { shortcutCanHandle } from "./shortcuts";
 import {
   estimatedTextureLoadBytes,
@@ -1472,7 +1472,10 @@ export class PinBoardRenderer {
         );
       } else {
         const hit = this.hitImage(this.dragWorld);
-        if ((event.ctrlKey || event.metaKey) && hit) {
+        // Ctrl/Cmd 与 Shift 都作为加选修饰键：按住点击单张图切换选中，按住在空白处
+        // 拖拽则累加框选。
+        const additiveSelection = isAdditiveSelectionModifier(event);
+        if (additiveSelection && hit) {
           if (this.selectedIds.has(hit.imageId)) this.selectedIds.delete(hit.imageId);
           else {
             this.selectedIds.add(hit.imageId);
@@ -1502,7 +1505,9 @@ export class PinBoardRenderer {
           this.dragBefore = this.snapshot([...this.selectedIds]);
         } else {
           this.marqueeBaseIds.clear();
-          if (event.ctrlKey || event.metaKey) {
+          if (additiveSelection) {
+            // 累加式框选：保留当前选中作为基底，框到的新图在此基础上加入，
+            // 因此可以连续多次框选，已选中的不会消失。
             for (const imageId of this.selectedIds) this.marqueeBaseIds.add(imageId);
           } else {
             this.selectedIds.clear();
@@ -1618,15 +1623,17 @@ export class PinBoardRenderer {
       } else {
         this.marqueeWorld = world;
         const bounds = this.boundsBetween(this.dragWorld, world);
-        this.selectedIds.clear();
-        for (const imageId of this.marqueeBaseIds) this.selectedIds.add(imageId);
-        for (const image of this.images) {
-          if (!image.deleted && image.available && quadIntersectsBounds(image.points, bounds)) {
-            this.selectedIds.add(image.imageId);
-          }
-        }
+        // 累加式框选：以 marqueeBaseIds 为基底并入框到的图片，因此可连续多次框选，
+        // 已选中的不会消失，框到的新图加入。
+        const next = marqueeSelection(this.images, bounds, this.marqueeBaseIds);
+        // 框选矩形是独立的 DOM 叠加层，每个指针事件都要跟随；但选中集合未变时
+        // （例如拖过空白区域或已选中的图片）无需重排、重绘与广播状态。
         this.updateMarqueeOverlay(bounds);
-        this.refreshSelectionVisuals();
+        if (!sameSelection(this.selectedIds, next)) {
+          this.selectedIds.clear();
+          for (const imageId of next) this.selectedIds.add(imageId);
+          this.refreshSelectionVisuals();
+        }
       }
     }
     event.preventDefault();
