@@ -9,6 +9,23 @@ the five version fields move together, so the version number lags the work until
 the cut. A version can exist without a tag: tagging is a separate, later release
 decision, so an untagged version is transitional.
 
+## Unreleased
+
+### Fixed
+
+- The framing loupe now samples a fixed ratio of the source instead of a fixed
+  72 source pixels. The lens keeps a fixed 3x magnification over the main view,
+  so the sampling span is `lens size / (3 x main-view scale)`: a larger canvas is
+  covered by a proportionally larger span and is no longer magnified far past
+  what the main view shows. The tile that covers the window grows with the span
+  (at least 512 source pixels, 1.25x the span when larger) while its output edge
+  is sized to what the lens actually shows (the cell's on-screen size times the
+  device pixel ratio, never above the source resolution or 1024 px), so a large
+  canvas transfers display-resolution pixels instead of source pixels that are
+  never drawn; tiles below source resolution are drawn smoothly instead of
+  pixelated, and the tile cache key now includes the output edge because it
+  depends on the device pixel ratio.
+
 ## 0.2.0-rc.2 - 2026-10-09
 
 ### Added
