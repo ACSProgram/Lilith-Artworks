@@ -4,6 +4,12 @@
 /src-tauri/target/
 /.idea/
 /.vscode/
+
+# Research sandbox: each project under /research/ is its own repository with its
+# own docs, tools and history. It is deliberately kept out of the product
+# history and CI; mature results flow back as proposals in docs/planning/.
+/research/
+
 *.log
 *.tmp
 *.bak
