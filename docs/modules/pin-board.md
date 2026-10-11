@@ -97,6 +97,7 @@ SQLite:
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
 - 画板列表为空或未选中画板时，画布区域显示“当前未选择素材板”等占位提示，不显示加载动画；
+- 纹理未就绪的占位：画布上可见、但**缩略图与高清纹理都尚未就绪**的图片，会在其显示范围上铺一块中性灰方框（DOM 层 `.pin-board-placeholder-layer`，由 `renderer.updatePlaceholderOverlay` 按世界→屏幕变换定位），中心是旋转的强调色弧线图标；方框随平移/缩放/旋转同步，图标反向抵消图片角度保持竖直，并随方框缩放（任一边小于 18px 时只留底色）。纹理到位后由下一次 `draw()` 自动移除；节点按 `imageId` 复用，画板释放与 `destroy()` 时清理。加载失败的图片（`failedTextureDimensions` 有记录）改显**红色调**方框与静态 `!` 徽标，不再无限转圈。占位层 `pointer-events: none`，不影响拖拽、框选与拖入导入；缺失 DDS 的图片（`available: false`）不在可见集内，因此不显示占位（仍由工具栏「N 张缺失」提示）；
 - 侧栏画板支持拖放排序（沿用 Client 的拖放语义）：拖动行到目标行的上/下半区决定插入到前/后，落库前先本地乐观重排，失败回滚；`reorder_pin_boards` 要求传入的 id 集合与当前未删除画板完全一致（缺项、重复或跨作品 id 一律拒绝），顺序只是列表元数据，不影响已打开画板的编辑会话；
 - 将当前选中画板移入回收站时渲染器不销毁，只以「跳过旧画板 finalize」的方式切换：有回退画板时 `loadBoard(..., finalizeCurrent=false)`，无可回退画板时 `unloadBoard(false)`；跳过对已删除画板的 finalize 保存，避免时序上的写库失败。
 

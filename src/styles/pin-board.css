@@ -254,6 +254,67 @@
 .pin-board-canvas.over-resize-nesw { cursor: nesw-resize; }
 .pin-board-canvas.selecting { cursor: crosshair; }
 
+/* 纹理未就绪时的图片占位：灰底方框标示图片范围，中心一个动态加载图标。 */
+.pin-board-placeholder-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.pin-board-placeholder {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--text) 16%, transparent);
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--text) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface) 45%, transparent);
+  will-change: transform;
+}
+.pin-board-placeholder-spinner,
+.pin-board-placeholder-failed {
+  grid-area: 1 / 1;
+  display: block;
+  width: var(--pb-placeholder-icon, 20px);
+  height: var(--pb-placeholder-icon, 20px);
+  /* 外层承载图片旋转，图标反向抵消以保持竖直。 */
+  transform: rotate(var(--pb-placeholder-angle, 0rad));
+}
+.pin-board-placeholder-spinner {
+  border: 2px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-top-color: color-mix(in srgb, var(--accent) 85%, transparent);
+  border-radius: 50%;
+  animation: pin-board-placeholder-spin 720ms linear infinite;
+}
+.pin-board-placeholder-failed { display: none; }
+/* 失败态：结构与加载态一致，仅换成红色调，让整块图片范围都醒目可辨。 */
+.pin-board-placeholder.failed {
+  border-color: color-mix(in srgb, var(--danger) 42%, transparent);
+  background: color-mix(in srgb, var(--danger) 8%, transparent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 10%, transparent);
+}
+.pin-board-placeholder.failed .pin-board-placeholder-spinner { display: none; }
+.pin-board-placeholder.failed .pin-board-placeholder-failed {
+  display: grid;
+  place-items: center;
+  border: 2px solid color-mix(in srgb, var(--danger) 55%, transparent);
+  border-radius: 50%;
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 18%, transparent);
+  font-size: calc(var(--pb-placeholder-icon, 20px) * 0.72);
+  font-weight: 700;
+  line-height: 1;
+}
+/* 方框过小时只保留底色，避免图标撑破范围。 */
+.pin-board-placeholder.compact .pin-board-placeholder-spinner,
+.pin-board-placeholder.compact .pin-board-placeholder-failed { display: none; }
+@keyframes pin-board-placeholder-spin {
+  to { transform: rotate(calc(var(--pb-placeholder-angle, 0rad) + 360deg)); }
+}
+
 .pin-board-selection,
 .pin-board-marquee { position: absolute; top: 0; left: 0; pointer-events: none; }
 .pin-board-selection[hidden],
