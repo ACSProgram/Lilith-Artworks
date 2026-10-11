@@ -5,6 +5,21 @@
 本文件只记录当前批次状态与人工验收结果。未完成事项见 `todo.md`；已完成或被替代的批次记录
 见 `archive/`。
 
+## 画板创建不再遗留空目录（已实现）
+
+新建画板会在进程工作目录下留下一棵空的 `artworks/<artwork-id>/boards/<board-id>` 目录树：
+`create_board` 用空根拼出**相对路径**再 `create_dir_all`，于是按工作目录解析——安装版从开始
+菜单快捷方式启动时落在安装目录，`cargo test --lib` 时落在 `src-tauri/`（累计 1483 个空目录）。
+该目录从不被读写：画板目录由 `persist_dds_file` 落盘时按需创建，读取路径由
+`load_board_context` 用真实仓库根解析，因此直接删除这两行即可。
+
+- `pin_board/repository.rs`：移除 `create_board` 中的 `create_dir_all` 及其空根参数，
+  `fs` 导入随之下沉到测试模块；画板目录改由 `persist_dds_file` 首次落盘时创建。
+- 清理残留：`src-tauri/artworks/`（1483 个空目录）与安装目录下的同名空目录树。
+
+**验证**：`cargo fmt --check`、`cargo check --lib`（无警告）、`cargo test --lib`、
+`git diff --check` 通过；清理后重跑 `cargo test --lib`，`src-tauri/artworks/` 不再生成。
+
 ## 素材板纹理未就绪占位符（已实现，加载态已确认；失败态免人工验证）
 
 打开画板或滑动视图时，纹理（缩略图/高清）尚未就绪的可见图片此前在画布上是一片空白。现在
@@ -221,6 +236,7 @@ WebGPU 设备。现已在读取返回点增加生命周期闸门。已排除 Rus
 
 | 批次 | 内容 | 验证 |
 | --- | --- | --- |
+| 画板创建不再遗留空目录 | 移除 `create_board` 用空根创建相对画板目录的冗余调用，画板目录改由 `persist_dds_file` 按需创建；清理 1483 个空目录残留 | `cargo test --lib`；`cargo check --lib` 无警告 |
 | 素材板纹理未就绪占位符 | 灰底方框 + 动态加载图标标示图片范围，随视口/旋转同步定位；加载失败改红色调方框与静态 `!` 徽标 | `npm run test:pin-board` 66；加载态维护者目视确认 |
 | Shift 加选框选与操作手册 | 加选修饰键统一 `Ctrl`/`Cmd`/`Shift`、框选累加、选中未变时跳过重绘；设置页「素材板」新增分组操作手册 | 维护者实测；`npm test` 181 |
 | 框选放大镜改为固定比例 | 取样跨度按主视图显示比例反比缩放（相对主视图固定 3×），瓦片边长随窗口增长、输出按镜片显示分辨率（含设备像素比）定尺 | 维护者实测；`npm test` 175 |

@@ -42,6 +42,14 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Creating a pin board no longer leaves a stray empty directory in the
+  process working directory. The board directory was built from an empty
+  root, so the relative path was resolved by `create_dir_all` against the
+  working directory: the install directory for an installed build, or
+  `src-tauri/` when running the test suite, which accumulated hundreds
+  of empty `artworks/<artwork-id>/boards/<board-id>` trees. The directory
+  is now created on demand by `persist_dds_file` when the first DDS is
+  written, which is the only place that needs it.
 - The framing loupe now samples a fixed ratio of the source instead of a fixed
   72 source pixels. The lens keeps a fixed 3x magnification over the main view,
   so the sampling span is `lens size / (3 x main-view scale)`: a larger canvas is
