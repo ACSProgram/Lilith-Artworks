@@ -9,10 +9,7 @@
 //! 本模块只通过 `storage.rs` 打开连接，不读取 ChunkFile；回收站永久删除经
 //! `cleanup.rs` 队列清理 DDS 目录。
 
-use std::{
-    fs,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -186,8 +183,9 @@ pub(crate) fn create_board(
         )
         .map_err(storage::database_error)?;
     let board_id = transaction.last_insert_rowid();
-    let directory = board_directory(Path::new(""), artwork_id, board_id);
-    fs::create_dir_all(&directory).map_err(|error| format!("无法创建画板目录：{error}"))?;
+    // 不在此处创建画板目录：`persist_dds_file` 落盘时会按需创建。原先用空根
+    // 拼出相对路径再 `create_dir_all`，会按进程工作目录（安装目录 / crate 根）
+    // 生成一个从不被读写的空目录。
     transaction.commit().map_err(storage::database_error)?;
     Ok(PinBoardSummary {
         board_id,
@@ -1482,6 +1480,7 @@ pub(crate) fn read_texture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     fn test_repository() -> (tempfile::TempDir, Connection) {
         let directory = tempfile::tempdir().unwrap();
