@@ -23,6 +23,14 @@ decision, so an untagged version is transitional.
 - The pin-board settings page now includes an operation manual. It documents
   viewing, selection, editing, and board/file operations as grouped rows with
   key chips, placed next to the lock and fullscreen shortcut fields.
+- Pin-board images that are visible but whose texture is not loaded yet now
+  show a placeholder over their footprint: a neutral grey box tracing the
+  image's on-screen quad with a spinning accent arc in the centre, so an
+  opening board no longer shows blank gaps while textures stream in. The
+  placeholder follows pan, zoom and rotation, keeps the icon upright by
+  cancelling the image angle, and shrinks the icon with the box (dropped
+  entirely once an edge falls below 18 px). An image whose load failed switches
+  to a red-toned box with a static `!` badge instead of spinning forever.
 
 ### Changed
 

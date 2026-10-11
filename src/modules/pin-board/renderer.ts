@@ -599,12 +599,18 @@ export class PinBoardRenderer {
   private scaleStartDistance = 1;
   private dragBefore: ImageSnapshot[] = [];
   private selectionScreenQuad: Quad | null = null;
+  /**
+   * 纹理未就绪的图片占位层：DOM 节点按 imageId 复用，避免每帧增删；位置随
+   * 视口/图片旋转同步。纹理（缩略图或高清）到位后由下一次 `draw()` 移除。
+   */
+  private readonly placeholderNodes = new Map<number, HTMLElement>();
   private drawErrorReported = false;
 
   private constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly selectionElement: HTMLElement,
     private readonly marqueeElement: HTMLElement,
+    private readonly placeholderElement: HTMLElement,
     private gpu: GpuState,
     private arrangementGapCssPixels: number,
     private autosaveEnabled: boolean,
@@ -732,6 +738,7 @@ export class PinBoardRenderer {
     canvas: HTMLCanvasElement,
     selectionElement: HTMLElement,
     marqueeElement: HTMLElement,
+    placeholderElement: HTMLElement,
     arrangementGapCssPixels: number,
     autosaveEnabled: boolean,
     onError: (message: string) => void,
@@ -745,6 +752,7 @@ export class PinBoardRenderer {
       canvas,
       selectionElement,
       marqueeElement,
+      placeholderElement,
       gpu,
       arrangementGapCssPixels,
       autosaveEnabled,
@@ -846,6 +854,7 @@ export class PinBoardRenderer {
     this.textureReservedBytes = 0;
     this.failedTextureDimensions.clear();
     this.textureQualityCaps.clear();
+    this.clearPlaceholderOverlay();
     this.visibleImages = [];
     this.history.length = 0;
     this.historyIndex = 0;
@@ -945,6 +954,7 @@ export class PinBoardRenderer {
     this.canvas.removeEventListener("pointercancel", this.pointerUp);
     this.canvas.removeEventListener("wheel", this.wheel);
     this.canvas.removeEventListener("contextmenu", this.contextMenu);
+    this.clearPlaceholderOverlay();
     for (const loaded of this.textures.values()) destroyTexture(loaded);
     this.textures.clear();
     for (const loaded of this.previewTextures.values()) destroyTexture(loaded);
@@ -2053,7 +2063,10 @@ export class PinBoardRenderer {
   }
 
   private draw() {
-    if (this.destroyed || this.gpuUnavailable) return;
+    if (this.destroyed || this.gpuUnavailable) {
+      this.clearPlaceholderOverlay();
+      return;
+    }
     try {
       const encoder = this.gpu.device.createCommandEncoder();
       const pass = encoder.beginRenderPass({
@@ -2087,12 +2100,86 @@ export class PinBoardRenderer {
       pass.end();
       this.gpu.device.queue.submit([encoder.finish()]);
       this.drawErrorReported = false;
+      this.updatePlaceholderOverlay();
     } catch (error) {
       if (!this.destroyed && !this.drawErrorReported) {
         this.drawErrorReported = true;
         this.onError(`画布渲染失败：${errorMessage(error)}`);
       }
     }
+  }
+
+  /**
+   * 同步「纹理未就绪」占位层：为可见但尚无纹理（缩略图或高清）的图片铺一块
+   * 灰底方框标示图片范围，中心配一个动态加载图标。加载失败的图片改显静态
+   * 告警图标，避免永久转圈。节点按 imageId 复用，只在集合变化时增删。
+   */
+  private updatePlaceholderOverlay() {
+    const layer = this.placeholderElement;
+    if (!layer || this.destroyed || this.gpuUnavailable || !this.loaded) {
+      this.clearPlaceholderOverlay();
+      return;
+    }
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.width < 1 || rect.height < 1) {
+      this.clearPlaceholderOverlay();
+      return;
+    }
+    const pending = new Map<number, { quad: Quad; failed: boolean }>();
+    for (const image of this.visibleImages) {
+      if (this.textures.has(image.imageId) || this.previewTextures.has(image.imageId)) continue;
+      pending.set(image.imageId, {
+        quad: image.points,
+        failed: this.failedTextureDimensions.has(image.imageId),
+      });
+    }
+    for (const [imageId, node] of this.placeholderNodes) {
+      if (pending.has(imageId)) continue;
+      node.remove();
+      this.placeholderNodes.delete(imageId);
+    }
+    for (const [imageId, entry] of pending) {
+      let node = this.placeholderNodes.get(imageId);
+      if (!node) {
+        node = document.createElement("div");
+        node.className = "pin-board-placeholder";
+        const spinner = document.createElement("span");
+        spinner.className = "pin-board-placeholder-spinner";
+        const failed = document.createElement("span");
+        failed.className = "pin-board-placeholder-failed";
+        failed.textContent = "!";
+        node.append(spinner, failed);
+        layer.appendChild(node);
+        this.placeholderNodes.set(imageId, node);
+      }
+      node.classList.toggle("failed", entry.failed);
+      const screenQuad = entry.quad.map((point) => worldToScreen(point, rect, this.viewport)) as Quad;
+      const width = Math.max(
+        Math.hypot(screenQuad[1][0] - screenQuad[0][0], screenQuad[1][1] - screenQuad[0][1]),
+        1,
+      );
+      const height = Math.max(
+        Math.hypot(screenQuad[3][0] - screenQuad[0][0], screenQuad[3][1] - screenQuad[0][1]),
+        1,
+      );
+      const angle = Math.atan2(screenQuad[1][1] - screenQuad[0][1], screenQuad[1][0] - screenQuad[0][0]);
+      node.style.transformOrigin = "0 0";
+      node.style.transform = `translate(${screenQuad[0][0]}px, ${screenQuad[0][1]}px) rotate(${angle}rad)`;
+      node.style.width = `${width}px`;
+      node.style.height = `${height}px`;
+      // 图标不随图片旋转：外层旋转由内层反向抵消；尺寸随画面缩放，过小的方框只留底色。
+      const minSide = Math.min(width, height);
+      const icon = Math.max(12, Math.min(30, minSide * 0.26));
+      node.style.setProperty("--pb-placeholder-icon", `${icon}px`);
+      node.style.setProperty("--pb-placeholder-angle", `${-angle}rad`);
+      node.classList.toggle("compact", minSide < 18);
+    }
+  }
+
+  private clearPlaceholderOverlay() {
+    if (!this.placeholderNodes) return;
+    for (const node of this.placeholderNodes.values()) node.remove();
+    this.placeholderNodes.clear();
   }
 
   private sortVisibleImages() {

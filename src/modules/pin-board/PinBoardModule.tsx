@@ -247,6 +247,8 @@ function GpuCanvas({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const selectionRef = useRef<HTMLDivElement>(null);
   const marqueeRef = useRef<HTMLDivElement>(null);
+  /** 纹理未就绪图片的占位层：由渲染器按视口同步填充。 */
+  const placeholderRef = useRef<HTMLDivElement>(null);
   /** 渲染器实例常驻：创建 effect 只随画布生命周期运行一次。 */
   const rendererRef = useRef<PinBoardRenderer | null>(null);
   const bootRef = useRef<Promise<PinBoardRenderer | null> | null>(null);
@@ -286,13 +288,15 @@ function GpuCanvas({
     const canvas = canvasRef.current;
     const selection = selectionRef.current;
     const marquee = marqueeRef.current;
-    if (!canvas || !selection || !marquee) return undefined;
+    const placeholder = placeholderRef.current;
+    if (!canvas || !selection || !marquee || !placeholder) return undefined;
 
     if (!bootRef.current) {
       bootRef.current = PinBoardRenderer.create(
         canvas,
         selection,
         marquee,
+        placeholder,
         gapRef.current,
         autosaveRef.current,
         (message) => setStatusRef.current(message),
@@ -370,6 +374,7 @@ function GpuCanvas({
   return (
     <div className="pin-board-canvas-shell">
       <canvas ref={canvasRef} className="pin-board-canvas" tabIndex={0} />
+      <div ref={placeholderRef} className="pin-board-placeholder-layer" aria-hidden="true" />
       <div ref={marqueeRef} className="pin-board-marquee" hidden />
       <div ref={selectionRef} className="pin-board-selection" hidden>
         <span className="pin-board-rotation-stem" />
