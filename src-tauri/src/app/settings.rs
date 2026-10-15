@@ -19,6 +19,18 @@ use crate::{history, library};
 
 const CURRENT_SETTINGS_VERSION: u32 = 2;
 
+/// 主窗口允许的最小物理尺寸，与 `tauri.conf.json` 的 `minWidth` / `minHeight` 一致。
+/// 加载设置时用它夹紧越界值，捕获窗口几何时用它判断一次捕获是否可信。
+const MIN_WINDOW_WIDTH: u32 = 760;
+const MIN_WINDOW_HEIGHT: u32 = 560;
+/// 主窗口允许的最大物理尺寸；超过它几乎只可能来自异常状态或异常的显示器几何。
+const MAX_WINDOW_WIDTH: u32 = 16_384;
+const MAX_WINDOW_HEIGHT: u32 = 16_384;
+/// 恢复窗口位置的最低门槛：窗口矩形同某块显示器的重叠不足这个范围时，视为落在
+/// 已经不存在的显示器上，改为居中，避免窗口开到屏幕外让用户以为程序没启动。
+const MIN_VISIBLE_WINDOW_WIDTH: i32 = 160;
+const MIN_VISIBLE_WINDOW_HEIGHT: i32 = 80;
+
 /// 诊断阈值：仓库锁等待/持有超过该时长即记录一条告警。正常操作远低于此值，
 /// 因此平时零噪声；一旦出现说明存在争用或某次操作异常变慢。
 const LOCK_WAIT_WARN_MS: u128 = 300;
@@ -406,6 +418,87 @@ fn migrate_settings(settings: &mut AppSettings) {
     }
 }
 
+/// 快捷键允许留空（表示未设置）；非空时按键组合必须由非空段组成，长度受限。
+fn shortcut_is_well_formed(shortcut: &str) -> bool {
+    let shortcut = shortcut.trim();
+    shortcut.is_empty()
+        || (shortcut.chars().count() <= 64
+            && !shortcut.split('+').any(|part| part.trim().is_empty()))
+}
+
+/// 加载落盘设置时的宽松修正：只把越界的个别字段改回可用值，绝不整份丢弃。
+///
+/// 与 [`validate_settings`] 的分工不同——后者服务于保存入口，用户输入必须明确拒绝；
+/// 加载时一个坏字段（典型来源是窗口最小化退出时被写进来的任务栏图标尺寸）不应该把
+/// 用户的仓库路径和全部偏好一起清空。返回是否做过修正，供调用点决定是否留下告警日志。
+fn sanitize_settings(settings: &mut AppSettings) -> bool {
+    let fallback = AppSettings::default();
+    let mut repaired = false;
+
+    if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
+        settings.theme = fallback.theme;
+        repaired = true;
+    }
+    if !matches!(
+        settings.automatic_backup_check_mode.as_str(),
+        "quick" | "full"
+    ) {
+        settings.automatic_backup_check_mode = fallback.automatic_backup_check_mode;
+        repaired = true;
+    }
+    if !matches!(settings.content.density.as_str(), "comfortable" | "compact") {
+        settings.content.density = fallback.content.density;
+        repaired = true;
+    }
+    if !matches!(
+        settings.content.default_panel.as_str(),
+        "overview" | "history" | "authenticity"
+    ) {
+        settings.content.default_panel = fallback.content.default_panel;
+        repaired = true;
+    }
+    if !matches!(
+        settings.pin_board.texture_cache_level.as_str(),
+        "low" | "medium" | "high"
+    ) {
+        settings.pin_board.texture_cache_level = fallback.pin_board.texture_cache_level;
+        repaired = true;
+    }
+    if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
+        settings.pin_board.arrangement_gap_px = fallback.pin_board.arrangement_gap_px;
+        repaired = true;
+    }
+    if !shortcut_is_well_formed(&settings.pin_board.lock_shortcut) {
+        settings.pin_board.lock_shortcut = fallback.pin_board.lock_shortcut.clone();
+        repaired = true;
+    }
+    if !shortcut_is_well_formed(&settings.pin_board.fullscreen_shortcut) {
+        settings.pin_board.fullscreen_shortcut = fallback.pin_board.fullscreen_shortcut.clone();
+        repaired = true;
+    }
+
+    // 窗口尺寸只夹紧到合法范围，而不是判整份设置无效：越界尺寸最常见的来源是
+    // 最小化时捕获到的任务栏图标矩形（约 237×39），夹回最小尺寸即可让窗口继续可见。
+    let width = settings
+        .window
+        .width
+        .clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+    if width != settings.window.width {
+        settings.window.width = width;
+        repaired = true;
+    }
+    let height = settings
+        .window
+        .height
+        .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
+    if height != settings.window.height {
+        settings.window.height = height;
+        repaired = true;
+    }
+
+    repaired
+}
+
 pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
     if !path.exists() {
         let settings = AppSettings::default();
@@ -417,14 +510,16 @@ pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
 
     match fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str::<AppSettings>(&content) {
-            Ok(settings) if settings.version == CURRENT_SETTINGS_VERSION => {
-                match validate_settings(&settings) {
-                    Ok(()) => (settings, None),
-                    Err(error) => (
-                        AppSettings::default(),
-                        Some(format!("设置内容无效，已临时使用默认值：{error}")),
-                    ),
+            Ok(mut settings) if settings.version == CURRENT_SETTINGS_VERSION => {
+                // 越界字段就地修正而不是整份回落默认：曾经把仓库路径连同全部偏好
+                // 一起清空。修正只发生在内存里，一致性交回既有写入路径（保存设置或
+                // 退出时捕获窗口），启动阶段不额外写盘。
+                if sanitize_settings(&mut settings) {
+                    log::warn!(
+                        "settings.json had out-of-range fields; repaired them in place without dropping the rest"
+                    );
                 }
+                (settings, None)
             }
             Ok(settings) if settings.version > CURRENT_SETTINGS_VERSION => (
                 settings,
@@ -433,6 +528,7 @@ pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
             Ok(mut settings) => {
                 migrate_settings(&mut settings);
                 settings.version = CURRENT_SETTINGS_VERSION;
+                sanitize_settings(&mut settings);
                 let warning = write_json_atomic(path, &settings)
                     .err()
                     .map(|error| format!("设置迁移后无法写回：{error}"));
@@ -624,24 +720,119 @@ pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Res
     Ok(())
 }
 
+/// 一块显示器在虚拟桌面坐标里的矩形，独立于窗口系统，便于做纯几何单元测试。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MonitorRect {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+/// 读取当前所有显示器的矩形；拿不到时返回 `None`，由调用点回退到安全行为。
+fn monitor_rects(window: &tauri::WebviewWindow) -> Option<Vec<MonitorRect>> {
+    window.available_monitors().ok().map(|monitors| {
+        monitors
+            .iter()
+            .map(|monitor| {
+                let position = monitor.position();
+                let size = monitor.size();
+                MonitorRect {
+                    x: position.x,
+                    y: position.y,
+                    width: size.width,
+                    height: size.height,
+                }
+            })
+            .collect()
+    })
+}
+
+/// 窗口矩形与任意一块显示器是否重叠出足以让用户看到并拖动它的范围。
+///
+/// 保存窗口时的显示器可能已经断开（外接绘画屏、投影）或分辨率改变；只按保存的坐标
+/// 恢复会让窗口开在屏幕外。只蹭到一条边同样按不可见处理。
+fn window_overlaps_a_monitor(
+    monitors: &[MonitorRect],
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    // 尺寸已在调用点限制在主窗口允许范围内；这里再做一次饱和转换，
+    // 避免任何 u32 -> i32 溢出改变几何判断。
+    let width = width.min(i32::MAX as u32) as i32;
+    let height = height.min(i32::MAX as u32) as i32;
+    let right = x.saturating_add(width);
+    let bottom = y.saturating_add(height);
+    let required_width = MIN_VISIBLE_WINDOW_WIDTH.min(width).max(1);
+    let required_height = MIN_VISIBLE_WINDOW_HEIGHT.min(height).max(1);
+    monitors.iter().any(|monitor| {
+        let monitor_right = monitor
+            .x
+            .saturating_add(monitor.width.min(i32::MAX as u32) as i32);
+        let monitor_bottom = monitor
+            .y
+            .saturating_add(monitor.height.min(i32::MAX as u32) as i32);
+        let overlap_width = right.min(monitor_right) - x.max(monitor.x);
+        let overlap_height = bottom.min(monitor_bottom) - y.max(monitor.y);
+        overlap_width >= required_width && overlap_height >= required_height
+    })
+}
+
+/// 保存的窗口坐标是否仍落在当前某块显示器上。拿不到显示器列表时按不可见处理，
+/// 让调用点回退到居中，而不是把窗口恢复到未知位置。
+fn saved_position_is_on_a_current_monitor(
+    window: &tauri::WebviewWindow,
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+) -> bool {
+    monitor_rects(window)
+        .map(|monitors| window_overlaps_a_monitor(&monitors, x, y, width, height))
+        .unwrap_or(false)
+}
+
+/// 一次窗口尺寸捕获是否可信：只接受落在主窗口允许范围内的物理尺寸。
+///
+/// 最小化时 `GetWindowRect` 返回的是任务栏图标矩形（实测约 237×39），最大化时是铺满
+/// 屏幕的矩形；两者都不是用户摆放的窗口几何，必须挡在写入设置之前。
+fn plausible_window_size(width: u32, height: u32) -> bool {
+    (MIN_WINDOW_WIDTH..=MAX_WINDOW_WIDTH).contains(&width)
+        && (MIN_WINDOW_HEIGHT..=MAX_WINDOW_HEIGHT).contains(&height)
+}
+
 pub(crate) fn restore_window_settings(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let settings = state.settings.read().map_err(|_| "设置状态已损坏")?;
     let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
+    // 这里再夹紧一次：来自更高版本的设置文件不会走 `sanitize_settings`，保证无论
+    // 来源如何都不会把越界尺寸喂给窗口。
+    let width = settings
+        .window
+        .width
+        .clamp(MIN_WINDOW_WIDTH, MAX_WINDOW_WIDTH);
+    let height = settings
+        .window
+        .height
+        .clamp(MIN_WINDOW_HEIGHT, MAX_WINDOW_HEIGHT);
     window
-        .set_size(PhysicalSize::new(
-            settings.window.width,
-            settings.window.height,
-        ))
+        .set_size(PhysicalSize::new(width, height))
         .map_err(|error| format!("无法恢复窗口大小：{error}"))?;
-    if let (Some(x), Some(y)) = (settings.window.x, settings.window.y) {
-        window
+    // 只有保存的坐标仍落在当前某块显示器上时才恢复位置：保存时的显示器可能已经
+    // 断开，直接恢复会让窗口开在屏幕外，用户会以为程序没有启动。
+    let saved_position =
+        settings.window.x.zip(settings.window.y).filter(|(x, y)| {
+            saved_position_is_on_a_current_monitor(&window, *x, *y, width, height)
+        });
+    match saved_position {
+        Some((x, y)) => window
             .set_position(PhysicalPosition::new(x, y))
-            .map_err(|error| format!("无法恢复窗口位置：{error}"))?;
-    } else {
-        window
+            .map_err(|error| format!("无法恢复窗口位置：{error}"))?,
+        None => window
             .center()
-            .map_err(|error| format!("无法居中主窗口：{error}"))?;
+            .map_err(|error| format!("无法居中主窗口：{error}"))?,
     }
     if settings.window.maximized {
         window
@@ -655,8 +846,30 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
     let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
     let maximized = window.is_maximized().unwrap_or(false);
-    let size = (!maximized).then(|| window.outer_size().ok()).flatten();
-    let position = (!maximized).then(|| window.outer_position().ok()).flatten();
+    // 最小化时窗口矩形是任务栏图标（约 237×39、坐标 -32000），最大化时是铺满屏幕的
+    // 矩形：把它们写进设置会让下次启动的尺寸校验失败，进而整份设置回落默认，所以只在
+    // 正常窗口状态下捕获几何；最小化/最大化仍会记录 `maximized` 标志。
+    let inspectable = !window.is_minimized().unwrap_or(false) && !maximized;
+    let size = inspectable
+        .then(|| window.outer_size().ok())
+        .flatten()
+        .filter(|size| plausible_window_size(size.width, size.height));
+
+    // 位置校验需要窗口尺寸：优先用刚捕获的值，拿不到时退回设置里的旧值。
+    let (width, height) = match size {
+        Some(size) => (size.width, size.height),
+        None => {
+            let settings = state.settings.read().map_err(|_| "设置状态已损坏")?;
+            (settings.window.width, settings.window.height)
+        }
+    };
+    let position = inspectable
+        .then(|| window.outer_position().ok())
+        .flatten()
+        .filter(|position| {
+            saved_position_is_on_a_current_monitor(&window, position.x, position.y, width, height)
+        });
+
     let settings = {
         let mut settings = state.settings.write().map_err(|_| "设置状态已损坏")?;
         settings.window.maximized = maximized;
@@ -719,23 +932,18 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
         return Err("素材板阵列间距超出允许范围".into());
     }
-    // 快捷键允许留空（表示未设置）；非空时按键组合必须由非空段组成，长度受限。
     for (label, shortcut) in [
         ("锁定画板", &settings.pin_board.lock_shortcut),
         ("画板全屏", &settings.pin_board.fullscreen_shortcut),
     ] {
-        let shortcut = shortcut.trim();
-        if shortcut.is_empty() {
-            continue;
-        }
-        if shortcut.chars().count() > 64 || shortcut.split('+').any(|part| part.trim().is_empty()) {
+        if !shortcut_is_well_formed(shortcut) {
             return Err(format!("素材板{label}快捷键格式无效"));
         }
     }
-    if settings.window.width < 760
-        || settings.window.height < 560
-        || settings.window.width > 16_384
-        || settings.window.height > 16_384
+    if settings.window.width < MIN_WINDOW_WIDTH
+        || settings.window.height < MIN_WINDOW_HEIGHT
+        || settings.window.width > MAX_WINDOW_WIDTH
+        || settings.window.height > MAX_WINDOW_HEIGHT
     {
         return Err("窗口尺寸超出允许范围".into());
     }
@@ -977,5 +1185,100 @@ mod tests {
         switched_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         active_thread.join().unwrap();
         switching_thread.join().unwrap();
+    }
+
+    #[test]
+    fn an_out_of_range_window_size_keeps_the_rest_of_the_settings() {
+        // 复现真实故障：窗口在最小化状态下退出时，`GetWindowRect` 返回任务栏图标
+        // 矩形（约 237×39）并被写进 settings.json；此前加载会因此把整份设置回落
+        // 默认，用户的仓库路径与全部偏好一起丢失。
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut broken = AppSettings::default();
+        broken.repository_path = "F:\\LilithData\\Artworks".into();
+        broken.pin_board.arrangement_gap_px = 3.0;
+        broken.pin_board.fullscreen_shortcut = "Escape".into();
+        broken.window.width = 237;
+        broken.window.height = 39;
+        write_json_atomic(&path, &broken).unwrap();
+
+        let (loaded, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded.repository_path, "F:\\LilithData\\Artworks");
+        assert_eq!(loaded.pin_board.arrangement_gap_px, 3.0);
+        assert_eq!(loaded.pin_board.fullscreen_shortcut, "Escape");
+        // 越界尺寸被夹回可用范围，窗口仍然可见、可拖动。
+        assert_eq!(loaded.window.width, MIN_WINDOW_WIDTH);
+        assert_eq!(loaded.window.height, MIN_WINDOW_HEIGHT);
+    }
+
+    #[test]
+    fn taskbar_icon_sized_rects_are_not_a_plausible_window_size() {
+        assert!(!plausible_window_size(237, 39));
+        assert!(!plausible_window_size(0, 0));
+        assert!(!plausible_window_size(MIN_WINDOW_WIDTH - 1, 840));
+        assert!(!plausible_window_size(1320, MAX_WINDOW_HEIGHT + 1));
+        assert!(plausible_window_size(MIN_WINDOW_WIDTH, MIN_WINDOW_HEIGHT));
+        assert!(plausible_window_size(1320, 840));
+    }
+
+    #[test]
+    fn a_window_saved_on_a_disconnected_monitor_is_not_treated_as_visible() {
+        let monitors = [MonitorRect {
+            x: 0,
+            y: 0,
+            width: 2560,
+            height: 1440,
+        }];
+        // 仍在一块显示器内的位置。
+        assert!(window_overlaps_a_monitor(&monitors, 100, 100, 1320, 840));
+        // 曾经落在右侧外接屏（x≈2560），屏幕断开后已不可见。
+        assert!(!window_overlaps_a_monitor(&monitors, 3400, 200, 1320, 840));
+        // 最小化时写入的任务栏坐标。
+        assert!(!window_overlaps_a_monitor(
+            &monitors, -32000, -32000, 1320, 840
+        ));
+        // 只蹭到一条边：重叠不足最低可见范围，仍按不可见处理。
+        assert!(!window_overlaps_a_monitor(&monitors, 2550, 100, 1320, 840));
+
+        let side_by_side = [
+            MonitorRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+            MonitorRect {
+                x: 1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ];
+        // 位于第二块显示器时仍然可见，不会因为不在主屏而被误判。
+        assert!(window_overlaps_a_monitor(
+            &side_by_side,
+            2000,
+            100,
+            1320,
+            840
+        ));
+    }
+
+    #[test]
+    fn sanitizing_repairs_only_the_out_of_range_fields() {
+        let mut settings = AppSettings::default();
+        settings.repository_path = "F:\\LilithData\\Artworks".into();
+        settings.theme = "neon".into();
+        settings.pin_board.arrangement_gap_px = 0.0;
+        settings.window.width = 237;
+
+        assert!(sanitize_settings(&mut settings));
+        assert_eq!(settings.repository_path, "F:\\LilithData\\Artworks");
+        assert_eq!(settings.theme, "system");
+        assert_eq!(settings.pin_board.arrangement_gap_px, 10.0);
+        assert_eq!(settings.window.width, MIN_WINDOW_WIDTH);
+        // 修正后的设置已经合法，再次加载不再触发修正。
+        assert!(!sanitize_settings(&mut settings));
     }
 }

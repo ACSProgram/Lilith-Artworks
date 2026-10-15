@@ -42,6 +42,20 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Minimizing the window before quitting no longer wipes the settings file. The
+  exit capture read `GetWindowRect` while the window was minimized, which
+  returns the taskbar-icon rect (about 237x39 at -32000,-32000); that size was
+  stored, failed the window-bounds check on the next launch, and made
+  `load_settings` fall back to the whole default document, silently dropping the
+  repository path and every other preference. Capture now skips minimized and
+  maximized windows and rejects implausible rects, and loading repairs an
+  out-of-range field in place (window sizes are clamped to the allowed range)
+  instead of discarding the rest of the file.
+- The main window is centered when the saved position no longer overlaps any
+  connected monitor, instead of being restored off-screen. A monitor that was
+  present when the position was saved (a drawing tablet, a projector) may be gone
+  by the next launch, and the window used to open outside the desktop, looking
+  like the application had not started.
 - Creating a pin board no longer leaves a stray empty directory in the
   process working directory. The board directory was built from an empty
   root, so the relative path was resolved by `create_dir_all` against the
