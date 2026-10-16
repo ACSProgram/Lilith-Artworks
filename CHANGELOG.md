@@ -11,6 +11,8 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+## 0.2.0-rc.3 - 2026-10-16
+
 ### Added
 
 - Shift now works as an additive-selection modifier in the pin board, matching
@@ -49,6 +51,10 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The application version is incremented to `0.2.0-rc.3`. The bump changes only
+  the version string and does not by itself tag or release anything; tagging
+  `v0.2.0-rc.3` and publishing it stays a separate, later maintainer decision,
+  so this cut is a transitional, untagged version.
 - Marquee moves in the pin board that leave the selected set unchanged now skip
   the canvas redraw and state broadcast. Dragging the marquee across empty space
   or over already-selected images no longer re-renders and re-sorts the whole
