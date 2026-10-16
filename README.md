@@ -1,66 +1,42 @@
 # Lilith Artworks
 
-本地优先的平面美术个人项目工作台，统一管理三件事：作品资源（可嵌套的 Artwork 树与按作品的
-素材板）、版本（可派生分支的增量历史）与发布（最终成品与 C2PA/TrustMark 认证）。四个领域
-模块共享同一个作品仓库，全部数据留在本机。
+## 简介
 
-## 当前状态
+Lilith Artworks 是一套用于管理个人平面美术工作流中资源的工具软件，集成、轻量，**全部操作和数据均完全本地化**。
+当前版本：`0.2.0-rc.3`（repository schema v4）
 
-当前版本 `0.2.0-rc.2`，使用 repository schema v4 和应用标识 `com.lilith.artworks`，最新发布
-标签为 `v0.2.0-rc.2`。版本号只在切版本时更新；切版本之后的改动记录在
-[CHANGELOG.md](CHANGELOG.md) 的 `Unreleased` 段。
+## 主要功能
 
-四个领域模块及其跨模块工作流均已实现：
-
-- **Artwork 树（Library）**：任意深度的分组与作品树、按标题或工作文件搜索、拖放排序、
-  Ctrl/Shift 多选与项目回收站。
-- **分支与增量历史（History/Backup）**：每个作品可有多分支与独立工作文件，支持主动提交、
-  托盘自动调度、恢复、精简、检查点与整仓灾备。历史采用内容定义分块 + SHA-256 + zstd 反向
-  delta，兼容 LilithClient ChunkFile v1。工作文件可留空，此时该分支不参与备份。
-- **成品与认证（Authenticity）**：进入发布状态会锁定分支 head，导出强制签入 C2PA、可选嵌入
-  TrustMark，并支持质量预览、识别与跨作品溯源。
-- **素材板（Pin-board）**：按作品的多块画板、BC7 DDS 图片存储、WebGPU 画布与画板回收站，
-  不进入分支历史。
+- **作品库**：软件可以统一管理大量的作品数据。作品（Artwork）是本软件管理数据的核心单元，其他模块的数据都按此进行划分。作品采用 **文件/文件夹** 的模式进行管理，支持移动、排序、搜索、删除和恢复功能。
+  - **可移动仓库**：用户可以自由选择一个文件夹作为本软件的数据仓库，数据仓库储存所有作品和对应的数据（不包括软件的偏好设置）。软件可以通过切换仓库路径来随时切换仓库，仓库也可以方便地进行移动和备份。软件还支持仓库的完整性校验和垃圾清理功能。
+- **工作文件版本管理**：软件可以手动或者自动备份作品的工作文件（比如 psd、clip 等，支持任意格式），每次备份会产生一个 **历史节点**，按照先后顺序的历史节点构成 **版本链**。用户可以方便地查看、命名和删除任意一个历史节点，也可以把任意一个历史节点的内容导出到对应文件。
+  - **增量备份**：备份采用内容定义分块算法，只保存相对上一版改动过的内容，因此除首次完整快照外，每次备份新增的硬盘占用 **远小于** 工作文件本身的大小。
+  - **可差分**：任意历史节点可以根据差分版本（对应另一个版本的工作文件）形成分支，不同分支交叉形成 **版本树**。版本树内所有的分支可以同时进行备份和管理。
+- **素材板**：软件可以导入并存储作品的参考图像，并在一个画布中统一展示。同一作品可以有多个画板来存储不同类别的参考图像。画布中的参考图像支持移动、缩放、镜像、旋转、排列、图层、复制和导出等功能。
+- **发布与认证**：软件可以给最终发布的平面作品图像嵌入 C2PA 作品信息和 TrustMark 不可见数字水印，并对这些信息进行管理。软件还可以识别图像中的 C2PA 和 TrustMark 信息，如果这些信息来自本软件，则可以自动匹配到对应的作品分支。
 
 ## 使用声明
 
-本项目由作者在个人生产环境中持续使用，并在代码层面尽量做到安全与可靠。但项目仍处于早期
-阶段，可能存在缺陷、稳定性问题或安全缺口：作者无法确保本软件在其它场景下正常运行，也不对
-软件可能造成的数据损失承担责任。本软件目前不适合作为作品数据的唯一副本。
+本项目由作者在个人生产环境中 **长期持续使用**，作者承诺会在代码层面尽量做到安全与可靠。但本项目仍处于早期阶段，可能存在缺陷、稳定性问题或安全缺口，因此作者 **无法确保本软件在所有场景下的正常运行，也不对软件可能造成的数据损失承担责任**。本软件目前不适合作为作品数据的唯一副本。
 
-**数据兼容性：** 本版本不提供旧数据迁移支持。早于 schema v1 的作品仓库、设置和应用数据都
-不在支持范围内，旧版本数据不会被打开、覆盖或复用。
+软件在设计上尽量保障数据的安全性，并针对 **强制结束进程、软件崩溃、长操作取消、超大仓库和工作文件、高频/高并发指令、硬盘/内存爆满** 等极端情况做了自动化压力测试，详细结论与实测数据见 [可靠性压力测试报告](docs/user/stress-test-report.md)。
 
-**数据可靠性边界：** 「可程序判定」的部分——强制结束进程与崩溃、长操作取消、大工作文件
-（已实测 64 MiB / 256 MiB / 1 GiB / 4 GiB）——已由自动压力测试覆盖，结论与实测数据见
-[可靠性压力测试报告](docs/user/stress-test-report.md)。断电持久性、界面视觉与交互手感不在
-该测试覆盖范围内。压力测试只在发布前手动运行（四档整轮约 40 分钟、峰值磁盘可达十几 GiB），
-不属于日常构建流程，约定见[验证策略](docs/guides/validation.md)。
+软件打开旧版本仓库时会按迁移链自动升级到当前版本，且不支持降级。因此 **升级不可逆，打开旧版本仓库前请先备份**。
 
 ## 开发与构建
 
-支持的环境为 Windows + Node.js 24 + 稳定版 Rust 工具链 + Microsoft C++ 生成工具 + WebView2。
-用 `npm ci` 安装锁定依赖，用 `npm run tauri -- dev` 启动应用。完整约定见
-[CONTRIBUTING.md](CONTRIBUTING.md)。
+支持的环境为 Windows + Node.js 24 + 稳定版 Rust 工具链 + Microsoft C++ 生成工具 + WebView2。用 `npm ci` 安装锁定依赖，用 `npm run tauri -- dev` 启动应用。完整约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 文档
 
 文档按读者分层，完整索引见 [docs/README.md](docs/README.md)。
 
-- 使用者：[可靠性压力测试报告](docs/user/stress-test-report.md)、[安全策略](SECURITY.md)、
-  [第三方许可摘要](THIRD_PARTY_NOTICES.md)、[变更日志](CHANGELOG.md)。
-- 开发者与代理：[AI 阅读引导](docs/architecture/ai-reading-guide.md)、
-  [系统架构](docs/architecture/overview.md)、[模块文档](docs/README.md)、
-  [验证策略](docs/guides/validation.md)、[发行政策](docs/guides/release-policy.md)、
-  [当前任务交接](docs/planning/current-handoff.md)、[待办清单](docs/planning/todo.md)。
+- 使用者：[可靠性压力测试报告](docs/user/stress-test-report.md)、[安全策略](SECURITY.md)、[第三方许可摘要](THIRD_PARTY_NOTICES.md)、[变更日志](CHANGELOG.md)。
+- 开发者与代理：[AI 阅读引导](docs/architecture/ai-reading-guide.md)、[系统架构](docs/architecture/overview.md)、[模块文档](docs/README.md)、[验证策略](docs/guides/validation.md)、[发行政策](docs/guides/release-policy.md)、[当前任务交接](docs/planning/current-handoff.md)、[待办清单](docs/planning/todo.md)。
 
 ## 许可证
 
-项目贡献者创作的代码以 [GNU General Public License v3.0 only](LICENSE) 发布。分发完整应用时，
-需要同时满足 GPL-3.0-only 和随包第三方材料各自适用的许可与告知义务。
+项目贡献者创作的代码以 [GNU General Public License v3.0 only](LICENSE) 发布。分发完整应用时，需要同时满足 GPL-3.0-only 和随包第三方材料各自适用的许可与告知义务。
 
-- 第三方软件保留各自版权和许可条款；人工维护的摘要与正式版仍需补齐的许可清单见
-  [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-- 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）沿用 Adobe 提供的
-  MIT License；原始许可文本见
-  [`src-tauri/resources/models/LICENSE`](src-tauri/resources/models/LICENSE)。
+- 第三方软件保留各自版权和许可条款；人工维护的摘要与正式版仍需补齐的许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）沿用 Adobe 提供的 MIT License；原始许可文本见 [`src-tauri/resources/models/LICENSE`](src-tauri/resources/models/LICENSE)。
