@@ -240,6 +240,18 @@
   box-shadow: 0 6px 18px rgb(0 0 0 / 12%);
   pointer-events: none;
 }
+/* 环境不提供 WebGPU 适配器时的常驻说明：取代画布内容，不走 4.5 秒自动清除的状态栏。 */
+.pin-board-unavailable .pin-board-stage-hint {
+  max-width: 420px;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  border-radius: 8px;
+  color: var(--pb-text-soft);
+  background: var(--pb-warning-soft);
+  text-align: center;
+}
+.pin-board-unavailable .pin-board-stage-hint strong { color: var(--warning); }
+.pin-board-unavailable .pin-board-stage-hint span { line-height: 1.6; }
 
 .pin-board-canvas-shell { position: absolute; inset: 0; overflow: hidden; background: var(--pin-board-bg); }
 .pin-board-stage-overlay { position: absolute; inset: 0; z-index: 2; display: grid; place-items: center; pointer-events: none; }

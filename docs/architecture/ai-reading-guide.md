@@ -46,4 +46,6 @@
 
 复用共享基础设施与既有 DTO。不要在领域仓储中重复数据库连接设置、路径归一化、ID 生成或错误
 格式化。跨模块流程在应用命令层编排。入口点或契约变化时更新架构/模块文档；未完成工作写入
-`docs/planning/todo.md`，当前批次状态写入 `docs/planning/current-handoff.md`。
+`docs/planning/todo.md`，当前批次状态写入 `docs/planning/current-handoff.md`。这两份是表层文档，
+只保留当前状况、未完成事项与规划：已完成批次与已通过的验收搬入 `docs/planning/archive/`（并同步
+其 `README.md` 索引）后从表层删除。

@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
+  pinBoardLockIndicatorVisible,
+  pinBoardUnavailableNotice,
   reorderBoardIds,
 } from "./PinBoardModule";
 import { shortcutMatches } from "./shortcuts";
@@ -51,5 +53,42 @@ describe("board drag reorder", () => {
     const next = reorderBoardIds(order, 3, 1, "before");
     expect(next).not.toBeNull();
     expect([...next!].sort((left, right) => left - right)).toEqual([1, 2, 3, 4]);
+  });
+});
+
+describe("pin-board unavailable notice", () => {
+  it("states the graphics requirement and keeps the raw failure reason", () => {
+    const notice = pinBoardUnavailableNotice("无法初始化 WebGPU 适配器");
+    expect(notice).toContain("WebGPU");
+    expect(notice).toContain("BC7");
+    expect(notice).toContain("无法初始化 WebGPU 适配器");
+    expect(notice).toContain("其余功能不受影响");
+  });
+
+  it("hides the lock indicator while the renderer could not boot", () => {
+    // 渲染器为空时画板停在默认锁定态，那不是用户锁的：只显示不可用说明。
+    expect(pinBoardLockIndicatorVisible({
+      hasView: true,
+      locked: true,
+      unavailable: true,
+    })).toBe(false);
+  });
+
+  it("shows the lock indicator only for a loaded, user-locked board", () => {
+    expect(pinBoardLockIndicatorVisible({
+      hasView: true,
+      locked: true,
+      unavailable: false,
+    })).toBe(true);
+    expect(pinBoardLockIndicatorVisible({
+      hasView: true,
+      locked: false,
+      unavailable: false,
+    })).toBe(false);
+    expect(pinBoardLockIndicatorVisible({
+      hasView: false,
+      locked: true,
+      unavailable: false,
+    })).toBe(false);
   });
 });

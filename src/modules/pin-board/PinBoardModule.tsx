@@ -109,6 +109,33 @@ function actionTitle(action: string, shortcut: string): string {
   return hint ? `${action} (${hint})` : action;
 }
 
+/**
+ * 渲染器创建失败时的常驻说明。
+ *
+ * 素材板完全依赖 WebGPU，创建失败后画布在整个进程生命周期内都不会再可用，因此这条说明不能
+ * 走 4.5 秒自动清除的状态栏：清空之后画板只剩空白与全部禁用的按钮，用户只会判断成「卡死」。
+ * 原始原因保留在文案里，好区分「没有可用适配器」「缺少 BC7 纹理压缩」这几种不同的处置方式。
+ */
+export function pinBoardUnavailableNotice(reason: string): string {
+  return "素材板需要支持 WebGPU 与 BC7 纹理压缩的图形适配器，当前环境不可用"
+    + `（${reason}）。请更新显卡驱动、开启虚拟机的 3D 加速，或改在具备可用适配器的环境`
+    + "运行后重启应用；其余功能不受影响。";
+}
+
+/**
+ * 「画板已锁定」标记的显示条件。
+ *
+ * 渲染器没起来时画板停在默认的锁定状态，但那不是用户锁的；此时显示这个标记会把排查引向
+ * 错误方向，所以只显示不可用说明。
+ */
+export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
+  hasView: boolean;
+  locked: boolean;
+  unavailable: boolean;
+}): boolean {
+  return hasView && locked && !unavailable;
+}
+
 const IMAGE_PATH_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif|tga|dds)$/i;
 
 /**
@@ -229,6 +256,7 @@ function GpuCanvas({
   cacheBudgets,
   active,
   setStatus,
+  onUnavailable,
   onRenderer,
   onState,
   onContextMenu,
@@ -240,6 +268,8 @@ function GpuCanvas({
   cacheBudgets: PinBoardTextureBudgets;
   active: boolean;
   setStatus: (message: string | null) => void;
+  /** 渲染器创建失败时的常驻原因；创建成功或尚未尝试时为 null。 */
+  onUnavailable: (reason: string | null) => void;
   onRenderer: (renderer: PinBoardRenderer | null) => void;
   onState: (state: PinBoardInteractionState) => void;
   onContextMenu: (request: PinBoardContextMenuRequest | null) => void;
@@ -270,6 +300,8 @@ function GpuCanvas({
   cacheBudgetsRef.current = cacheBudgets;
   const setStatusRef = useRef(setStatus);
   setStatusRef.current = setStatus;
+  const onUnavailableRef = useRef(onUnavailable);
+  onUnavailableRef.current = onUnavailable;
   const onRendererRef = useRef(onRenderer);
   onRendererRef.current = onRenderer;
   const onStateRef = useRef(onState);
@@ -321,6 +353,7 @@ function GpuCanvas({
           created.setTextureCacheBudgets(cacheBudgetsRef.current);
           created.setActive(activeRef.current);
           rendererRef.current = created;
+          onUnavailableRef.current(null);
           unregisterLifecycleRef.current = registerPinBoardLifecycleParticipant(created);
           onRendererRef.current(created);
           onStateRef.current(created.interactionState);
@@ -333,7 +366,8 @@ function GpuCanvas({
             "warn",
             `pin-board renderer create failed: artworkId=${artworkIdRef.current}, error=${errorMessage(error)}`,
           );
-          if (!disposedRef.current) setStatusRef.current(errorMessage(error));
+          // 走常驻说明而不是 4.5 秒自动清除的状态栏：这条原因必须一直看得见。
+          if (!disposedRef.current) onUnavailableRef.current(errorMessage(error));
           return null;
         });
     }
@@ -568,6 +602,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [view, setView] = useState<PinBoardView | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  /**
+   * 渲染器创建失败的常驻原因。素材板完全依赖 WebGPU，创建失败后画布不会再可用，
+   * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
+   */
+  const [unavailable, setUnavailable] = useState<string | null>(null);
   /** 拖入文件悬停在画布上时显示投放提示。 */
   const [dropActive, setDropActive] = useState(false);
   const [sidebar, setSidebar] = useState(getSidebarVisible);
@@ -1515,11 +1554,20 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             cacheBudgets={textureBudgetsForLevel(settings.textureCacheLevel)}
             active={active}
             setStatus={setStatus}
+            onUnavailable={setUnavailable}
             onRenderer={setRenderer}
             onState={handleRendererState}
             onContextMenu={handleRendererContextMenu}
           />
-          {!view && (
+          {unavailable ? (
+            <div className="pin-board-stage-overlay pin-board-unavailable" role="alert">
+              <div className="pin-board-stage-hint">
+                <AlertTriangle size={22} />
+                <strong>素材板不可用</strong>
+                <span>{pinBoardUnavailableNotice(unavailable)}</span>
+              </div>
+            </div>
+          ) : !view && (
             <div className="pin-board-stage-overlay" role="status">
               {boards === null
                 ? <LoaderCircle className="spin" size={24} />
@@ -1533,7 +1581,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
                 )}
             </div>
           )}
-          {view && interaction.locked && (
+          {pinBoardLockIndicatorVisible({
+            hasView: view !== null,
+            locked: interaction.locked,
+            unavailable: unavailable !== null,
+          }) && (
             <span className="pin-board-lock-indicator" title="画板已锁定" aria-label="画板已锁定">
               <Lock size={16} />
             </span>

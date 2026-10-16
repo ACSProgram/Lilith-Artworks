@@ -108,8 +108,42 @@ decision, so an untagged version is transitional.
   plus `stress_input`), which brings the input-domain and path-boundary
   regressions into everyday runs instead of pre-release ones.
 
+### Fixed
+
+- The pin board no longer fails silently when the environment offers no usable
+  WebGPU adapter. The renderer's creation error used to reach only the transient
+  status line, and every status is cleared after 4.5 seconds, so such a machine
+  (a virtual machine without 3D acceleration, some remote-desktop sessions)
+  ended up with a blank board, every editing control disabled, and a
+  "画板已锁定" marker that pointed away from the real cause. The failure now
+  renders a **persistent** notice in the stage area that names the original
+  reason and states what the environment needs, and the lock marker is
+  suppressed while the renderer is absent (the board's default state is locked,
+  which is not what the user did). The pin board is the only module that needs
+  WebGPU, so the notice also says the rest of the application is unaffected.
+  Found during the clean Windows user-environment acceptance run and fixed the
+  same day. The requirement itself — a graphics adapter supporting WebGPU and
+  BC7 texture compression, which recent integrated graphics meet — is now
+  stated in `README.md`'s runtime section and in the manual gate list of
+  `docs/guides/release-policy.md`, neither of which mentioned it before. The
+  fix was re-verified on 2026-10-17 in an environment without a usable adapter:
+  the persistent notice appears with the original reason.
+
 ### Changed
 
+- The planning set now follows one rule instead of two behaviours: the two
+  surface documents (`docs/planning/current-handoff.md` and
+  `docs/planning/todo.md`) carry only the current state, open work, and plans,
+  while everything finished — completed batches, passed manual acceptance,
+  superseded plans — moves into `docs/planning/archive/` and is deleted from
+  the surface. A pass used to be appended to the handoff beside the open items,
+  which grew the file without bound and mixed history into what a reader needs
+  for the current batch. The rule is stated in `AGENTS.md`, `docs/README.md`,
+  `docs/architecture/ai-reading-guide.md`, `docs/guides/release-policy.md` and
+  in the headers of both surface documents; the acceptance records and the batch
+  rows they used to carry now live in the archive (the newest in
+  `archive/handoff-log-2026-10-16.md`), with the `archive/README.md` index
+  updated to match.
 - `rustls` moved to 0.23.46 in `src-tauri/Cargo.lock`, which clears the four
   advisories RustSec published on 2026-10-14 against 0.23.45
   (RUSTSEC-2026-0346 client session `Debug` output leaking TLS secrets,
