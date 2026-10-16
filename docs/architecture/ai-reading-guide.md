@@ -11,6 +11,7 @@
 | 发布、成品、C2PA、TrustMark、识别 | `docs/modules/authenticity.md` | `src/modules/authenticity/`、`src-tauri/src/authenticity/` |
 | 素材板、画板、图片导入导出、画板回收站 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
 | 设置、托盘、窗口生命周期 | `docs/architecture/overview.md` | `src-tauri/src/app/`、`src-tauri/src/lib.rs` |
+| 确认弹窗、滑动确认等无领域语义的共享 UI | `docs/architecture/overview.md` 的「前端共享控件」 | `src/shared/` |
 | 构建、格式、静态检查 | `docs/guides/validation.md` | 只运行与改动匹配的检查 |
 
 ## 读序
@@ -23,6 +24,10 @@
 ## 边界
 
 - 前端模块之间不互相导入；跨模块流程在 `src/app/` 编排。
+- 跨模块的确认交互复用 `src/shared/ConfirmDialog.tsx`；不可逆的高风险操作在它的
+  `ConfirmView` 上置 `slideToConfirm: true`，走 `src/shared/SlideToConfirm.tsx` 的滑动确认，
+  不要另写拖拽、长按或二段式点击控件；测试里驱动该控件用 `src/shared/slideToConfirmTesting.ts`。
+  共享控件清单见 `docs/architecture/overview.md`。
 - 原生跨领域 Tauri 流程在 `src-tauri/src/app/workflows.rs` 编排；领域模块只暴露单领域服务。
 - History、Library、Authenticity、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费，
   页面组件不直接调用命令。

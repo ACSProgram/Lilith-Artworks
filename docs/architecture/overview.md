@@ -36,6 +36,33 @@ Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`
 
 开发/验证期另有一个**无界面命令行入口**（`--headless`，由 `headless` feature 门控、**不进发布产物**）：它与 Tauri 命令层并列，是同一批领域函数的另一个适配器，只做参数解析、锁与状态装配、领域调用，不含业务判断。它只供发布前的压力测试以**独立进程**调用真实可执行文件，不创建窗口、不建托盘、不加载 webview、不经过 IPC，因此发布版的产品行为零变化。定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，面向使用者的结论见 `docs/user/stress-test-report.md`。
 
+## 前端共享控件
+
+`src/shared/` 是无领域语义的 UI 与工具层，跨模块复用的确认交互也归它所有：模块里不要再写第二套。
+
+- `ConfirmDialog.tsx`：应用内唯一的确认弹窗（原生 `window.confirm` 在 Tauri webview 中不可靠）。
+  `ConfirmView.danger` 决定红色危险样式；`emphasis` 是最危险的一档，在 danger 基础上进一步加强
+  警示；`slideToConfirm` 把页脚主操作换成下面的滑动控件。任何模块都不要再手写 `.dialog-backdrop`
+  加 `role="alertdialog"` 的弹窗标记。
+- `SlideToConfirm.tsx`：滑动确认控件，只给最危险、不可逆的操作用。必须在轨迹上把滑块拖到底
+  （键盘按 `→` 逐步推进）才触发；单击或半途松手都会回弹，因此不存在「在同一个位置连点两次」
+  的误确认路径，也不需要用户多读一段文案。接入方式是在 `ConfirmView` 上置 `slideToConfirm: true`，
+  轨迹文案仍取 `action`。
+- `slideToConfirmTesting.ts`：驱动滑动控件的测试助手。jsdom 不实现 `PointerEvent`，它用带坐标的
+  `MouseEvent` 触发 `pointer*`，行程取控件导出量不到布局时的回退值。`*_test` 里的弹窗测试统一从
+  这里取，不要再各写一份拖拽序列。
+- `format.ts` / `fileCleanup.ts` / `menuPlacement.ts`、`useMenuPlacement.ts`：格式化、跨领域清理
+  DTO 与浮层定位。
+
+**规则**：不可逆删除的最后一道确认用滑动控件（`danger` + `emphasis` + `slideToConfirm`），可恢复
+或可撤销的操作沿用点击确认。当前采用滑动的有：库「清空回收站」、素材板「清空回收站」、历史
+「删除分支」/「删除节点与后续历史」、「删除节点」中选中含主动提交或已改名节点的第二道确认、
+发布「取消发布并删除本地数据」。同一次流程需要两道确认时，第一道仍是点击确认。
+
+共享控件样式写在 `src/styles/index.css`（基础控件），模块样式留在各自的 `src/styles/<module>.css`。
+`ConfirmDialog` 的 danger / emphasis 两档警示样式都在 `index.css` 里，各模块共用同一套，不要再按
+模块作用域重写一遍。
+
 ## 应用生命周期
 
 主窗口使用无原生装饰的 48px 应用顶栏，窗口拖动、最小化、最大化/还原与关闭通过受限的 Tauri window capability 调用。应用启用 Tauri single-instance 插件；再次启动时只聚焦并恢复现有主窗口，不创建第二个窗口。关闭按钮仍触发 Rust `CloseRequested`，默认只隐藏到系统托盘；托盘左键或“打开”命令恢复窗口，只有托盘“退出”或关闭到托盘设置被禁用时才结束进程。窗口隐藏期间备份调度器继续运行。真正退出分两段：原生端保存窗口状态后向 webview 发送 `app_shutdown_requested` 并启动 15 秒兜底强退计时器；webview 收到事件后结算素材板（保存并截断步骤历史，`preparePinBoardRuntimeChange`），无论成败都调用 `confirm_app_shutdown` 确认。原生端确认后设置不可逆的 `shutting_down` 状态、请求取消活动操作、停止并等待调度线程，最后等待共享操作锁释放再调用 `app.exit`；排队任务在拿到锁后只返回取消错误，活动任务完成临时文件和事务清理前不会退出。webview 未能在时限内确认（挂起或崩溃）时由兜底计时器强制退出，保证窗口始终可以关闭。

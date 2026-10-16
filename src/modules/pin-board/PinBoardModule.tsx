@@ -1198,8 +1198,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       subject: `${trash.length} 块画板`,
       description: "回收站中的所有画板及其图片文件将被永久删除，此操作无法撤销。",
       detail: null,
-      action: "清空回收站",
+      action: "拖动到底清空回收站",
       danger: true,
+      emphasis: true,
+      slideToConfirm: true,
     };
   }, [confirmRequest, trash.length]);
 

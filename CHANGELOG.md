@@ -31,6 +31,21 @@ decision, so an untagged version is transitional.
   cancelling the image angle, and shrinks the icon with the box (dropped
   entirely once an edge falls below 18 px). An image whose load failed switches
   to a red-toned box with a static `!` badge instead of spinning forever.
+- Confirmations for the most dangerous actions now use a slide control instead
+  of a button. `src/shared/SlideToConfirm.tsx` fires only after its thumb is
+  dragged to the end of the track (or stepped there with the right arrow key);
+  a click or a half-drag springs back, so a second click in the same place can
+  no longer confirm by accident. Dialogs opt in with
+  `ConfirmView.slideToConfirm`; irreversible deletions now all end in it:
+  emptying the library trash, emptying the pin-board trash, deleting a branch,
+  deleting a node with its later history, deleting history nodes that carry
+  manual intent (its second confirmation), and cancelling a publication. The
+  two hand-written dialogs in the authenticity module were folded back into the
+  shared `ConfirmDialog`, so the module no longer repeats the dialog markup;
+  deleting a certification record keeps a plain click confirmation. The stronger
+  red styling for the highest-risk tier now lives with the shared dialog, so it
+  applies to every module that asks for it instead of only inside the history
+  workspace.
 
 ### Changed
 
@@ -39,6 +54,14 @@ decision, so an untagged version is transitional.
   or over already-selected images no longer re-renders and re-sorts the whole
   board on every pointer event; the marquee rectangle itself is a separate
   overlay and still follows the pointer.
+- Removing intermediate history nodes is now labelled as what it does. The
+  compact toolbar button reads "删除节点" and uses the shared outlined danger
+  button instead of the accent-coloured "执行精简", and the confirmation dialog
+  matches. When the selection contains manual commits or nodes whose title was
+  changed by hand, a second, stronger confirmation follows; plain automatic
+  backups still need only one. Whether a title was changed by hand is derived by
+  comparing it with the title generated at commit time, so no schema or DTO
+  field was added.
 
 ### Fixed
 

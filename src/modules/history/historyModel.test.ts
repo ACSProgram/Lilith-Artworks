@@ -1,8 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { ArtworkBranch, HistoryNode } from "./types";
-import { buildBranchLine, canCompact, suggestedRestorePath } from "./historyModel";
+import {
+  buildBranchLine, canCompact, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
+} from "./historyModel";
 
-const node = (id: string, parentId: string | null, createdMs: number): HistoryNode => ({
+const node = (
+  id: string,
+  parentId: string | null,
+  createdMs: number,
+  overrides: Partial<HistoryNode> = {},
+): HistoryNode => ({
   id,
   createdOnBranchId: "branch",
   parentId,
@@ -15,6 +22,7 @@ const node = (id: string, parentId: string | null, createdMs: number): HistoryNo
   chunkFileSize: 1,
   sha256: id.padEnd(64, "0"),
   chunkCount: 1,
+  ...overrides,
 });
 
 const branch: ArtworkBranch = {
@@ -53,5 +61,23 @@ describe("history model", () => {
 
   it("preserves the working file extension in restore suggestions", () => {
     expect(suggestedRestorePath(nodes[2], branch)).toBe("C:/art/source_restored.psd");
+  });
+
+  it("reports a node as renamed only when its title left the generated default", () => {
+    const automatic = node("auto", "root", 2, { title: "自动备份", commitKind: "automatic" });
+    expect(isRenamedNode(automatic)).toBe(false);
+    expect(isRenamedNode({ ...automatic, title: "发布前定稿" })).toBe(true);
+
+    const manual = node("manual", "root", 3, { title: "主动提交" });
+    expect(isRenamedNode(manual)).toBe(false);
+    expect(isRenamedNode({ ...manual, note: "改肤色", title: "改肤色" })).toBe(false);
+    expect(isRenamedNode({ ...manual, note: "改肤色", title: "改肤色 v2" })).toBe(true);
+  });
+
+  it("asks for a stronger confirmation for manual or renamed nodes", () => {
+    const automatic = node("auto", "root", 2, { title: "自动备份", commitKind: "automatic" });
+    expect(needsCompactSecondConfirm(automatic)).toBe(false);
+    expect(needsCompactSecondConfirm({ ...automatic, title: "自动备份 v2" })).toBe(true);
+    expect(needsCompactSecondConfirm(node("manual", "root", 3, { title: "主动提交" }))).toBe(true);
   });
 });

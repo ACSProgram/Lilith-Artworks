@@ -13,7 +13,7 @@ import type { ConfirmRequest } from "./HistoryControls";
 import { HistoryTimeline, Mindmap } from "./HistoryGraph";
 import {
   branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
-  isForcedCheckpoint, suggestedRestorePath,
+  isForcedCheckpoint, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
 } from "./historyModel";
 import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
 import { useHistoryController } from "./useHistoryController";
@@ -146,17 +146,37 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     setSelectedNodeId(null);
   };
 
+  // 精简按分支链从后向前处理，与后端的单节点改接契约保持一致。
+  const orderedCompactSelection = () => branchLine
+    .filter((node) => compactSelection.has(node.id))
+    .reverse();
+
+  const runCompact = async (ordered: HistoryNode[]) => {
+    if (await compactNodes(ordered)) {
+      setCompactMode(false);
+      setCompactSelection(new Set());
+    }
+  };
+
   const executeConfirmed = async () => {
     const request = confirmRequest;
     if (!request || !history) return;
     if (request.kind === "compact") {
-      const ordered = branchLine
-        .filter((node) => compactSelection.has(node.id))
-        .reverse();
-      if (await compactNodes(ordered)) {
-        setCompactMode(false);
-        setCompactSelection(new Set());
+      const ordered = orderedCompactSelection();
+      // 主动提交或已被人工改名的节点承载明确意图，删除前再插一道更强的确认。
+      const important = ordered.filter(needsCompactSecondConfirm);
+      if (important.length > 0) {
+        setConfirmRequest({
+          kind: "compact-warning",
+          selectedCount: ordered.length,
+          manualCount: important.filter((node) => node.commitKind !== "automatic").length,
+          renamedCount: important.filter(isRenamedNode).length,
+        });
+        return;
       }
+      await runCompact(ordered);
+    } else if (request.kind === "compact-warning") {
+      await runCompact(orderedCompactSelection());
     } else if (request.kind === "delete-branch") {
       await deleteBranch(request.branch.id);
     } else if (request.kind === "delete-nodes") {
@@ -294,10 +314,9 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     {compactMode && <div className="compact-mode-bar">
       <ListCollapse aria-hidden="true" size={16} /><div><strong>精简 {selectedBranch?.title}</strong><span>选择当前分支上的普通中间节点</span></div>
       <strong className="compact-count">{compactSelection.size} 个已选</strong>
-      <button className="primary-button" type="button" disabled={!compactSelection.size || busy || runtime.busy} onClick={() => {
-        const first = branchLine.find((node) => compactSelection.has(node.id));
-        if (first) setConfirmRequest({ kind: "compact", node: first, selectedCount: compactSelection.size });
-      }}>执行精简</button>
+      <button className="danger-button" type="button" disabled={!compactSelection.size || busy || runtime.busy} onClick={() => {
+        setConfirmRequest({ kind: "compact", selectedCount: compactSelection.size });
+      }}><Trash2 size={15} />删除节点</button>
       <button className="text-button" type="button" onClick={() => { setCompactMode(false); setCompactSelection(new Set()); }}>退出</button>
     </div>}
 
