@@ -1,7 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BranchScheduleStatus, BranchSettings } from "./HistoryControls";
-import type { ArtworkBranch } from "./types";
+import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
+import { BranchScheduleStatus, BranchSettings, ConfirmDialog } from "./HistoryControls";
+import type { ArtworkBranch, HistoryNode } from "./types";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
@@ -28,6 +29,53 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
   publishedCount: 0,
   verifyError: null,
   verifiedMs: null,
+});
+
+const historyNode: HistoryNode = {
+  id: "history-1",
+  createdOnBranchId: "branch-1",
+  parentId: "root",
+  title: "Middle",
+  note: "",
+  commitKind: "manual",
+  isCheckpoint: false,
+  createdMs: 1,
+  logicalSize: 1,
+  chunkFileSize: 1,
+  sha256: "b".repeat(64),
+  chunkCount: 1,
+};
+
+describe("ConfirmDialog views", () => {
+  afterEach(cleanup);
+
+  it("puts irreversible history deletions behind the slide control", () => {
+    const onConfirm = vi.fn();
+    render(<ConfirmDialog
+      request={{ kind: "delete-branch", node: historyNode, branch: branch(true) }}
+      busy={false}
+      onClose={vi.fn()}
+      onConfirm={onConfirm}
+    />);
+
+    expect(screen.getByRole("slider", { name: "拖动到底删除分支" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "确认删除分支" })).toBeNull();
+
+    dragSlideToEnd("拖动到底删除分支");
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the compact selection on a click confirmation", () => {
+    render(<ConfirmDialog
+      request={{ kind: "compact", selectedCount: 2 }}
+      busy={false}
+      onClose={vi.fn()}
+      onConfirm={vi.fn()}
+    />);
+
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.getByRole("button", { name: "确认删除" })).toBeTruthy();
+  });
 });
 
 describe("BranchSettings", () => {

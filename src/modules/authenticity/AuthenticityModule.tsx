@@ -5,6 +5,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from "react";
+import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
 import { authenticityApi } from "./api";
@@ -169,7 +170,23 @@ function PublishView({
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
       </> : <div className="auth-empty"><LoaderCircle className="spin" size={18} />{publication?.artifact ? "读取成品预览" : "读取发布状态"}</div>}
-    {selectedBranch && deleteConfirmOpen && <PublicationDeleteDialog branchTitle={selectedBranch.title} busy={busy} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void cancelPublication()} />}
+    {selectedBranch && deleteConfirmOpen && <ConfirmDialog
+      view={{
+        danger: true,
+        emphasis: true,
+        slideToConfirm: true,
+        icon: <Trash2 size={20} />,
+        eyebrow: "不可撤销",
+        title: "删除本地发布数据",
+        subject: selectedBranch.title,
+        description: "将删除该分支的仓库内最终成品、全部认证记录、认证 JPG 副本和保存配置，并解除分支锁定。",
+        detail: "首次导出的 JPG 会保留在原发布路径，不会由此操作删除。",
+        action: "拖动到底删除本地数据",
+      }}
+      busy={busy}
+      onCancel={() => setDeleteConfirmOpen(false)}
+      onConfirm={() => void cancelPublication()}
+    />}
   </div>;
 }
 
@@ -380,32 +397,26 @@ function RecordView({ record, preview, exporting, deleting, onExport, onDelete, 
       </section>
       {record.c2paManifestJson && <section className="record-manifest"><details className="manifest-details" open><summary>C2PA 报告</summary><pre>{record.c2paManifestJson}</pre></details></section>}
     </div>
-    {deleteConfirmOpen && <RecordDeleteDialog record={record} busy={deleting} onClose={() => setDeleteConfirmOpen(false)} onConfirm={() => void onDelete(record)} />}
-  </div>;
-}
-
-function RecordDeleteDialog({ record, busy, onClose, onConfirm }: { record: CertificationRecord; busy: boolean; onClose: () => void; onConfirm: () => void }) {
-  return <div className="dialog-backdrop" onMouseDown={onClose}>
-    <section className="publication-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-record-title" onMouseDown={(event) => event.stopPropagation()}>
-      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-record-title">删除发布记录</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
-      <div><strong>{record.title}</strong><p>将删除这条发布记录及其仓库内认证 JPG 副本、C2PA 清单与 TrustMark ID。</p><div className="delete-detail">首次导出的 JPG 会保留在原发布路径，不会由此操作删除。</div></div>
-      <footer><button className="text-button" type="button" onClick={onClose}>保留记录</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认删除记录</button></footer>
-    </section>
+    {deleteConfirmOpen && <ConfirmDialog
+      view={{
+        danger: true,
+        icon: <Trash2 size={20} />,
+        eyebrow: "不可撤销",
+        title: "删除发布记录",
+        subject: record.title,
+        description: "将删除这条发布记录及其仓库内认证 JPG 副本、C2PA 清单与 TrustMark ID。",
+        detail: "首次导出的 JPG 会保留在原发布路径，不会由此操作删除。",
+        action: "确认删除记录",
+      }}
+      busy={deleting}
+      onCancel={() => setDeleteConfirmOpen(false)}
+      onConfirm={() => void onDelete(record)}
+    />}
   </div>;
 }
 
 function ReadOnlyField({ label, value, multiline = false }: { label: string; value: string; multiline?: boolean }) {
   return <div className={`readonly-field${multiline ? " multiline" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
-}
-
-function PublicationDeleteDialog({ branchTitle, busy, onClose, onConfirm }: { branchTitle: string; busy: boolean; onClose: () => void; onConfirm: () => void }) {
-  return <div className="dialog-backdrop" onMouseDown={onClose}>
-    <section className="publication-delete-dialog" role="alertdialog" aria-modal="true" aria-labelledby="delete-publication-title" onMouseDown={(event) => event.stopPropagation()}>
-      <header><span><Trash2 size={20} /></span><div><small>不可撤销</small><h2 id="delete-publication-title">删除本地发布数据</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
-      <div><strong>{branchTitle}</strong><p>将删除该分支的仓库内最终成品、全部认证记录、认证 JPG 副本和保存配置，并解除分支锁定。</p><div className="delete-detail">首次导出的 JPG 会保留在原发布路径，不会由此操作删除。</div></div>
-      <footer><button className="text-button" type="button" onClick={onClose}>保留发布内容</button><button className="danger-button solid" type="button" disabled={busy} onClick={onConfirm}>{busy && <LoaderCircle className="spin" size={15} />}确认删除本地数据</button></footer>
-    </section>
-  </div>;
 }
 
 export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, onCancel, onPublish }: {

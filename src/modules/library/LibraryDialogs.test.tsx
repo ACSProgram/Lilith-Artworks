@@ -1,5 +1,6 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { TrashDialog } from "./LibraryDialogs";
 import type { LibraryTrashEntry } from "./types";
 
@@ -28,7 +29,7 @@ function renderDialog(overrides: Partial<Parameters<typeof TrashDialog>[0]> = {}
 describe("TrashDialog", () => {
   afterEach(cleanup);
 
-  it("requires a second confirmation before emptying the trash", async () => {
+  it("empties the trash only after the confirmation slider is dragged to the end", async () => {
     const { onEmpty } = renderDialog();
 
     fireEvent.click(screen.getByRole("button", { name: "清空回收站" }));
@@ -41,9 +42,13 @@ describe("TrashDialog", () => {
     expect(onEmpty).not.toHaveBeenCalled();
     expect(screen.queryByRole("alertdialog")).toBeNull();
 
+    // 清空回收站不可撤销：确认按钮换成滑动控件，点不开，必须拖到底。
     fireEvent.click(screen.getByRole("button", { name: "清空回收站" }));
-    fireEvent.click(screen.getByRole("button", { name: "永久删除 1 个项目" }));
+    const slider = screen.getByRole("slider", { name: "拖动到底永久删除 1 个项目" });
+    fireEvent.click(slider);
+    expect(onEmpty).not.toHaveBeenCalled();
 
+    dragSlideToEnd("拖动到底永久删除 1 个项目");
     expect(onEmpty).toHaveBeenCalledTimes(1);
   });
 

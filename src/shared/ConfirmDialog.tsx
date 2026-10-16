@@ -1,5 +1,6 @@
 import { LoaderCircle, X } from "lucide-react";
 import type { ReactNode } from "react";
+import { SlideToConfirm } from "./SlideToConfirm";
 
 export interface ConfirmView {
   icon: ReactNode;
@@ -8,8 +9,19 @@ export interface ConfirmView {
   subject: string;
   description: string;
   detail?: string | null;
+  /** 页脚主操作（或滑动确认控件）上的文字。 */
   action: string;
   danger?: boolean;
+  /** 最危险的一档视觉：在 danger 基础上进一步加强红色警示。 */
+  emphasis?: boolean;
+  /**
+   * 最高风险的确认：页脚不提供可点击的确认按钮，改为 `SlideToConfirm`
+   * 滑动控件，必须把滑块拖到底才会触发，避免误点误删。文案仍取自 `action`。
+   *
+   * 最危险的一档由三者共同组成（`danger` + `emphasis` + `slideToConfirm`），
+   * 三者各自独立只是为了普通危险操作仍能只用其中一两个。
+   */
+  slideToConfirm?: boolean;
 }
 
 /**
@@ -25,7 +37,7 @@ export function ConfirmDialog({ view, busy, onCancel, onConfirm }: {
 }) {
   return <div className="dialog-backdrop" onMouseDown={onCancel}>
     <section
-      className={`confirm-dialog${view.danger ? " danger" : ""}`}
+      className={`confirm-dialog${view.danger ? " danger" : ""}${view.emphasis ? " emphasis" : ""}`}
       role="alertdialog"
       aria-modal="true"
       aria-labelledby="confirm-title"
@@ -41,11 +53,13 @@ export function ConfirmDialog({ view, busy, onCancel, onConfirm }: {
         <p>{view.description}</p>
         {view.detail && <div className="confirm-detail">{view.detail}</div>}
       </div>
-      <footer>
+      <footer className={view.slideToConfirm ? "with-slide" : undefined}>
         <button className="text-button" type="button" onClick={onCancel}>取消</button>
-        <button className={view.danger ? "danger-button solid" : "primary-button"} type="button" disabled={busy} onClick={onConfirm}>
-          {busy && <LoaderCircle className="spin" size={15} />}{view.action}
-        </button>
+        {view.slideToConfirm
+          ? <SlideToConfirm label={view.action} disabled={busy} onConfirm={onConfirm} />
+          : <button className={view.danger ? "danger-button solid" : "primary-button"} type="button" disabled={busy} onClick={onConfirm}>
+            {busy && <LoaderCircle className="spin" size={15} />}{view.action}
+          </button>}
       </footer>
     </section>
   </div>;

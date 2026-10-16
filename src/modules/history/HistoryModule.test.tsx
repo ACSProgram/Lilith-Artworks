@@ -1,5 +1,6 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { HistoryModule } from "./HistoryModule";
 import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
 
@@ -91,6 +92,17 @@ const history: ArtworkHistory = {
   ],
 };
 
+/** 与默认标题一致、未改名的自动备份节点：精简时属于可安全删除的那一类。 */
+const automaticHistory: ArtworkHistory = {
+  ...history,
+  nodes: [
+    node("root", "Root", null, "main", 1),
+    { ...node("auto", "自动备份", "root", "main", 2), commitKind: "automatic" },
+    node("main-head", "Main head", "auto", "main", 3),
+    node("other-head", "Other head", "root", "other", 4),
+  ],
+};
+
 function controllerReturn(overrides: Record<string, unknown> = {}) {
   return {
     history,
@@ -150,6 +162,65 @@ describe("HistoryModule overview interactions", () => {
     fireEvent.doubleClick(screen.getByText("Other head").closest("button")!);
     expect(onSelectBranch).toHaveBeenCalledWith("other");
     expect(screen.getByRole("button", { name: "总览" }).classList.contains("active")).toBe(true);
+  });
+
+  it("requires a second confirmation before removing manual or renamed nodes", async () => {
+    const compactNodes = vi.fn().mockResolvedValue(true);
+    controller.useHistoryController.mockReturnValue(controllerReturn({ compactNodes }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "精简当前分支" }));
+    fireEvent.click(screen.getByText("Middle").closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "删除节点" }));
+
+    expect(screen.getByRole("heading", { name: "删除节点" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    expect(screen.getByRole("heading", { name: "其中包含重要节点" })).toBeTruthy();
+    expect(screen.getByText("共 1 个节点，含 1 个主动提交节点、1 个已改名节点")).toBeTruthy();
+    expect(compactNodes).not.toHaveBeenCalled();
+
+    // 第二次确认只提供滑动控件，点不开：必须在轨迹上拖到底才会执行。
+    fireEvent.click(screen.getByRole("slider", { name: "拖动到底确认删除" }));
+    expect(compactNodes).not.toHaveBeenCalled();
+
+    dragSlideToEnd("拖动到底确认删除");
+    await waitFor(() => expect(compactNodes).toHaveBeenCalledTimes(1));
+  });
+
+  it("deletes plain automatic backups after a single confirmation", async () => {
+    const compactNodes = vi.fn().mockResolvedValue(true);
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      compactNodes,
+      history: automaticHistory,
+    }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "精简当前分支" }));
+    // 「自动备份」同时出现在分支设置的分组标题上，这里只取历史节点卡片。
+    const autoCard = screen.getAllByText("自动备份")
+      .find((element) => element.closest(".history-node-card"));
+    fireEvent.click(autoCard!.closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "删除节点" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() => expect(compactNodes).toHaveBeenCalledTimes(1));
+    // 全部是未改名的自动备份节点：不再出现第二次确认的滑动控件。
+    expect(screen.queryByRole("slider", { name: "拖动到底确认删除" })).toBeNull();
   });
 
   it("re-queues a failed chain verification from the branch status row", () => {

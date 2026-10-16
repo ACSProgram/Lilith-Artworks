@@ -1,6 +1,6 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, Ban, Check, ChevronDown, CircleDot, Copy, Eraser, FileOutput, FilePenLine,
+  AlertTriangle, Ban, Check, ChevronDown, Copy, Eraser, FileOutput, FilePenLine,
   FolderOpen, GitBranch, GitFork, LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -373,7 +373,13 @@ export function EditNodeDialog({
 export type ConfirmRequest =
   | { kind: "delete-nodes"; node: HistoryNode; branch: ArtworkBranch; descendantCount: number }
   | { kind: "delete-branch"; node: HistoryNode; branch: ArtworkBranch }
-  | { kind: "compact"; node: HistoryNode; selectedCount: number }
+  | { kind: "compact"; selectedCount: number }
+  | {
+    kind: "compact-warning";
+    selectedCount: number;
+    manualCount: number;
+    renamedCount: number;
+  }
   | { kind: "checkpoint"; node: HistoryNode; enable: boolean };
 
 export function ConfirmDialog({
@@ -394,34 +400,56 @@ export function ConfirmDialog({
 function confirmCopy(request: ConfirmRequest): ConfirmView {
   if (request.kind === "delete-branch") return {
     danger: true,
+    emphasis: true,
+    slideToConfirm: true,
     icon: <Trash2 size={20} />,
     eyebrow: "不可撤销",
     title: "删除分支",
     subject: request.branch.title,
     description: "这个分支独有的历史链与 Chunk 文件将被永久删除；被其他分支共享的祖先节点会保留。",
     detail: "如分支已经发布成品，必须先移除成品。",
-    action: "确认删除分支",
+    action: "拖动到底删除分支",
   };
   if (request.kind === "delete-nodes") return {
     danger: true,
+    emphasis: true,
+    slideToConfirm: true,
     icon: <Trash2 size={20} />,
     eyebrow: "不可撤销",
     title: "删除节点与后续历史",
     subject: request.node.title,
     description: `将从“${request.branch.title}”删除此节点及后续 ${request.descendantCount} 个节点，并自动把分支回退到前一个保留节点。`,
     detail: "如果后续历史属于其他完整分支，操作会被拒绝，请先删除对应分支。",
-    action: "确认永久删除",
+    action: "拖动到底永久删除",
   };
   if (request.kind === "compact") return {
-    danger: false,
-    icon: <CircleDot size={20} />,
-    eyebrow: "重新整理历史链",
-    title: "执行精简",
+    danger: true,
+    icon: <Trash2 size={20} />,
+    eyebrow: "不可撤销",
+    title: "删除节点",
     subject: `已选择 ${request.selectedCount} 个中间节点`,
     description: "程序会逐个重建相邻节点的反向增量并重新连接历史链，所选节点随后被永久移除。",
     detail: "分支 head、分支起点、分叉点和检查点不会被选中。",
-    action: "开始精简",
+    action: "确认删除",
   };
+  if (request.kind === "compact-warning") {
+    const parts = [
+      request.manualCount > 0 ? `${request.manualCount} 个主动提交节点` : "",
+      request.renamedCount > 0 ? `${request.renamedCount} 个已改名节点` : "",
+    ].filter(Boolean);
+    return {
+      danger: true,
+      emphasis: true,
+      slideToConfirm: true,
+      icon: <AlertTriangle size={20} />,
+      eyebrow: "请再次确认",
+      title: "其中包含重要节点",
+      subject: `共 ${request.selectedCount} 个节点，含 ${parts.join("、")}`,
+      description: "主动提交或已改名的节点记录了你的人工意图，删除后无法恢复，备注与自定义名称会一并丢失。",
+      detail: "最后一步不可点击确认：把滑块向右拖到底才会删除。如果只是想清理自动备份产生的节点，请取消并重新选择。",
+      action: "拖动到底确认删除",
+    };
+  }
   return {
     danger: false,
     icon: <FileOutput size={20} />,

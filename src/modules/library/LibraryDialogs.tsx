@@ -143,8 +143,10 @@ function trashConfirmView(target: TrashConfirmTarget): ConfirmView {
       subject: `回收站中的 ${target.count} 个项目`,
       description: "这些分组、Artwork、分支历史与 Chunk 文件将被永久删除，无法恢复。",
       detail: "如果还需要其中的作品，请先取消并按需恢复项目。",
-      action: `永久删除 ${target.count} 个项目`,
+      action: `拖动到底永久删除 ${target.count} 个项目`,
       danger: true,
+      emphasis: true,
+      slideToConfirm: true,
     };
   }
   return {

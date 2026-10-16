@@ -236,8 +236,26 @@ button { color: inherit; }
 .confirm-body p { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
 .confirm-detail { margin-top: 14px; padding: 9px 10px; border-left: 2px solid var(--border); color: var(--muted); background: var(--surface-subtle); font-size: 10px; line-height: 1.5; }
 .confirm-dialog.danger .confirm-detail { border-left-color: var(--danger); }
+/* emphasis 是最危险的一档，在 danger 之上再加重红色警示；各模块共用，不要按模块重写。 */
+.confirm-dialog.emphasis { border-top-width: 4px; box-shadow: 0 22px 64px rgb(0 0 0 / 24%), 0 0 0 1px color-mix(in srgb, var(--danger) 40%, transparent); }
+.confirm-dialog.emphasis > header { background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
+.confirm-dialog.emphasis .confirm-icon { color: var(--danger); background: color-mix(in srgb, var(--danger) 16%, var(--surface)); }
+.confirm-dialog.emphasis .confirm-body > strong { color: color-mix(in srgb, var(--danger) 78%, var(--text)); }
+.confirm-dialog.emphasis .confirm-detail { color: color-mix(in srgb, var(--danger) 62%, var(--text)); }
 .confirm-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
+.confirm-dialog > footer.with-slide { align-items: center; }
 .danger-button.solid { color: white; border-color: var(--danger); background: var(--danger); }
+
+/* 滑动确认（`src/shared/SlideToConfirm.tsx`）：最危险操作的确认控件。 */
+.slide-confirm { --slide-thumb: 26px; --slide-inset: 3px; position: relative; flex: 1 1 auto; height: 34px; min-width: 180px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); border-radius: 6px; background: color-mix(in srgb, var(--danger) 7%, var(--surface)); }
+.slide-confirm-fill { position: absolute; top: 0; bottom: 0; left: 0; width: calc(var(--slide-progress, 0) * 100%); background: color-mix(in srgb, var(--danger) 15%, transparent); }
+.slide-confirm-label { position: absolute; inset: 0; display: grid; place-items: center; padding: 0 34px 0 38px; overflow: hidden; color: var(--danger); font-size: 11px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; user-select: none; pointer-events: none; }
+.slide-confirm-thumb { position: absolute; top: var(--slide-inset); bottom: var(--slide-inset); left: calc(var(--slide-inset) + var(--slide-progress, 0) * (100% - var(--slide-thumb) - var(--slide-inset) * 2)); display: grid; place-items: center; width: var(--slide-thumb); border-radius: 4px; color: #fff; background: var(--danger); box-shadow: 0 1px 3px rgb(0 0 0 / 22%); cursor: grab; transition: left 140ms ease; touch-action: none; }
+.slide-confirm.dragging .slide-confirm-thumb { cursor: grabbing; transition: none; }
+.slide-confirm:not(.disabled) .slide-confirm-thumb:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.slide-confirm.completed .slide-confirm-fill { width: 100%; }
+.slide-confirm.disabled { opacity: .6; }
+.slide-confirm.disabled .slide-confirm-thumb { cursor: default; }
 .settings-dialog { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(800px, 100%); height: min(680px, calc(100vh - 48px)); max-height: calc(100vh - 48px); overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 18px 56px rgb(0 0 0 / 20%); }
 .settings-dialog > header { display: flex; align-items: center; justify-content: space-between; min-height: 60px; padding: 10px 18px; border-bottom: 1px solid var(--border); }
 .settings-heading { display: flex; align-items: center; gap: 11px; min-width: 0; }

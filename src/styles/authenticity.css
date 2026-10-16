@@ -176,16 +176,6 @@
 .record-search-control input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
 .record-search-control input:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
 .scope-reset { justify-self: start; min-height: 24px; padding: 0 4px; color: var(--accent); font-size: 10px; }
-.publication-delete-dialog { width: min(520px, 100%); overflow: hidden; border: 1px solid var(--border); border-top: 3px solid var(--danger); border-radius: 8px; background: var(--surface); box-shadow: 0 22px 64px rgb(0 0 0 / 24%); }
-.publication-delete-dialog > header { display: grid; grid-template-columns: 36px minmax(0, 1fr) 32px; align-items: center; gap: 10px; padding: 16px 18px; border-bottom: 1px solid var(--border); }
-.publication-delete-dialog > header > span { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 6px; color: var(--danger); background: color-mix(in srgb, var(--danger) 9%, var(--surface)); }
-.publication-delete-dialog h2 { margin: 0; font-size: 16px; }
-.publication-delete-dialog header small { display: block; margin-bottom: 3px; color: var(--danger); font-size: 9px; font-weight: 650; text-transform: uppercase; }
-.publication-delete-dialog > div { padding: 18px; }
-.publication-delete-dialog > div > strong { display: block; font-size: 13px; }
-.publication-delete-dialog p { margin: 9px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
-.delete-detail { margin-top: 14px; padding: 9px 10px; border-left: 2px solid var(--danger); color: var(--muted); background: var(--surface-subtle); font-size: 10px; line-height: 1.5; }
-.publication-delete-dialog > footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 18px; border-top: 1px solid var(--border); background: var(--surface-subtle); }
 .publication-preview-backdrop { padding: 24px; }
 .publication-preview-dialog { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; width: min(1200px, 100%); height: min(900px, calc(100vh - 48px)); min-height: 0; overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); box-shadow: 0 22px 64px rgb(0 0 0 / 28%); }
 .publication-preview-dialog > header { display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 68px; padding: 12px 16px; border-bottom: 1px solid var(--border); }

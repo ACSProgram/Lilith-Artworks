@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { AuthenticityModule, PublicationPreviewDialog } from "./AuthenticityModule";
 import type { BranchPublication, PublicationPreview } from "./types";
 
@@ -12,6 +13,7 @@ const api = vi.hoisted(() => ({
   cancelOperation: vi.fn(),
   previewRecord: vi.fn(),
   deleteRecord: vi.fn(),
+  cancelPublication: vi.fn(),
   stageDroppedImage: vi.fn(),
   previewExternal: vi.fn(),
 }));
@@ -123,6 +125,7 @@ describe("PublicationPreviewDialog", () => {
     api.getPublication.mockResolvedValue(brokenPreviewPublication);
     api.previewArtifact.mockRejectedValue(new Error("成品文件已损坏"));
     api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.cancelPublication.mockResolvedValue({ failures: [] });
     render(<AuthenticityModule
       mode="publish"
       artworkTitle="Artwork"
@@ -138,6 +141,14 @@ describe("PublicationPreviewDialog", () => {
     fireEvent.click(screen.getByTitle("更多发布操作"));
     fireEvent.click(screen.getByRole("button", { name: "取消发布并删除本地数据" }));
     expect(screen.getByRole("alertdialog", { name: "删除本地发布数据" })).toBeTruthy();
+
+    // 删除本地发布数据不可撤销：确认按钮换成滑动控件，必须拖到底。
+    const slider = screen.getByRole("slider", { name: "拖动到底删除本地数据" });
+    fireEvent.click(slider);
+    expect(api.cancelPublication).not.toHaveBeenCalled();
+
+    dragSlideToEnd("拖动到底删除本地数据");
+    await waitFor(() => expect(api.cancelPublication).toHaveBeenCalledWith("branch-1"));
   });
 
   it("shows preview generation separately from its cancel action", async () => {
