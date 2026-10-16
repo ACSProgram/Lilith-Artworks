@@ -19,7 +19,7 @@
 
 - [AI 阅读引导](architecture/ai-reading-guide.md)：代码任务的第一入口，按问题选择一条路由。
 - [系统架构](architecture/overview.md)：分层、应用生命周期、存储布局与运行锁。
-- [当前任务交接](planning/current-handoff.md)：当前批次状态与人工验收结果。
+- [当前任务交接](planning/current-handoff.md)：当前批次状态与当前基线。
 - [待办清单](planning/todo.md)：未完成、未验证与待决策事项的唯一清单。
 
 领域模块：
@@ -36,13 +36,15 @@
 - [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。
 - [0.3 架构与核心算法改进计划](planning/0.3-architecture-algorithm-plan-2026-10-05.md)：提案，
   尚未实施。
-- [规划归档](planning/archive/README.md)：已完成或被替代的规划与批次记录，不再作为执行依据。
+- [规划归档](planning/archive/README.md)：已完成或被替代的规划、批次记录与人工验收结论，不再作为执行依据。
 
 ## 目录分工
 
 - `architecture/`：跨模块的分层、生命周期、存储布局与运行锁等长期有效的约束。
 - `modules/`：各领域模块的上下文入口、契约（DTO / 命令 / 表结构）与领域行为。
 - `guides/`：验证、发布与日志规范。
-- `planning/current-handoff.md`：当前批次状态与人工验收结果，只写"现在"。
+- `planning/current-handoff.md`：当前批次状态与当前基线，只写"现在"。
 - `planning/todo.md`：未完成、未验证或待决策事项的唯一清单。
-- `planning/archive/`：已完成或被替代的规划与批次记录，不再作为执行依据。
+- `planning/archive/`：已完成或被替代的规划、批次记录与人工验收结论，即"历史增量"的唯一归属；
+  某批次或某项验收通过并归档后，其记录从 `current-handoff.md` 与 `todo.md` 同步删除，不在表层
+  留下"已通过"的痕迹。

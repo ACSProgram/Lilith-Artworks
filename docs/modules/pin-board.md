@@ -30,6 +30,8 @@
 
 **设备丢失走限流自动重建**：`device.lost` 后经 `makeGpu` 重建设备（与创建共用同一条初始化路径）并重新武装新设备的 `lost` 监听，随后按当前画板重载纹理；每个渲染器生命周期最多重建 2 次、带 600 ms × 次数退避，重建期间暂停绘制与纹理加载，超限或重建失败即保持挂起并只上报错误。
 
+**创建失败走常驻说明，不进入瞬时状态栏**：环境不提供 WebGPU 适配器（`requestAdapter()` 返回 null）、适配器不可用或缺少 `texture-compression-bc` 时 `PinBoardRenderer.create` 直接拒绝，此时画布区显示一条**常驻**的「素材板不可用」说明并注明原始原因，编辑控件保持禁用，同时**不再显示「画板已锁定」**——渲染器为空时的锁定状态并非用户所为，显示它只会把排查引向错误方向。这条说明不能复用 4.5 秒自动清除的状态栏：那条链路清空后画板只剩空白与禁用按钮，用户会误判成卡死。素材板是本应用**唯一依赖 WebGPU** 的模块，缺少可用适配器的环境（未开启 3D 加速的虚拟机、部分远程桌面）其余功能不受影响；运行要求见 `README.md` 的「运行环境」，验收口径见 `docs/guides/release-policy.md` 的人工门槛。
+
 工作区挂载：历史/发布/识别三个窗格以 `artworkId` 为 key 整块重置，**素材板窗格不带 key**，因此跨作品保留渲染器与设备；仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
 持久化只属于 Rust：SQLite（仓库 schema v2 引入的三张素材板表）保存画板、图片记录与 step 历史；BC7 DDS 实体文件存于 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`。不迁移 Lilith Client 的旧 `index.json` 画板库。
@@ -105,4 +107,4 @@ SQLite:
 
 - `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序/迁移（临时目录 SQLite），不依赖 Tauri 运行时；
-- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用）由维护者执行，结果记录在 `docs/planning/current-handoff.md`。
+- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。
