@@ -352,7 +352,9 @@ pub(crate) fn validate_snapshot(
 
 fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
     if cancelled() {
-        Err("恢复操作已取消".into())
+        // 恢复、精简、检查点与删除子树共用这条检查，因此文案保持中性：
+        // 写成「恢复操作」会在精简或检查点取消时误报。
+        Err("操作已取消".into())
     } else {
         Ok(())
     }

@@ -76,6 +76,22 @@ describe("ConfirmDialog views", () => {
     expect(screen.queryByRole("slider")).toBeNull();
     expect(screen.getByRole("button", { name: "确认删除" })).toBeTruthy();
   });
+
+  it("routes the running-state cancel to the operation instead of closing", () => {
+    const onClose = vi.fn();
+    const onCancelOperation = vi.fn();
+    render(<ConfirmDialog
+      request={{ kind: "compact", selectedCount: 2 }}
+      busy
+      onClose={onClose}
+      onCancelOperation={onCancelOperation}
+      onConfirm={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "取消操作" }));
+    expect(onCancelOperation).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
 });
 
 describe("BranchSettings", () => {

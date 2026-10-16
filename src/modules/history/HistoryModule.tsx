@@ -83,6 +83,17 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       ? current : null);
   }, [history]);
 
+  // 精简中途被取消时，已删除的节点不能再留在选择里：否则计数会虚高，而它们已经
+  // 没有卡片可以取消勾选。
+  useEffect(() => {
+    if (!history) return;
+    setCompactSelection((current) => {
+      const valid = new Set(history.nodes.map((node) => node.id));
+      const next = new Set([...current].filter((id) => valid.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [history]);
+
   useEffect(() => {
     window.localStorage.setItem(MINDMAP_NODE_WIDTH_KEY, String(mindmapNodeWidth));
   }, [mindmapNodeWidth]);
@@ -373,7 +384,15 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     {editOpen && actionNode && <EditNodeDialog initialValue={actionNode.title} busy={busy} onClose={() => setEditOpen(false)} onSubmit={async (title) => {
       if (await renameNode({ historyId: actionNode.id, title })) setEditOpen(false);
     }} />}
-    {confirmRequest && <ConfirmDialog request={confirmRequest} busy={busy || runtime.busy} onClose={() => setConfirmRequest(null)} onConfirm={() => void executeConfirmed()} />}
+    {confirmRequest && <ConfirmDialog
+      request={confirmRequest}
+      busy={busy || runtime.busy}
+      // 只有本弹窗自己的操作真的在跑时才提供「取消操作」：runtime.busy 也可能来自
+      // 后台自动备份或空闲校验，那不是这个操作。
+      onCancelOperation={busy ? () => void cancelOperation() : undefined}
+      onClose={() => setConfirmRequest(null)}
+      onConfirm={() => void executeConfirmed()}
+    />}
   </div>;
 }
 

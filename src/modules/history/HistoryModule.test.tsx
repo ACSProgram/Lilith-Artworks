@@ -223,6 +223,70 @@ describe("HistoryModule overview interactions", () => {
     expect(screen.queryByRole("slider", { name: "拖动到底确认删除" })).toBeNull();
   });
 
+  it("drops nodes that no longer exist from the compact selection", () => {
+    const historyModule = () => <HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />;
+    controller.useHistoryController.mockReturnValue(controllerReturn());
+
+    const view = render(historyModule());
+    fireEvent.click(screen.getByRole("button", { name: "精简当前分支" }));
+    fireEvent.click(screen.getByText("Middle").closest("button")!);
+    expect(screen.getByText("1 个已选")).toBeTruthy();
+
+    // 精简中途被取消后这个节点已经不在树里：计数不能继续把它算在内。
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      history: { ...history, nodes: history.nodes.filter((item) => item.id !== "middle") },
+    }));
+    view.rerender(historyModule());
+
+    expect(screen.getByText("0 个已选")).toBeTruthy();
+  });
+
+  it("runs the confirmation dialog's cancel against the operation while it is busy", async () => {
+    const cancelOperation = vi.fn();
+    // 精简挂起不返回：弹窗停在运行态，正是用户会去点取消的那一刻。
+    const compactNodes = vi.fn(() => new Promise<boolean>(() => {}));
+    const historyModule = () => <HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />;
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      compactNodes,
+      cancelOperation,
+      history: automaticHistory,
+    }));
+
+    const view = render(historyModule());
+    fireEvent.click(screen.getByRole("button", { name: "精简当前分支" }));
+    const autoCard = screen.getAllByText("自动备份")
+      .find((element) => element.closest(".history-node-card"));
+    fireEvent.click(autoCard!.closest("button")!);
+    fireEvent.click(screen.getByRole("button", { name: "删除节点" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(compactNodes).toHaveBeenCalledTimes(1));
+
+    // 操作已在运行：弹窗只剩「取消操作」这一个出口，而且它必须作用在操作上。
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      compactNodes,
+      cancelOperation,
+      history: automaticHistory,
+      busy: true,
+    }));
+    view.rerender(historyModule());
+
+    expect(screen.queryByRole("button", { name: "取消" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "取消操作" }));
+    expect(cancelOperation).toHaveBeenCalledTimes(1);
+  });
+
   it("re-queues a failed chain verification from the branch status row", () => {
     const reverifyBranch = vi.fn();
     const failedBranch = {
