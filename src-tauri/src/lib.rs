@@ -2,11 +2,16 @@ mod app;
 mod authenticity;
 mod backup;
 mod cleanup;
+/// 单元测试共享的确定性畸形输入生成器（只在 `cfg(test)` 下编译，不进任何产物）。
+#[cfg(test)]
+mod fuzz_support;
 #[cfg(feature = "headless")]
 mod headless;
 mod history;
 mod library;
 mod pin_board;
+#[cfg(feature = "headless")]
+mod repository_lock;
 mod storage;
 
 use std::{

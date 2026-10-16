@@ -98,3 +98,24 @@ jobs:
 
       - name: Run Rust library tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
+      - name: Check headless test gate
+        run: cargo test --manifest-path src-tauri/Cargo.toml --test gate_guard
+
+      # 便宜的八组压力测试进 CI（合计约 30 秒运行，外加一次 headless 构建）。它们覆盖
+      # 取消、强杀、孤儿回收、损坏恢复、画板 DDS、认证、多进程并发边界与输入域极值——
+      # 这些此前只在发布前手动跑，日常改动得不到回归保护。大文件（stress_large，几十分钟）
+      # 与规模（stress_scale，约 50 秒）仍留在手动档，见 docs/guides/validation.md。
+      - name: Build headless binary
+        run: cargo build --manifest-path src-tauri/Cargo.toml --features headless
+
+      - name: Run headless stress tests (fast groups)
+        run: |
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_cancel
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_crash
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_cleanup
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_damage
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_pin_board
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_authenticity
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_concurrency
+          cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_input

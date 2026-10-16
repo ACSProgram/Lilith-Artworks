@@ -399,7 +399,11 @@ mod tests {
         time::Duration,
     };
 
-    use super::{supported_signing_algorithm, wait_for_timestamp, TIMESTAMP_TIMEOUT};
+    use super::{
+        read_manifest, supported_signing_algorithm, wait_for_timestamp, TIMESTAMP_TIMEOUT,
+    };
+
+    use crate::fuzz_support::random_bytes;
 
     #[test]
     fn ps256_is_rejected_before_signing() {
@@ -437,5 +441,46 @@ mod tests {
 
         assert!(result.unwrap_err().to_string().contains("cancelled"));
         assert!(!timed_out.load(Ordering::SeqCst));
+    }
+
+    /// 畸形输入模糊（C2PA 清单）：把任意字节当成「待识别的图片」交给 `read_manifest`。
+    ///
+    /// 认证输入来自用户挑选的文件，属于**不受信任的字节**，且是少数「读完即解析第三方
+    /// 容器（JPEG + JUMBF）」的入口：解析必须干净地给出「没有清单」或一个错误，绝不 panic。
+    ///
+    /// 清单解析主要由第三方 `c2pa` crate 承担。这里用 `catch_unwind` 兜底并把种子写进
+    /// 失败消息：若它在畸形输入上 panic，那正是要被记录下来的事实（而不是让整个单元
+    /// 测试二进制崩在半路、丢掉其余结果），并且可以按种子原样重放。
+    #[test]
+    fn fuzzed_manifests_are_rejected_without_panicking() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("untrusted.jpg");
+
+        for seed in 0..96_u64 {
+            let bytes = if seed % 2 == 0 {
+                random_bytes(seed, 1 + (seed as usize * 29) % 2048)
+            } else {
+                // 带常见图片魔数的前缀 + 随机尾巴：更接近「伪装成图片的文件」。
+                let mut value = if seed % 4 == 1 {
+                    b"\xFF\xD8\xFF\xE0".to_vec()
+                } else {
+                    b"\x89PNG\r\n\x1A\n".to_vec()
+                };
+                value.extend_from_slice(&random_bytes(seed, 1 + (seed as usize * 13) % 1024));
+                value
+            };
+            std::fs::write(&path, &bytes).unwrap();
+
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| read_manifest(&path)));
+            match outcome {
+                Ok(Ok(summary)) => assert!(
+                    !summary.present,
+                    "seed={seed}：随机字节不可能带有有效的 C2PA 清单"
+                ),
+                Ok(Err(_)) => {}
+                Err(_) => panic!("seed={seed}：解析不受信任的图片时发生 panic"),
+            }
+        }
     }
 }

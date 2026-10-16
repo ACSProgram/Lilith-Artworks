@@ -8,7 +8,7 @@
 //! 只用到其中一个子集；`allow(dead_code)` 是这一结构的必要产物，并不代表这里存在
 //! 废弃代码。新增场景时优先复用本模块的夹具与断言，不要在测试文件里复制。
 //!
-//! **门控**：八个 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]` 开头，不带该
+//! **门控**：所有 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]` 开头，不带该
 //! feature 时它们编译为空目标——裸 `cargo test` 因此既不会构建无头二进制，也不会启动
 //! 任何进程。这是必需的：`cargo test` 会自动发现 `tests/` 下的**每一个** `.rs` 文件并运行，
 //! 文件放在这里就等于「默认参与 `cargo test`」，而这个 feature 才是「只在发布前手工跑」的
@@ -203,6 +203,7 @@ pub struct ArtworkFixture {
     pub workspace: Workspace,
     pub repository: PathBuf,
     pub work: PathBuf,
+    pub artwork_id: String,
     pub branch_id: String,
 }
 
@@ -221,10 +222,13 @@ impl ArtworkFixture {
         created.expect_ok();
         let branch_id = created.data_str("branchId");
         assert!(!branch_id.is_empty(), "{}", created.describe());
+        let artwork_id = created.data_str("artworkId");
+        assert!(!artwork_id.is_empty(), "{}", created.describe());
         Self {
             workspace,
             repository,
             work,
+            artwork_id,
             branch_id,
         }
     }
@@ -1486,6 +1490,43 @@ pub fn directory_names(directory: &Path) -> Vec<String> {
     names
 }
 
+/// 递归收集 `list-tree` 的 `data`（`LibraryTree`）里的全部节点标题，顺序为先序。
+///
+/// 标题的往返（写入什么、读回什么）是输入域测试的核心断言，放在这里避免每个测试
+/// 各写一份递归遍历。
+pub fn tree_node_titles(tree: &Value) -> Vec<String> {
+    fn walk(nodes: &[Value], titles: &mut Vec<String>) {
+        for node in nodes {
+            if let Some(title) = node["title"].as_str() {
+                titles.push(title.to_owned());
+            }
+            if let Some(children) = node["children"].as_array() {
+                walk(children, titles);
+            }
+        }
+    }
+    let mut titles = Vec::new();
+    if let Some(nodes) = tree["nodes"].as_array() {
+        walk(nodes, &mut titles);
+    }
+    titles
+}
+
+/// 在 `LibraryTree::nodes` 里按标题（先序）查找节点，返回其 JSON 引用。
+pub fn find_tree_node<'a>(nodes: &'a [Value], title: &str) -> Option<&'a Value> {
+    for node in nodes {
+        if node["title"].as_str() == Some(title) {
+            return Some(node);
+        }
+        if let Some(children) = node["children"].as_array() {
+            if let Some(found) = find_tree_node(children, title) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// 断言仓库内没有遗留的临时文件，并返回实体文件清单。
 #[track_caller]
 pub fn assert_no_stray(repository: &Path) -> StorageState {
@@ -1646,6 +1687,26 @@ pub fn record_skip(scenario: &str, group: &str, tier: &str, reason: &str) {
         "tier": tier,
         "skipped": true,
         "reason": reason,
+    });
+    append_report_line(&path, &line);
+}
+
+/// 追加一行「性能基准」报告：基准跨越多条命令、没有单一 `Outcome`，因此只记录场景、
+/// 标签与耗时（毫秒）。数值落进同一份 `target/stress-report.jsonl`，便于长期比对。
+pub fn record_measurement(scenario: &str, group: &str, label: &str, ms: f64, extra: Value) {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("target")
+        .join("stress-report.jsonl");
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let line = json!({
+        "scenario": scenario,
+        "group": group,
+        "label": label,
+        "perf": true,
+        "ms": ms,
+        "detail": extra,
     });
     append_report_line(&path, &line);
 }

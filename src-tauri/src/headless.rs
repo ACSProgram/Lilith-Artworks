@@ -28,7 +28,7 @@ use crate::{
     app::AppState,
     authenticity::{self, AuthenticityState, PathAuthorization},
     backup::{self, restore, worker, BackupState, BackupTaskKind},
-    cleanup, history, library, pin_board, storage,
+    cleanup, history, library, pin_board, repository_lock, storage,
 };
 
 const EXIT_OK: i32 = 0;
@@ -100,7 +100,18 @@ pub fn run(args: &[String]) -> i32 {
     let interlock = INTERLOCK.get_or_init(|| interlock);
     interlock.stage(&format!("started command={}", options.command));
 
-    let outcome = dispatch(&options, interlock);
+    // 跨进程仓库哨兵锁：会写仓库的命令独占，第二个进程拿到明确错误，而不是与前者
+    // 在业务层竞态。锁在进程退出（含崩溃）时由操作系统释放，不会残留。取锁失败与
+    // 业务失败走同一条结果路径（写 `--result`、退出码 1），调用方无需区分。
+    let outcome =
+        match repository_lock::RepositoryGuard::acquire(&options.repository, &options.command) {
+            Ok(guard) => {
+                let outcome = dispatch(&options, interlock);
+                drop(guard);
+                outcome
+            }
+            Err(error) => Err(error),
+        };
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let cancelled = interlock.cancelled();
     let (ok, error, data) = match outcome {

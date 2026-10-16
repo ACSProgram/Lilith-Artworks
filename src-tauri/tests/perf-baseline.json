@@ -1,0 +1,24 @@
+{
+  "note": "由 stress_bench 在 LILITH_STRESS_PERF_UPDATE=1 下生成；供 LILITH_STRESS_PERF_STRICT=1 比对。绝对耗时依赖机器与构建档，跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR。",
+  "debug": {
+    "P1 node chain::commitMs": 58.5,
+    "P1 node chain::chainStepMs": 1.6,
+    "P1 node chain::restoreOldestMs": 74.3,
+    "P1 node chain::restoreHeadMs": 38.6,
+    "P2 authenticity::publishMs": 746.7,
+    "P2 authenticity::renderMs": 450.0,
+    "P2 authenticity::encodeMs": 120.0,
+    "P2 authenticity::signingMs": 12.0,
+    "P2 authenticity::decodeMs": 324.3,
+    "P3 board dds::importPerImageMs": 23.3,
+    "P3 board dds::importTotalMs": 372.7,
+    "P3 board dds::scrubMs": 413.7,
+    "P3 board dds::scrubPerImageMs": 25.9,
+    "P4 library tree and search::listTreeMs": 36.9,
+    "P4 library tree and search::searchAllMs": 33.1,
+    "P4 library tree and search::searchNarrowMs": 32.2,
+    "P5 repository backup::backupMs": 335.1,
+    "P6 cleanup scan::scanUnreferencedMs": 32.8,
+    "P6 cleanup scan::cleanupQueueMs": 32.0
+  }
+}

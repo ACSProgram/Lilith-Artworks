@@ -1306,6 +1306,9 @@ fn read_u64<R: Read>(input: &mut R) -> ChunkFileResult<u64> {
 mod tests {
     use super::*;
 
+    use crate::backup::test_support::{QuotaWriter, Rng};
+    use crate::fuzz_support::{mutated, mutated_header, random_bytes};
+
     fn encode_snapshot(bytes: &[u8]) -> Vec<u8> {
         let mut output = Cursor::new(Vec::new());
         ChunkFile::create(
@@ -1525,5 +1528,227 @@ mod tests {
         let mut truncated = encoded_delta.into_inner();
         truncated.truncate(truncated.len().saturating_sub(17));
         assert!(ChunkFileDelta::open(&mut Cursor::new(truncated)).is_err());
+    }
+
+    fn materialized(layout: &ChunkFile, store: &mut ChunkStore<'_>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let mut reader = store.reader();
+        layout.copy_original(&mut reader, &mut bytes).unwrap();
+        bytes
+    }
+
+    /// 属性测试：随机版本链的任意跳恢复，都与该版本字节逐字节一致。
+    ///
+    /// 每个种子构造一条 3–6 版本的链，每版本对上一版本做若干随机字节改动，逐跳
+    /// 生成反向增量，再从最新版本出发一路回退到最老版本，断言每一跳都精确复现
+    /// 对应版本。它覆盖的是「随机改动位置 × 随机链深」的组合，而不是靠手写固定
+    /// 场景去猜边界；失败时把种子带进消息即可复现。
+    #[test]
+    fn randomized_reverse_delta_chains_restore_every_revision() {
+        for seed in 1..=16_u64 {
+            let mut rng = Rng::new(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            let revision_count = 3 + rng.below(4);
+            let base_length = 32 * 1024 + rng.below(96 * 1024);
+
+            let mut first = vec![0_u8; base_length];
+            for byte in &mut first {
+                *byte = rng.next_u64() as u8;
+            }
+            let mut versions = vec![first];
+            for _ in 1..revision_count {
+                let mut next = versions.last().unwrap().clone();
+                let length = next.len();
+                for _ in 0..(1 + rng.below(4)) {
+                    let start = rng.below(length);
+                    let span = 1 + rng.below((length - start).min(8 * 1024));
+                    let mask = rng.nonzero_byte();
+                    for byte in &mut next[start..start + span] {
+                        *byte ^= mask;
+                    }
+                }
+                versions.push(next);
+            }
+
+            let snapshots: Vec<Vec<u8>> = versions
+                .iter()
+                .map(|version| encode_snapshot(version))
+                .collect();
+            let deltas: Vec<Vec<u8>> = (0..revision_count - 1)
+                .map(|index| encode_reverse_delta(&versions[index + 1], &versions[index]))
+                .collect();
+
+            let newest = revision_count - 1;
+            let mut store = ChunkStore::new();
+            store
+                .append(Box::new(Cursor::new(snapshots[newest].clone())))
+                .unwrap();
+            let mut layout = ChunkFile::open(&mut Cursor::new(snapshots[newest].clone())).unwrap();
+            assert_eq!(
+                materialized(&layout, &mut store),
+                versions[newest],
+                "seed={seed} 最新版本不一致"
+            );
+
+            for index in (0..newest).rev() {
+                let delta = ChunkFileDelta::open(&mut Cursor::new(deltas[index].clone())).unwrap();
+                layout = delta.resolve(&layout, &mut store).unwrap();
+                assert_eq!(
+                    materialized(&layout, &mut store),
+                    versions[index],
+                    "seed={seed} 回退到版本 {index} 时字节不一致"
+                );
+            }
+        }
+    }
+
+    /// 磁盘写满时创建快照必须干净失败：返回真实的「空间不足」错误、不 panic，
+    /// 且写到一半的半成品无法被当成完整快照打开。
+    #[test]
+    fn snapshot_creation_reports_a_full_disk_cleanly() {
+        let source_bytes = vec![b'A'; 96 * 1024];
+        let quota = 16 * 1024;
+        let mut writer = QuotaWriter::new(Cursor::new(Vec::new()), quota);
+
+        let error = ChunkFile::create(
+            &mut Cursor::new(&source_bytes),
+            &mut writer,
+            ChunkingConfig::default(),
+        )
+        .unwrap_err();
+
+        let ChunkFileError::Io(io_error) = &error else {
+            panic!("预期 I/O 错误，实际为 {error}");
+        };
+        assert_eq!(io_error.kind(), io::ErrorKind::StorageFull, "{io_error}");
+        // 配额内的字节确实落盘，证明这是「写到一半失败」而不是「拒绝写入」。
+        let written = writer.written();
+        assert!(written > 0 && written <= quota, "written={written}");
+        let partial = writer.into_inner().into_inner();
+        assert_eq!(partial.len() as u64, written);
+        // 半成品不是合法快照：不能通过 `open` 的完整性校验。
+        assert!(ChunkFile::open(&mut Cursor::new(partial)).is_err());
+    }
+
+    /// 物化快照（恢复路径的落盘）遇到磁盘写满时同样干净失败。
+    #[test]
+    fn snapshot_materialization_reports_a_full_disk_cleanly() {
+        let source_bytes = vec![b'B'; 128 * 1024];
+        let encoded = encode_snapshot(&source_bytes);
+        let layout = ChunkFile::open(&mut Cursor::new(encoded.clone())).unwrap();
+        let quota = 8 * 1024;
+        let mut writer = QuotaWriter::new(Cursor::new(Vec::new()), quota);
+
+        let error = layout
+            .write_snapshot(&mut Cursor::new(encoded), &mut writer)
+            .unwrap_err();
+
+        let ChunkFileError::Io(io_error) = &error else {
+            panic!("预期 I/O 错误，实际为 {error}");
+        };
+        assert_eq!(io_error.kind(), io::ErrorKind::StorageFull, "{io_error}");
+        let written = writer.written();
+        assert!(written > 0 && written <= quota, "written={written}");
+    }
+
+    /// 畸形输入模糊（快照容器）：任意字节都必须被 `open` 干净地拒绝或正确地接受，
+    /// **绝不 panic、绝不因为头部声明的巨大数量而无界分配**。
+    ///
+    /// 固定种子扫三类输入：纯随机字节、对合法快照的结构未知随机扰动、只扰动头部的
+    /// 随机扰动（魔数 / 版本 / 计数 / 长度）。`Ok` 的分支额外断言两条自洽性——这也是
+    /// 「畸形头部不能换来无界内存」的可观测形式：
+    /// ① 块数量不可能超过文件长度所能容纳的记录数（每条至少 32 字节摘要 + 4 字节长度）；
+    /// ② 结构合法的容器必须能被物化，产物长度等于它自己声明的大小。
+    #[test]
+    fn fuzzed_snapshot_containers_are_rejected_without_panicking() {
+        const MINIMUM_RECORD_BYTES: usize = DIGEST_SIZE + size_of::<u32>();
+        let valid = encode_snapshot(&random_bytes(0xF0_0D, 96 * 1024));
+        let mut accepted = 0_usize;
+        for seed in 0..384_u64 {
+            let bytes = match seed % 3 {
+                0 => random_bytes(seed, 1 + (seed as usize * 37) % 4096),
+                1 => mutated(seed, &valid, 1 + (seed as usize % 24)),
+                _ => mutated_header(seed, &valid, 64, 1 + (seed as usize % 12)),
+            };
+            let Ok(layout) = ChunkFile::open(&mut Cursor::new(bytes.clone())) else {
+                continue;
+            };
+            accepted += 1;
+            assert!(
+                layout.chunk_count().saturating_mul(MINIMUM_RECORD_BYTES) <= bytes.len(),
+                "seed={seed}：接受了超出文件容量的块数量（{} 块 / {} 字节）",
+                layout.chunk_count(),
+                bytes.len()
+            );
+            let mut materialized = Cursor::new(Vec::new());
+            if let Ok(restored) =
+                layout.write_snapshot(&mut Cursor::new(bytes.clone()), &mut materialized)
+            {
+                assert_eq!(
+                    materialized.into_inner().len() as u64,
+                    layout.logical_size(),
+                    "seed={seed}：物化产物长度必须等于声明的大小"
+                );
+                assert_eq!(restored.logical_size(), layout.logical_size());
+            }
+        }
+        // 固定种子下必须确有「结构仍然合法」的组合：否则说明扰动根本没进入解析器，
+        // 上面那一圈只是空转，模糊测试退化成同义反复。
+        assert!(
+            accepted > 0,
+            "固定种子下没有任何一次扰动保持在结构之内，模糊输入未真正覆盖解析路径"
+        );
+
+        // 两条确定的拒绝性质：截断与续写都不可能被当成合法快照。
+        assert!(valid.len() > 256);
+        for drop in [1_usize, 9, 64, valid.len() / 2, valid.len() - 1] {
+            assert!(
+                ChunkFile::open(&mut Cursor::new(valid[..valid.len() - drop].to_vec())).is_err(),
+                "截断 {drop} 字节的快照必须被拒绝"
+            );
+        }
+        let mut extended = valid.clone();
+        extended.push(0);
+        assert!(
+            ChunkFile::open(&mut Cursor::new(extended)).is_err(),
+            "续写字节的快照必须被拒绝"
+        );
+    }
+
+    /// 畸形输入模糊（反向增量容器）：任意字节都必须被干净地拒绝或接受，绝不 panic；
+    /// 并额外断言截断与续写这两条确定的拒绝性质。
+    #[test]
+    fn fuzzed_delta_containers_are_rejected_without_panicking() {
+        let child = random_bytes(0xC1, 96 * 1024);
+        let parent = random_bytes(0xB2, 96 * 1024);
+        let valid = encode_reverse_delta(&child, &parent);
+        assert!(valid.len() > 256);
+        // 正向对照：合法增量必须能被打开，否则下面的性质断言没有意义。
+        assert!(
+            ChunkFileDelta::open(&mut Cursor::new(valid.clone())).is_ok(),
+            "合法反向增量必须能打开"
+        );
+
+        for seed in 0..384_u64 {
+            let bytes = match seed % 2 {
+                0 => random_bytes(seed, 1 + (seed as usize * 53) % 4096),
+                _ => mutated(seed, &valid, 1 + (seed as usize % 24)),
+            };
+            // 不 assert 结果：只要求不 panic、不无界分配。被拒绝是常态。
+            let _ = ChunkFileDelta::open(&mut Cursor::new(bytes));
+        }
+
+        for drop in [1_usize, 7, 64, valid.len() / 2, valid.len() - 1] {
+            assert!(
+                ChunkFileDelta::open(&mut Cursor::new(valid[..valid.len() - drop].to_vec()))
+                    .is_err(),
+                "截断 {drop} 字节的增量必须被拒绝"
+            );
+        }
+        let mut extended = valid.clone();
+        extended.extend_from_slice(b"trailing");
+        assert!(
+            ChunkFileDelta::open(&mut Cursor::new(extended)).is_err(),
+            "续写字节的增量必须被拒绝"
+        );
     }
 }

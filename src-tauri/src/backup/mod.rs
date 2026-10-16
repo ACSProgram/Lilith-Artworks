@@ -6,6 +6,8 @@ mod repository_backup;
 pub(crate) mod restore;
 mod runtime;
 mod scheduler;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod worker;
 
 use serde::{Deserialize, Serialize};

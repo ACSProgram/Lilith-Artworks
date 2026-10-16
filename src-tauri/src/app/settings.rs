@@ -988,6 +988,8 @@ mod tests {
 
     use super::*;
 
+    use crate::fuzz_support::random_bytes;
+
     #[test]
     fn default_settings_round_trip() {
         let directory = tempfile::tempdir().unwrap();
@@ -1187,6 +1189,70 @@ mod tests {
         switching_thread.join().unwrap();
     }
 
+    /// 长写任务持仓库操作锁期间，只读命令必须仍能作答。
+    ///
+    /// 这是产品明文的并发承诺（`with_ready_repository` 的排他锁「会被 restore/compaction
+    /// 持有数分钟」，而只读命令走共享读租约），此前只有「切换仓库会等活跃租约」被验证过，
+    /// 「长写期间读还能不能返回」没有断言。回归会表现为只读命令被排他锁挡住——即素材板
+    /// 在备份/恢复期间卡死。这里用线程与超时把它钉死：若读路径错误地取了排他锁，读者不会
+    /// 在超时内返回，测试失败而不是无限挂起。
+    #[test]
+    fn repository_read_answers_while_a_long_write_holds_the_operation_lock() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        library::initialize(&root).unwrap();
+        let mut settings = AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+
+        let (write_entered_tx, write_entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let writer = state.clone();
+        let writer_thread = thread::spawn(move || {
+            writer
+                .with_ready_repository(|_| {
+                    // 进入操作锁后停住，模拟一次耗时数分钟的长任务仍持有排他锁。
+                    write_entered_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                })
+                .unwrap();
+        });
+        write_entered_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("写线程未进入仓库操作锁");
+
+        // 写操作此刻持有排他锁：只读命令走共享读租约，必须立刻返回。
+        let (read_tx, read_rx) = mpsc::channel();
+        let reader = state.clone();
+        let reader_thread = thread::spawn(move || {
+            let started = std::time::Instant::now();
+            let result = reader.with_repository_read(|root| Ok(root.is_dir()));
+            read_tx.send((result, started.elapsed())).unwrap();
+        });
+
+        let (result, waited) = read_rx.recv_timeout(Duration::from_secs(5)).expect(
+            "只读命令在长写期间未能返回——很可能错误地取了排他仓库操作锁（会让界面在备份/恢复时卡死）",
+        );
+        assert!(
+            result.expect("长写期间只读命令必须成功"),
+            "只读命令在长写期间应能读到仓库目录"
+        );
+        assert!(
+            waited < Duration::from_secs(2),
+            "只读命令在长写期间等待了 {waited:?}，说明它被排他锁挡住了"
+        );
+
+        release_tx.send(()).unwrap();
+        writer_thread.join().unwrap();
+        reader_thread.join().unwrap();
+    }
+
     #[test]
     fn an_out_of_range_window_size_keeps_the_rest_of_the_settings() {
         // 复现真实故障：窗口在最小化状态下退出时，`GetWindowRect` 返回任务栏图标
@@ -1280,5 +1346,71 @@ mod tests {
         assert_eq!(settings.window.width, MIN_WINDOW_WIDTH);
         // 修正后的设置已经合法，再次加载不再触发修正。
         assert!(!sanitize_settings(&mut settings));
+    }
+
+    /// 畸形输入模糊（设置文件）：任意字节都必须让 `load_settings` 干净地回落并**如实给出
+    /// 警告**，绝不 panic；两条断言分别锁定「回落结果合法」与「用户文件不被悄悄覆盖」：
+    /// ① 版本为当前版本时（`sanitize_settings` 会运行），返回的设置必须通过
+    ///    `validate_settings` —— 这是「修正在内存里、不整份清空」的契约；
+    /// ② **解析失败的设置文件必须被原样保留**：它可能是更高版本写入的，一次失败的读取
+    ///    绝不能把它覆盖成默认值（那才是真正的数据丢失）。
+    #[test]
+    fn fuzzed_settings_files_fall_back_without_clobbering_the_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for seed in 0..64_u64 {
+            cases.push(random_bytes(seed, (seed as usize * 17) % 512));
+        }
+        for text in [
+            "",
+            "{}",
+            "[]",
+            "null",
+            "123",
+            "\"text\"",
+            "{",
+            "{\"version\":}",
+            "{\"version\":99}",
+            "{\"version\":-1}",
+            "{\"version\":4294967296}",
+            "{\"theme\":\"bogus\"}",
+            "{\"content\":{\"density\":\"huge\"}}",
+        ] {
+            cases.push(text.as_bytes().to_vec());
+        }
+        // 两类经典的「解析器耗尽」手法：超深嵌套与超长字面量。二者都必须被干净拒绝，
+        // 而不是把栈或内存吃光。
+        cases.push(format!("{}{}", "[".repeat(10_000), "]".repeat(10_000)).into_bytes());
+        cases.push("9".repeat(100_000).into_bytes());
+        cases.push(format!("{{\"theme\":\"{}\"}}", "x".repeat(100_000)).into_bytes());
+
+        for (index, bytes) in cases.iter().enumerate() {
+            fs::write(&path, bytes).unwrap();
+            let parses = std::str::from_utf8(bytes)
+                .ok()
+                .is_some_and(|text| serde_json::from_str::<AppSettings>(text).is_ok());
+
+            let (settings, warning) = load_settings(&path);
+
+            if parses && settings.version == CURRENT_SETTINGS_VERSION {
+                assert!(
+                    validate_settings(&settings).is_ok(),
+                    "case #{index}：当前版本的设置必须被就地修正为合法（不整份回落）"
+                );
+            }
+            if !parses {
+                assert!(
+                    warning.is_some(),
+                    "case #{index}：解析失败必须如实给出警告，而不是静默回落"
+                );
+                assert_eq!(
+                    fs::read(&path).unwrap(),
+                    *bytes,
+                    "case #{index}：解析失败的设置文件必须被原样保留"
+                );
+            }
+        }
     }
 }
