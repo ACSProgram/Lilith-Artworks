@@ -686,6 +686,8 @@ pub(crate) fn clipboard_file_paths() -> Result<Vec<String>, String> {
 mod tests {
     use super::*;
 
+    use crate::fuzz_support::{mutated, mutated_header, random_bytes};
+
     #[test]
     fn evicts_oldest_texture_cache_entries_first() {
         let mut cache: HashMap<TextureCacheKey, TextureCacheEntry> = HashMap::new();
@@ -814,5 +816,89 @@ mod tests {
         persist_dds_file(&destination, b"dds-bytes", "剪贴板 DDS 图片").unwrap();
 
         assert_eq!(fs::read(&destination).unwrap(), b"dds-bytes");
+    }
+
+    /// 构造一个合法的 BC7 DDS：`edge × edge`、确定性内容。
+    fn valid_bc7_dds(edge: u32, seed: u32) -> Vec<u8> {
+        let image = image::RgbaImage::from_fn(edge, edge, |x, y| {
+            let value = (x.wrapping_mul(31) ^ y.wrapping_mul(17) ^ seed) as u8;
+            image::Rgba([value, value.wrapping_mul(3), value.wrapping_add(11), 255])
+        });
+        encode_bc7_dds(&image).unwrap()
+    }
+
+    /// 畸形输入模糊（DDS 头）：随机字节、对合法 DDS 头部（前 148 字节，即 DX10 头的范围）
+    /// 的随机扰动、以及整个文件的随机扰动。
+    ///
+    /// 断言都是「不受信任的 148 字节头不能换来无界资源」的可观测形式：
+    /// ① 解析入口绝不 panic；
+    /// ② 被接受的尺寸必须落在声明上限之内（长边 ≤ 16384、像素数 ≤ 2.68 亿）——
+    ///    这正是「头部声明 65535×65535」会被挡住的原因；
+    /// ③ 尺寸合法仍不足够：负载长度必须与尺寸自洽，且导入产物必须自报同样的尺寸。
+    #[test]
+    fn fuzzed_dds_headers_never_exceed_the_declared_limits() {
+        let valid = valid_bc7_dds(64, 0x5EED);
+        assert_eq!(dds_dimensions(&valid).unwrap(), (64, 64));
+
+        // 明确的对照：只改负载里一个字节，头部仍然合法 → 必须仍可解析。
+        // 它同时确认「只做长度校验」的语义边界（内容语义在无原始素材时不可判定）。
+        let mut payload_only = valid.clone();
+        let last = payload_only.len() - 1;
+        payload_only[last] ^= 0xFF;
+        assert_eq!(dds_dimensions(&payload_only).unwrap(), (64, 64));
+
+        for seed in 0..384_u64 {
+            let bytes = match seed % 3 {
+                0 => random_bytes(seed, 1 + (seed as usize * 41) % 4096),
+                1 => mutated_header(
+                    seed,
+                    &valid,
+                    DDS_DX10_HEADER_BYTES,
+                    1 + (seed as usize % 16),
+                ),
+                _ => mutated(seed, &valid, 1 + (seed as usize % 16)),
+            };
+
+            let _ = decode_raster_bytes(&bytes);
+
+            let Ok((width, height)) = dds_dimensions(&bytes) else {
+                continue;
+            };
+            assert!(width > 0 && height > 0, "seed={seed}：接受了零尺寸");
+            assert!(
+                width.max(height) <= MAX_SOURCE_DIMENSION,
+                "seed={seed}：接受了超长边 {width}×{height}"
+            );
+            assert!(
+                u64::from(width) * u64::from(height) <= MAX_DDS_SOURCE_PIXELS,
+                "seed={seed}：接受了超像素数 {width}×{height}"
+            );
+
+            // 声明了合法尺寸仍不足够：负载长度必须覆盖声明的块数。
+            if validate_dds_payload(&bytes, width, height).is_ok() {
+                assert!(
+                    bytes.len() >= dds_payload_end(width, height).unwrap(),
+                    "seed={seed}：负载长度必须覆盖声明尺寸"
+                );
+            }
+            // BC7 解码路径只消费声明长度内的块，必须只拒绝、不 panic。
+            let _ = validate_bc7_decodable(&bytes, width, height);
+
+            if let Ok((dds, out_width, out_height)) = prepare_dds_import(&bytes) {
+                assert!(
+                    out_width.max(out_height) <= MAX_TEXTURE_DIMENSION,
+                    "seed={seed}：导入产物尺寸超过纹理上限"
+                );
+                assert!(
+                    u64::from(out_width) * u64::from(out_height) <= MAX_IMAGE_PIXELS,
+                    "seed={seed}：导入产物像素数超过上限"
+                );
+                assert_eq!(
+                    dds_dimensions(&dds).unwrap(),
+                    (out_width, out_height),
+                    "seed={seed}：导入产物必须自报与返回值一致的尺寸"
+                );
+            }
+        }
     }
 }

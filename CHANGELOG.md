@@ -11,6 +11,123 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Added
+
+- Headless commands that write a repository now take a **cross-process write
+  sentinel**: an exclusive lock held by a dedicated SQLite database
+  (`BEGIN IMMEDIATE`, `busy_timeout = 0`), so a second writer gets an explicit
+  refusal instead of racing the first in the business layer. The rejection reads
+  "仓库正在被另一个进程写入；不支持同一仓库的多进程写入". SQLite releases the lock
+  when the handle closes, so a killed process cannot leave the repository
+  locked — a plain lock file would, and this project has many kill scenarios.
+  Only the headless entry is gated, only for the commands that write, and only
+  when the repository directory already exists; read-only commands,
+  `init-repository`, and the whole GUI path are unchanged (the GUI keeps relying
+  on the single-instance plugin). Covered by the new `stress_concurrency` group.
+- New tests close the gaps listed in `docs/planning/todo.md` under "待补强":
+  a deterministic property test over the reverse-delta chain (any revision in a
+  random chain restores byte-identically), a random commit/restore sequence on a
+  real repository, disk-full injection on the real snapshot write path
+  (`ErrorKind::StorageFull` returns a clean error and leaves the repository
+  intact and retryable, with the partial bytes actually on disk), and
+  multi-process contention plus 20 rapid sequential commits. The `chunk_file`
+  snapshot writer was already generic over `Write + Seek`, so disk-full injects
+  at the real data path rather than a mock; the commit path's snapshot write was
+  extracted into `create_snapshot` for the same reason, and the shared fixtures
+  live in the new `backup/test_support.rs`. Coverage and run commands are
+  documented in `docs/guides/validation.md`.
+- The remaining review gaps are closed without touching product code:
+  a **large-file interruption** scenario (every commit cancel checkpoint plus
+  one real kill on a tier-sized work file, asserting no residue, no history
+  advance, and a byte-identical head restore, since the cancel and kill groups
+  previously only used 96 KiB files); **main-database corruption** (the
+  `.sqlite3` header overwritten with non-database bytes, and the file emptied —
+  both must fail cleanly with an actionable error, and the emptied file must
+  not be rebuilt into a fresh empty repository, which would silently discard
+  history); **write + read interleaving** (read commands still answer, and see
+  a consistent pre-write state, while a writer holds the sentinel lock,
+  including the "snapshot published, transaction not yet committed" window;
+  concurrent readers do not block each other); and a **performance baseline**
+  for core algorithms (node chain, authenticity publish/decode, board DDS
+  import/scan) recorded to `src-tauri/tests/perf-baseline.json`, with an opt-in
+  strict comparison (`LILITH_STRESS_PERF_STRICT=1`, `LILITH_STRESS_PERF_FACTOR`,
+  default 2.5x) so a slow regression is caught instead of only an
+  order-of-magnitude blow-up.
+- `tests/gate_guard.rs` guards the one line Cargo cannot: it scans every
+  `stress_*.rs` and fails if `#![cfg(feature = "headless")]` is missing, so a
+  new stress target can no longer silently rejoin a bare `cargo test` and pop
+  a GUI window.
+- `app/settings.rs` gains a unit test for the long-standing concurrency
+  promise that read-only repository commands keep answering while a long write
+  (restore/compaction) holds the exclusive operation lock. A regression now
+  fails by timeout instead of hanging the board.
+- The review list's remaining items are closed with tests only:
+  - **Input-domain extremes** (`stress_input`, group K): non-ASCII, emoji, ZWJ
+    sequences, non-BMP code points, RTL, combining marks, zero-width characters,
+    embedded newlines/tabs and titles containing path separators must round-trip
+    character for character (which also proves a title is never used as a file
+    name); title length is counted in **characters** (160 emoji = 640 bytes is
+    accepted, 161 is rejected) after trimming; only-whitespace titles are
+    rejected; non-ASCII, spaced and deep source paths work end to end; relative,
+    out-of-workspace and missing sources are all refused with a stated reason.
+  - **Malformed-input fuzzing** for the four parsers — snapshot/delta
+    containers, DDS headers, C2PA manifests and the settings file — driven by a
+    deterministic generator in the new `src/fuzz_support.rs` (`cfg(test)` only,
+    also the single implementation behind `backup::test_support::Rng`). No new
+    dependency. The contract asserted is that untrusted bytes can never buy a
+    panic, an out-of-bounds access or an unbounded allocation: an accepted
+    container must be self-consistent (chunk count within the file's capacity,
+    materialisable, length equal to the declared size), an accepted DDS size
+    must sit inside the declared limits, and a settings file that fails to parse
+    must be **left byte-identical** rather than overwritten with defaults.
+  - **Randomised corruption** (`stress_damage` R5/R6): every managed file gets
+    several seeded single-point rewrites, each of which must be detected by the
+    content-level check with exit code 1 and no panic while the database-level
+    check stays unaffected; board DDS gets six structural corruptions (magic,
+    DX10 fourcc, BC7 format, zero width, oversized height, truncation) which
+    must be reported as `corrupt`, plus 24 random rewrites after which the scan
+    must still return a report.
+  - **Multi-operation interleaving** (`stress_concurrency` J3–J5): reads answer
+    while a *long* write holds the lock (repository backup and compaction,
+    parked at every checkpoint), and a genuinely concurrent
+    compaction × full-repository scrub run (four rounds, no window
+    constructed) must not hang, must leave the repository complete and every
+    remaining node byte-restorable. J5 surfaced a real boundary: in one of four
+    rounds the scrub failed cleanly with "找不到历史节点" because `scrub` is a
+    read command and is not covered by the write sentinel, so it is not
+    mutually exclusive with `compact`. No data loss; the error just does not
+    match its cause. Recorded as a P2 item in `docs/planning/todo.md` and in the
+    report's boundary table.
+  - **Performance baseline extended to six scenarios**: library tree assembly
+    and two search queries, whole-repository backup (throughput as well as
+    time), and cleanup scan / queue replay join the node chain, authenticity and
+    board DDS baselines. Each of the new ones takes the minimum of three runs and
+    asserts correctness on every repeat, so the number cannot drift away from a
+    correct result.
+- Eight of the cheap stress groups now run in Windows CI (the seven from before
+  plus `stress_input`), which brings the input-domain and path-boundary
+  regressions into everyday runs instead of pre-release ones.
+
+### Changed
+
+- The pre-release stress suite was re-run in full on `0.2.0-rc.3` — all eight
+  groups, 31 cases, all passing — and its C group now covers all five tiers,
+  including `manual` (8 GiB), which the report previously listed as designed
+  but never measured. `docs/user/stress-test-report.md` now carries the numbers
+  from that run instead of the older `0.2.0-alpha.4` ones. No shipped behavior
+  changed. Running `manual` needs an explicit `LILITH_STRESS_DISK_BUDGET`,
+  because its own peak-disk floor (3 x 8 GiB + 64 MiB) already exceeds the
+  24 GiB default — leaving it alone records the whole C group as skipped rather
+  than failing. `docs/guides/validation.md` now states that prerequisite and
+  the measured cost of a full run (about 95 minutes on a 16-thread desktop).
+- `windows-ci.yml` now also builds the headless binary and runs the cheap
+  stress groups (`stress_cancel`, `stress_crash`, `stress_cleanup`,
+  `stress_damage`, `stress_pin_board`, `stress_authenticity`,
+  `stress_concurrency`, `stress_input` — about 30 seconds in total) plus
+  `tests/gate_guard.rs`. They previously ran only before a release, so everyday
+  changes had no automatic regression coverage. `stress_large`,
+  `stress_scale`, and `stress_bench` stay manual (`docs/guides/validation.md`).
+
 ## 0.2.0-rc.3 - 2026-10-16
 
 ### Added

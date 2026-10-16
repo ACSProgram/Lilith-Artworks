@@ -1,4 +1,10 @@
-use std::{fs, fs::File, io, path::Path, time::SystemTime};
+use std::{
+    fs,
+    fs::File,
+    io::{self, Seek, Write},
+    path::Path,
+    time::SystemTime,
+};
 
 use tempfile::NamedTempFile;
 
@@ -87,6 +93,19 @@ fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadat
     }
 }
 
+/// 从工作文件流式创建快照。
+///
+/// 独立成函数只为让「快照写入」这一步能被磁盘写满注入测试直接复用：产品路径传入
+/// `NamedTempFile` 的文件句柄，测试传入一个耗尽的受限写入器，走的是同一段代码，
+/// 因此注入测试断言的是真实行为，而不是一个模仿出来的分支。
+fn create_snapshot<W>(source: &mut File, writer: &mut W) -> Result<ChunkFile, String>
+where
+    W: Write + Seek,
+{
+    ChunkFile::create(source, writer, ChunkingConfig::default())
+        .map_err(|error| format!("无法创建文件快照：{error}"))
+}
+
 pub(crate) fn run_backup(
     root: &Path,
     branch_id: &str,
@@ -125,12 +144,7 @@ pub(crate) fn run_backup(
     let temp_directory = artwork_directory.join("temp");
     let mut snapshot_temp = NamedTempFile::new_in(&temp_directory)
         .map_err(|error| format!("无法创建 snapshot 临时文件：{error}"))?;
-    let snapshot = ChunkFile::create(
-        &mut source,
-        snapshot_temp.as_file_mut(),
-        ChunkingConfig::default(),
-    )
-    .map_err(|error| format!("无法创建文件快照：{error}"))?;
+    let snapshot = create_snapshot(&mut source, snapshot_temp.as_file_mut())?;
     snapshot_temp
         .as_file()
         .sync_all()
@@ -373,7 +387,10 @@ fn publish_temp(temp: NamedTempFile, target: &Path, label: &str) -> Result<(), S
 mod tests {
     use std::{fs, io::Write};
 
-    use crate::{history, library};
+    use crate::{
+        backup::test_support::{QuotaWriter, Rng},
+        history, library,
+    };
 
     use super::*;
 
@@ -620,5 +637,114 @@ mod tests {
         assert!(restore_error.contains("snapshot"), "{restore_error}");
         assert!(checkpoint_error.contains("snapshot"), "{checkpoint_error}");
         assert!(!output.exists());
+    }
+
+    /// 属性测试：随机提交序列下，任意历史节点都能被恢复成提交当时的字节。
+    ///
+    /// 每一轮对工作文件做若干随机字节改动后提交，记录每个节点的期望内容；随后
+    /// 随机回访历史节点，断言恢复产物与该版本逐字节一致。走的是真实提交路径
+    /// （分块 → 反向增量 → 事务 → 原子发布）与真实恢复路径（穿增量链）。
+    #[test]
+    fn randomized_commit_and_restore_sequence_preserves_every_revision() {
+        let (directory, root, source, _artwork_id, branch_id) = create_fixture();
+        let mut rng = Rng::new(0x5eed_1234_abcd_0001);
+
+        // 先提交一次建立初始节点，其内容就是初始工作文件字节。
+        let mut current = fs::read(&source).unwrap();
+        let initial = run_backup(&root, &branch_id, "initial", "manual", || false).unwrap();
+        let mut revisions = vec![(initial.history_id.unwrap(), current.clone())];
+
+        for round in 0..8 {
+            let length = current.len();
+            for _ in 0..(1 + rng.below(5)) {
+                let start = rng.below(length);
+                let span = 1 + rng.below((length - start).min(12 * 1024));
+                let mask = rng.nonzero_byte();
+                for byte in &mut current[start..start + span] {
+                    *byte ^= mask;
+                }
+            }
+            fs::write(&source, &current).unwrap();
+            let result = run_backup(
+                &root,
+                &branch_id,
+                &format!("round {round}"),
+                "manual",
+                || false,
+            )
+            .unwrap();
+            let id = result.history_id.expect("每次改动都应产生新节点");
+            revisions.push((id, current.clone()));
+        }
+
+        for attempt in 0..24 {
+            let index = rng.below(revisions.len());
+            let (id, expected) = &revisions[index];
+            // 输出名按轮次唯一：同一节点会被随机回访多次。
+            let output = directory.path().join(format!("restored-{attempt}.bin"));
+            super::super::restore::restore(
+                &root,
+                id,
+                output.to_str().unwrap(),
+                || false,
+                |_, _, _| {},
+            )
+            .unwrap();
+            assert_eq!(
+                &fs::read(&output).unwrap(),
+                expected,
+                "回退到版本 {index} 时字节不一致"
+            );
+        }
+
+        assert_eq!(
+            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            revisions.len() as u64
+        );
+    }
+
+    /// 磁盘写满时快照写入干净失败：返回真实的「空间不足」错误、不 panic，写到一半的
+    /// 半成品无法被当成完整快照，且仓库不受影响、仍可整体校验。
+    ///
+    /// 注入点在真实的快照写入步骤上（`create_snapshot`），这就是提交路径在**任何数据库
+    /// 变更之前**调用的同一函数，配额只够写头部与一小段数据，因此产品遇到的是与真实
+    /// ENOSPC 相同的「写到一半失败」，而不是一个被简化成「直接拒绝写入」的假场景。
+    #[test]
+    fn a_full_disk_during_snapshot_leaves_the_repository_intact() {
+        let (directory, root, source, artwork_id, branch_id) = create_fixture();
+        let initial = run_backup(&root, &branch_id, "initial", "manual", || false).unwrap();
+        let first_id = initial.history_id.unwrap();
+        let nodes_before = history::list(&root, &artwork_id).unwrap().nodes.len();
+
+        let mut backing = fs::File::create(directory.path().join("full-disk-target.bin")).unwrap();
+        let quota = 16 * 1024;
+        let mut writer = QuotaWriter::new(&mut backing, quota);
+        let mut handle = fs::File::open(&source).unwrap();
+        let error = create_snapshot(&mut handle, &mut writer).unwrap_err();
+
+        assert!(error.contains("无法创建文件快照"), "{error}");
+        assert!(
+            writer.written() > 0 && writer.written() <= quota,
+            "配额内的字节应已落盘：written={}",
+            writer.written()
+        );
+
+        // 失败发生在任何数据库变更之前：历史与 head 都没有动，最早版本仍逐位可恢复。
+        assert_eq!(
+            history::list(&root, &artwork_id).unwrap().nodes.len(),
+            nodes_before
+        );
+        assert_eq!(
+            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            nodes_before as u64
+        );
+        let head = history::list(&root, &artwork_id).unwrap().nodes[0]
+            .id
+            .clone();
+        assert_eq!(&head, &first_id);
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &first_id),
+            vec![b'A'; 96 * 1024]
+        );
     }
 }

@@ -924,3 +924,118 @@ fn c6_large_file_large_change_round_trip() {
     fs::remove_file(&head_output).expect("无法清理恢复输出");
     let _ = fs::remove_file(&expected_oldest);
 }
+
+/// C7 大文件 × 中断：在档位大小的工作文件上逐个取消检查点各取消一次，再强杀一次。
+///
+/// A 组（取消）与 B 组（强杀）只用 **96 KiB** 工作文件，C 组的大文件档此前不做取消与
+/// 强杀——「用户在数百 MiB 的提交进行到一半时取消 / 进程被杀」恰好落在两组之间的缝里。
+/// 大文件提交会把整份快照流式写入临时文件再原子发布，取消与强杀因此各有一套完全不同的
+/// 清理面：C7 把 A/B 两组的断言搬到这条真实大文件链路上。
+///
+/// 档位决定文件大小（`default` 64 MiB、`LILITH_STRESS_TIERS=large` 256 MiB …）：链深与
+/// 中断行为与文件大小无关，用默认档即可覆盖，且单场景耗时可控。
+#[test]
+fn c7_large_file_commit_survives_cancellation_and_kill() {
+    let Some(mut scenario) = Scenario::new("C7 large file interruption", ChangeProfile::Small)
+    else {
+        return;
+    };
+    let tier = tier();
+
+    // 建立 head，使其后的提交是「在已有历史上推进」，取消/强杀因此有既有状态可断言未被破坏。
+    scenario.commit("baseline");
+    assert_eq!(scenario.healthy().nodes, 1);
+
+    // 逐检查点取消：每个取消点都断言无残留、待清理队列为空、历史不推进、仓库可重开。
+    for target in 1..=5_usize {
+        scenario.next_change(target);
+        let policy = Policy::at_index(target);
+        let outcome = scenario
+            .command("commit")
+            .arg("branch", &scenario.branch_id)
+            .arg("commit-kind", "manual")
+            .arg("note", "cancel probe")
+            .gate()
+            .drive(|index, stage| policy.decide(index, stage));
+        outcome.expect_cancelled();
+        assert_eq!(
+            outcome.checkpoints.len(),
+            target,
+            "检查点数量与取消位置不符：\n{}",
+            outcome.describe()
+        );
+        assert_no_stray(&scenario.repository);
+        assert_cleanup_empty(&scenario.workspace, &scenario.repository);
+        assert_eq!(
+            scenario.healthy().nodes,
+            1,
+            "大文件提交被取消不得推进历史：\n{}",
+            outcome.describe()
+        );
+        record(
+            "C7 large file cancel",
+            "C",
+            tier.name(),
+            &outcome,
+            json!({
+                "logicalBytes": scenario.logical,
+                "checkpoint": target,
+                "regionBytes": scenario.region_bytes(),
+            }),
+        );
+    }
+
+    // 取消之后，同一仓库上重跑同一次提交必须成功，且只前进一格。
+    scenario.next_change(101);
+    scenario.commit("after cancels");
+    assert_eq!(scenario.healthy().nodes, 2);
+
+    // 一次强杀：让大文件提交停在第一个检查点（已进入处理），TerminateProcess 不跑任何清理。
+    scenario.next_change(102);
+    let killed = scenario
+        .command("commit")
+        .arg("branch", &scenario.branch_id)
+        .arg("commit-kind", "manual")
+        .arg("note", "kill probe")
+        .gate()
+        .start()
+        .kill_at(|index, _stage| index == 1);
+    assert!(
+        killed.killed,
+        "大文件写进程应当被强杀：\n{}",
+        killed.describe()
+    );
+
+    assert_no_stray(&scenario.repository);
+    assert_cleanup_empty(&scenario.workspace, &scenario.repository);
+    assert_eq!(
+        scenario.healthy().nodes,
+        2,
+        "被强杀的大文件提交不得推进历史：\n{}",
+        killed.describe()
+    );
+    record_crash(
+        "C7 large file kill",
+        "C",
+        tier.name(),
+        &killed,
+        json!({ "logicalBytes": scenario.logical, "regionBytes": scenario.region_bytes() }),
+    );
+
+    // 强杀之后，另一个写进程仍能成功提交，且 head 能恢复出与工作文件逐位一致的内容。
+    scenario.next_change(103);
+    scenario.commit("after kill");
+    assert_eq!(scenario.healthy().nodes, 3);
+    let (head, output) = scenario.restore(&scenario.nodes[2], "c7-head.bin");
+    assert_eq!(file_bytes(&output), scenario.logical);
+    assert_files_identical(&scenario.work, &output);
+    record(
+        "C7 large file recover after kill",
+        "C",
+        tier.name(),
+        &head,
+        json!({ "logicalBytes": scenario.logical, "restoreMs": head.elapsed.as_millis() as u64 }),
+    );
+    fs::remove_file(&output).expect("无法清理恢复输出");
+    assert!(directory_names(&scenario.workspace.out_directory()).is_empty());
+}

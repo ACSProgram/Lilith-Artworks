@@ -16,51 +16,146 @@
 - 前端纯逻辑、请求竞态或交互状态变更运行 `npm test`；素材板范围可用 `npm run test:pin-board`。Windows CI 固定运行完整前端测试集。
 - 数据库变更使用临时目录与临时 SQLite 文件测试，不读取或修改用户真实仓库。如引入 schema 迁移，迁移 SQL 先在仓库数据库副本上用只读脚本核对效果，再进入 `schema.rs`。
 - 文件提交/恢复测试使用小型确定性样本，重点验证哈希、原子发布、不覆盖和取消边界。
+- `backup` 模块的单元测试含**确定性属性测试**（固定种子随机版本链与随机提交/恢复序列，
+  断言「恢复任意历史节点都与提交当时的字节逐字节一致」）与**磁盘写满注入**（注入写入器在
+  真实快照写入路径上返回 `ErrorKind::StorageFull`，断言干净失败、仓库不受影响且可重试）。
+  两者不引入新依赖、随 `cargo test --lib` 运行、秒级完成，因此进 Windows CI。
+- **四个解析器各有一组确定性畸形输入模糊**（`chunk_file` 快照/增量容器、`pin_board::dds`
+  DDS 头、`authenticity::c2pa` 清单、`app::settings` 设置文件），生成器集中在 `src/fuzz_support.rs`
+  （只在 `cfg(test)` 下编译，亦是 `backup::test_support::Rng` 的实现）。断言的是「不受信任的
+  字节不能换来 panic / 越界 / 无界分配 / 无限循环」：被接受的容器必须自洽（块数量不超过文件容量、
+  可物化且长度等于声明值），被接受的 DDS 尺寸必须落在声明上限之内，解析失败的设置文件必须被
+  **原样保留**。同样零新依赖、秒级完成、随 `cargo test --lib` 进 CI。
+- `app/settings.rs` 的单元测试覆盖「**长写任务持仓库操作锁期间，只读命令仍能作答**」这一并发
+  承诺：写线程持排他锁并停住，读线程走共享读租约，断言读在超时内返回（若读路径错误地取了排他
+  锁，会以超时失败而不是无限挂起）。同处还覆盖「切换仓库会等活跃租约」。
+- 仓库内**主库文件本身**被改坏（非数据库内容 / 清空）时的干净失败由 `stress_damage` 的 R3/R4
+  覆盖，与该组的 R1/R2（快照/增量内容损坏）互补——两层校验都打不开主库时也应给出可行动的错误。
 - `backup/chunk_file.rs` 与 `backup/restore.rs` 只依赖 sha2、zstd、tempfile（restore 另需 history/storage 少量接口），可以在仓库外用只含这几个依赖的轻量 crate `#[path]` 引入编译并运行其测试；这是重依赖边界内验证分块与物化逻辑的标准做法。
 - `trustmark` 经 `ort-sys` 的构建脚本从 pyke CDN 下载预编译 ONNX Runtime，因此**全新环境首次构建需要网络**。改动依赖版本后必须重跑 `npm run legal` 并提交 `licenses/THIRD_PARTY_LICENSES.html`。
 
-## 压力测试：只在发布前运行
+## 压力测试：便宜的分组进 CI，昂贵的仍只在发布前运行
 
-`src-tauri/tests/` 下的八组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
-`stress_large` 大文件端到端、`stress_scale` 规模与灾备与参数边界、`stress_cleanup` 崩溃孤儿
-回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
-`stress_damage` 损坏文件的检测与恢复）是**发布前手动运行**的套件，**不在 CI 中**，
-也**不属于日常开发的任何阶段**：
+`src-tauri/tests/` 下的十一组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`stress_large` 大文件端到端与大文件中断、`stress_scale` 规模与灾备与参数边界、`stress_cleanup`
+崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
+`stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏与画板 DDS 损坏）、
+`stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读）、
+`stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准）都以**真实可执行文件**驱动，
+只通过命令行、stdin 与磁盘事实断言。
 
-- **由 `headless` feature 门控**：八个 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]`
+- **由 `headless` feature 门控**：所有 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]`
   开头，不带该 feature 时它们编译为空目标。因此 `cargo test`（包括裸跑）既不会构建无头二进制、
-  也不会启动任何被测进程——「只在发布前手工运行」由 feature 精确表达，而不是靠人记得加
-  `--test`。原因：`cargo test` 会自动发现并运行 `tests/` 下的**每一个** `.rs` 文件，文件放在
-  那里就等于默认参与裸 `cargo test`；而在没有该 feature 的构建上 `--headless` 会被忽略、
-  应用直接以 GUI 启动（debug 档加载 `devUrl`，没有 `npm run dev` 时就是一个「找不到网页」的窗口）。
-  被测二进制在启动子进程前会做一次 `--headless help` 探针，指向未启用该 feature 的构建会立即
-  报错终止，而不是把 GUI 拉起来。
-  **新增 `tests/stress_*.rs` 时必须同样在文件开头写 `#![cfg(feature = "headless")]`**：这一行是
-  唯一的门控，Cargo 不会替你检查，漏写就等于让新文件回到裸 `cargo test` 里。
+  也不会启动任何被测进程。原因：`cargo test` 会自动发现并运行 `tests/` 下的**每一个** `.rs`
+  文件，文件放在那里就等于默认参与裸 `cargo test`；而在没有该 feature 的构建上 `--headless`
+  会被忽略、应用直接以 GUI 启动（debug 档加载 `devUrl`，没有 `npm run dev` 时就是一个
+  「找不到网页」的窗口）。被测二进制在启动子进程前会做一次 `--headless help` 探针，指向未启用
+  该 feature 的构建会立即报错终止，而不是把 GUI 拉起来。
+  **新增 `tests/stress_*.rs` 时必须同样在文件开头写 `#![cfg(feature = "headless")]`**：
+  `tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言这一行存在，缺了会直接失败（该守护测试
+  自身不带门控，因此在裸 `cargo test` 下就运行），把「漏写门控 → 裸 `cargo test` 拉起 GUI」
+  这类事故挡在提交前。
+- **按成本分层**：**八组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
+  `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
+  `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
+  **`stress_large`（几十分钟）、`stress_scale`（约 50 秒）与 `stress_bench` 仍只在发布前手动运行**
+  ——前两组依赖大量磁盘与时间，基准的数值需要人工解读（见其文件头与本节的环境变量）。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
-  `cargo test --lib`、`git diff --check`。**不要顺手运行压力测试**——即使到了收尾、整理、
-  提交前的阶段，只要不是准备发布，也不需要跑。
-- **它很耗时间与磁盘，这是设计属性而不是卡住**：测试以真实可执行文件、真实落盘路径执行，
-  覆盖「逻辑文件大小 × 单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行
-  常以十分钟计，峰值磁盘占用可达数 GiB，`extreme` 档（4 GiB 文件、每次改 1 GiB）接近十几 GiB。
-- **只在准备发布、需要产出或更新 `docs/user/stress-test-report.md` 的实测数据时运行**，
-  并由维护者显式发起。代理不得在普通开发或收尾阶段自行运行；需要跑时先向维护者确认档位与
-  磁盘预算。
+  `cargo test --lib`、`git diff --check`。CI 已覆盖的八组不必在本地反复跑；**其余分组不要顺手
+  运行**——即使到了收尾、整理、提交前的阶段也一样。
+- **昂贵分组的耗时与磁盘是设计属性而不是卡住**：测试以真实落盘路径执行，覆盖「逻辑文件大小 ×
+  单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行常以十分钟计，峰值磁盘占用
+  可达数 GiB，`extreme` 档（4 GiB 文件、每次改 1 GiB）接近十几 GiB，`manual` 档（8 GiB 文件、
+  每次改 2 GiB）约 25–32 GiB、单次约一小时。十一组 + C 组五个档位整轮实测约 95 分钟（一个 16
+  逻辑核 / 32 GiB 内存的桌面机，空闲磁盘 ≥ 87 GB）——新增的两组只加秒级开销。
+- **昂贵的分组只在准备发布、需要产出或更新 `docs/user/stress-test-report.md` 的实测数据时运行**，
+  并由维护者显式发起；需要跑时先确认档位与磁盘预算。
 - **大文件档按磁盘预算并发执行**：`stress_large` 的场景通过 `scenario_slot` 按「预计峰值磁盘」
   准入，可多个并行，但保留峰值之和不超过 `LILITH_STRESS_DISK_BUDGET`（默认 24 GiB），并发数
   不超过 `LILITH_STRESS_JOBS`（默认可用核数）。这样在有磁盘余量的机器上充分利用多核——
   被测子进程是单线程的，串行只会用一个核——同时避免盲目并行把磁盘写满。
-- 运行方式、档位、磁盘需求与实测数据见 `docs/user/stress-test-report.md` 第 4、6 节。
+- 运行方式（构建无头入口、档位选择、环境变量与输出文件）见下方「运行方式」；各档位的实测数据、
+  磁盘需求与墙钟见 `docs/user/stress-test-report.md` 第 4 节。
 - **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
   缓存、也不保证目录项落盘，结构上无法覆盖「断电后已提交数据是否仍在」。该保证由操作系统、
   磁盘与 SQLite `synchronous = FULL` 声明承担，保留为声明/人工项，不列入自动化目标。
+
+### 运行方式
+
+被测对象是**带无头入口的二进制**，必须先用 `--features headless` 构建出来（该入口不进发布
+产物）。运行命令由 `headless` feature 统一开闸：它既构建无头入口，也让 `tests/stress_*.rs`
+参与 `cargo test`。
+
+```text
+# 1. 构建带无界面入口的二进制（该入口不进发布产物）
+cd src-tauri
+cargo build --release --features headless
+
+# 2. 建议把测试指向发布档：峰值内存、存储放大与耗时才有参考价值
+LILITH_STRESS_BIN=target/release/lilith-artworks.exe \
+  cargo test --features headless --test stress_large
+
+# 3. 选择档位（默认 default；大文件档需要相应磁盘与时间）
+LILITH_STRESS_TIERS=extreme LILITH_STRESS_BIN=... \
+  cargo test --features headless --test stress_large
+
+# 4. 便宜的分组（MiB 级文件，秒级）：这些已在 Windows CI 中，本地一般不重复跑
+cargo test --features headless --test stress_cancel
+cargo test --features headless --test stress_crash
+cargo test --features headless --test stress_cleanup
+cargo test --features headless --test stress_damage
+cargo test --features headless --test stress_pin_board
+cargo test --features headless --test stress_authenticity
+cargo test --features headless --test stress_concurrency
+cargo test --features headless --test stress_input
+cargo test --test gate_guard
+
+# 5. 规模（约 50 秒，数百子进程）与性能基准（数值需人工解读；基线/比对用单线程采集）
+cargo test --features headless --test stress_scale
+cargo test --features headless --test stress_bench -- --nocapture
+
+# 6. 性能基线的更新与回归门（默认只记录，见「可调环境变量」）
+LILITH_STRESS_PERF_UPDATE=1 cargo test --features headless --test stress_bench -- --test-threads=1
+LILITH_STRESS_PERF_STRICT=1 cargo test --features headless --test stress_bench -- --test-threads=1
+
+# 7. 认证大图（16K 源图）：只在 extreme 及以上档位运行，否则 G1/G2 明确跳过
+LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authenticity
+```
+
+可调环境变量：
+
+- `LILITH_STRESS_TIERS`：档位（`default`/`large`/`heavy`/`extreme`/`manual`），默认 `default`。
+- `LILITH_STRESS_BIN`：被测可执行文件，建议指向发布档。
+- `LILITH_STRESS_DISK_BUDGET`：磁盘峰值上限（接受字节数或 `KiB/MiB/GiB/TiB` 后缀，默认 24 GiB）。
+  **跑 `manual` 档必须显式调高**：该档的 `peak_disk_floor` 本身（3 × 8 GiB + 64 MiB ≈ 24.06 GiB）
+  就已超过默认的 24 GiB，不改会把整个 C 组记为**跳过**（`record_skip`，报告里是 `skipped`）而不是
+  失败。用 `LILITH_STRESS_DISK_BUDGET=40GiB`——C6 大改动场景的预计峰值约 32.2 GiB，是五档里的上界。
+- `LILITH_STRESS_JOBS`：并发场景数上限（默认可用核数）。
+- `LILITH_STRESS_PERF_UPDATE=1`：`stress_bench` 把本次测量写入 `src-tauri/tests/perf-baseline.json`
+  对应构建档（`debug` / `release`）的条目。基线与构建档绑定——两者绝对耗时相差一个数量级。
+- `LILITH_STRESS_PERF_STRICT=1`：`stress_bench` 与基线比对，超过 `LILITH_STRESS_PERF_FACTOR`
+  倍（默认 `2.5`）即失败。默认**只记录不比对**，因为绝对耗时依赖机器，把机器差异变成
+  flaky 断言没有意义；跨机器比对时按需放宽 factor。
+
+结果写入 `target/stress-report.jsonl`（每场景一行 JSON）与 `target/stress-ledger.jsonl`
+（磁盘账本）；工作区位于 `target/stress-workspaces/`，正常结束后自动回收。被测子进程是单线程的
+（内容定义分块、SHA-256 与 zstd 都是单核路径），因此串行执行只会用一个核、磁盘远未跑满；
+`stress_large` 按磁盘预算准入并行正是为了在有磁盘余量的机器上吃满多核，同时避免盲目并行把
+磁盘写满。
 
 ## 持续集成
 
 - `windows-ci.yml`：`dependency-audit`（ubuntu，npm audit、`rustsec/audit-check`、SBOM）与
   `validate`（windows，发布元数据、许可证一致性、前端构建与测试、`cargo fmt --check`、
-  `cargo test --lib`）。
-- `release.yml`：推送 `v*` tag 时运行，含同样的审计与 Rust 测试步骤。
+  `cargo test --lib`、`cargo test --test gate_guard`、以及**八组便宜的无头压力测试**——构建
+  headless 二进制后依次运行 `stress_cancel` / `stress_crash` / `stress_cleanup` /
+  `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
+  `stress_input`）。
+  把便宜分组前置到 CI 是为了让日常改动也有回归保护：它们此前只在发布前手动跑，问题会在
+  「准备发布」时集中爆发。`stress_large` / `stress_scale` / `stress_bench` 不进 CI。
+- `release.yml`：推送 `v*` tag 时运行，含同样的审计，Rust 侧为 `cargo fmt --check` +
+  `cargo test --lib`（不含压力测试——发布前的候选版验收另有一套完整重跑，见本文与
+  `docs/user/stress-test-report.md`）。
 - 两处易踩的坑：
   1. `rustsec/audit-check` 的 `ignore` 输入**只按逗号切分**。用 YAML 块标量每行写一个
      advisory ID 会被当成**单个**非法参数传给 `cargo-audit`，报错后 stdout 为空，action
