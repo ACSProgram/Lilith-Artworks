@@ -7,6 +7,17 @@
 //! 本模块由每个测试目标各自 `mod stress_support;` 引入并**单独编译**，因此每个二进制
 //! 只用到其中一个子集；`allow(dead_code)` 是这一结构的必要产物，并不代表这里存在
 //! 废弃代码。新增场景时优先复用本模块的夹具与断言，不要在测试文件里复制。
+//!
+//! **门控**：八个 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]` 开头，不带该
+//! feature 时它们编译为空目标——裸 `cargo test` 因此既不会构建无头二进制，也不会启动
+//! 任何进程。这是必需的：`cargo test` 会自动发现 `tests/` 下的**每一个** `.rs` 文件并运行，
+//! 文件放在这里就等于「默认参与 `cargo test`」，而这个 feature 才是「只在发布前手工跑」的
+//! 开关。若某个目标在没有该 feature 的构建上被启动，`--headless` 会被忽略、应用直接以 GUI
+//! 启动（debug 构建加载 devUrl，没有 `npm run dev` 时就是一个「找不到网页」的窗口）。
+//!
+//! **新增 `stress_*.rs` 目标时必须同样在文件开头写 `#![cfg(feature = "headless")]`**——这一行
+//! 是唯一的门控，Cargo 不会替你检查（`tests/` 下的文件默认被自动发现并运行），漏写就会让新
+//! 目标回到裸 `cargo test` 里，也就是上面那段描述的事故。
 #![allow(dead_code)]
 
 use std::{
@@ -46,24 +57,29 @@ static REPORT_LOCK: Mutex<()> = Mutex::new(());
 ///   cargo test --features headless --test stress_cancel
 /// ```
 ///
-/// 覆盖路径会先做一次探针：`--headless help` 必须正常返回。指向未启用 `headless`
-/// feature 的构建时 `--headless` 会被忽略并启动 GUI，探针会终止它并报错。
+/// **两条路径都会先探针**：`--headless help` 必须自行退出且返回成功。指向未启用
+/// `headless` feature 的构建时 `--headless` 会被忽略、直接启动 GUI，探针会终止它并报错——
+/// 这是「测试跑起来却弹出窗口」的唯一拦截点，因此默认二进制与覆盖二进制同等对待。
 /// 需要真实数值的只有「峰值内存 / 存储放大 / 耗时」类场景（C、D、G 组）；
 /// 取消、崩溃与一致性断言与构建档无关。
 pub fn headless_bin() -> PathBuf {
-    let Ok(overridden) = std::env::var("LILITH_STRESS_BIN") else {
-        return PathBuf::from(DEFAULT_HEADLESS_BIN);
+    let path = match std::env::var("LILITH_STRESS_BIN") {
+        Ok(overridden) => {
+            let path = PathBuf::from(overridden);
+            assert!(
+                path.is_file(),
+                "LILITH_STRESS_BIN 指向的文件不存在：{}",
+                path.display()
+            );
+            path
+        }
+        Err(_) => PathBuf::from(DEFAULT_HEADLESS_BIN),
     };
-    let path = PathBuf::from(overridden);
-    assert!(
-        path.is_file(),
-        "LILITH_STRESS_BIN 指向的文件不存在：{}",
-        path.display()
-    );
     PROBE.get_or_init(|| probe_headless(&path));
     path
 }
 
+/// 确认被测二进制真的启用了 `headless` feature：`--headless help` 能自行退出即通过。
 fn probe_headless(path: &Path) {
     let mut child = Command::new(path)
         .arg("--headless")
@@ -72,14 +88,15 @@ fn probe_headless(path: &Path) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .expect("无法启动 LILITH_STRESS_BIN");
+        .unwrap_or_else(|error| panic!("无法启动被测二进制 {}：{error}", path.display()));
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
                 assert!(
                     status.success(),
-                    "LILITH_STRESS_BIN 的 `--headless help` 未正常返回：{status}"
+                    "被测二进制 {} 的 `--headless help` 未正常返回：{status}",
+                    path.display()
                 );
                 return;
             }
@@ -90,8 +107,10 @@ fn probe_headless(path: &Path) {
             let _ = child.kill();
             let _ = child.wait();
             panic!(
-                "LILITH_STRESS_BIN 没有启用 headless feature（`--headless` 被忽略，已终止）。\
-                 请用 `cargo build --release --features headless` 构建。"
+                "被测二进制 {} 没有启用 headless feature（`--headless` 被忽略，已终止）。\
+                 请用 `cargo build --features headless` 重新构建 debug 档，\
+                 或 `cargo build --release --features headless` 后配合 LILITH_STRESS_BIN 使用。",
+                path.display()
             );
         }
         std::thread::sleep(POLL_INTERVAL);

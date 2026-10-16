@@ -99,6 +99,23 @@ decision, so an untagged version is transitional.
   never drawn; tiles below source resolution are drawn smoothly instead of
   pixelated, and the tile cache key now includes the output edge because it
   depends on the device pixel ratio.
+- `cargo test` no longer launches the application. The eight stress-test targets
+  in `src-tauri/tests/` are now gated with `#![cfg(feature = "headless")]`,
+  which is what the policy that they are a publish-time-only suite always
+  implied: without the feature they compile to empty targets, so a plain
+  `cargo test` — listed as an allowed daily command — runs the library unit
+  tests and nothing else. Every file under `tests/` is discovered and run
+  automatically, so the suite was in fact part of bare `cargo test` all along;
+  without the feature `--headless` is stripped from the binary, every case
+  started the real application against the `devUrl` that only exists while the
+  dev server runs, and the single-instance plugin kept re-showing the window
+  until the run was interrupted. The check that the target really is headless
+  now also covers the default debug binary instead of only a `LILITH_STRESS_BIN`
+  override, so a mismatched build fails immediately with a clear message rather
+  than by opening windows. The two `unused_imports` warnings that appeared only
+  in `cargo test` are gone as well: the library re-exports used solely by the
+  headless entry point are gated on the feature alone, not `any(test, feature =
+  "headless")`.
 
 ## 0.2.0-rc.2 - 2026-10-09
 
