@@ -110,6 +110,21 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- `rustls` moved to 0.23.46 in `src-tauri/Cargo.lock`, which clears the four
+  advisories RustSec published on 2026-10-14 against 0.23.45
+  (RUSTSEC-2026-0346 client session `Debug` output leaking TLS secrets,
+  RUSTSEC-2026-0347 application data sent to the outer server after ECH
+  rejection, RUSTSEC-2026-0348 a brotli certificate that can allocate up to
+  1 GiB before authentication, RUSTSEC-2026-0349 an unauthenticated ServerHello
+  downgrading later connections to classical key exchange). None of the four was
+  in the audit ignore list, so `windows-ci.yml` and `release.yml` both failed at
+  "Audit Rust dependencies" — the first run after the advisories landed, not a
+  regression from the commits before it. `rustls` comes in through `ureq`'s
+  `rustls` feature and that requirement is `^0.23`, so nothing else moved;
+  `licenses/THIRD_PARTY_LICENSES.html` was regenerated for the new version.
+  One audit warning stays and cannot be fixed here: every `zip` 8.x release,
+  including the locked `8.6.0`, is yanked on crates.io, and `c2pa` up to 0.91.2
+  still requires `zip ^8.6.0`. The warning does not fail the audit check.
 - The pre-release stress suite was re-run in full on `0.2.0-rc.3` — all eight
   groups, 31 cases, all passing — and its C group now covers all five tiers,
   including `manual` (8 GiB), which the report previously listed as designed
