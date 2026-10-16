@@ -9,6 +9,9 @@
 //!
 //! 运行：`cargo test --features headless --test stress_scale`
 
+// 只在启用 `headless` feature 时编译。理由见 `tests/stress_support/mod.rs` 顶部说明。
+#![cfg(feature = "headless")]
+
 mod stress_support;
 
 use std::{

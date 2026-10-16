@@ -27,6 +27,16 @@
 `stress_damage` 损坏文件的检测与恢复）是**发布前手动运行**的套件，**不在 CI 中**，
 也**不属于日常开发的任何阶段**：
 
+- **由 `headless` feature 门控**：八个 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]`
+  开头，不带该 feature 时它们编译为空目标。因此 `cargo test`（包括裸跑）既不会构建无头二进制、
+  也不会启动任何被测进程——「只在发布前手工运行」由 feature 精确表达，而不是靠人记得加
+  `--test`。原因：`cargo test` 会自动发现并运行 `tests/` 下的**每一个** `.rs` 文件，文件放在
+  那里就等于默认参与裸 `cargo test`；而在没有该 feature 的构建上 `--headless` 会被忽略、
+  应用直接以 GUI 启动（debug 档加载 `devUrl`，没有 `npm run dev` 时就是一个「找不到网页」的窗口）。
+  被测二进制在启动子进程前会做一次 `--headless help` 探针，指向未启用该 feature 的构建会立即
+  报错终止，而不是把 GUI 拉起来。
+  **新增 `tests/stress_*.rs` 时必须同样在文件开头写 `#![cfg(feature = "headless")]`**：这一行是
+  唯一的门控，Cargo 不会替你检查，漏写就等于让新文件回到裸 `cargo test` 里。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
   `cargo test --lib`、`git diff --check`。**不要顺手运行压力测试**——即使到了收尾、整理、
   提交前的阶段，只要不是准备发布，也不需要跑。

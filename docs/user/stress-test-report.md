@@ -289,6 +289,10 @@ C 组覆盖**两条正交的轴**——「文件多大」与「每次改动多�
 > `cargo fmt --check`、`cargo check`、`cargo test --lib`、`git diff --check`）。运行约定见
 > `docs/guides/validation.md` 的「压力测试：只在发布前运行」。
 
+> 八个测试目标都以 `#![cfg(feature = "headless")]` 门控，因此下面命令里的 `--features headless`
+> 同时是两件事的开关：构建无头入口，以及让这些用例参与 `cargo test`。漏写它时它们编译为空目标，
+> 裸 `cargo test` 不会运行任何压力测试，也不会启动应用。
+
 ```text
 # 1. 构建带无界面入口的二进制（该入口不进发布产物）
 cd src-tauri
