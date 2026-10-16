@@ -185,7 +185,9 @@ function PublishView({
       }}
       busy={busy}
       onCancel={() => setDeleteConfirmOpen(false)}
-      onConfirm={() => void cancelPublication()}
+      // 解除发布与仓库内文件删除是一步到位的短操作，底层没有可中断点：确认后立即
+      // 关窗，避免弹窗停在运行态给出一个点了不生效的取消入口。
+      onConfirm={() => { setDeleteConfirmOpen(false); void cancelPublication(); }}
     />}
   </div>;
 }
@@ -410,7 +412,8 @@ function RecordView({ record, preview, exporting, deleting, onExport, onDelete, 
       }}
       busy={deleting}
       onCancel={() => setDeleteConfirmOpen(false)}
-      onConfirm={() => void onDelete(record)}
+      // 同「取消发布并删除本地数据」：短且不可中断，确认后立即关窗。
+      onConfirm={() => { setDeleteConfirmOpen(false); void onDelete(record); }}
     />}
   </div>;
 }

@@ -386,15 +386,24 @@ export function ConfirmDialog({
   request,
   busy,
   onClose,
+  onCancelOperation,
   onConfirm,
 }: {
   request: ConfirmRequest;
   busy: boolean;
   onClose: () => void;
+  /** 运行期间的取消操作入口；缺省表示当前操作不可中断（见共享控件的 busy 契约）。 */
+  onCancelOperation?: () => void;
   onConfirm: () => void;
 }) {
   const view = useMemo(() => confirmCopy(request), [request]);
-  return <SharedConfirmDialog view={view} busy={busy} onCancel={onClose} onConfirm={onConfirm} />;
+  return <SharedConfirmDialog
+    view={view}
+    busy={busy}
+    onCancelOperation={onCancelOperation}
+    onCancel={onClose}
+    onConfirm={onConfirm}
+  />;
 }
 
 function confirmCopy(request: ConfirmRequest): ConfirmView {

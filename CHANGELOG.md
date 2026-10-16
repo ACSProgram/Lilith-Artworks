@@ -65,6 +65,33 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- The confirmation dialog no longer offers a cancel button that cancels
+  nothing. While the operation it started is still running, the footer button
+  now reads "取消操作" and aborts that operation, and the dialog can no longer
+  be dismissed through the backdrop or the header close button, so the one
+  remaining exit is the one that works; the previously working cancel lived on
+  the header progress bar, which the modal backdrop put out of reach. Callers
+  opt in with the new `ConfirmDialog.onCancelOperation`, and only operations
+  with real interruption points pass it. The two authenticity dialogs whose
+  commands have no cancellation checkpoints (cancelling a publication, deleting
+  a certification record) now close as soon as they are confirmed instead of
+  sitting in a running state behind a cancel button that only closes the
+  window.
+- Removing history nodes now really stops when the user cancels it. Compaction
+  calls the per-node command in a loop, while the shared cancel flag is cleared
+  whenever a command takes the run lock and again when it returns, so a cancel
+  could only ever affect the one command that was executing: a request landing
+  after its last checkpoint, or in the gap between two commands, was silently
+  dropped and the remaining nodes were deleted anyway. The controller now
+  records the request itself, the loop checks it before starting the next node,
+  and a node command that fails while a cancel is pending is folded into the
+  same batch result, so the outcome is always reported as "精简已取消，剩余 N 个
+  节点未被删除。" with the compact selection kept; the bare native "操作已取消"
+  no longer reaches the user as the whole story. A request that arrives after
+  the operation has already finished is reported as such instead of being
+  swallowed. The shared cancellation error is neutral now ("操作已取消"): it
+  read "恢复操作已取消" for compaction, checkpoints and subtree deletion, which
+  all reuse that check.
 - Minimizing the window before quitting no longer wipes the settings file. The
   exit capture read `GetWindowRect` while the window was minimized, which
   returns the taskbar-icon rect (about 237x39 at -32000,-32000); that size was
