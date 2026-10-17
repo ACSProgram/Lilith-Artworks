@@ -209,6 +209,23 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The headless full-repository content check (`scrub`) now refuses to run
+  while another process holds the write sentinel, with "仓库正在被写入，请稍后
+  重试". Running it during a compaction used to surface "找不到历史节点" — clean
+  and lossless, but an error unrelated to its cause; J5 measured it in one of
+  four rounds. Only content-level checks are gated: `verify`, `list-*` and the
+  other light read commands keep the promise that they answer while a writer
+  holds the lock (J1/J2 assert exactly that and must not regress). The probe
+  takes `BEGIN IMMEDIATE` with a zero busy timeout and rolls back at once, so
+  the read command never becomes a mutual-exclusion source between writers; the
+  window between the probe and a writer starting is accepted and documented,
+  since the alternative — re-reading the node set and continuing — would verify
+  a moving target and hide the real concurrency window. J6 pins the refusal
+  deterministically (writer parked on a checkpoint, `scrub` refused with exit
+  code 1, `verify` still answering, `scrub` passing once the writer finishes),
+  and J5 now records refusals separately from other failures instead of treating
+  them as a boundary (2 of 4 rounds refused and none failing otherwise on the
+  re-run).
 - The planning set now follows one rule instead of two behaviours: the two
   surface documents (`docs/planning/current-handoff.md` and
   `docs/planning/todo.md`) carry only the current state, open work, and plans,

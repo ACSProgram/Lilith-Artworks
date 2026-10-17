@@ -40,7 +40,8 @@
 `stress_large` 大文件端到端与大文件中断、`stress_scale` 规模与灾备与参数边界、`stress_cleanup`
 崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
 `stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏与画板 DDS 损坏）、
-`stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读）、
+`stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读、
+写哨兵持有期间全库校验的明确拒绝）、
 `stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准）都以**真实可执行文件**驱动，
 只通过命令行、stdin 与磁盘事实断言。
 
