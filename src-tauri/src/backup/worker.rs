@@ -70,6 +70,12 @@ pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool
     if branch.source_path.trim().is_empty() || branch.head_history_id.is_none() {
         return Ok(false);
     }
+    // 快速检查只服务无人值守流程，因此网络位置与设备命名空间必须先拒绝：下面的
+    // `metadata()` 就是这条路径真正落到操作系统的地方。资格判定由调度器负责记录
+    // 原因，这里只兜底不触碰路径。
+    if let Some(reason) = storage::unattended_source_path_rejection(&branch.source_path) {
+        return Err(reason);
+    }
     let Some((size, modified_ms)) = history::load_source_metadata(root, branch_id)? else {
         return Ok(false);
     };
@@ -136,6 +142,10 @@ pub(crate) fn run_backup(
             "该分支未选择工作文件，无法创建备份".into(),
         ));
     }
+    // 手动提交允许网络位置（NAS 是合法用法），但设备命名空间一律拒绝：这类路径
+    // 指向的是设备对象而不是文件，打开它等同一次未经确认的原生对象访问。
+    storage::ensure_not_device_path(&branch.source_path, "分支工作文件")
+        .map_err(BackupRunError::Failed)?;
     let source_path = Path::new(&branch.source_path);
     let before = source_metadata(source_path)?;
     let mut source =

@@ -15,7 +15,7 @@ use tempfile::NamedTempFile;
 
 use super::diagnostics::{self, DiagnosticsState};
 use crate::backup::{BackupState, BackupTaskKind};
-use crate::{history, library};
+use crate::{history, library, storage};
 
 const CURRENT_SETTINGS_VERSION: u32 = 2;
 
@@ -574,6 +574,9 @@ pub(crate) fn reveal_path_in_folder(path: String) -> Result<(), String> {
     if trimmed.is_empty() {
         return Err("文件路径为空".into());
     }
+    // 用户在场的手动操作：网络位置照常打开（NAS 是合法用法），但设备命名空间
+    // 一律拒绝——那是设备对象而不是文件，交给资源管理器打开没有意义。
+    storage::ensure_not_device_path(trimmed, "文件路径")?;
     let path = Path::new(trimmed);
     if !path.is_file() {
         return Err("文件不存在或已被移动".into());

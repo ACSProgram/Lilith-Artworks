@@ -1,3 +1,5 @@
+use std::path::Path;
+
 use rusqlite::{Connection, OptionalExtension};
 
 use crate::storage;
@@ -316,7 +318,10 @@ pub(super) fn validate_current(connection: &Connection) -> Result<(), String> {
     validate_current_version(repository_version(connection)?)
 }
 
-pub(super) fn validate_repository_semantics(connection: &Connection) -> Result<(), String> {
+pub(super) fn validate_repository_semantics(
+    connection: &Connection,
+    root: &Path,
+) -> Result<(), String> {
     let mut foreign_keys = connection
         .prepare("PRAGMA foreign_key_check")
         .map_err(storage::database_error)?;
@@ -374,6 +379,27 @@ pub(super) fn validate_repository_semantics(connection: &Connection) -> Result<(
             .map_err(|error| format!("{label} 无效：{error}"))?;
     }
     drop(paths);
+
+    // 分支工作文件按设计保存仓库之外的绝对路径，因此单独做结构校验：绝对路径、
+    // 无设备命名空间、不在仓库目录内，但不检查文件是否存在，也不拒绝网络位置。
+    // 读取侧必须挡住的是「打开别人的仓库后，无人值守流程直接对这条路径取元数据
+    // 或整份复制」——这些使用点另外按 `unattended_source_path_rejection` 跳过。
+    let mut branch_paths = connection
+        .prepare(
+            "SELECT 'branches.source_path', source_path FROM branches
+             UNION ALL SELECT 'branches.source_path_key', source_path_key FROM branches",
+        )
+        .map_err(storage::database_error)?;
+    let branch_rows = branch_paths
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?;
+    for row in branch_rows {
+        let (label, path) = row.map_err(storage::database_error)?;
+        storage::validate_branch_source_path(root, &path, &label)?;
+    }
+    drop(branch_paths);
 
     let mut hashes = connection
         .prepare(

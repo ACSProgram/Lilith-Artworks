@@ -99,6 +99,9 @@ pub(crate) struct HistoryRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct ScheduledBranch {
     pub(crate) id: String,
+    /// 分支工作文件路径。调度器据此判断该分支能不能进入无人值守流程：网络位置与
+    /// 设备命名空间一律跳过（见 `storage::unattended_source_path_rejection`）。
+    pub(crate) source_path: String,
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) interval_minutes: u32,
     pub(crate) quick_enabled: bool,
