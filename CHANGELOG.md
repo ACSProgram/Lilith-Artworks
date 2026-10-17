@@ -206,6 +206,19 @@ decision, so an untagged version is transitional.
   `docs/guides/release-policy.md`, neither of which mentioned it before. The
   fix was re-verified on 2026-10-17 in an environment without a usable adapter:
   the persistent notice appears with the original reason.
+- The three new RustSec advisories against the `zip` crate
+  (RUSTSEC-2026-0367/0368/0369, symlink-escape and permission-preservation flaws
+  in extract-to-disk paths) are added to the dependency-audit ignore list in
+  both workflows, unblocking Windows CI run #19 without any code change. The
+  locked zip 8.6.0 is a transitive dependency of c2pa 0.90.11, which only reads
+  archive-based assets and is never handed an untrusted ZIP file, so the
+  vulnerable code is unreachable from this application. The proper fix —
+  upgrading c2pa to 0.91.3, which uses zip 9.0.4 — was evaluated and deferred:
+  0.91's validator rejects manifests signed by 0.90 or earlier (soft binding
+  values stored as CBOR text strings now fail `claim.malformed`), which would
+  fail closed the integrity verification of every previously published record.
+  The decision and the rationale are recorded in the workflow files and
+  `docs/planning/todo.md`.
 
 ### Changed
 
