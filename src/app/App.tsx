@@ -55,6 +55,7 @@ import { ConfirmDialog } from "../shared/ConfirmDialog";
 import { formatBytes } from "../shared/format";
 import {
   cleanupReasonLabel,
+  isExternalCleanupEntry,
   type PendingCleanupEntry,
   type UnreferencedScanCandidate,
 } from "../shared/fileCleanup";
@@ -172,6 +173,7 @@ export function App() {
   const [backupRuntime, setBackupRuntime] = useState(IDLE_BACKUP_RUNTIME);
   const [cancelPending, setCancelPending] = useState(false);
   const [pendingCleanup, setPendingCleanup] = useState<PendingCleanupEntry[]>([]);
+  const [externalCleanupTarget, setExternalCleanupTarget] = useState<PendingCleanupEntry | null>(null);
   const [scanCandidates, setScanCandidates] = useState<UnreferencedScanCandidate[] | null>(null);
   const [scanConfirmOpen, setScanConfirmOpen] = useState(false);
   const [cleanupBusy, setCleanupBusy] = useState(false);
@@ -591,14 +593,20 @@ export function App() {
       }
       : null;
   const settingsBusy = busy || settingsOperation !== null || backupRuntime.busy || cleanupBusy;
+  /** 仓库内条目由启动重放与「全部重试」处理；外部条目只走逐条确认。 */
+  const repositoryCleanupCount = pendingCleanup.filter((entry) => !isExternalCleanupEntry(entry)).length;
   const pendingCleanupSummary = useMemo(() => {
     if (!repository.ready) return "仓库不可用";
     if (pendingCleanup.length === 0) return "没有待清理的文件";
     const failed = pendingCleanup.filter((entry) => entry.lastError).length;
-    return failed > 0
-      ? `${pendingCleanup.length} 个文件待清理，其中 ${failed} 个上次删除失败`
-      : `${pendingCleanup.length} 个文件待清理`;
-  }, [pendingCleanup, repository.ready]);
+    const external = pendingCleanup.length - repositoryCleanupCount;
+    const externalNote = external > 0
+      ? `，另有 ${external} 个仓库外文件需逐条确认后删除`
+      : "";
+    return `${pendingCleanup.length} 个文件待清理${
+      failed > 0 ? `，其中 ${failed} 个上次删除失败` : ""
+    }${externalNote}`;
+  }, [pendingCleanup, repository.ready, repositoryCleanupCount]);
 
   return (
     <main className="app-shell">
@@ -800,7 +808,8 @@ export function App() {
                         className="secondary-button"
                         type="button"
                         onClick={() => void retryCleanup([])}
-                        disabled={settingsBusy || !repository.ready || pendingCleanup.length === 0}
+                        disabled={settingsBusy || !repository.ready || repositoryCleanupCount === 0}
+                        title="只重放仓库内条目；仓库外文件需逐条确认"
                       >
                         <RotateCcw aria-hidden="true" size={15} />全部重试
                       </button>
@@ -824,26 +833,50 @@ export function App() {
 
                   {pendingCleanup.length > 0 && (
                     <div className="cleanup-queue" role="list" aria-label="待清理文件队列">
-                      {pendingCleanup.map((entry) => (
-                        <div className="cleanup-queue-row" role="listitem" key={entry.id}>
-                          <div className="cleanup-queue-copy">
-                            <strong title={entry.path}>{entry.path}</strong>
-                            <small>
-                              {cleanupReasonLabel(entry.reason)}
-                              {entry.lastError ? ` · 上次失败：${entry.lastError}` : " · 等待清理"}
-                              {entry.lastAttemptMs ? ` · ${new Date(entry.lastAttemptMs).toLocaleString()}` : ""}
-                            </small>
+                      {pendingCleanup.map((entry) => {
+                        // 仓库外文件不参与自动重放：删除它等于删除仓库之外的任意
+                        // 路径，必须逐条确认，且确认前要看到完整路径、所属作品与
+                        // 期望摘要。
+                        const external = isExternalCleanupEntry(entry);
+                        return (
+                          <div className="cleanup-queue-row" role="listitem" key={entry.id}>
+                            <div className="cleanup-queue-copy">
+                              <strong title={entry.path}>{entry.path}</strong>
+                              <small>
+                                {external ? "仓库外文件 · " : ""}
+                                {cleanupReasonLabel(entry.reason)}
+                                {external && ` · 所属作品：${entry.artworkTitle ?? "未知"}`}
+                                {entry.lastError ? ` · 上次失败：${entry.lastError}` : external ? "" : " · 等待清理"}
+                                {entry.lastAttemptMs ? ` · ${new Date(entry.lastAttemptMs).toLocaleString()}` : ""}
+                              </small>
+                              {external && (
+                                <small title={entry.expectedSha256 ?? undefined}>
+                                  期望 SHA-256：{entry.expectedSha256 ?? "未记录"}
+                                </small>
+                              )}
+                            </div>
+                            {external ? (
+                              <button
+                                className="danger-button"
+                                type="button"
+                                disabled={settingsBusy}
+                                onClick={() => setExternalCleanupTarget(entry)}
+                              >
+                                <Trash2 aria-hidden="true" size={15} />确认删除…
+                              </button>
+                            ) : (
+                              <button
+                                className="secondary-button"
+                                type="button"
+                                disabled={settingsBusy}
+                                onClick={() => void retryCleanup([entry.id])}
+                              >
+                                <RotateCcw aria-hidden="true" size={15} />重试
+                              </button>
+                            )}
                           </div>
-                          <button
-                            className="secondary-button"
-                            type="button"
-                            disabled={settingsBusy}
-                            onClick={() => void retryCleanup([entry.id])}
-                          >
-                            <RotateCcw aria-hidden="true" size={15} />重试
-                          </button>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
 
@@ -1119,6 +1152,34 @@ export function App() {
           busy={cleanupBusy}
           onCancel={() => setScanConfirmOpen(false)}
           onConfirm={() => void purgeScanCandidates()}
+        />
+      )}
+
+      {externalCleanupTarget && (
+        <ConfirmDialog
+          view={{
+            icon: <Trash2 size={20} />,
+            eyebrow: "仓库外文件 · 不可撤销",
+            title: "确认删除这个仓库外文件",
+            subject: externalCleanupTarget.path,
+            description: "该文件位于仓库之外，删除后无法从仓库恢复；仅在它确实是应用写出的认证导出残留时才应删除。",
+            detail: [
+              `所属作品：${externalCleanupTarget.artworkTitle ?? "未知"}`,
+              `期望 SHA-256：${externalCleanupTarget.expectedSha256 ?? "未记录"}`,
+              "删除前会再比对文件摘要；内容已变化的文件会被保留。",
+            ].join("\n"),
+            action: "删除这个文件",
+            danger: true,
+            emphasis: true,
+            slideToConfirm: true,
+          }}
+          busy={cleanupBusy}
+          onCancel={() => setExternalCleanupTarget(null)}
+          onConfirm={() => {
+            const target = externalCleanupTarget;
+            setExternalCleanupTarget(null);
+            void retryCleanup([target.id]);
+          }}
         />
       )}
     </main>

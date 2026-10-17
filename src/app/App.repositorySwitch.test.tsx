@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import packageInfo from "../../package.json";
+import { dragSlideToEnd } from "../shared/slideToConfirmTesting";
 import type { SettingsSnapshot } from "./types";
 import type { LibraryTree } from "../modules/library/types";
 
@@ -543,6 +544,54 @@ describe("App repository switching", () => {
     await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith(["cleanup-1"]));
     await waitFor(() => expect(screen.queryByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeNull());
     expect(await screen.findByText("已清理 1 个待清理文件。")).toBeTruthy();
+  });
+
+  it("requires an explicit confirmation before deleting an external file", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    const externalPath = "D:\\exports\\signed.jpg";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.listPendingFileCleanup.mockResolvedValue([{
+      id: "cleanup-external",
+      path: externalPath,
+      pathKind: "external_file",
+      reason: "publish_certification",
+      createdMs: 1,
+      lastAttemptMs: null,
+      lastError: null,
+      expectedSha256: "A".repeat(64),
+      artworkTitle: "Repository artwork",
+    }]);
+    appApi.retryFileCleanup.mockResolvedValue({ cleanedCount: 1, pendingCount: 0, failures: [] });
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+
+    // 仓库外条目展示完整路径、所属作品与期望摘要，且不提供「全部重试」入口。
+    expect(await screen.findByText(externalPath)).toBeTruthy();
+    expect(screen.getByText(/所属作品：Repository artwork/)).toBeTruthy();
+    expect(screen.getByText(`期望 SHA-256：${"A".repeat(64)}`)).toBeTruthy();
+    const retryAll = screen.getByRole("button", { name: /全部重试/ }) as HTMLButtonElement;
+    expect(retryAll.disabled).toBe(true);
+
+    // 点击按钮只打开确认弹窗，不执行删除；必须滑动确认才会真正入队执行。
+    fireEvent.click(screen.getByRole("button", { name: /确认删除/ }));
+    const confirm = await screen.findByRole("alertdialog");
+    expect(confirm.textContent).toContain(externalPath);
+    expect(confirm.textContent).toContain("所属作品：Repository artwork");
+    expect(appApi.retryFileCleanup).not.toHaveBeenCalledWith(["cleanup-external"]);
+
+    dragSlideToEnd("删除这个文件");
+    await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith(["cleanup-external"]));
   });
 
   it("scans unreferenced files and cleans the confirmed candidates", async () => {

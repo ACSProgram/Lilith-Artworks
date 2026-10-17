@@ -21,6 +21,19 @@ export interface PendingCleanupEntry {
   lastAttemptMs: number | null;
   /** 上次删除失败原因；尚未尝试或上次成功时为空。 */
   lastError: string | null;
+  /** 入队时记录的期望 SHA-256；外部文件条目必填，删除前据此比对内容。 */
+  expectedSha256: string | null;
+  /** 外部文件条目所属作品标题；按导出路径回查不到记录时为空。 */
+  artworkTitle: string | null;
+}
+
+/**
+ * 外部文件条目（`path_kind = 'external_file'`）保存仓库之外的绝对路径，删除它
+ * 等于一条任意路径删除，因此**不参与自动重放**：应用启动与「全部重试」都只处理
+ * 仓库内条目，外部条目必须在设置页逐条确认后凭显式 id 执行。
+ */
+export function isExternalCleanupEntry(entry: PendingCleanupEntry): boolean {
+  return entry.pathKind === "external_file";
 }
 
 /** 未引用文件扫描候选；与后端 `cleanup::ScanCandidate` 对齐，只报告不删除。 */

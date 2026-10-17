@@ -110,6 +110,26 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- External cleanup entries no longer replay themselves on startup. The
+  `pending_file_cleanup` queue kept `external_file` rows (an absolute path
+  outside the repository) out of the path validation on purpose, and the
+  frontend called `retryFileCleanup([])` as soon as a repository became ready,
+  where an empty id list meant "process everything". Opening a poisoned
+  repository was therefore an automatic, unconfirmed "delete any absolute path"
+  primitive, with the target's SHA-256 as the only prerequisite. An empty id
+  list now means **repository entries only** (`repository_file` /
+  `repository_directory`), so the startup replay and the settings page's
+  "retry all" both leave external rows alone; those are deleted only from the
+  settings page, one row at a time, through an explicit id. Each external row
+  now shows the full path, the owning artwork (looked up through the export
+  path's certification record, empty when the publish failed before the record
+  existed) and the expected SHA-256, and the button opens a slide-to-confirm
+  dialog before the delete is queued. The existing "keep the file when the
+  digest does not match" guard is unchanged. A per-session directory allowlist
+  was rejected as the alternative: confirmation already removes the automatic,
+  unconfirmed primitive, an allowlist would only weaken the gate, and it would
+  expire on restart, which reads as a bug. Covered by `cleanup::run` and `App`
+  tests.
 - Opening a repository no longer trusts the branch work-file paths recorded in
   its database. `validate_repository_semantics` checked every controlled
   relative path but not `branches.source_path`, whose value only had to pass
