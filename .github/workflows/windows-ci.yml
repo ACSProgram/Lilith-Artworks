@@ -46,7 +46,17 @@ jobs:
           # with one id per line collapses into a single invalid `--ignore`
           # argument, which makes cargo-audit exit without JSON on stdout and
           # the action fail with "Unexpected end of JSON input".
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100
+          #
+          # RUSTSEC-2026-0367/0368/0369 (zip 8.x): our zip 8.6.0 is a transitive
+          # dependency of c2pa 0.90.11, which only reads archive assets and is
+          # never handed untrusted ZIP files, so the vulnerable extract-to-disk
+          # paths (symlink escape, SUID/SGID preservation) are unreachable.
+          # c2pa 0.91.3 moves to zip 9.0.4, but its validator rejects manifests
+          # signed by <= 0.90 (soft binding values stored as CBOR text strings
+          # now fail "claim.malformed"), which would fail closed every
+          # previously published record. Ignored until upstream offers a
+          # migration path for old manifests; tracked in docs/planning/todo.md.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369
 
       - name: Generate source dependency SBOM
         uses: anchore/sbom-action@v0.24.0
