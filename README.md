@@ -2,7 +2,7 @@
 
 Lilith Artworks 是一套用于管理个人平面美术工作流中资源的工具软件，集成、轻量，**全部操作和数据均完全本地化**。
 
-当前版本：`0.2.0-rc.4`（repository schema v4）
+当前版本：`0.2.0`（repository schema v4）
 
 <p align="center">
   <img src=".github/assets/demo.png" alt="Lilith Artworks 主界面：左侧为作品库，右侧为作品「创作 1」的版本历史时间轴，展示提交、自动备份与分支节点" width="880" />
@@ -53,5 +53,5 @@ Lilith Artworks 是一套用于管理个人平面美术工作流中资源的工�
 
 项目贡献者创作的代码以 [GNU General Public License v3.0 only](LICENSE) 发布。分发完整应用时，需要同时满足 GPL-3.0-only 和随包第三方材料各自适用的许可与告知义务。
 
-- 第三方软件保留各自版权和许可条款；人工维护的摘要与正式版仍需补齐的许可清单见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 第三方软件保留各自版权和许可条款；人工维护的主要组件摘要见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，完整的随包第三方许可清单由发行流程生成并随安装包交付（仓库内为 `licenses/THIRD_PARTY_LICENSES.html`）。
 - 随包分发的 **Adobe TrustMark 模型**（`src-tauri/resources/models/`）沿用 Adobe 提供的 MIT License；原始许可文本见 [`src-tauri/resources/models/LICENSE`](src-tauri/resources/models/LICENSE)。

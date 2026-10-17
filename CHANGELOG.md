@@ -9,6 +9,352 @@ the five version fields move together, so the version number lags the work until
 the cut. A version can exist without a tag: tagging is a separate, later release
 decision, so an untagged version is transitional.
 
+## Unreleased
+
+## 0.2.0 - 2026-10-17
+
+### Added
+
+- Headless commands that write a repository now take a **cross-process write
+  sentinel**: an exclusive lock held by a dedicated SQLite database
+  (`BEGIN IMMEDIATE`, `busy_timeout = 0`), so a second writer gets an explicit
+  refusal instead of racing the first in the business layer. The rejection reads
+  "仓库正在被另一个进程写入；不支持同一仓库的多进程写入". SQLite releases the lock
+  when the handle closes, so a killed process cannot leave the repository
+  locked — a plain lock file would, and this project has many kill scenarios.
+  Only the headless entry is gated, only for the commands that write, and only
+  when the repository directory already exists; read-only commands,
+  `init-repository`, and the whole GUI path are unchanged (the GUI keeps relying
+  on the single-instance plugin). Covered by the new `stress_concurrency` group.
+- New tests close the gaps listed in `docs/planning/todo.md` under "待补强":
+  a deterministic property test over the reverse-delta chain (any revision in a
+  random chain restores byte-identically), a random commit/restore sequence on a
+  real repository, disk-full injection on the real snapshot write path
+  (`ErrorKind::StorageFull` returns a clean error and leaves the repository
+  intact and retryable, with the partial bytes actually on disk), and
+  multi-process contention plus 20 rapid sequential commits. The `chunk_file`
+  snapshot writer was already generic over `Write + Seek`, so disk-full injects
+  at the real data path rather than a mock; the commit path's snapshot write was
+  extracted into `create_snapshot` for the same reason, and the shared fixtures
+  live in the new `backup/test_support.rs`. Coverage and run commands are
+  documented in `docs/guides/validation.md`.
+- The remaining review gaps are closed without touching product code:
+  a **large-file interruption** scenario (every commit cancel checkpoint plus
+  one real kill on a tier-sized work file, asserting no residue, no history
+  advance, and a byte-identical head restore, since the cancel and kill groups
+  previously only used 96 KiB files); **main-database corruption** (the
+  `.sqlite3` header overwritten with non-database bytes, and the file emptied —
+  both must fail cleanly with an actionable error, and the emptied file must
+  not be rebuilt into a fresh empty repository, which would silently discard
+  history); **write + read interleaving** (read commands still answer, and see
+  a consistent pre-write state, while a writer holds the sentinel lock,
+  including the "snapshot published, transaction not yet committed" window;
+  concurrent readers do not block each other); and a **performance baseline**
+  for core algorithms (node chain, authenticity publish/decode, board DDS
+  import/scan) recorded to `src-tauri/tests/perf-baseline.json`, with an opt-in
+  strict comparison (`LILITH_STRESS_PERF_STRICT=1`, `LILITH_STRESS_PERF_FACTOR`,
+  default 2.5x) so a slow regression is caught instead of only an
+  order-of-magnitude blow-up.
+- `tests/gate_guard.rs` guards the one line Cargo cannot: it scans every
+  `stress_*.rs` and fails if `#![cfg(feature = "headless")]` is missing, so a
+  new stress target can no longer silently rejoin a bare `cargo test` and pop
+  a GUI window.
+- `app/settings.rs` gains a unit test for the long-standing concurrency
+  promise that read-only repository commands keep answering while a long write
+  (restore/compaction) holds the exclusive operation lock. A regression now
+  fails by timeout instead of hanging the board.
+- The review list's remaining items are closed with tests only:
+  - **Input-domain extremes** (`stress_input`, group K): non-ASCII, emoji, ZWJ
+    sequences, non-BMP code points, RTL, combining marks, zero-width characters,
+    embedded newlines/tabs and titles containing path separators must round-trip
+    character for character (which also proves a title is never used as a file
+    name); title length is counted in **characters** (160 emoji = 640 bytes is
+    accepted, 161 is rejected) after trimming; only-whitespace titles are
+    rejected; non-ASCII, spaced and deep source paths work end to end; relative,
+    out-of-workspace and missing sources are all refused with a stated reason.
+  - **Malformed-input fuzzing** for the four parsers — snapshot/delta
+    containers, DDS headers, C2PA manifests and the settings file — driven by a
+    deterministic generator in the new `src/fuzz_support.rs` (`cfg(test)` only,
+    also the single implementation behind `backup::test_support::Rng`). No new
+    dependency. The contract asserted is that untrusted bytes can never buy a
+    panic, an out-of-bounds access or an unbounded allocation: an accepted
+    container must be self-consistent (chunk count within the file's capacity,
+    materialisable, length equal to the declared size), an accepted DDS size
+    must sit inside the declared limits, and a settings file that fails to parse
+    must be **left byte-identical** rather than overwritten with defaults.
+  - **Randomised corruption** (`stress_damage` R5/R6): every managed file gets
+    several seeded single-point rewrites, each of which must be detected by the
+    content-level check with exit code 1 and no panic while the database-level
+    check stays unaffected; board DDS gets six structural corruptions (magic,
+    DX10 fourcc, BC7 format, zero width, oversized height, truncation) which
+    must be reported as `corrupt`, plus 24 random rewrites after which the scan
+    must still return a report.
+  - **Multi-operation interleaving** (`stress_concurrency` J3–J6): reads answer
+    while a *long* write holds the lock (repository backup and compaction,
+    parked at every checkpoint); a genuinely concurrent compaction ×
+    full-repository scrub run (four rounds, no window constructed) must not
+    hang and must leave the repository complete with every remaining node
+    byte-restorable, and a scrub started while the writer holds the sentinel
+    is rejected explicitly with "仓库正在被写入，请稍后重试" (J6 asserts the
+    refusal deterministically; two of four unwindowed J5 rounds hit it).
+  - **Performance baseline extended to six scenarios**: library tree assembly
+    and two search queries, whole-repository backup (throughput as well as
+    time), and cleanup scan / queue replay join the node chain, authenticity and
+    board DDS baselines. Each of the new ones takes the minimum of three runs and
+    asserts correctness on every repeat, so the number cannot drift away from a
+    correct result.
+- All eight cheap stress groups now run in Windows CI (the seven from before
+  plus `stress_input`), which brings the input-domain and path-boundary
+  regressions into everyday runs instead of pre-release ones.
+
+### Fixed
+
+- Documentation aligned with the actual CI and stress-test split: the release
+  policy and the history/backup and authenticity module docs now state that the
+  eight cheap stress groups run in Windows CI (only `stress_large`,
+  `stress_scale`, and `stress_bench` still run manually before a release), the
+  Rust audit ignore-list description matches both workflows, and the
+  stress-test report's item count, J5 rerun conclusion, and 4.18 section
+  coverage were corrected.
+- TrustMark models are now verified before they are loaded. `model_info` computed
+  the encoder and decoder SHA-256 but never compared them with anything, and
+  `model_files_ready` only checked that the files existed, so a replaced
+  `*_Q.onnx` in the install directory was loaded silently — which undermines the
+  authenticity guarantees the application itself advertises. Both digests are
+  pinned as constants next to the loader (matching
+  `src-tauri/resources/models/README.md`), the check runs once and is cached with
+  the engine, and a missing or mismatched model makes `model_files_ready` false
+  and makes the loader fail with an explicit message naming the encoder or
+  decoder instead of loading it. `pinned_digests_match_the_shipped_models`
+  compares the constants with the models in this repository, so a model swap that
+  forgets the constants fails before the commit rather than after the release.
+  The compile-time `CARGO_MANIFEST_DIR` fallback in `lib.rs` is gone: a
+  developer-machine path does not belong in a release artifact, and the packaged
+  resource directory is the only place the models are resolved from.
+- Pin-board import and export now run the same two path gates the authenticity
+  module runs. `import_pin_board_images` handed renderer-supplied absolute paths
+  straight to `dds::read_limited` and the raster decoder with neither a
+  filesystem-scope check nor a repository-boundary check, and
+  `export_pin_board_images` only required the target directory to exist; the
+  "外部源绝对路径必须已由文件选择器授权" rule in the module documentation was
+  enforced by the UI alone and never reused in Rust. Both commands now call the
+  shared scope gate (moved out of `authenticity/commands.rs` into
+  `src-tauri/src/path_scope.rs`, so the two domain modules still do not import
+  each other), and both domain functions refuse paths inside the repository,
+  which also covers the headless entry. "Copy files in Explorer, paste into the
+  board" keeps working: the clipboard-reading command adds the paths it read
+  itself to the scope, so the import still passes the same gate. Pasting raw
+  **text** paths no longer imports — such a path has no authorization source, so
+  the Rust layer rejects it; paths now come from the picker or the clipboard
+  files, while drag-and-drop still uses the byte channel. Covered by
+  `pin_board::repository` and `path_scope` tests.
+- External cleanup entries no longer replay themselves on startup. The
+  `pending_file_cleanup` queue kept `external_file` rows (an absolute path
+  outside the repository) out of the path validation on purpose, and the
+  frontend called `retryFileCleanup([])` as soon as a repository became ready,
+  where an empty id list meant "process everything". Opening a poisoned
+  repository was therefore an automatic, unconfirmed "delete any absolute path"
+  primitive, with the target's SHA-256 as the only prerequisite. An empty id
+  list now means **repository entries only** (`repository_file` /
+  `repository_directory`), so the startup replay and the settings page's
+  "retry all" both leave external rows alone; those are deleted only from the
+  settings page, one row at a time, through an explicit id. Each external row
+  now shows the full path, the owning artwork (looked up through the export
+  path's certification record, empty when the publish failed before the record
+  existed) and the expected SHA-256, and the button opens a slide-to-confirm
+  dialog before the delete is queued. The existing "keep the file when the
+  digest does not match" guard is unchanged. A per-session directory allowlist
+  was rejected as the alternative: confirmation already removes the automatic,
+  unconfirmed primitive, an allowlist would only weaken the gate, and it would
+  expire on restart, which reads as a bug. Covered by `cleanup::run` and `App`
+  tests.
+- Opening a repository no longer trusts the branch work-file paths recorded in
+  its database. `validate_repository_semantics` checked every controlled
+  relative path but not `branches.source_path`, whose value only had to pass
+  the write side; a crafted or shared repository could therefore carry
+  `\\host\share\x` or a device path, and the automatic backup's quick check
+  would call `metadata()` on it (a silent SMB authentication towards that host)
+  while a full backup would open and copy the file into the history. The read
+  side now runs a **separate structural check** for `source_path` /
+  `source_path_key` — absolute, no device namespace, outside the repository
+  directory — deliberately **not** the controlled-relative-path check (the
+  field stores an absolute path by design), **without** testing whether the
+  file exists (work files get moved or deleted, and opening a repository must
+  still succeed), and **without** rejecting network paths (a NAS is a legal
+  setup, and refusing it would lock users out of their existing repositories).
+  What gets refused is only what hand-written data can produce: the device
+  namespace (`\\.\`, `\\?\`, `\Device\`) and paths inside the repository. The
+  unattended use sites — scheduled-branch selection, the quick check, and the
+  auto-triggered `run_backup` — skip network and device paths and record a clear
+  reason on the branch (`mark_automatic_backup_skipped`, which does not count a
+  failure, set a retry deadline, or disable automation, and skips the write when
+  the reason is unchanged), reusing the existing "does not take part in
+  automatic backup" rule; the settings page's backup work-file count follows the
+  same filter. Manual commits and "show in folder" still allow network paths but
+  refuse the device namespace. The same 2026-10-16 review also flagged the
+  external cleanup replay, the pin-board path gates, the unverified TrustMark
+  models, and `scrub` racing a writer; those are fixed in their own commits.
+- The pin board no longer fails silently when the environment offers no usable
+  WebGPU adapter. The renderer's creation error used to reach only the transient
+  status line, and every status is cleared after 4.5 seconds, so such a machine
+  (a virtual machine without 3D acceleration, some remote-desktop sessions)
+  ended up with a blank board, every editing control disabled, and a
+  "画板已锁定" marker that pointed away from the real cause. The failure now
+  renders a **persistent** notice in the stage area that names the original
+  reason and states what the environment needs, and the lock marker is
+  suppressed while the renderer is absent (the board's default state is locked,
+  which is not what the user did). The pin board is the only module that needs
+  WebGPU, so the notice also says the rest of the application is unaffected.
+  Found during the clean Windows user-environment acceptance run and fixed the
+  same day. The requirement itself — a graphics adapter supporting WebGPU and
+  BC7 texture compression, which recent integrated graphics meet — is now
+  stated in `README.md`'s runtime section and in the manual gate list of
+  `docs/guides/release-policy.md`, neither of which mentioned it before. The
+  fix was re-verified on 2026-10-17 in an environment without a usable adapter:
+  the persistent notice appears with the original reason.
+- The three new RustSec advisories against the `zip` crate
+  (RUSTSEC-2026-0367/0368/0369, symlink-escape and permission-preservation flaws
+  in extract-to-disk paths) are added to the dependency-audit ignore list in
+  both workflows, unblocking Windows CI run #19 without any code change. The
+  locked zip 8.6.0 is a transitive dependency of c2pa 0.90.11, which only reads
+  archive-based assets and is never handed an untrusted ZIP file, so the
+  vulnerable code is unreachable from this application. The proper fix —
+  upgrading c2pa to 0.91.3, which uses zip 9.0.4 — was evaluated and deferred:
+  0.91's validator rejects manifests signed by 0.90 or earlier (soft binding
+  values stored as CBOR text strings now fail `claim.malformed`), which would
+  fail closed the integrity verification of every previously published record.
+  The decision and the rationale are recorded in the workflow files and
+  `docs/planning/todo.md`.
+
+### Changed
+
+- The application version is incremented to `0.2.0`, the first stable-tagged
+  release of the 0.2 line. It carries the same product code as `0.2.0-rc.4`
+  (tagged `v0.2.0-rc.4` and pushed on 2026-10-17): no source change landed
+  between the two cuts, so this release ships exactly the candidate that
+  passed Windows CI, the clean-environment desktop acceptance and the full
+  pre-release stress suite. The cut itself adds only the version bump, the
+  release-infrastructure fixes and the documentation updates listed below.
+  Cutting the version does not by itself tag or release anything; tagging
+  `v0.2.0` stays a separate, later maintainer decision, so until then this
+  cut is an untagged version.
+- The release workflow now flags the draft GitHub release as a prerelease only
+  when the version carries a prerelease suffix (`-alpha.N` / `-rc.N`); a stable
+  tag such as `v0.2.0` produces a plain draft, so the flag no longer has to be
+  flipped manually before publishing. The workflow is renamed from "Windows
+  Release Candidate" to "Windows Release".
+- `tools/release/verify-metadata.mjs` now also verifies the application version
+  recorded in `src-tauri/Cargo.lock`, the one version field that was previously
+  unchecked.
+- The full pre-release stress suite was run on `0.2.0-rc.4`, whose product
+  code is identical to this release's, as this release's stress evidence: the
+  eleven groups with the large-file group across all five tiers up to
+  `manual` (8 GiB work files). The measured numbers, disk budgets and
+  wall-clock times are recorded in `docs/user/stress-test-report.md`.
+- The desktop acceptance for this content is complete. The full manual-gate
+  checklist passed on a clean Windows user environment on 2026-10-16 (the
+  pin-board item re-verified on a machine with a usable WebGPU adapter), and
+  the remaining task-control, idle-verification and security-batch UI items
+  passed on 2026-10-17 against `0.2.0-rc.4`. Because this release and
+  `0.2.0-rc.4` are the same build, that acceptance carries over unchanged;
+  the records are archived in
+  `docs/planning/archive/handoff-log-2026-10-16.md`.
+- Standing limitations carried by this release: a repository written
+  concurrently by the GUI and a headless process is not protected against
+  races (headless versus headless is, through the cross-process write
+  sentinel); files orphaned by a crash are reclaimed through scan and
+  explicit confirmation rather than automatically; and power-loss durability
+  is not automatically verified. See `docs/planning/todo.md` and
+  `docs/user/stress-test-report.md`.
+- The README now opens with a product screenshot (`.github/assets/demo.png`,
+  the version-history view of a real artwork) and its sections are reordered
+  and tightened: the feature list leads with the module names, the usage
+  statement and its runtime requirements keep their own headings, and the
+  version line follows the current lagging-version model. No behavior change.
+- The per-branch quick-check switch now actually controls that branch's
+  automatic backups, and the branch status line shows the check mode that
+  takes effect. Previously the switch only forced quick checks on: turning it
+  off meant "follow the global default" (quick by default), so a new artwork
+  displayed the switch as off while its backups still ran quick checks. The
+  scheduler now reads only the branch flag; the global
+  `automaticBackupCheckMode` setting is purely the default written into new
+  artworks and new branches at creation time (GUI and headless alike). Existing
+  branches that never touched the switch stored `0` and therefore switch to
+  full checks — matching what their switch now says; re-enable it per branch to
+  get quick checks back. The switch's off-state hint now reads "每次全量校验"
+  instead of "跟随全局设置". A scheduler regression test corrupts the head
+  snapshot and asserts a quick-disabled branch repairs it on an unchanged
+  file, the mirror of the existing quick-enabled test.
+- The headless full-repository content check (`scrub`) now refuses to run
+  while another process holds the write sentinel, with "仓库正在被写入，请稍后
+  重试". Running it during a compaction used to surface "找不到历史节点" — clean
+  and lossless, but an error unrelated to its cause; J5 measured it in one of
+  four rounds. Only content-level checks are gated: `verify`, `list-*` and the
+  other light read commands keep the promise that they answer while a writer
+  holds the lock (J1/J2 assert exactly that and must not regress). The probe
+  takes `BEGIN IMMEDIATE` with a zero busy timeout and rolls back at once, so
+  the read command never becomes a mutual-exclusion source between writers; the
+  window between the probe and a writer starting is accepted and documented,
+  since the alternative — re-reading the node set and continuing — would verify
+  a moving target and hide the real concurrency window. J6 pins the refusal
+  deterministically (writer parked on a checkpoint, `scrub` refused with exit
+  code 1, `verify` still answering, `scrub` passing once the writer finishes),
+  and J5 now records refusals separately from other failures instead of treating
+  them as a boundary (2 of 4 rounds refused and none failing otherwise on the
+  re-run).
+- The planning set now follows one rule instead of two behaviours: the two
+  surface documents (`docs/planning/current-handoff.md` and
+  `docs/planning/todo.md`) carry only the current state, open work, and plans,
+  while everything finished — completed batches, passed manual acceptance,
+  superseded plans — moves into `docs/planning/archive/` and is deleted from
+  the surface. A pass used to be appended to the handoff beside the open items,
+  which grew the file without bound and mixed history into what a reader needs
+  for the current batch. The rule is stated in `AGENTS.md`, `docs/README.md`,
+  `docs/architecture/ai-reading-guide.md`, `docs/guides/release-policy.md` and
+  in the headers of both surface documents; the acceptance records and the batch
+  rows they used to carry now live in the archive (the newest in
+  `archive/handoff-log-2026-10-16.md`), with the `archive/README.md` index
+  updated to match.
+- `rustls` moved to 0.23.46 in `src-tauri/Cargo.lock`, which clears the four
+  advisories RustSec published on 2026-10-14 against 0.23.45
+  (RUSTSEC-2026-0346 client session `Debug` output leaking TLS secrets,
+  RUSTSEC-2026-0347 application data sent to the outer server after ECH
+  rejection, RUSTSEC-2026-0348 a brotli certificate that can allocate up to
+  1 GiB before authentication, RUSTSEC-2026-0349 an unauthenticated ServerHello
+  downgrading later connections to classical key exchange). None of the four was
+  in the audit ignore list, so `windows-ci.yml` and `release.yml` both failed at
+  "Audit Rust dependencies" — the first run after the advisories landed, not a
+  regression from the commits before it. `rustls` comes in through `ureq`'s
+  `rustls` feature and that requirement is `^0.23`, so nothing else moved;
+  `licenses/THIRD_PARTY_LICENSES.html` was regenerated for the new version.
+  One audit warning stays and cannot be fixed here: every `zip` 8.x release,
+  including the locked `8.6.0`, is yanked on crates.io, and `c2pa` up to 0.91.2
+  still requires `zip ^8.6.0`. The warning does not fail the audit check.
+- The pre-release stress suite was re-run in full on `0.2.0-rc.3` — all eight
+  groups, 31 cases, all passing — and its C group now covers all five tiers,
+  including `manual` (8 GiB), which the report previously listed as designed
+  but never measured. `docs/user/stress-test-report.md` now carries the numbers
+  from that run instead of the older `0.2.0-alpha.4` ones. No shipped behavior
+  changed. Running `manual` needs an explicit `LILITH_STRESS_DISK_BUDGET`,
+  because its own peak-disk floor (3 x 8 GiB + 64 MiB) already exceeds the
+  24 GiB default — leaving it alone records the whole C group as skipped rather
+  than failing. `docs/guides/validation.md` now states that prerequisite and
+  the measured cost of a full run (about 95 minutes on a 16-thread desktop).
+- `windows-ci.yml` now also builds the headless binary and runs the cheap
+  stress groups (`stress_cancel`, `stress_crash`, `stress_cleanup`,
+  `stress_damage`, `stress_pin_board`, `stress_authenticity`,
+  `stress_concurrency`, `stress_input` — about 30 seconds in total) plus
+  `tests/gate_guard.rs`. They previously ran only before a release, so everyday
+  changes had no automatic regression coverage. `stress_large`,
+  `stress_scale`, and `stress_bench` stay manual (`docs/guides/validation.md`).
+- Two documentation claims were corrected. The security policy no longer calls
+  `0.2.0` "the first stable release" — `0.1.0` already is one — and instead
+  says that fixes go to the newest stable release and the current development
+  line, with the `0.2.0` release candidates superseded. Statements that
+  `0.2.0` is the *same build* as `0.2.0-rc.4` now read "the same product code":
+  only the version fields, the release workflow and the documentation differ
+  between the two cuts.
+
 ## 0.2.0-rc.4 - 2026-10-17
 
 ### Added

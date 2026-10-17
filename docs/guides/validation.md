@@ -59,7 +59,7 @@
 - **按成本分层**：**八组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
   `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
   `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
-  **`stress_large`（几十分钟）、`stress_scale`（约 50 秒）与 `stress_bench` 仍只在发布前手动运行**
+  **`stress_large`（数十分钟到两小时，视档位）、`stress_scale`（约 1 分钟）与 `stress_bench` 仍只在发布前手动运行**
   ——前两组依赖大量磁盘与时间，基准的数值需要人工解读（见其文件头与本节的环境变量）。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
   `cargo test --lib`、`git diff --check`。CI 已覆盖的八组不必在本地反复跑；**其余分组不要顺手
@@ -67,8 +67,9 @@
 - **昂贵分组的耗时与磁盘是设计属性而不是卡住**：测试以真实落盘路径执行，覆盖「逻辑文件大小 ×
   单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行常以十分钟计，峰值磁盘占用
   可达数 GiB，`extreme` 档（4 GiB 文件、每次改 1 GiB）接近十几 GiB，`manual` 档（8 GiB 文件、
-  每次改 2 GiB）约 25–32 GiB、单次约一小时。十一组 + C 组五个档位整轮实测约 95 分钟（一个 16
-  逻辑核 / 32 GiB 内存的桌面机，空闲磁盘 ≥ 87 GB）——新增的两组只加秒级开销。
+每次改 2 GiB）约 25–32 GiB、单次约两小时。十一组 + C 组五个档位整轮实测约 3 小时（一个 16
+逻辑核 / 32 GiB 内存的桌面机，空闲磁盘 ≥ 77 GB；2026-10-17 实测，自该轮起 C7 随五个档位并行
+运行、与其余场景争用磁盘，是耗时较此前约 95 分钟上升的主因）——新增的两组只加秒级开销。
 - **昂贵的分组只在准备发布、需要产出或更新 `docs/user/stress-test-report.md` 的实测数据时运行**，
   并由维护者显式发起；需要跑时先确认档位与磁盘预算。
 - **大文件档按磁盘预算并发执行**：`stress_large` 的场景通过 `scenario_slot` 按「预计峰值磁盘」
@@ -76,7 +77,7 @@
   不超过 `LILITH_STRESS_JOBS`（默认可用核数）。这样在有磁盘余量的机器上充分利用多核——
   被测子进程是单线程的，串行只会用一个核——同时避免盲目并行把磁盘写满。
 - 运行方式（构建无头入口、档位选择、环境变量与输出文件）见下方「运行方式」；各档位的实测数据、
-  磁盘需求与墙钟见 `docs/user/stress-test-report.md` 第 4 节。
+  磁盘需求与墙钟见 `docs/user/stress-test-report.md` 的「运行成本」一节。
 - **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
   缓存、也不保证目录项落盘，结构上无法覆盖「断电后已提交数据是否仍在」。该保证由操作系统、
   磁盘与 SQLite `synchronous = FULL` 声明承担，保留为声明/人工项，不列入自动化目标。
@@ -111,7 +112,7 @@ cargo test --features headless --test stress_concurrency
 cargo test --features headless --test stress_input
 cargo test --test gate_guard
 
-# 5. 规模（约 50 秒，数百子进程）与性能基准（数值需人工解读；基线/比对用单线程采集）
+# 5. 规模（约 1 分钟，数百子进程）与性能基准（数值需人工解读；基线/比对用单线程采集）
 cargo test --features headless --test stress_scale
 cargo test --features headless --test stress_bench -- --nocapture
 

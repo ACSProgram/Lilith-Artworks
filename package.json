@@ -1,7 +1,7 @@
 {
   "name": "lilith-artworks",
   "private": true,
-  "version": "0.2.0-rc.4",
+  "version": "0.2.0",
   "author": "ACSProgram",
   "license": "GPL-3.0-only",
   "type": "module",

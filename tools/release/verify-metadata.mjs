@@ -5,15 +5,25 @@ const root = process.cwd();
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const packageLock = JSON.parse(fs.readFileSync(path.join(root, "package-lock.json"), "utf8"));
 const cargoToml = fs.readFileSync(path.join(root, "src-tauri", "Cargo.toml"), "utf8");
+const cargoLock = fs.readFileSync(path.join(root, "src-tauri", "Cargo.lock"), "utf8");
 const tauriConfig = JSON.parse(fs.readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
 const npmConfig = fs.readFileSync(path.join(root, ".npmrc"), "utf8");
 
 const cargoVersion = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+const cargoName = cargoToml.match(/^name\s*=\s*"([^"]+)"/m)?.[1];
+const appLockVersion = cargoLock
+  .split("[[package]]")
+  .map((block) => ({
+    name: block.match(/^name\s*=\s*"([^"]+)"/m)?.[1],
+    version: block.match(/^version\s*=\s*"([^"]+)"/m)?.[1],
+  }))
+  .find((entry) => entry.name === cargoName)?.version;
 const versions = new Map([
   ["package.json", packageJson.version],
   ["package-lock.json", packageLock.version],
   ["package-lock root package", packageLock.packages?.[""]?.version],
   ["Cargo.toml", cargoVersion],
+  ["Cargo.lock", appLockVersion],
   ["tauri.conf.json", tauriConfig.version],
 ]);
 const expected = packageJson.version;
