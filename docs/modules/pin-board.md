@@ -79,6 +79,22 @@ SQLite:
 - `export_pin_board_images`（PNG 到用户选择目录）、`read_pin_board_image_png`（系统剪贴板复制）、`read_pin_board_texture`（画板 ID + 图片 ID + 请求长边）
 - `read_pin_board_clipboard_paths`（Windows `CF_HDROP`）
 
+**仓库外路径的两道闸门**与认证模块同一口径，各管一件事：
+
+- `import_pin_board_images` / `export_pin_board_images` 在命令层用
+  `path_scope::ensure_authorized` 要求每条源图路径与导出目录都已在 Tauri 文件系统 scope
+  中（原生文件选择器会自动写入）。scope 属于 UI 关注点，检查实现放在
+  `src-tauri/src/path_scope.rs`，认证与素材板共用，领域模块之间不互相导入；
+- `repository::import_images` / `export_images` 在领域层用
+  `storage::ensure_outside_repository` 拒绝仓库内部的源文件与导出目录——GUI 与无头入口
+  都会经过本函数，因此这一道对两条链路同时生效。
+
+「复制文件后粘贴」仍可用：`read_pin_board_clipboard_paths` 由本命令自己从系统剪贴板读出
+路径，并把确实存在的文件加入 scope，随后仍走同一条授权检查——路径不是渲染进程传进来的
+值，所以这不构成绕过。粘贴**纯文本路径**不再导入（那种路径没有任何授权来源，Rust 层会
+以「未由文件选择器授权」拒绝），需要路径的入口只剩文件选择器与剪贴板文件；拖入图片走的
+是字节链路（`import_pin_board_clipboard_image`），不涉及路径。
+
 ## 领域行为（沿用 Client 已验证实现）
 
 交互层（renderer、几何、纹理策略、会话、快捷键、画布交互）原样迁移，未重写。要点：

@@ -1237,6 +1237,13 @@ pub(crate) fn import_images(
     if !center_x.is_finite() || !center_y.is_finite() || !gap.is_finite() {
         return Err("导入位置无效".into());
     }
+    // 仓库边界在这里兜底，而不是只在命令层：GUI 与无头入口都会经过本函数，素材板
+    // 也不该读仓库内部的文件（认证路径同样明确禁止）。授权（`ensure_dialog_authorized`）
+    // 属于命令层的文件系统 scope，两者各管一件事，与认证模块两道都查的做法一致。
+    for source in paths {
+        storage::ensure_outside_repository(root, Path::new(source), "导入图片")
+            .map_err(|error| format!("{error}：{source}"))?;
+    }
     let total = paths.len();
     on_progress(0, total);
 
@@ -1378,6 +1385,9 @@ pub(crate) fn export_images(
     if !directory.is_dir() {
         return Err("导出位置必须是文件夹".into());
     }
+    // 与导入同一道仓库边界校验：导出不得写进仓库目录（那会让画板 DDS 与用户导出
+    // 文件混在同一棵树上，也会绕过受控路径规则）。授权属于命令层的文件系统 scope。
+    storage::ensure_outside_repository(root, &directory, "导出位置")?;
     let context = open_board_context(connection, root, board_id)?;
     let total = image_ids.len();
     on_progress(0, total);
@@ -1508,6 +1518,52 @@ mod tests {
             )
             .unwrap();
         artwork_id
+    }
+
+    #[test]
+    fn import_and_export_refuse_repository_paths() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "板").unwrap();
+        let revision: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [board.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        // 素材板与认证路径同一口径：外部源与导出目录都必须位于仓库之外。素材板
+        // 也不需要读仓库内部的文件，那里只有它自己的 DDS 与历史文件。
+        let inside_source = root.join("artworks").join("source.png");
+        fs::write(&inside_source, b"not decoded yet").unwrap();
+        let import_error = import_images(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[storage::display_path(&inside_source)],
+            0.0,
+            0.0,
+            0.0,
+            &revision,
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(import_error.contains("作品仓库内部"), "{import_error}");
+
+        let inside_output = root.join("exports");
+        fs::create_dir_all(&inside_output).unwrap();
+        let export_error = export_images(
+            &connection,
+            &root,
+            board.board_id,
+            &[1],
+            &storage::display_path(&inside_output),
+            |_, _| {},
+        )
+        .unwrap_err();
+        assert!(export_error.contains("作品仓库内部"), "{export_error}");
     }
 
     #[test]

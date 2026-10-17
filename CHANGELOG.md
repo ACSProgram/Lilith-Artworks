@@ -110,6 +110,23 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Pin-board import and export now run the same two path gates the authenticity
+  module runs. `import_pin_board_images` handed renderer-supplied absolute paths
+  straight to `dds::read_limited` and the raster decoder with neither a
+  filesystem-scope check nor a repository-boundary check, and
+  `export_pin_board_images` only required the target directory to exist; the
+  "外部源绝对路径必须已由文件选择器授权" rule in the module documentation was
+  enforced by the UI alone and never reused in Rust. Both commands now call the
+  shared scope gate (moved out of `authenticity/commands.rs` into
+  `src-tauri/src/path_scope.rs`, so the two domain modules still do not import
+  each other), and both domain functions refuse paths inside the repository,
+  which also covers the headless entry. "Copy files in Explorer, paste into the
+  board" keeps working: the clipboard-reading command adds the paths it read
+  itself to the scope, so the import still passes the same gate. Pasting raw
+  **text** paths no longer imports — such a path has no authorization source, so
+  the Rust layer rejects it; paths now come from the picker or the clipboard
+  files, while drag-and-drop still uses the byte channel. Covered by
+  `pin_board::repository` and `path_scope` tests.
 - External cleanup entries no longer replay themselves on startup. The
   `pending_file_cleanup` queue kept `external_file` rows (an absolute path
   outside the repository) out of the path validation on purpose, and the
