@@ -110,6 +110,32 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Opening a repository no longer trusts the branch work-file paths recorded in
+  its database. `validate_repository_semantics` checked every controlled
+  relative path but not `branches.source_path`, whose value only had to pass
+  the write side; a crafted or shared repository could therefore carry
+  `\\host\share\x` or a device path, and the automatic backup's quick check
+  would call `metadata()` on it (a silent SMB authentication towards that host)
+  while a full backup would open and copy the file into the history. The read
+  side now runs a **separate structural check** for `source_path` /
+  `source_path_key` — absolute, no device namespace, outside the repository
+  directory — deliberately **not** the controlled-relative-path check (the
+  field stores an absolute path by design), **without** testing whether the
+  file exists (work files get moved or deleted, and opening a repository must
+  still succeed), and **without** rejecting network paths (a NAS is a legal
+  setup, and refusing it would lock users out of their existing repositories).
+  What gets refused is only what hand-written data can produce: the device
+  namespace (`\\.\`, `\\?\`, `\Device\`) and paths inside the repository. The
+  unattended use sites — scheduled-branch selection, the quick check, and the
+  auto-triggered `run_backup` — skip network and device paths and record a clear
+  reason on the branch (`mark_automatic_backup_skipped`, which does not count a
+  failure, set a retry deadline, or disable automation, and skips the write when
+  the reason is unchanged), reusing the existing "does not take part in
+  automatic backup" rule; the settings page's backup work-file count follows the
+  same filter. Manual commits and "show in folder" still allow network paths but
+  refuse the device namespace. The same 2026-10-16 review also flagged the
+  external cleanup replay, the pin-board path gates, the unverified TrustMark
+  models, and `scrub` racing a writer; those are fixed in their own commits.
 - The pin board no longer fails silently when the environment offers no usable
   WebGPU adapter. The renderer's creation error used to reach only the transient
   status line, and every status is cleared after 4.5 seconds, so such a machine

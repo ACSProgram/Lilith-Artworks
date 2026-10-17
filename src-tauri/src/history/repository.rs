@@ -1349,6 +1349,28 @@ pub(crate) fn mark_error(root: &Path, branch_id: &str, error: &str) {
     }
 }
 
+/// 记录「该分支不参与自动备份」的原因（工作文件位于网络位置或设备命名空间）。
+///
+/// 与 [`mark_automatic_backup_error`] 的区别是它**不**计入连续失败次数、不设置重试
+/// 时间、也不会自动关闭自动备份：这是一条路径资格判定，和「未选择工作文件的分支
+/// 不参与自动备份」同一口径，不是一次失败的备份。原因与已有值相同时不写库，因此
+/// 调度器每轮都会调用它也不会产生写入。
+pub(crate) fn mark_automatic_backup_skipped(
+    root: &Path,
+    branch_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    storage::open(root)?
+        .execute(
+            "UPDATE branches SET last_error = ?2, consecutive_backup_failures = 0,
+                backup_retry_at_ms = NULL
+             WHERE id = ?1 AND (last_error IS NULL OR last_error <> ?2)",
+            params![branch_id, reason],
+        )
+        .map_err(storage::database_error)?;
+    Ok(())
+}
+
 pub(crate) fn acknowledge_backup_disable_notices(
     root: &Path,
     artwork_ids: &[String],
@@ -1395,7 +1417,8 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_quick_enabled, b.backup_retry_at_ms
+            "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
+                    b.backup_quick_enabled, b.backup_retry_at_ms
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND TRIM(b.source_path) <> ''
@@ -1407,10 +1430,11 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
         .query_map([], |row| {
             Ok(ScheduledBranch {
                 id: row.get(0)?,
-                last_check_ms: row.get(1)?,
-                interval_minutes: row.get(2)?,
-                quick_enabled: row.get::<_, i64>(3)? != 0,
-                retry_at_ms: row.get(4)?,
+                source_path: row.get(1)?,
+                last_check_ms: row.get(2)?,
+                interval_minutes: row.get(3)?,
+                quick_enabled: row.get::<_, i64>(4)? != 0,
+                retry_at_ms: row.get(5)?,
             })
         })
         .map_err(storage::database_error)?
@@ -1425,7 +1449,8 @@ pub(crate) fn load_scheduled(
 ) -> Result<Option<ScheduledBranch>, String> {
     storage::open(root)?
         .query_row(
-            "SELECT b.id, b.last_check_ms, b.backup_interval_minutes, b.backup_quick_enabled, b.backup_retry_at_ms
+            "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
+                    b.backup_quick_enabled, b.backup_retry_at_ms
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
@@ -1434,10 +1459,11 @@ pub(crate) fn load_scheduled(
             |row| {
                 Ok(ScheduledBranch {
                     id: row.get(0)?,
-                    last_check_ms: row.get(1)?,
-                    interval_minutes: row.get(2)?,
-                    quick_enabled: row.get::<_, i64>(3)? != 0,
-                    retry_at_ms: row.get(4)?,
+                    source_path: row.get(1)?,
+                    last_check_ms: row.get(2)?,
+                    interval_minutes: row.get(3)?,
+                    quick_enabled: row.get::<_, i64>(4)? != 0,
+                    retry_at_ms: row.get(5)?,
                 })
             },
         )
@@ -1569,18 +1595,31 @@ pub(crate) fn clear_verify_error(root: &Path, branch_id: &str) -> Result<(), Str
 }
 
 pub(crate) fn count_scheduled_files(root: &Path) -> Result<usize, String> {
-    let count: i64 = storage::open(root)?
-        .query_row(
-            "SELECT COUNT(DISTINCT b.source_path_key)
+    let connection = storage::open(root)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT DISTINCT b.source_path_key, b.source_path
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
                AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
-            [],
-            |row| row.get(0),
         )
         .map_err(storage::database_error)?;
-    usize::try_from(count).map_err(|_| "自动备份文件数量无效".into())
+    // 与调度器同一口径：网络位置与设备命名空间的工作文件不参与自动备份，因此
+    // 不计入「已启用自动备份的工作文件数」。
+    let rows = statement
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?;
+    let mut keys = HashSet::new();
+    for row in rows {
+        let (key, path) = row.map_err(storage::database_error)?;
+        if storage::unattended_source_path_rejection(&path).is_none() {
+            keys.insert(key);
+        }
+    }
+    Ok(keys.len())
 }
 
 pub(crate) fn artwork_directory(root: &Path, artwork_id: &str) -> PathBuf {

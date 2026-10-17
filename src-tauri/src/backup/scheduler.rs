@@ -47,7 +47,29 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             continue;
         }
         let quick_default = app_state.automatic_backup_quick_default();
-        let branches = match app_state.with_ready_repository(history::list_scheduled) {
+        let branches = match app_state.with_ready_repository(|root| {
+            let branches = history::list_scheduled(root)?;
+            // 网络位置与设备命名空间的工作文件不进入无人值守流程：快速检查会直接
+            // 对这条路径取元数据，全量备份还会打开并整份复制它。这里把原因写进
+            // 分支记录，与「未选择工作文件的分支不参与自动备份」同一口径；
+            // `mark_automatic_backup_skipped` 在原因未变时不写库，因此每轮调用
+            // 不会产生写入。
+            for branch in &branches {
+                let Some(reason) = storage::unattended_source_path_rejection(&branch.source_path)
+                else {
+                    continue;
+                };
+                if let Err(error) =
+                    history::mark_automatic_backup_skipped(root, &branch.id, &reason)
+                {
+                    log::warn!(
+                        "failed to record skipped automatic backup for branch {}: {error}",
+                        branch.id
+                    );
+                }
+            }
+            Ok(branches)
+        }) {
             Ok(branches) => branches,
             Err(_) => {
                 if !state.wait_scheduler(ERROR_RETRY) {
@@ -71,6 +93,11 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             // 手动提交优先：有待处理手动请求的分支本轮不再自动备份，
             // 由手动提交完成后的调度唤醒接管。
             if state.manual_pending(&branch.id) {
+                continue;
+            }
+            // 网络位置与设备命名空间的工作文件不进入无人值守流程（原因已在上面
+            // 候选筛选时写入分支记录），这里只跳过，不参与到期判定。
+            if storage::unattended_source_path_rejection(&branch.source_path).is_some() {
                 continue;
             }
             let due_at = due_at_ms(&branch, now);
@@ -101,6 +128,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 Ok(_)
                 | Err(ExclusiveRunError::Operation(
                     AutomaticBackupError::NotScheduled
+                    | AutomaticBackupError::Skipped
                     | AutomaticBackupError::Deferred
                     | AutomaticBackupError::ForegroundWaiting,
                 )) => {}
@@ -321,6 +349,8 @@ fn run_idle_verify(
 #[derive(Debug)]
 enum AutomaticBackupError {
     NotScheduled,
+    /// 分支工作文件位于网络位置或设备命名空间，本轮自动备份跳过且不计入失败。
+    Skipped,
     /// 分支有待处理的手动提交，本轮自动备份主动让位，不计入失败。
     Deferred,
     /// 有前台命令在等待共享运行锁，本轮自动备份主动让位，不计入失败。
@@ -337,6 +367,7 @@ impl std::fmt::Display for AutomaticBackupError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotScheduled => formatter.write_str("分支不再满足自动备份条件"),
+            Self::Skipped => formatter.write_str("分支工作文件不参与自动备份"),
             Self::Deferred => formatter.write_str("分支有待处理的手动提交，自动备份已延后"),
             Self::ForegroundWaiting => formatter.write_str("有前台命令在等待，自动备份已让位"),
             Self::Cancelled => formatter.write_str("自动备份已取消"),
@@ -381,6 +412,14 @@ fn run_scheduled_backup(
     let branch = history::load_scheduled(root, branch_id)
         .map_err(AutomaticBackupError::Infrastructure)?
         .ok_or(AutomaticBackupError::NotScheduled)?;
+    // 无人值守流程的路径资格复查：候选筛选之后、取得运行锁之前分支工作文件可能被
+    // 改成网络位置（或仓库由他人构造）。这里再判一次，命中就跳过且不计入失败——
+    // 自动备份不应当因为一条路径资格判定而被关闭。
+    if let Some(reason) = storage::unattended_source_path_rejection(&branch.source_path) {
+        history::mark_automatic_backup_skipped(root, branch_id, &reason)
+            .map_err(AutomaticBackupError::Infrastructure)?;
+        return Err(AutomaticBackupError::Skipped);
+    }
     if due_at_ms(&branch, now) > now {
         return Err(AutomaticBackupError::NotScheduled);
     }
@@ -641,12 +680,45 @@ mod tests {
     fn due_time_uses_retry_deadline_without_interval_jitter() {
         let branch = ScheduledBranch {
             id: "branch".into(),
+            source_path: r"C:\work\artwork.bin".into(),
             last_check_ms: Some(10),
             interval_minutes: 120,
             quick_enabled: false,
             retry_at_ms: Some(42),
         };
         assert_eq!(due_at_ms(&branch, 1_000), 42);
+    }
+
+    #[test]
+    fn scheduled_backup_skips_a_network_work_file_without_counting_a_failure() {
+        let (_directory, root, _source, artwork_id, branch_id) = fixture();
+        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        make_due(&root, &branch_id);
+        // 手工把工作文件改成 UNC 路径（等价于「打开他人构造的仓库」）。
+        crate::storage::open(&root)
+            .unwrap()
+            .execute(
+                "UPDATE branches SET source_path = ?2, source_path_key = ?2 WHERE id = ?1",
+                rusqlite::params![&branch_id, r"\\nas\share\artwork.bin"],
+            )
+            .unwrap();
+
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id, true);
+
+        assert!(
+            matches!(result, Err(AutomaticBackupError::Skipped)),
+            "{result:?}"
+        );
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert!(branch
+            .last_error
+            .as_deref()
+            .is_some_and(|error| error.contains("网络位置")));
+        assert_eq!(branch.consecutive_backup_failures, 0);
+        assert!(branch.backup_enabled);
     }
 
     #[test]

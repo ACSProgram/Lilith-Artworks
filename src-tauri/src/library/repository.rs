@@ -52,7 +52,7 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
     } else {
         super::schema::migrate(&connection)?;
         super::schema::validate(&connection)?;
-        super::schema::validate_repository_semantics(&connection)?;
+        super::schema::validate_repository_semantics(&connection, root)?;
         create_directories(root)?;
     }
     Ok(())
@@ -66,7 +66,7 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
     let connection = storage::open(root)?;
     super::schema::migrate(&connection)?;
     super::schema::validate(&connection)?;
-    super::schema::validate_repository_semantics(&connection)?;
+    super::schema::validate_repository_semantics(&connection, root)?;
     create_directories(root)
 }
 
@@ -1126,6 +1126,46 @@ mod tests {
 
         let path_error = open_existing(&fixture.root).unwrap_err();
         assert!(path_error.contains("仓库存储路径无效"), "{path_error}");
+    }
+
+    #[test]
+    fn opening_repository_rejects_a_crafted_branch_source_path() {
+        let fixture = Fixture::new();
+        let connection = open(&fixture.root).unwrap();
+        // 设备命名空间：读取侧必须拒绝，「打开他人构造的仓库」不能换来一条对设备
+        // 对象的路径。
+        connection
+            .execute(
+                "UPDATE branches SET source_path = ?1, source_path_key = ?1",
+                [r"\\.\PhysicalDrive0"],
+            )
+            .unwrap();
+        drop(connection);
+        let device_error = open_existing(&fixture.root).unwrap_err();
+        assert!(device_error.contains("设备命名空间"), "{device_error}");
+
+        // 仓库内部路径同样拒绝；网络位置（NAS）放行，打开不因网络路径失败。
+        let inside = fixture.root.join("artworks").join("artwork.bin");
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "UPDATE branches SET source_path = ?1, source_path_key = ?1",
+                [storage::display_path(&inside)],
+            )
+            .unwrap();
+        drop(connection);
+        let inside_error = open_existing(&fixture.root).unwrap_err();
+        assert!(inside_error.contains("作品仓库内部"), "{inside_error}");
+
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "UPDATE branches SET source_path = ?1, source_path_key = ?1",
+                [r"\\nas\share\artwork.bin"],
+            )
+            .unwrap();
+        drop(connection);
+        open_existing(&fixture.root).unwrap();
     }
 
     #[test]
