@@ -209,6 +209,20 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The per-branch quick-check switch now actually controls that branch's
+  automatic backups, and the branch status line shows the check mode that
+  takes effect. Previously the switch only forced quick checks on: turning it
+  off meant "follow the global default" (quick by default), so a new artwork
+  displayed the switch as off while its backups still ran quick checks. The
+  scheduler now reads only the branch flag; the global
+  `automaticBackupCheckMode` setting is purely the default written into new
+  artworks and new branches at creation time (GUI and headless alike). Existing
+  branches that never touched the switch stored `0` and therefore switch to
+  full checks — matching what their switch now says; re-enable it per branch to
+  get quick checks back. The switch's off-state hint now reads "每次全量校验"
+  instead of "跟随全局设置". A scheduler regression test corrupts the head
+  snapshot and asserts a quick-disabled branch repairs it on an unchanged
+  file, the mirror of the existing quick-enabled test.
 - The headless full-repository content check (`scrub`) now refuses to run
   while another process holds the write sentinel, with "仓库正在被写入，请稍后
   重试". Running it during a compaction used to surface "找不到历史节点" — clean

@@ -580,7 +580,8 @@ mod tests {
             .write_all(&vec![b'A'; 96 * 1024])
             .unwrap();
         library::initialize(&root).unwrap();
-        let artwork = library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
         run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap();
         fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
         run_backup(&root, &artwork.branch_id, "Second", "manual", || false).unwrap();

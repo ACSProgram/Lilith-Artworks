@@ -689,8 +689,16 @@ fn create_artwork(options: &Options) -> Result<Value, String> {
     let branch_title = options.require("branch-title")?;
     let source = options.path_within("source", "分支工作文件")?;
     let app_state = options.app_state();
+    let quick_default = app_state.automatic_backup_quick_default();
     let created = app_state.with_ready_repository(|root| {
-        library::create_artwork(root, options.value("parent"), title, branch_title, &source)
+        library::create_artwork(
+            root,
+            options.value("parent"),
+            title,
+            branch_title,
+            &source,
+            quick_default,
+        )
     })?;
     Ok(json!({
         "artworkId": created.artwork_id,
@@ -797,10 +805,19 @@ fn create_branch(options: &Options) -> Result<Value, String> {
     let app_state = options.app_state();
     let state = options.backup_state();
     // 与 `fork_artwork_branch` 一致：先固化 fork 起点的检查点，再建分支。
+    // 全局"默认检查方式"只在创建时落成分支初始值。
+    let quick_default = app_state.automatic_backup_quick_default();
     let branch_id = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
         app_state.with_ready_repository(|root| {
             backup::ensure_checkpoint(root, from_history_id)?;
-            history::create_branch(root, artwork_id, from_history_id, title, &source)
+            history::create_branch(
+                root,
+                artwork_id,
+                from_history_id,
+                title,
+                &source,
+                quick_default,
+            )
         })
     })?;
     Ok(json!({ "branchId": branch_id }))

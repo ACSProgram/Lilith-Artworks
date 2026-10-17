@@ -290,7 +290,7 @@ export function BranchSettings({
       <label className="switch-field">
         <span className="switch-copy">
           <strong>快速检查</strong>
-          <small>{!hasSource || !effectiveEnabled ? "随自动备份生效" : quick ? "先比大小与修改时间" : "跟随全局设置"}</small>
+          <small>{!hasSource || !effectiveEnabled ? "随自动备份生效" : quick ? "先比大小与修改时间" : "每次全量校验"}</small>
         </span>
         <input
           aria-label="快速检查"

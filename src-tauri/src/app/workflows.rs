@@ -160,6 +160,8 @@ pub(crate) async fn create_library_artwork(
     let app_state = app_state.inner().clone();
     let state = backup_state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // 全局"默认检查方式"只在创建时落成分支初始值；此后由分支开关独立控制。
+        let quick_default = app_state.automatic_backup_quick_default();
         let tree = app_state.with_ready_repository(|root| {
             library::create_artwork_and_list(
                 root,
@@ -167,6 +169,7 @@ pub(crate) async fn create_library_artwork(
                 &request.title,
                 &request.branch_title,
                 Path::new(&request.source_path),
+                quick_default,
             )
         })?;
         state.wake_scheduler();
@@ -229,6 +232,8 @@ pub(crate) async fn fork_artwork_branch(
     let state = backup_state.inner().clone();
     let scheduler = state.clone();
     let result = tauri::async_runtime::spawn_blocking(move || {
+        // 全局"默认检查方式"只在创建时落成分支初始值；此后由分支开关独立控制。
+        let quick_default = app_state.automatic_backup_quick_default();
         state.run_exclusive(None, BackupTaskKind::UserOperation, || {
             app_state.with_ready_repository(|root| {
                 backup::ensure_checkpoint(root, &request.from_history_id)?;
@@ -238,6 +243,7 @@ pub(crate) async fn fork_artwork_branch(
                     &request.from_history_id,
                     &request.title,
                     Path::new(&request.source_path),
+                    quick_default,
                 )?;
                 history::list(root, &request.artwork_id)
             })

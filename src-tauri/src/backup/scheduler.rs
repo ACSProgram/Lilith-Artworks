@@ -46,7 +46,6 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             }
             continue;
         }
-        let quick_default = app_state.automatic_backup_quick_default();
         let branches = match app_state.with_ready_repository(|root| {
             let branches = history::list_scheduled(root)?;
             // 网络位置与设备命名空间的工作文件不进入无人值守流程：快速检查会直接
@@ -114,12 +113,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 || {
                     app_state
                         .with_ready_repository(|root| {
-                            Ok(run_scheduled_backup(
-                                root,
-                                &state,
-                                &branch_id,
-                                quick_default,
-                            ))
+                            Ok(run_scheduled_backup(root, &state, &branch_id))
                         })
                         .map_err(AutomaticBackupError::Infrastructure)?
                 },
@@ -406,7 +400,6 @@ fn run_scheduled_backup(
     root: &std::path::Path,
     state: &BackupState,
     branch_id: &str,
-    quick_default: bool,
 ) -> Result<BackupCommitResult, AutomaticBackupError> {
     let now = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
     let branch = history::load_scheduled(root, branch_id)
@@ -433,9 +426,10 @@ fn run_scheduled_backup(
     if state.foreground_waiting() > 0 {
         return Err(AutomaticBackupError::ForegroundWaiting);
     }
-    // 快速检查：分支单独开启或全局默认为快速时，先只比较大小与修改时间；
-    // 完全一致视为内容未变化，任何不一致都退回下方全量检查和备份流程。
-    if branch.quick_enabled || quick_default {
+    // 快速检查：分支开启快速检查时，先只比较大小与修改时间；完全一致视为内容
+    // 未变化，任何不一致都退回下方全量检查和备份流程。全局设置只在分支创建时
+    // 提供初始值，不参与这里的判定。
+    if branch.quick_enabled {
         let quick_unchanged = worker::quick_check_unchanged(root, branch_id).map_err(|error| {
             AutomaticBackupError::Failed {
                 error,
@@ -515,7 +509,7 @@ mod tests {
             .unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
         (
             directory,
             root,
@@ -531,8 +525,7 @@ mod tests {
         worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
         make_due(&root, &branch_id);
 
-        let result =
-            run_scheduled_backup(&root, &BackupState::default(), &branch_id, true).unwrap();
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
 
         assert!(!result.created);
         assert!(result.unchanged);
@@ -555,15 +548,14 @@ mod tests {
         make_due(&root, &branch_id);
         fs::write(&source, b"changed content").unwrap();
 
-        let result =
-            run_scheduled_backup(&root, &BackupState::default(), &branch_id, true).unwrap();
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
 
         assert!(result.created);
         assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 2);
     }
 
     #[test]
-    fn branch_quick_flag_uses_quick_path_even_with_full_default() {
+    fn branch_quick_flag_uses_the_quick_path() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
         let first_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
             .unwrap()
@@ -581,12 +573,42 @@ mod tests {
         fs::write(&original_path, damaged).unwrap();
         make_due(&root, &branch_id);
 
-        let result =
-            run_scheduled_backup(&root, &BackupState::default(), &branch_id, false).unwrap();
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
 
         assert!(!result.created);
         assert!(result.unchanged);
         assert_eq!(
+            history::load_node(&root, &first_id).unwrap().snapshot_path,
+            Some(original_relative)
+        );
+    }
+
+    #[test]
+    fn quick_disabled_branch_runs_full_check_even_when_content_is_unchanged() {
+        let (_directory, root, _source, _artwork_id, branch_id) = fixture();
+        let first_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
+            .unwrap()
+            .history_id
+            .unwrap();
+        // 分支显式关闭快速检查：即使创建时的全局默认是快速，内容未变化也必须
+        // 走全量路径核对并修复损坏的 head snapshot。
+        history::update_branch(&root, &branch_id, "Main", true, true, 10, false, None).unwrap();
+        let original_relative = history::load_node(&root, &first_id)
+            .unwrap()
+            .snapshot_path
+            .unwrap();
+        let original_path = crate::storage::resolve_path(&root, &original_relative).unwrap();
+        let mut damaged = fs::read(&original_path).unwrap();
+        *damaged.last_mut().unwrap() ^= 0xff;
+        fs::write(&original_path, damaged).unwrap();
+        make_due(&root, &branch_id);
+
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
+
+        assert!(!result.created);
+        assert!(result.unchanged);
+        // 修复以新路径发布 head snapshot，与被破坏的原路径不同。
+        assert_ne!(
             history::load_node(&root, &first_id).unwrap().snapshot_path,
             Some(original_relative)
         );
@@ -602,7 +624,7 @@ mod tests {
         // 且不计入失败、不推进检查时间。
         let waiting = state.begin_foreground_wait();
 
-        let yielded = run_scheduled_backup(&root, &state, &branch_id, true);
+        let yielded = run_scheduled_backup(&root, &state, &branch_id);
 
         assert!(
             matches!(yielded, Err(AutomaticBackupError::ForegroundWaiting)),
@@ -617,7 +639,7 @@ mod tests {
         assert_eq!(branch.consecutive_backup_failures, 0);
         assert!(branch.last_error.is_none());
 
-        let result = run_scheduled_backup(&root, &state, &branch_id, true).unwrap();
+        let result = run_scheduled_backup(&root, &state, &branch_id).unwrap();
         assert!(result.unchanged);
     }
 
@@ -629,11 +651,11 @@ mod tests {
         let state = BackupState::default();
         state.begin_manual_request(&branch_id);
 
-        let deferred = run_scheduled_backup(&root, &state, &branch_id, true);
+        let deferred = run_scheduled_backup(&root, &state, &branch_id);
 
         assert!(matches!(deferred, Err(AutomaticBackupError::Deferred)));
         state.end_manual_request(&branch_id);
-        let result = run_scheduled_backup(&root, &state, &branch_id, true).unwrap();
+        let result = run_scheduled_backup(&root, &state, &branch_id).unwrap();
         assert!(result.unchanged);
     }
 
@@ -648,7 +670,7 @@ mod tests {
             .unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
         assert!(history::load_scheduled(&root, &artwork.branch_id)
             .unwrap()
             .is_some());
@@ -664,8 +686,7 @@ mod tests {
             None,
         )
         .unwrap();
-        let result =
-            run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id, false);
+        let result = run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id);
 
         assert!(matches!(result, Err(AutomaticBackupError::NotScheduled)));
         let branch = history::list(&root, &artwork.artwork_id)
@@ -703,7 +724,7 @@ mod tests {
             )
             .unwrap();
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id, true);
+        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id);
 
         assert!(
             matches!(result, Err(AutomaticBackupError::Skipped)),
@@ -731,7 +752,7 @@ mod tests {
         fs::write(&artifact, b"final content").unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
         let history_id =
             worker::run_backup(&root, &artwork.branch_id, "Initial", "manual", || false)
                 .unwrap()
@@ -745,8 +766,7 @@ mod tests {
         )
         .unwrap();
 
-        let result =
-            run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id, false);
+        let result = run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id);
 
         assert!(matches!(result, Err(AutomaticBackupError::NotScheduled)));
         let branch = history::list(&root, &artwork.artwork_id)
@@ -765,7 +785,7 @@ mod tests {
         fs::write(&source, b"scheduled content").unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
         let state = BackupState::default();
         let operation_state = state.clone();
 
@@ -774,7 +794,7 @@ mod tests {
             BackupTaskKind::AutomaticBackup,
             || {
                 assert!(operation_state.request_cancel().unwrap());
-                run_scheduled_backup(&root, &operation_state, &artwork.branch_id, false)
+                run_scheduled_backup(&root, &operation_state, &artwork.branch_id)
             },
         );
 
