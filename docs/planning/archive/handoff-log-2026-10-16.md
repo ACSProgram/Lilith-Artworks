@@ -410,3 +410,14 @@ authenticity 4 / damage 4 / concurrency 5 / scale 5 / large（C7）1 / bench 3 �
 同日 `todo.md` 第三节的 2026-10-16 维护者决策记录（两条 P1 修法、`scrub × compact` 并发口径、
 素材板路径授权与 TrustMark 模型完整性并入同批）随本节一并归档：上述决策对应的代码、自动化
 测试与模块文档均已落地，界面部分已随本节验收，表层不再保留。
+
+## 0.2.0-rc.4 切分、README 收尾与标签事实（2026-10-17，从 current-handoff.md 清出）
+
+- **切版本到 `0.2.0-rc.4`**：`CHANGELOG.md` 的 `## Unreleased` 落为带日期小节，五处版本字段与
+  许可清单同步，`node tools/release/verify-metadata.mjs` 验证通过。
+- **README 收尾**：增加示例图（`.github/assets/demo.png`）并整理排版。
+- 同日 12:07，维护者打出 `v0.2.0-rc.4` 附注标签并推送（指向切分提交 fd620ad），推翻本日早些
+  时候「本阶段不打任何标签」的结论；`v0.2.0-rc.3` 自切分后未打标签。
+- 维护者口径：rc.4 的全套餐压力测试即 `0.2.0` 正式版的压力测试（两者产品代码一致），实测数据由
+  维护者补入 `docs/user/stress-test-report.md`；据此完成 `0.2.0` 正式版切分准备（未提交、未打
+  标签，现状见现行 `current-handoff.md`）。

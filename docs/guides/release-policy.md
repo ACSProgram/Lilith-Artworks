@@ -9,7 +9,7 @@
 - `CHANGELOG.md` 顶部维护唯一的 `## Unreleased` 暂存段：当前版本落定之后的全部改动都记入该段，不写回已带日期的版本小节。带日期的小节一经建立即冻结。
 - 维护者决定切版本时的固定动作：把 `## Unreleased` 改名为 `## X.Y.Z - 日期`；同步上述五处版本字段；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
 - 切版本不等于发布，也不触发任何门槛；是否打标签由维护者单独决定。一旦打上候选或正式标签，该版本即公开，必须通过「自动门槛」与「人工门槛」的全部项目。
-- 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.2`、`0.2.0-alpha.4`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
+- 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.2`、`0.2.0-alpha.4`、`0.2.0-rc.3`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
 - 已发布的标签、安装包和版本身份不可复用或替换。标签之后的任何代码、schema、应用标识或签名声明变化都必须切到新版本并打新标签。
 - 源码仓库可公开不等于安装包可正式发布。每个二进制产物必须能追溯到唯一、干净且不可变的标签。
 
@@ -23,7 +23,7 @@ Windows CI 必须通过以下项目：
 4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
 5. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
 
-CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；Rust 依赖审计固定使用 `rustsec/audit-check@v2.0.0`，仅精确忽略 `RUSTSEC-2023-0071`，因为 PS256 已在前后端禁用并有直接回归测试，其余漏洞仍使作业失败。
+CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；Rust 依赖审计固定使用 `rustsec/audit-check@v2.0.0`，精确忽略一组固定告警，忽略列表在 `.github/workflows/windows-ci.yml` 与 `.github/workflows/release.yml` 中逐字一致（`RUSTSEC-2023-0071` 因 PS256 已在前后端禁用并有直接回归测试；zip 8.x 三项 `RUSTSEC-2026-0367/0368/0369` 因易受攻击路径在当前依赖图中不可达，理由见该列表旁注）；忽略列表之外的漏洞仍使作业失败。
 
 正式候选版还必须通过：
 
@@ -35,7 +35,7 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 
 依赖更新、Tauri 权限、schema、迁移、清理队列、路径校验、C2PA 或 TrustMark 变更必须单独说明风险和针对性测试。Actions、Node、Rust 工具链和 release workflow 应固定到受支持且可复现的版本；发布测试使用锁文件。
 
-自动化压力测试（`src-tauri/tests/`，**发布前手动运行、不进 CI**）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、8 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`。
+自动化压力测试（`src-tauri/tests/`；八组便宜的分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench` 仍在发布前手动运行）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、8 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`。
 
 ## 人工门槛
 
