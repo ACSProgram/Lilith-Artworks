@@ -9,7 +9,7 @@ the five version fields move together, so the version number lags the work until
 the cut. A version can exist without a tag: tagging is a separate, later release
 decision, so an untagged version is transitional.
 
-## Unreleased
+## 0.2.0-rc.4 - 2026-10-17
 
 ### Added
 
@@ -222,6 +222,15 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The application version is incremented to `0.2.0-rc.4`. The bump changes only
+  the version string and does not by itself tag or release anything; tagging
+  `v0.2.0-rc.4` and publishing it stays a separate, later maintainer decision,
+  so this cut is a transitional, untagged version.
+- The README now opens with a product screenshot (`.github/assets/demo.png`,
+  the version-history view of a real artwork) and its sections are reordered
+  and tightened: the feature list leads with the module names, the usage
+  statement and its runtime requirements keep their own headings, and the
+  version line follows the current lagging-version model. No behavior change.
 - The per-branch quick-check switch now actually controls that branch's
   automatic backups, and the branch status line shows the check mode that
   takes effect. Previously the switch only forced quick checks on: turning it
