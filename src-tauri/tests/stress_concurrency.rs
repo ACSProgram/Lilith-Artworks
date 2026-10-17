@@ -406,15 +406,16 @@ fn j4_reads_answer_while_a_compaction_holds_the_lock() {
 /// **构造**出来的。这一条不构造窗口：让 `compact` 与 `scrub` 真正同时启动、各自跑完，
 /// 重复多轮。断言三条不变量：
 /// ① 两者都不得挂起；
-/// ② `compact` 必须成功；`scrub` 成功或**干净失败**（退出码 1、无 panic）——`scrub` 不属于
-///    写命令，与 `compact` 之间没有互斥，二者只靠 SQLite 的快照隔离与文件系统语义；
+/// ② `compact` 必须成功；`scrub` 成功、以「仓库正在被写入，请稍后重试」**明确拒绝**，
+///    或以退出码 1 干净失败（无 panic）；
 /// ③ 两者都结束后仓库必须完整：`verify` + `scrub` 通过，且仍存在的每个节点都能逐位恢复。
 ///
-/// `scrub` 失败的轮次会被记进报告：若它经常干净失败，说明「精简进行中跑全库校验」会给
-/// 用户一个难以理解的错误，那是一条应当被登记的产品边界，而不是测试噪声。
+/// 拒绝计入报告：写者持锁时全库校验给出的是**有意义的**拒绝，不再是边界问题。两者都不
+/// 持锁却仍失败的轮次意味着「精简进行中跑全库校验」还有别的错误路径，那仍然值得暴露。
 #[test]
 fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
-    let mut scrub_failures = 0_usize;
+    let mut refusals = 0_usize;
+    let mut other_failures = 0_usize;
     for round in 0..4_u64 {
         let fixture = ArtworkFixture::new();
         let first = fixture.commit(96 * 1024, 1 + round, "first");
@@ -442,7 +443,11 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
             compaction.describe()
         );
         if !scrub.ok() {
-            scrub_failures += 1;
+            if scrub.error().contains("仓库正在被写入，请稍后重试") {
+                refusals += 1;
+            } else {
+                other_failures += 1;
+            }
             assert!(
                 !scrub.timed_out,
                 "round={round}：全库校验不得挂起：\n{}",
@@ -485,10 +490,84 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
             "J",
             "small",
             &compaction,
-            json!({ "round": round, "scrubOk": scrub.ok(), "scrubError": if scrub.ok() { Value::Null } else { Value::String(scrub.error()) } }),
+            json!({
+                "round": round,
+                "scrubOk": scrub.ok(),
+                "scrubRefused": !scrub.ok() && scrub.error().contains("仓库正在被写入"),
+                "scrubError": if scrub.ok() { Value::Null } else { Value::String(scrub.error()) },
+            }),
         );
     }
 
-    // 如实记录：真并发下全库校验失败的轮次。它是产品边界的度量，不是失败信号。
-    eprintln!("J5：4 轮真并发中全库校验失败 {scrub_failures} 轮");
+    // 如实记录：真并发下全库校验被明确拒绝与以其他错误失败的轮次。前者是既定行为，
+    // 后者才是需要继续关注的信号。
+    eprintln!("J5：4 轮真并发中全库校验被拒绝 {refusals} 轮、其他失败 {other_failures} 轮");
+}
+
+/// J6：写哨兵被持有时，内容级全库校验必须**明确拒绝**。
+///
+/// `scrub` 是只读命令，但与精简真正并发时会撞上「节点在读取过程中被移除」，报出一个与
+/// 原因无关的错误。因此只给它加了一道前置判定：写哨兵被持有时直接拒绝并提示
+/// 「仓库正在被写入，请稍后重试」。这里用闸门把写进程停在检查点（此时它确实持有哨兵），
+/// 确定性验证这条拒绝；同时断言轻量只读命令（`verify`）保持 J1/J2 的承诺不回退，并验证
+/// 写者结束后同一条命令正常通过——拒绝不能变成永久关闭。
+#[test]
+fn j6_full_scrub_is_refused_while_a_writer_holds_the_sentinel() {
+    let fixture = ArtworkFixture::new();
+    fixture.commit(96 * 1024, 1, "baseline");
+    fs::write(&fixture.work, vec![0x33_u8; 96 * 1024]).expect("无法改写工作文件");
+
+    let mut refusal = None;
+    let mut verify = None;
+    let outcome = fixture.commit_command().gate().drive(|index, _stage| {
+        if index == 1 {
+            // 写进程在此持有哨兵锁：全库校验必须立刻拿到有意义的拒绝。
+            refusal = Some(fixture.command("scrub").finish());
+            verify = Some(fixture.command("verify").finish());
+        }
+        false
+    });
+    outcome.expect_ok();
+
+    let refusal = refusal.expect("全库校验应当已被启动");
+    assert!(
+        !refusal.timed_out,
+        "拒绝必须是立刻返回的，不得等待：\n{}",
+        refusal.describe()
+    );
+    assert!(
+        !refusal.ok(),
+        "写者持锁时全库校验不应成功：\n{}",
+        refusal.describe()
+    );
+    assert_eq!(
+        refusal.exit_code,
+        1,
+        "拒绝必须是普通错误（退出码 1）：\n{}",
+        refusal.describe()
+    );
+    assert!(
+        refusal.error().contains("仓库正在被写入，请稍后重试"),
+        "拒绝必须给出可行动的理由：\n{}",
+        refusal.describe()
+    );
+
+    // J1/J2 的承诺不回退：轻量只读命令在写者持锁期间照常作答。
+    let verify = verify.expect("verify 应当已被启动");
+    assert!(
+        !verify.timed_out && verify.ok(),
+        "写者持锁期间 verify 仍必须作答：\n{}",
+        verify.describe()
+    );
+
+    // 写者结束后同一命令恢复正常（拒绝不是一个永久关闭）。
+    let after = fixture.command("scrub").finish();
+    after.expect_ok();
+    assert_eq!(
+        after.data_u64("historyNodes"),
+        2,
+        "写者结束后全库校验必须覆盖全部节点：\n{}",
+        after.describe()
+    );
+    fixture.assert_repository_clean();
 }
