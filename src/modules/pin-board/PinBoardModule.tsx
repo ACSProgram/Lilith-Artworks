@@ -172,22 +172,6 @@ export function reorderBoardIds(
   return next.every((boardId, index) => boardId === boardIds[index]) ? null : next;
 }
 
-function clipboardImagePaths(value: string): string[] {
-  return value
-    .split(/[\r\n\0]+/)
-    .map((part) => part.trim().replace(/^["']|["']$/g, ""))
-    .map((part) => {
-      if (!part.toLowerCase().startsWith("file:")) return part;
-      try {
-        const pathname = decodeURIComponent(new URL(part).pathname);
-        return /^\/[a-z]:/i.test(pathname) ? pathname.slice(1) : pathname;
-      } catch {
-        return part;
-      }
-    })
-    .filter((path) => IMAGE_PATH_PATTERN.test(path));
-}
-
 async function clipboardImageBytes(): Promise<number[] | null> {
   if (!navigator.clipboard?.read) return null;
   try {
@@ -203,15 +187,6 @@ async function clipboardImageBytes(): Promise<number[] | null> {
     // Clipboard access may be unavailable; import falls back to paths and the dialog.
   }
   return null;
-}
-
-async function clipboardPaths(): Promise<string[]> {
-  if (!navigator.clipboard?.readText) return [];
-  try {
-    return clipboardImagePaths(await navigator.clipboard.readText());
-  } catch {
-    return [];
-  }
 }
 
 async function renderTextImage(text: string, fontSize: number, color: string): Promise<number[]> {
@@ -927,14 +902,16 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         return;
       }
 
+      // 路径来源只剩两条：剪贴板里的文件（由 `read_pin_board_clipboard_paths`
+      // 读出并加入文件系统 scope）与文件选择器。粘贴纯文本路径不再导入——那种
+      // 路径没有任何授权来源，Rust 层会以「未由文件选择器授权」拒绝。
       let paths: string[] = [];
       try {
         paths = (await pinBoardApi.readPinBoardClipboardPaths())
           .filter((path) => IMAGE_PATH_PATTERN.test(path));
       } catch {
-        // Fall back to text and the file picker when the native clipboard is unavailable.
+        // Fall back to the file picker when the native clipboard is unavailable.
       }
-      if (paths.length === 0) paths = await clipboardPaths();
       if (paths.length === 0) {
         paths = await pickPinBoardImagePaths();
         if (paths.length === 0) return;

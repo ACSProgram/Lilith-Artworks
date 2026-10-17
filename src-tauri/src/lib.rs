@@ -9,6 +9,7 @@ mod fuzz_support;
 mod headless;
 mod history;
 mod library;
+mod path_scope;
 mod pin_board;
 #[cfg(feature = "headless")]
 mod repository_lock;

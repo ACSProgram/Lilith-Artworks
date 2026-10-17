@@ -383,30 +383,17 @@ fn external_image_path(root: &Path, value: &str, label: &str) -> AuthenticityRes
 /// 选择器写入，承载「该路径必须被用户显式选择过」这条语义；无头侧的实现是一个只
 /// 允许 `--workspace` 之下路径的显式作用域（见 `src/headless.rs`）。
 ///
-/// 抽象成可注入的来源，是为了让无头进程复用**同一条**检查，而不是为了把检查关掉：
-/// 两条实现都仍然要求路径被显式授权，且都不接受空路径，因此不存在「安全控制可关闭」
-/// 的开关。
-pub(crate) trait PathAuthorization {
-    fn is_path_authorized(&self, path: &Path) -> bool;
-}
-
-impl PathAuthorization for tauri::fs::Scope {
-    fn is_path_authorized(&self, path: &Path) -> bool {
-        self.is_allowed(path)
-    }
-}
+/// 实现在 `crate::path_scope`（素材板共用同一条检查），这里只按认证模块的错误类型
+/// 转写结果。
+pub(crate) use crate::path_scope::PathAuthorization;
 
 pub(crate) fn ensure_dialog_authorized(
     scope: &impl PathAuthorization,
     path: &Path,
     label: &str,
 ) -> AuthenticityResult<()> {
-    if path.as_os_str().is_empty() || !scope.is_path_authorized(path) {
-        return Err(AuthenticityError::InvalidInput(format!(
-            "{label}未由文件选择器授权，请重新选择"
-        )));
-    }
-    Ok(())
+    crate::path_scope::ensure_authorized(scope, path, label)
+        .map_err(AuthenticityError::InvalidInput)
 }
 
 fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {

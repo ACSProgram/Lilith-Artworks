@@ -10,13 +10,16 @@ pub(crate) mod dds;
 pub(crate) mod repository;
 pub(crate) mod scrub;
 
+use std::path::Path;
+
 use serde::Serialize;
 use tauri::{
     ipc::{Channel, Response},
     State,
 };
+use tauri_plugin_fs::FsExt;
 
-use crate::{app::AppState, cleanup, storage};
+use crate::{app::AppState, cleanup, path_scope, storage};
 use repository::{
     EditablePinBoardImage, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
     SavePinBoardResult,
@@ -289,6 +292,7 @@ pub(crate) async fn paste_pin_board_images(
 #[tauri::command]
 pub(crate) async fn import_pin_board_images(
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
     board_id: i64,
     paths: Vec<String>,
     center_x: f64,
@@ -297,6 +301,11 @@ pub(crate) async fn import_pin_board_images(
     expected_revision: String,
     on_progress: Channel<PinBoardTransferProgress>,
 ) -> Result<PinBoardMutationResult, String> {
+    // 源图路径必须由文件选择器（或剪贴板读取命令）写入文件系统 scope；仓库边界校验
+    // 在 `repository::import_images` 里对 GUI 与无头两个入口一起生效。
+    for path in &paths {
+        path_scope::ensure_authorized(&window.fs_scope(), Path::new(path), "导入图片")?;
+    }
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         state.with_ready_repository(|root| {
@@ -357,11 +366,17 @@ pub(crate) async fn import_pin_board_clipboard_image(
 #[tauri::command]
 pub(crate) async fn export_pin_board_images(
     state: State<'_, AppState>,
+    window: tauri::WebviewWindow,
     board_id: i64,
     image_ids: Vec<i64>,
     output_directory: String,
     on_progress: Channel<PinBoardTransferProgress>,
 ) -> Result<usize, String> {
+    path_scope::ensure_authorized(
+        &window.fs_scope(),
+        Path::new(output_directory.trim()),
+        "导出位置",
+    )?;
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         state.with_ready_repository(|root| {
@@ -430,7 +445,22 @@ pub(crate) async fn read_pin_board_texture(
     Ok(Response::new(bytes))
 }
 
+/// 读取剪贴板里的文件路径（Windows `CF_HDROP`）。
+///
+/// 这是「复制文件后在素材板里粘贴」的入口：路径由本命令自己从系统剪贴板读出，不是
+/// 渲染进程传进来的值，因此可以在这里把它们加入文件系统 scope——随后
+/// `import_pin_board_images` 仍走同一条「路径必须已被授权」的检查，既不破坏粘贴
+/// 流程，也不新增一条绕过授权的通道。只授权确实存在的文件。
 #[tauri::command]
-pub(crate) fn read_pin_board_clipboard_paths() -> Result<Vec<String>, String> {
-    dds::clipboard_file_paths()
+pub(crate) fn read_pin_board_clipboard_paths(
+    window: tauri::WebviewWindow,
+) -> Result<Vec<String>, String> {
+    let paths = dds::clipboard_file_paths()?;
+    for path in &paths {
+        let file = Path::new(path);
+        if file.is_file() {
+            path_scope::authorize_path(&window, file)?;
+        }
+    }
+    Ok(paths)
 }
