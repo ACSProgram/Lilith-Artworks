@@ -126,7 +126,7 @@ mod tests {
             .unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
         let history_id = storage::new_id();
         let artifact_id = storage::new_id();
         let relative = format!("artworks/{}/artifacts/final.jpg", artwork.artwork_id);

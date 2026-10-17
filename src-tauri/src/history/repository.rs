@@ -111,6 +111,7 @@ pub(crate) fn create_branch(
     from_history_id: &str,
     title: &str,
     source_path: &Path,
+    backup_quick_enabled: bool,
 ) -> Result<String, String> {
     storage::validate_title(title, "分支标题")?;
     let (source_display, source_key) = storage::normalize_source_path(root, source_path)?;
@@ -131,8 +132,8 @@ pub(crate) fn create_branch(
         .execute(
             "INSERT INTO branches
              (id, artwork_id, title, source_path, source_path_key, head_history_id,
-              created_from_history_id, created_ms, updated_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?7)",
+              created_from_history_id, backup_quick_enabled, created_ms, updated_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7, ?8, ?8)",
             params![
                 id,
                 artwork_id,
@@ -140,6 +141,7 @@ pub(crate) fn create_branch(
                 source_display,
                 source_key,
                 from_history_id,
+                i64::from(backup_quick_enabled),
                 now
             ],
         )
@@ -1658,7 +1660,7 @@ mod tests {
             fs::write(&fork_source, b"fork").unwrap();
             crate::library::initialize(&root).unwrap();
             let artwork =
-                crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source)
+                crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source, false)
                     .unwrap();
             Self {
                 _directory: directory,
@@ -1809,6 +1811,7 @@ mod tests {
             "root",
             "Side",
             &fixture.fork_source,
+            false,
         )
         .unwrap();
 
@@ -2021,7 +2024,8 @@ mod tests {
             .unwrap();
         crate::library::initialize(&root).unwrap();
         let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source).unwrap();
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source, false)
+                .unwrap();
         let root_node = "root-node";
         commit(
             &root,
@@ -2043,8 +2047,15 @@ mod tests {
             },
         )
         .unwrap();
-        let branch_id =
-            create_branch(&root, &artwork.artwork_id, root_node, "Fork", &fork_source).unwrap();
+        let branch_id = create_branch(
+            &root,
+            &artwork.artwork_id,
+            root_node,
+            "Fork",
+            &fork_source,
+            false,
+        )
+        .unwrap();
         commit(
             &root,
             HistoryCommit {
@@ -2114,6 +2125,7 @@ mod tests {
             "root",
             "Fork",
             &fixture.fork_source,
+            false,
         )
         .unwrap();
         fixture.commit_node(&fork_branch, "fork-head", Some("root"), 4);
@@ -2158,6 +2170,7 @@ mod tests {
             "root",
             "Fork",
             &fixture.fork_source,
+            false,
         )
         .unwrap();
         let connection = storage::open(&fixture.root).unwrap();

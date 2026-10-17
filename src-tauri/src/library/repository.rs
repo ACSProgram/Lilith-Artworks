@@ -337,6 +337,7 @@ pub(crate) fn create_artwork(
     title: &str,
     branch_title: &str,
     source_path: &Path,
+    backup_quick_enabled: bool,
 ) -> Result<CreatedArtwork, String> {
     validate_title(title, "Artwork 标题")?;
     validate_title(branch_title, "分支标题")?;
@@ -378,14 +379,16 @@ pub(crate) fn create_artwork(
     transaction
         .execute(
             "INSERT INTO branches
-             (id, artwork_id, title, source_path, source_path_key, created_ms, updated_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+             (id, artwork_id, title, source_path, source_path_key, backup_quick_enabled,
+              created_ms, updated_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
             params![
                 branch_id,
                 artwork_id,
                 branch_title.trim(),
                 source_display,
                 source_key,
+                i64::from(backup_quick_enabled),
                 now
             ],
         )
@@ -403,8 +406,16 @@ pub(crate) fn create_artwork_and_list(
     title: &str,
     branch_title: &str,
     source_path: &Path,
+    backup_quick_enabled: bool,
 ) -> Result<LibraryTree, String> {
-    let created = create_artwork(root, parent_id, title, branch_title, source_path)?;
+    let created = create_artwork(
+        root,
+        parent_id,
+        title,
+        branch_title,
+        source_path,
+        backup_quick_enabled,
+    )?;
     let _created_ids = (created.artwork_id, created.branch_id);
     list_tree(root)
 }
@@ -1074,8 +1085,15 @@ mod tests {
                 .unwrap();
             initialize(&root).unwrap();
             let group = create_group_id(&root, None, "Series").unwrap();
-            let artwork =
-                create_artwork(&root, Some(&group), "Portrait", "Main", &first_source).unwrap();
+            let artwork = create_artwork(
+                &root,
+                Some(&group),
+                "Portrait",
+                "Main",
+                &first_source,
+                false,
+            )
+            .unwrap();
             Self {
                 _directory: directory,
                 root,
@@ -1575,7 +1593,7 @@ mod tests {
         let root = directory.path().join("repository");
         initialize(&root).unwrap();
 
-        let created = create_artwork(&root, None, "Artwork", "Main", Path::new("")).unwrap();
+        let created = create_artwork(&root, None, "Artwork", "Main", Path::new(""), false).unwrap();
         let branch = crate::history::list(&root, &created.artwork_id)
             .unwrap()
             .branches
@@ -1587,7 +1605,7 @@ mod tests {
         assert!(scheduled
             .iter()
             .all(|branch| branch.id != created.branch_id));
-        create_artwork(&root, None, "Second", "Main", Path::new("")).unwrap();
+        create_artwork(&root, None, "Second", "Main", Path::new(""), false).unwrap();
     }
 
     #[test]
@@ -1596,8 +1614,15 @@ mod tests {
         let root = directory.path().join("repository");
         initialize(&root).unwrap();
 
-        let error =
-            create_artwork(&root, None, "Artwork", "Main", Path::new("missing.psd")).unwrap_err();
+        let error = create_artwork(
+            &root,
+            None,
+            "Artwork",
+            "Main",
+            Path::new("missing.psd"),
+            false,
+        )
+        .unwrap_err();
         assert!(error.contains("分支工作文件"), "{error}");
     }
 }

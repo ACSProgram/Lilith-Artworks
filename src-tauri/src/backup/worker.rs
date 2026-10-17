@@ -419,7 +419,8 @@ mod tests {
             .write_all(&vec![b'A'; 96 * 1024])
             .unwrap();
         library::initialize(&root).unwrap();
-        let artwork = library::create_artwork(&root, None, "Artwork", "Main", &source).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
         (
             directory,
             root,
@@ -474,7 +475,7 @@ mod tests {
         let root = directory.path().join("repository");
         library::initialize(&root).unwrap();
         let artwork =
-            library::create_artwork(&root, None, "Artwork", "Main", Path::new("")).unwrap();
+            library::create_artwork(&root, None, "Artwork", "Main", Path::new(""), false).unwrap();
 
         let error = run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap_err();
 
