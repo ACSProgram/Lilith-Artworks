@@ -9,6 +9,11 @@
 
 模型变体与哈希摘要由后端在运行时读取，显示于应用的发布/识别页面；不在前端写死。
 
+**换模型时必须同步更新**表里的 SHA-256 与 `src-tauri/src/authenticity/state.rs` 中的
+`ENCODER_Q_SHA256` / `DECODER_Q_SHA256`：后端在加载前比对摘要，不匹配即拒绝加载，
+`authenticity::state::tests::pinned_digests_match_the_shipped_models` 会在提交前
+拦住忘记更新常量的一方。
+
 ## 许可
 
 模型文件来源于 [adobe/trustmark](https://github.com/adobe/trustmark) 官方开源

@@ -110,6 +110,21 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- TrustMark models are now verified before they are loaded. `model_info` computed
+  the encoder and decoder SHA-256 but never compared them with anything, and
+  `model_files_ready` only checked that the files existed, so a replaced
+  `*_Q.onnx` in the install directory was loaded silently — which undermines the
+  authenticity guarantees the application itself advertises. Both digests are
+  pinned as constants next to the loader (matching
+  `src-tauri/resources/models/README.md`), the check runs once and is cached with
+  the engine, and a missing or mismatched model makes `model_files_ready` false
+  and makes the loader fail with an explicit message naming the encoder or
+  decoder instead of loading it. `pinned_digests_match_the_shipped_models`
+  compares the constants with the models in this repository, so a model swap that
+  forgets the constants fails before the commit rather than after the release.
+  The compile-time `CARGO_MANIFEST_DIR` fallback in `lib.rs` is gone: a
+  developer-machine path does not belong in a release artifact, and the packaged
+  resource directory is the only place the models are resolved from.
 - Pin-board import and export now run the same two path gates the authenticity
   module runs. `import_pin_board_images` handed renderer-supplied absolute paths
   straight to `dds::read_limited` and the raster decoder with neither a

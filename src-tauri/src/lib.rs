@@ -303,12 +303,12 @@ pub fn run() {
             backup_state.start_scheduler(application.handle().clone())?;
             application.manage(backup_state);
             let resource_dir = application.path().resource_dir()?;
+            // 只认随包资源目录。曾经保留一条 `CARGO_MANIFEST_DIR` 的编译期回退路径，
+            // 那条路径会把开发机目录写进发布产物，也让「模型是否被替换」的判断多一个
+            // 无法预测的落点；开发与发布两种构建都由打包把模型放进 `resources/models`。
             let model_candidates = [
                 resource_dir.join("resources").join("models"),
                 resource_dir.join("models"),
-                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                    .join("resources")
-                    .join("models"),
             ];
             let models_dir = model_candidates
                 .into_iter()
