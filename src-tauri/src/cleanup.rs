@@ -52,6 +52,11 @@ pub(crate) struct ScanCandidate {
 
 /// 待清理队列中的一条条目，供设置页展示与重试。`last_attempt_ms` / `last_error`
 /// 只在一次删除尝试失败后写入，因此尚未尝试过的条目两者为空。
+///
+/// `expected_sha256` 与 `artwork_title` 服务于外部文件条目的**逐条确认**：删除前
+/// 用户需要看到完整路径、所属作品与期望摘要，才能判断这条记录是不是自己预期的
+/// 那次清理。所属作品按导出路径回查认证记录，查不到时为空（例如发布在建记录之前
+/// 就失败）。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PendingCleanupEntry {
@@ -63,6 +68,8 @@ pub(crate) struct PendingCleanupEntry {
     pub(crate) created_ms: i64,
     pub(crate) last_attempt_ms: Option<i64>,
     pub(crate) last_error: Option<String>,
+    pub(crate) expected_sha256: Option<String>,
+    pub(crate) artwork_title: Option<String>,
 }
 
 struct PendingCleanup {
@@ -210,8 +217,15 @@ pub(crate) fn list_pending(root: &Path) -> Result<Vec<PendingCleanupEntry>, Stri
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT id, path, path_kind, reason, created_ms, last_attempt_ms, last_error
-             FROM pending_file_cleanup ORDER BY created_ms, id",
+            "SELECT p.id, p.path, p.path_kind, p.reason, p.created_ms, p.last_attempt_ms,
+                    p.last_error, p.expected_sha256,
+                    (SELECT n.title
+                       FROM certification_records r
+                       JOIN branches b ON b.id = r.branch_id
+                       JOIN library_nodes n ON n.id = b.artwork_id
+                      WHERE r.output_path = p.path
+                      LIMIT 1)
+             FROM pending_file_cleanup p ORDER BY p.created_ms, p.id",
         )
         .map_err(storage::database_error)?;
     let entries = statement
@@ -224,6 +238,8 @@ pub(crate) fn list_pending(root: &Path) -> Result<Vec<PendingCleanupEntry>, Stri
                 created_ms: row.get(4)?,
                 last_attempt_ms: row.get(5)?,
                 last_error: row.get(6)?,
+                expected_sha256: row.get(7)?,
+                artwork_title: row.get(8)?,
             })
         })
         .map_err(storage::database_error)?
@@ -232,8 +248,16 @@ pub(crate) fn list_pending(root: &Path) -> Result<Vec<PendingCleanupEntry>, Stri
     Ok(entries)
 }
 
+/// 执行待清理队列。
+///
+/// `requested_ids` 为空表示「重放仓库内条目」：仓库文件与仓库目录会被处理，
+/// **外部文件条目一律跳过**。外部条目保存的是仓库之外的绝对路径，删除它等于一条
+/// 任意路径删除；因此它只在用户于设置页逐条确认后，以**显式 id** 才会执行。
+/// 启动时的自动重放与设置页的「全部重试」都走空 id 这条路径，所以被投毒的仓库
+/// 无法借启动流程删除任意文件。
 pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport, String> {
     let requested = requested_ids.iter().cloned().collect::<HashSet<_>>();
+    let explicit = !requested.is_empty();
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
@@ -257,10 +281,13 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
 
     let mut cleaned_count = 0;
     let mut failures = Vec::new();
-    for entry in entries
-        .into_iter()
-        .filter(|entry| requested.is_empty() || requested.contains(&entry.id))
-    {
+    for entry in entries.into_iter().filter(|entry| {
+        if explicit {
+            requested.contains(&entry.id)
+        } else {
+            entry.path_kind != EXTERNAL_FILE
+        }
+    }) {
         let result = match referenced_path(&connection, &entry) {
             Ok(Some(reference)) => Err(format!("文件仍被 {reference} 引用，已保留")),
             Ok(None) => remove_entry(root, &entry),
@@ -775,6 +802,47 @@ mod tests {
         assert!(retried.failures.is_empty());
         assert!(!output.exists());
         assert_eq!(retried.pending_count, 0);
+    }
+
+    #[test]
+    fn automatic_replay_never_touches_external_entries() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let output = directory.path().join("output.jpg");
+        let stored = root.join("artworks").join("artifact.jpg");
+        crate::library::initialize(&root).unwrap();
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&output, b"original").unwrap();
+        fs::write(&stored, b"original").unwrap();
+        let external_id = enqueue_external(&root, &output, &sha256_file(&output).unwrap());
+        let mut connection = storage::open(&root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let repository_id =
+            enqueue_repository_file(&transaction, "artworks/artifact.jpg", "test").unwrap();
+        transaction.commit().unwrap();
+        drop(connection);
+
+        // 空 id 是「重放仓库内条目」：应用启动与设置页「全部重试」都走这条路，
+        // 外部条目必须原样留在队列里，只能凭显式 id 删除。
+        let report = run(&root, &[]).unwrap();
+
+        assert_eq!(report.cleaned_count, 1);
+        assert!(report.failures.is_empty());
+        assert!(!stored.exists());
+        assert!(output.is_file());
+        assert_eq!(report.pending_count, 1);
+        let remaining = list_pending(&root).unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, external_id);
+        assert_ne!(remaining[0].id, repository_id);
+        assert_eq!(remaining[0].path_kind, EXTERNAL_FILE);
+        assert!(remaining[0].expected_sha256.is_some());
+
+        // 显式 id 才是外部条目的执行入口（用户逐条确认后）。
+        let explicit = run(&root, std::slice::from_ref(&external_id)).unwrap();
+        assert_eq!(explicit.cleaned_count, 1);
+        assert!(!output.exists());
+        assert_eq!(explicit.pending_count, 0);
     }
 
     #[test]
