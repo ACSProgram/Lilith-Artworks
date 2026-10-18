@@ -2,7 +2,7 @@
 
 Lilith Artworks 是一套用于管理个人平面美术工作流中资源的工具软件，集成、轻量，**全部操作和数据均完全本地化**。
 
-当前版本：`0.2.0`（repository schema v4）
+当前版本：`0.3.0-alpha.1`（repository schema v4）
 
 <p align="center">
   <img src=".github/assets/demo.png" alt="Lilith Artworks 主界面：左侧为作品库，右侧为作品「创作 1」的版本历史时间轴，展示提交、自动备份与分支节点" width="880" />

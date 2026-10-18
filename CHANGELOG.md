@@ -11,6 +11,8 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+## 0.3.0-alpha.1 - 2026-10-18
+
 ### Added
 
 - The 0.3 stage 1 command runtime: `CommandContext`, `OperationCoordinator`,
