@@ -4,10 +4,13 @@ use tauri::{AppHandle, Manager};
 
 use crate::{
     app::AppState,
+    cancel::CancelToken,
     history::{self, IdleVerifyTarget, ScheduledBranch},
     repository_lock::{OwnerLockError, RepositoryOwnerLock},
     storage,
 };
+
+use super::chunk_file::ChunkWriteOptions;
 
 use super::{
     runtime::ExclusiveRunError, validate_snapshot, worker, BackupCommitResult, BackupState,
@@ -141,7 +144,12 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 || {
                     app_state
                         .with_ready_repository(|root| {
-                            Ok(run_scheduled_backup(root, &state, &branch_id))
+                            Ok(run_scheduled_backup(
+                                root,
+                                &state,
+                                &branch_id,
+                                app_state.chunk_write_options(),
+                            ))
                         })
                         .map_err(AutomaticBackupError::Infrastructure)?
                 },
@@ -363,7 +371,11 @@ fn run_idle_verify(
         .ok_or_else(|| IdleVerifyError::Failed("分支 head 缺少 snapshot，无法校验".into()))?;
     let path = storage::resolve_path(root, relative).map_err(IdleVerifyError::Infrastructure)?;
     state.report_progress("verify", "正在校验分支链路", 0, 1);
-    match validate_snapshot(&path, &record, "链路校验") {
+    let cancel = CancelToken::with_source({
+        let state = state.clone();
+        move || state.cancelled()
+    });
+    match validate_snapshot(&path, &record, "链路校验", &cancel) {
         Ok(()) => {
             let verified_ms = storage::now_ms().map_err(IdleVerifyError::Infrastructure)?;
             history::mark_verified(root, branch_id, &target.head_history_id, verified_ms)
@@ -442,6 +454,7 @@ fn run_scheduled_backup(
     root: &std::path::Path,
     state: &BackupState,
     branch_id: &str,
+    options: ChunkWriteOptions,
 ) -> Result<BackupCommitResult, AutomaticBackupError> {
     let now = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
     let branch = history::load_scheduled(root, branch_id)
@@ -490,7 +503,11 @@ fn run_scheduled_backup(
             });
         }
     }
-    match worker::run_backup(root, branch_id, "", "automatic", || state.cancelled()) {
+    let cancel = CancelToken::with_source({
+        let state = state.clone();
+        move || state.cancelled()
+    });
+    match worker::run_backup(root, branch_id, "", "automatic", &cancel, options) {
         Ok(result) => Ok(result),
         Err(worker::BackupRunError::Cancelled) => Err(AutomaticBackupError::Cancelled),
         Err(worker::BackupRunError::Failed(error)) => {
@@ -584,10 +601,24 @@ mod tests {
     #[test]
     fn quick_check_marks_unchanged_without_creating_a_node() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         make_due(&root, &branch_id);
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         assert!(!result.created);
         assert!(result.unchanged);
@@ -606,11 +637,25 @@ mod tests {
     #[test]
     fn quick_check_falls_back_to_full_backup_when_metadata_changes() {
         let (_directory, root, source, artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         make_due(&root, &branch_id);
         fs::write(&source, b"changed content").unwrap();
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         assert!(result.created);
         assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 2);
@@ -619,10 +664,17 @@ mod tests {
     #[test]
     fn branch_quick_flag_uses_the_quick_path() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        let first_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let first_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         history::update_branch(&root, &branch_id, "Main", true, true, 10, true, None).unwrap();
         // 破坏 head snapshot：全量路径会核对并修复，快速路径应完全跳过校验。
         let original_relative = history::load_node(&root, &first_id)
@@ -635,7 +687,13 @@ mod tests {
         fs::write(&original_path, damaged).unwrap();
         make_due(&root, &branch_id);
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         assert!(!result.created);
         assert!(result.unchanged);
@@ -648,10 +706,17 @@ mod tests {
     #[test]
     fn quick_disabled_branch_runs_full_check_even_when_content_is_unchanged() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        let first_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let first_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         // 分支显式关闭快速检查：即使创建时的全局默认是快速，内容未变化也必须
         // 走全量路径核对并修复损坏的 head snapshot。
         history::update_branch(&root, &branch_id, "Main", true, true, 10, false, None).unwrap();
@@ -665,7 +730,13 @@ mod tests {
         fs::write(&original_path, damaged).unwrap();
         make_due(&root, &branch_id);
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id).unwrap();
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         assert!(!result.created);
         assert!(result.unchanged);
@@ -679,14 +750,22 @@ mod tests {
     #[test]
     fn scheduled_backup_yields_to_a_waiting_foreground_command() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         make_due(&root, &branch_id);
         let state = BackupState::default();
         // 模拟一个已登记、仍在等待运行锁的前台命令：后台任务取得运行锁后必须让位，
         // 且不计入失败、不推进检查时间。
         let waiting = state.begin_foreground_wait();
 
-        let yielded = run_scheduled_backup(&root, &state, &branch_id);
+        let yielded = run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1);
 
         assert!(
             matches!(yielded, Err(AutomaticBackupError::ForegroundWaiting)),
@@ -701,23 +780,33 @@ mod tests {
         assert_eq!(branch.consecutive_backup_failures, 0);
         assert!(branch.last_error.is_none());
 
-        let result = run_scheduled_backup(&root, &state, &branch_id).unwrap();
+        let result =
+            run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1).unwrap();
         assert!(result.unchanged);
     }
 
     #[test]
     fn scheduled_backup_defers_to_a_pending_manual_request() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         make_due(&root, &branch_id);
         let state = BackupState::default();
         state.begin_manual_request(&branch_id);
 
-        let deferred = run_scheduled_backup(&root, &state, &branch_id);
+        let deferred = run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1);
 
         assert!(matches!(deferred, Err(AutomaticBackupError::Deferred)));
         state.end_manual_request(&branch_id);
-        let result = run_scheduled_backup(&root, &state, &branch_id).unwrap();
+        let result =
+            run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1).unwrap();
         assert!(result.unchanged);
     }
 
@@ -748,7 +837,12 @@ mod tests {
             None,
         )
         .unwrap();
-        let result = run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id);
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &artwork.branch_id,
+            ChunkWriteOptions::V1,
+        );
 
         assert!(matches!(result, Err(AutomaticBackupError::NotScheduled)));
         let branch = history::list(&root, &artwork.artwork_id)
@@ -775,7 +869,15 @@ mod tests {
     #[test]
     fn scheduled_backup_skips_a_network_work_file_without_counting_a_failure() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         make_due(&root, &branch_id);
         // 手工把工作文件改成 UNC 路径（等价于「打开他人构造的仓库」）。
         crate::storage::open(&root)
@@ -786,7 +888,12 @@ mod tests {
             )
             .unwrap();
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &branch_id);
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            ChunkWriteOptions::V1,
+        );
 
         assert!(
             matches!(result, Err(AutomaticBackupError::Skipped)),
@@ -815,11 +922,17 @@ mod tests {
         crate::library::initialize(&root).unwrap();
         let artwork =
             crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
-        let history_id =
-            worker::run_backup(&root, &artwork.branch_id, "Initial", "manual", || false)
-                .unwrap()
-                .history_id
-                .unwrap();
+        let history_id = worker::run_backup(
+            &root,
+            &artwork.branch_id,
+            "Initial",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         crate::authenticity::store_final_artifact(
             &root,
             &artwork.branch_id,
@@ -828,7 +941,12 @@ mod tests {
         )
         .unwrap();
 
-        let result = run_scheduled_backup(&root, &BackupState::default(), &artwork.branch_id);
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &artwork.branch_id,
+            ChunkWriteOptions::V1,
+        );
 
         assert!(matches!(result, Err(AutomaticBackupError::NotScheduled)));
         let branch = history::list(&root, &artwork.artwork_id)
@@ -856,7 +974,12 @@ mod tests {
             BackupTaskKind::AutomaticBackup,
             || {
                 assert!(operation_state.request_cancel().unwrap());
-                run_scheduled_backup(&root, &operation_state, &artwork.branch_id)
+                run_scheduled_backup(
+                    &root,
+                    &operation_state,
+                    &artwork.branch_id,
+                    ChunkWriteOptions::V1,
+                )
             },
         );
 
@@ -933,10 +1056,17 @@ mod tests {
     #[test]
     fn idle_verify_marks_a_healthy_head_verified_and_leaves_the_queue() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let history_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         let targets = history::list_idle_verify_targets(&root).unwrap();
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].head_history_id, history_id);
@@ -957,10 +1087,17 @@ mod tests {
     #[test]
     fn idle_verify_records_a_failure_and_retries_only_after_requeue() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let history_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         // 破坏 head snapshot 内容，摘要与数据库记录不再匹配。
         let record = history::load_node(&root, &history_id).unwrap();
         let path = storage::resolve_path(&root, record.snapshot_path.as_deref().unwrap()).unwrap();
@@ -991,19 +1128,33 @@ mod tests {
     #[test]
     fn a_new_head_requeues_verification_and_clears_the_previous_failure() {
         let (_directory, root, source, artwork_id, branch_id) = fixture();
-        let first_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let first_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         history::mark_verify_error(&root, &branch_id, &first_id, "链路校验失败").unwrap();
         assert!(history::list_idle_verify_targets(&root).unwrap().is_empty());
 
         // 新提交产生新 head：分支重新入队，且旧失败摘要被清空。
         fs::write(&source, b"changed content").unwrap();
-        let second_id = worker::run_backup(&root, &branch_id, "Second", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let second_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         assert_ne!(first_id, second_id);
 
         let targets = history::list_idle_verify_targets(&root).unwrap();
@@ -1019,7 +1170,15 @@ mod tests {
     #[test]
     fn idle_verify_skips_a_head_that_changed_after_selection() {
         let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        worker::run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         let result = run_idle_verify(
             &root,
@@ -1042,10 +1201,17 @@ mod tests {
     #[test]
     fn idle_verify_yields_to_foreground_and_manual_work() {
         let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(&root, &branch_id, "First", "manual", || false)
-            .unwrap()
-            .history_id
-            .unwrap();
+        let history_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
         let state = BackupState::default();
 
         let waiting = state.begin_foreground_wait();

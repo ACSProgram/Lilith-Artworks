@@ -7,12 +7,12 @@ use std::{
 use crate::{
     app::AppState,
     backup::{BackupState, BackupTaskKind, ExclusiveRunError},
+    cancel::CancelToken,
     repository_lock::{self, OwnerLockError, RepositoryOwnerLock},
     storage,
 };
 
 use super::{
-    cancel::CancelToken,
     error::CommandError,
     events::{
         AppEvent, AppEventKind, NoopObserver, OperationObserver, OperationOutcome, SharedEventSink,
@@ -553,6 +553,16 @@ impl CommandContext {
 
     pub(crate) fn is_cancelled(&self) -> bool {
         self.cancel.is_cancelled()
+    }
+
+    /// The shared cancellation token for long I/O. Stage 4 chunk-file APIs take
+    /// this token directly so every read/write step observes the same source.
+    pub(crate) fn cancel(&self) -> &CancelToken {
+        &self.cancel
+    }
+
+    pub(crate) fn chunk_write_options(&self) -> crate::backup::chunk_file::ChunkWriteOptions {
+        self.app_state().chunk_write_options()
     }
 
     pub(crate) fn app_state(&self) -> &AppState {

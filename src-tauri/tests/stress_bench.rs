@@ -10,6 +10,8 @@
 //!
 //! - **P1 节点链**：96 KiB 工作文件上建 [`CHAIN_NODES`] 个节点的链，测每次提交的摊薄耗时
 //!   与「恢复最早节点」（穿越整条反向增量链）的每步耗时；顺带逐位校验恢复内容。
+//!   P1B 在同一组里用 4 MiB 工作文件建 [`SEGMENT_NODES`] 个节点，让每条 snapshot/delta
+//!   产生大量 chunk 段，反复恢复最早/最新节点并取 p50/p95，作为段索引与读取游标的证据。
 //! - **P2 认证**：512 级源图的发布流水线（渲染 / 编码 / 签名各阶段耗时来自产品自报）
 //!   与 `decode-authenticity` 回读耗时。
 //! - **P3 画板 DDS**：导入 16 张 512 级 PNG（BC7 编码）与全库 DDS 完整性扫描的每张耗时。
@@ -51,6 +53,11 @@ use stress_support::*;
 const CHAIN_NODES: usize = 48;
 /// P1 的工作文件大小：小到让固定开销可见，大到足以产生多块内容。
 const NODE_FILE_BYTES: usize = 96 * 1024;
+/// P1B 的段规模：4 MiB 随机内容在 2/16/64 KiB 的 CDC 参数下产生数十个 chunk 段，
+/// 足以让「每次线性找段」与「二分 + 游标」的差异在恢复耗时上可见。
+const SEGMENT_FILE_BYTES: usize = 4 * 1024 * 1024;
+const SEGMENT_NODES: usize = 6;
+const SEGMENT_RESTORES: usize = 12;
 /// P2 的认证源图边长（512 级：真实链路，成本可控）。
 const AUTH_EDGE: u32 = 512;
 /// P3 的导入图片数量与边长。
@@ -73,6 +80,7 @@ const REPEATS: usize = 3;
 /// 灾难性回归护栏（**只拦数量级失控**，正常波动远在其下）。
 const CATASTROPHIC_COMMIT_MS: f64 = 5_000.0;
 const CATASTROPHIC_CHAIN_STEP_MS: f64 = 1_000.0;
+const CATASTROPHIC_SEGMENT_RESTORE_MS: f64 = 60_000.0;
 const CATASTROPHIC_AUTH_PUBLISH_MS: f64 = 300_000.0;
 const CATASTROPHIC_AUTH_DECODE_MS: f64 = 120_000.0;
 const CATASTROPHIC_DDS_PER_IMAGE_MS: f64 = 20_000.0;
@@ -285,6 +293,136 @@ fn p1_node_chain_commit_and_restore_baseline() {
 
     fs::remove_file(&oldest).expect("无法清理恢复输出");
     fs::remove_file(&head).expect("无法清理恢复输出");
+    assert!(directory_names(&fixture.workspace.out_directory()).is_empty());
+}
+
+/// 百分位（`p` 为 0–1）：样本先排序，取最接近的次序统计量。
+fn percentile(samples: &mut [f64], p: f64) -> f64 {
+    if samples.is_empty() {
+        return 0.0;
+    }
+    samples.sort_by(|left, right| left.total_cmp(right));
+    let index = ((samples.len() - 1) as f64 * p).round() as usize;
+    samples[index]
+}
+
+/// 计时一次恢复并逐位校验产物，随后删除输出，避免重复轮次相互争抢磁盘。
+#[track_caller]
+fn timed_restore(fixture: &ArtworkFixture, history_id: &str, name: &str, expected: &[u8]) -> f64 {
+    let output = fixture.workspace.out(name);
+    let started = Instant::now();
+    fixture
+        .command("restore")
+        .arg("history", history_id)
+        .arg("output", output.to_string_lossy())
+        .finish()
+        .expect_ok();
+    let elapsed = millis(started.elapsed());
+    assert_eq!(
+        fs::read(&output).expect("无法读取恢复输出"),
+        expected,
+        "段索引场景的恢复产物必须逐位一致"
+    );
+    fs::remove_file(&output).expect("无法清理恢复输出");
+    elapsed
+}
+
+/// P1B：大文件多段链上的恢复耗时分布。
+///
+/// 每个提交都会写出完整 snapshot 与到父节点的反向 delta，4 MiB 随机内容在默认
+/// `2/16/64 KiB` 参数下产生数十个 chunk 段。恢复最早节点要穿过整条 delta 链，
+/// 每次读块都会命中段查找；这里对同一目标重复恢复并报告 p50/p95，作为「深链恢复
+/// 不随 segment 数线性退化」的同机同档证据。耗时含进程启动与打开仓库的固定开销。
+#[test]
+fn p1b_segment_reads_baseline() {
+    let fixture = ArtworkFixture::new();
+    let source = fixture.workspace.work("p1b-source.bin");
+    write_work_file(&source, SEGMENT_FILE_BYTES, 0xD00);
+    let created = fixture
+        .command("create-artwork")
+        .arg("title", "Segment artwork")
+        .arg("branch-title", "Main")
+        .arg("source", source.to_string_lossy())
+        .finish();
+    created.expect_ok();
+    let branch_id = created.data_str("branchId");
+    assert!(!branch_id.is_empty(), "{}", created.describe());
+
+    let build_started = Instant::now();
+    let mut nodes = Vec::with_capacity(SEGMENT_NODES);
+    for index in 0..SEGMENT_NODES {
+        // 每个版本内容全变：delta 无法靠重复块缩小，段数才是真实的。
+        write_work_file(&source, SEGMENT_FILE_BYTES, 0xD00 + index as u64 + 1);
+        let committed = fixture
+            .command("commit")
+            .arg("branch", &branch_id)
+            .arg("commit-kind", "manual")
+            .arg("note", &format!("segment node {index}"))
+            .finish();
+        committed.expect_ok();
+        nodes.push(committed.data_str("historyId"));
+    }
+    let build = build_started.elapsed();
+    let oldest = nodes.first().expect("链上至少一个节点").clone();
+    let head = nodes.last().expect("链上至少一个节点").clone();
+    let oldest_expected = pattern_bytes(SEGMENT_FILE_BYTES, 0xD01);
+    let head_expected = pattern_bytes(SEGMENT_FILE_BYTES, 0xD00 + SEGMENT_NODES as u64);
+
+    let mut oldest_samples = Vec::with_capacity(SEGMENT_RESTORES);
+    let mut head_samples = Vec::with_capacity(SEGMENT_RESTORES);
+    for repeat in 0..SEGMENT_RESTORES {
+        oldest_samples.push(timed_restore(
+            &fixture,
+            &oldest,
+            &format!("p1b-oldest-{repeat}.bin"),
+            &oldest_expected,
+        ));
+        head_samples.push(timed_restore(
+            &fixture,
+            &head,
+            &format!("p1b-head-{repeat}.bin"),
+            &head_expected,
+        ));
+    }
+
+    let oldest_p50 = percentile(&mut oldest_samples, 0.50);
+    let oldest_p95 = percentile(&mut oldest_samples, 0.95);
+    let head_p50 = percentile(&mut head_samples, 0.50);
+    let head_p95 = percentile(&mut head_samples, 0.95);
+    assert!(
+        oldest_p95 < CATASTROPHIC_SEGMENT_RESTORE_MS,
+        "多段深链恢复耗时失控：p95={oldest_p95:.1} ms"
+    );
+    assert!(
+        head_p95 < CATASTROPHIC_SEGMENT_RESTORE_MS,
+        "多段快照恢复耗时失控：p95={head_p95:.1} ms"
+    );
+
+    let mib = SEGMENT_FILE_BYTES as f64 / (1024.0 * 1024.0);
+    emit(
+        "P1 segment reads",
+        &[
+            ("restoreOldestP50Ms", oldest_p50),
+            ("restoreOldestP95Ms", oldest_p95),
+            ("restoreHeadP50Ms", head_p50),
+            ("restoreHeadP95Ms", head_p95),
+            (
+                "restoreOldestMiBPerSecond",
+                mib / (oldest_p50 / 1000.0).max(1e-9),
+            ),
+            (
+                "restoreHeadMiBPerSecond",
+                mib / (head_p50 / 1000.0).max(1e-9),
+            ),
+        ],
+        json!({
+            "nodes": SEGMENT_NODES,
+            "fileBytes": SEGMENT_FILE_BYTES,
+            "restoresPerTarget": SEGMENT_RESTORES,
+            "buildMs": millis(build),
+        }),
+    );
+
     assert!(directory_names(&fixture.workspace.out_directory()).is_empty());
 }
 

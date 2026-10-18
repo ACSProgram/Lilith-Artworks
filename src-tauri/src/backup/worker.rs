@@ -1,25 +1,31 @@
 use std::{
     fs,
     fs::File,
-    io::{self, Seek, Write},
+    io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
-    time::SystemTime,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
+use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 use crate::{
+    cancel::CancelToken,
     cleanup,
     history::{self, HistoryCommit},
     storage,
 };
 
 use super::{
-    chunk_file::{ChunkFile, ChunkingConfig},
+    chunk_file::{ChunkFile, ChunkTask, ChunkWriteOptions, ChunkingConfig},
     BackupCommitResult,
 };
 
 const MAX_TITLE_CHARS: usize = 160;
+/// 快速检查指纹的版本与首尾采样大小。版本号随算法演进；旧基线（历史上直接
+/// 保存的 mtime）与当前值不相等时自然退回全量并重写基线。
+const SOURCE_FINGERPRINT_VERSION: u8 = 1;
+const SOURCE_FINGERPRINT_SAMPLE_BYTES: u64 = 64 * 1024;
 
 /// 提交失败的原因。`pub(crate)` 而不是 `pub(super)`：无头入口同样要区分
 /// 「取消」与「失败」，因此这个类型必须对它可见。
@@ -50,20 +56,52 @@ impl From<&str> for BackupRunError {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SourceMetadata {
     length: u64,
     modified: Option<SystemTime>,
+    /// Cheap fingerprint captured together with the metadata; `None` means the
+    /// quick check cannot trust this baseline and must fall back to full.
+    fingerprint: Option<i64>,
 }
 
-fn system_time_ms(time: Option<SystemTime>) -> Option<i64> {
-    let duration = time?.duration_since(std::time::UNIX_EPOCH).ok()?;
-    i64::try_from(duration.as_millis()).ok()
+/// 计算工作文件的 cheap fingerprint：版本号、大小、修改时间（纳秒）与
+/// 首尾各 64 KiB 采样。任何一步取不到（时间精度不足、打开失败、采样读取失败）
+/// 都返回 `None`，调用方必须退回全量；旧基线里保存的裸 mtime 与指纹取值域不同，
+/// 因此也会自然退回一次全量并重写基线。
+fn source_fingerprint(path: &Path, metadata: &fs::Metadata) -> Option<i64> {
+    let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    // FAT 等粗粒度时间源可能只记录整秒；没有亚秒精度时无法区分同一秒内
+    // 的同尺寸改写，按计划退回全量。
+    if duration.subsec_nanos() == 0 {
+        return None;
+    }
+    let size = metadata.len();
+    let mut file = File::open(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update([SOURCE_FINGERPRINT_VERSION]);
+    hasher.update(size.to_le_bytes());
+    hasher.update(duration.as_secs().to_le_bytes());
+    hasher.update(duration.subsec_nanos().to_le_bytes());
+
+    let mut sample = vec![0_u8; usize::try_from(size.min(SOURCE_FINGERPRINT_SAMPLE_BYTES)).ok()?];
+    file.read_exact(&mut sample).ok()?;
+    hasher.update(&sample);
+    if size > SOURCE_FINGERPRINT_SAMPLE_BYTES {
+        file.seek(SeekFrom::Start(size - SOURCE_FINGERPRINT_SAMPLE_BYTES))
+            .ok()?;
+        file.read_exact(&mut sample).ok()?;
+        hasher.update(&sample);
+    }
+    let digest = hasher.finalize();
+    // 取摘要前 8 字节并把最高位清零，才能存进 `last_source_modified_ms` 的整数列。
+    let digest_prefix = u64::from_le_bytes(digest[..8].try_into().expect("8-byte prefix"));
+    Some((digest_prefix & 0x7fff_ffff_ffff_ffff) as i64)
 }
 
-/// 快速检查：仅比较工作文件大小与修改时间和上次全量检查记录的基线。
-/// 完全一致返回 true，表示可以跳过全量校验；缺少基线、任何不一致或读取
-/// 失败都返回 false，交给全量流程给出权威结论并自行修复或报错。
+/// 快速检查：比较工作文件大小与上次全量检查记录的指纹（时间、首尾采样）。
+/// 完全一致返回 true；缺少基线、任何不一致或读取失败都返回 false，交给全量
+/// 流程给出权威结论并自行修复或报错。
 pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool, String> {
     let branch = history::load_branch(root, branch_id)?;
     // 没有工作文件或还没有任何提交时无从比较，必须走全量路径建立基线。
@@ -76,25 +114,26 @@ pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool
     if let Some(reason) = storage::unattended_source_path_rejection(&branch.source_path) {
         return Err(reason);
     }
-    let Some((size, modified_ms)) = history::load_source_metadata(root, branch_id)? else {
+    let Some((size, Some(expected))) = history::load_source_metadata(root, branch_id)? else {
         return Ok(false);
     };
-    let Ok(metadata) = Path::new(&branch.source_path).metadata() else {
+    let path = Path::new(&branch.source_path);
+    let Ok(metadata) = path.metadata() else {
         return Ok(false);
     };
     if !metadata.is_file() || metadata.len() != u64::try_from(size).unwrap_or(u64::MAX) {
         return Ok(false);
     }
-    Ok(system_time_ms(metadata.modified().ok()) == modified_ms)
+    let Some(fingerprint) = source_fingerprint(path, &metadata) else {
+        return Ok(false);
+    };
+    Ok(fingerprint == expected)
 }
 
 fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadata) {
-    if let Err(error) = history::record_source_metadata(
-        root,
-        branch_id,
-        metadata.length,
-        system_time_ms(metadata.modified),
-    ) {
+    if let Err(error) =
+        history::record_source_metadata(root, branch_id, metadata.length, metadata.fingerprint)
+    {
         log::warn!("failed to record source metadata for branch {branch_id}: {error}");
     }
 }
@@ -104,11 +143,17 @@ fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadat
 /// 独立成函数只为让「快照写入」这一步能被磁盘写满注入测试直接复用：产品路径传入
 /// `NamedTempFile` 的文件句柄，测试传入一个耗尽的受限写入器，走的是同一段代码，
 /// 因此注入测试断言的是真实行为，而不是一个模仿出来的分支。
-fn create_snapshot<W>(source: &mut File, writer: &mut W) -> Result<ChunkFile, String>
+fn create_snapshot<W>(
+    source: &mut File,
+    writer: &mut W,
+    options: ChunkWriteOptions,
+    cancel: &CancelToken,
+) -> Result<ChunkFile, String>
 where
     W: Write + Seek,
 {
-    ChunkFile::create(source, writer, ChunkingConfig::default())
+    let task = ChunkTask::cancel(cancel);
+    ChunkFile::create(source, writer, ChunkingConfig::default(), options, &task)
         .map_err(|error| format!("无法创建文件快照：{error}"))
 }
 
@@ -117,7 +162,8 @@ pub(crate) fn run_backup(
     branch_id: &str,
     note: &str,
     commit_kind: &str,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
 ) -> Result<BackupCommitResult, BackupRunError> {
     if note.chars().count() > 500 {
         return Err(BackupRunError::Failed("提交备注不能超过 500 个字符".into()));
@@ -134,7 +180,7 @@ pub(crate) fn run_backup(
     };
     let title = title.chars().take(MAX_TITLE_CHARS).collect::<String>();
     let branch = history::load_branch(root, branch_id)?;
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     history::ensure_directories(root, &branch.artwork_id)?;
     // 未选择工作文件的分支不参与备份：调度已跳过，这里兜底给出明确错误。
     if branch.source_path.trim().is_empty() {
@@ -154,12 +200,12 @@ pub(crate) fn run_backup(
     let temp_directory = artwork_directory.join("temp");
     let mut snapshot_temp = NamedTempFile::new_in(&temp_directory)
         .map_err(|error| format!("无法创建 snapshot 临时文件：{error}"))?;
-    let snapshot = create_snapshot(&mut source, snapshot_temp.as_file_mut())?;
+    let snapshot = create_snapshot(&mut source, snapshot_temp.as_file_mut(), options, cancel)?;
     snapshot_temp
         .as_file()
         .sync_all()
         .map_err(|error| format!("无法同步 snapshot：{error}"))?;
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let after = source_metadata(source_path)?;
     if before.length != after.length || before.modified != after.modified {
         return Err(BackupRunError::Failed(
@@ -178,8 +224,8 @@ pub(crate) fn run_backup(
         .as_ref()
         .filter(|node| node.sha256.eq_ignore_ascii_case(&digest))
     {
-        if let Err(validation_error) = validate_head_snapshot(root, head) {
-            ensure_not_cancelled(&cancelled)?;
+        if let Err(validation_error) = validate_head_snapshot(root, head, cancel) {
+            ensure_not_cancelled(cancel)?;
             log::warn!(
                 "HEAD snapshot {} failed validation and will be rebuilt: {validation_error}",
                 head.id
@@ -193,9 +239,10 @@ pub(crate) fn run_backup(
         // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
         record_source_metadata(root, branch_id, &after);
         log::info!(
-            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, elapsed_ms={}",
+            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}",
             head.id,
             snapshot.logical_size(),
+            options.format,
             started.elapsed().as_millis()
         );
         return Ok(BackupCommitResult {
@@ -226,8 +273,15 @@ pub(crate) fn run_backup(
             .map_err(|error| format!("无法读取当前 snapshot：{error}"))?;
         let mut temp = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建 delta 临时文件：{error}"))?;
+        let task = ChunkTask::cancel(cancel);
         snapshot
-            .create_reverse_delta(&previous_chunk, &mut previous_file, temp.as_file_mut())
+            .create_reverse_delta(
+                &previous_chunk,
+                &mut previous_file,
+                temp.as_file_mut(),
+                options,
+                &task,
+            )
             .map_err(|error| format!("无法创建反向增量：{error}"))?;
         temp.as_file()
             .sync_all()
@@ -246,7 +300,7 @@ pub(crate) fn run_backup(
         delta_temp = Some(temp);
     }
 
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     publish_temp(snapshot_temp, &snapshot_final, "snapshot")?;
     if let (Some(temp), Some(final_path)) = (delta_temp, delta_final.as_ref()) {
         if let Err(error) = publish_temp(temp, final_path, "delta") {
@@ -254,7 +308,7 @@ pub(crate) fn run_backup(
             return Err(error.into());
         }
     }
-    if let Err(error) = ensure_not_cancelled(&cancelled) {
+    if let Err(error) = ensure_not_cancelled(cancel) {
         let _ = fs::remove_file(&snapshot_final);
         if let Some(path) = delta_final.as_ref() {
             let _ = fs::remove_file(path);
@@ -302,7 +356,9 @@ pub(crate) fn run_backup(
     // 提交成功，记录基线元数据供快速检查使用。
     record_source_metadata(root, branch_id, &after);
     log::info!(
-        "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, elapsed_ms={}",
+        "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, format={:?}, chunking={:?}, elapsed_ms={}",
+        options.format,
+        options.chunking,
         started.elapsed().as_millis()
     );
     Ok(BackupCommitResult {
@@ -312,7 +368,11 @@ pub(crate) fn run_backup(
     })
 }
 
-fn validate_head_snapshot(root: &Path, head: &history::HistoryRecord) -> Result<(), String> {
+fn validate_head_snapshot(
+    root: &Path,
+    head: &history::HistoryRecord,
+    cancel: &CancelToken,
+) -> Result<(), String> {
     let relative = head
         .snapshot_path
         .as_deref()
@@ -329,8 +389,9 @@ fn validate_head_snapshot(root: &Path, head: &history::HistoryRecord) -> Result<
     {
         return Err("当前 HEAD snapshot 摘要与历史数据库不匹配".into());
     }
+    let task = ChunkTask::cancel(cancel);
     snapshot
-        .copy_original(&mut file, &mut io::sink())
+        .copy_original(&mut file, &mut io::sink(), &task)
         .map_err(|error| format!("当前 HEAD snapshot 完整性校验失败：{error}"))
 }
 
@@ -366,8 +427,8 @@ fn repair_head_snapshot(
     }
 }
 
-fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), BackupRunError> {
-    if cancelled() {
+fn ensure_not_cancelled(cancel: &CancelToken) -> Result<(), BackupRunError> {
+    if cancel.is_cancelled() {
         Err(BackupRunError::Cancelled)
     } else {
         Ok(())
@@ -384,6 +445,7 @@ fn source_metadata(path: &Path) -> Result<SourceMetadata, String> {
     Ok(SourceMetadata {
         length: metadata.len(),
         modified: metadata.modified().ok(),
+        fingerprint: source_fingerprint(path, &metadata),
     })
 }
 
@@ -436,7 +498,7 @@ mod tests {
             root,
             history_id,
             output.to_str().unwrap(),
-            || false,
+            &CancelToken::standalone(),
             |_, _, _| {},
         )
         .unwrap();
@@ -450,7 +512,15 @@ mod tests {
         // 没有任何提交也没有基线时必须退回全量。
         assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
 
-        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         assert!(quick_check_unchanged(&root, &branch_id).unwrap());
 
         fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
@@ -462,9 +532,47 @@ mod tests {
     }
 
     #[test]
+    fn quick_check_detects_same_size_mtime_edit_in_sampled_region() {
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let mut bytes = fs::read(&source).unwrap();
+        for byte in &mut bytes[..1024] {
+            *byte ^= 0xff;
+        }
+        fs::write(&source, bytes).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+    }
+
+    #[test]
     fn quick_check_needs_a_readable_source_file() {
         let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
-        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         fs::remove_file(&source).unwrap();
         assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
     }
@@ -477,7 +585,15 @@ mod tests {
         let artwork =
             library::create_artwork(&root, None, "Artwork", "Main", Path::new(""), false).unwrap();
 
-        let error = run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap_err();
+        let error = run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap_err();
 
         assert!(
             matches!(error, BackupRunError::Failed(ref message) if message.contains("未选择工作文件")),
@@ -489,13 +605,29 @@ mod tests {
     fn commits_delta_and_restores_parent_bytes() {
         let (directory, root, source, artwork_id, branch_id) = create_fixture();
 
-        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = first.history_id.unwrap();
         fs::File::create(&source)
             .unwrap()
             .write_all(&[vec![b'A'; 48 * 1024], vec![b'B'; 48 * 1024]].concat())
             .unwrap();
-        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         assert!(second.created);
 
         let nodes = history::list(&root, &artwork_id).unwrap().nodes;
@@ -505,7 +637,8 @@ mod tests {
             vec![b'A'; 96 * 1024]
         );
         assert_eq!(
-            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
+                .unwrap(),
             2
         );
     }
@@ -514,7 +647,17 @@ mod tests {
     fn cancellation_has_a_typed_result() {
         let (_directory, root, _source, _artwork_id, branch_id) = create_fixture();
 
-        let error = run_backup(&root, &branch_id, "", "automatic", || true).unwrap_err();
+        let cancelled = CancelToken::standalone();
+        cancelled.cancel();
+        let error = run_backup(
+            &root,
+            &branch_id,
+            "",
+            "automatic",
+            &cancelled,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap_err();
 
         assert!(matches!(error, BackupRunError::Cancelled));
     }
@@ -522,9 +665,25 @@ mod tests {
     #[test]
     fn repository_scrub_rejects_a_damaged_delta() {
         let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
-        run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
-        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let delta_relative = history::load_node(&root, second.history_id.as_deref().unwrap())
             .unwrap()
             .delta_path
@@ -535,7 +694,9 @@ mod tests {
         )
         .unwrap();
 
-        let error = super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap_err();
+        let error =
+            super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
+                .unwrap_err();
 
         assert!(error.contains("delta"), "{error}");
     }
@@ -543,11 +704,27 @@ mod tests {
     #[test]
     fn unchanged_backup_keeps_a_valid_head_snapshot() {
         let (_directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = first.history_id.unwrap();
         let original_path = history::load_node(&root, &first_id).unwrap().snapshot_path;
 
-        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
         assert!(!second.created);
         assert!(second.unchanged);
@@ -560,7 +737,15 @@ mod tests {
     #[test]
     fn unchanged_backup_repairs_a_missing_head_snapshot() {
         let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = first.history_id.unwrap();
         let original_relative = history::load_node(&root, &first_id)
             .unwrap()
@@ -568,7 +753,15 @@ mod tests {
             .unwrap();
         fs::remove_file(storage::resolve_path(&root, &original_relative).unwrap()).unwrap();
 
-        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let repaired = history::load_node(&root, &first_id).unwrap();
 
         assert!(!second.created);
@@ -591,7 +784,15 @@ mod tests {
     #[test]
     fn unchanged_backup_repairs_a_corrupt_head_snapshot() {
         let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = first.history_id.unwrap();
         let original_relative = history::load_node(&root, &first_id)
             .unwrap()
@@ -602,7 +803,15 @@ mod tests {
         *damaged.last_mut().unwrap() ^= 0xff;
         fs::write(&original_path, damaged).unwrap();
 
-        let second = run_backup(&root, &branch_id, "Second", "manual", || false).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let repaired = history::load_node(&root, &first_id).unwrap();
 
         assert!(!second.created);
@@ -621,7 +830,15 @@ mod tests {
     #[test]
     fn restore_and_checkpoint_reject_a_replaced_snapshot() {
         let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(&root, &branch_id, "First", "manual", || false).unwrap();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = first.history_id.unwrap();
         let relative = history::load_node(&root, &first_id)
             .unwrap()
@@ -638,12 +855,17 @@ mod tests {
             &root,
             &first_id,
             output.to_str().unwrap(),
-            || false,
+            &CancelToken::standalone(),
             |_, _, _| {},
         )
         .unwrap_err();
-        let checkpoint_error =
-            super::super::restore::ensure_checkpoint(&root, &first_id).unwrap_err();
+        let checkpoint_error = super::super::restore::ensure_checkpoint(
+            &root,
+            &first_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap_err();
 
         assert!(restore_error.contains("snapshot"), "{restore_error}");
         assert!(checkpoint_error.contains("snapshot"), "{checkpoint_error}");
@@ -662,7 +884,15 @@ mod tests {
 
         // 先提交一次建立初始节点，其内容就是初始工作文件字节。
         let mut current = fs::read(&source).unwrap();
-        let initial = run_backup(&root, &branch_id, "initial", "manual", || false).unwrap();
+        let initial = run_backup(
+            &root,
+            &branch_id,
+            "initial",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let mut revisions = vec![(initial.history_id.unwrap(), current.clone())];
 
         for round in 0..8 {
@@ -681,7 +911,8 @@ mod tests {
                 &branch_id,
                 &format!("round {round}"),
                 "manual",
-                || false,
+                &CancelToken::standalone(),
+                ChunkWriteOptions::V1,
             )
             .unwrap();
             let id = result.history_id.expect("每次改动都应产生新节点");
@@ -697,7 +928,7 @@ mod tests {
                 &root,
                 id,
                 output.to_str().unwrap(),
-                || false,
+                &CancelToken::standalone(),
                 |_, _, _| {},
             )
             .unwrap();
@@ -709,7 +940,8 @@ mod tests {
         }
 
         assert_eq!(
-            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
+                .unwrap(),
             revisions.len() as u64
         );
     }
@@ -723,7 +955,15 @@ mod tests {
     #[test]
     fn a_full_disk_during_snapshot_leaves_the_repository_intact() {
         let (directory, root, source, artwork_id, branch_id) = create_fixture();
-        let initial = run_backup(&root, &branch_id, "initial", "manual", || false).unwrap();
+        let initial = run_backup(
+            &root,
+            &branch_id,
+            "initial",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
         let first_id = initial.history_id.unwrap();
         let nodes_before = history::list(&root, &artwork_id).unwrap().nodes.len();
 
@@ -731,7 +971,13 @@ mod tests {
         let quota = 16 * 1024;
         let mut writer = QuotaWriter::new(&mut backing, quota);
         let mut handle = fs::File::open(&source).unwrap();
-        let error = create_snapshot(&mut handle, &mut writer).unwrap_err();
+        let error = create_snapshot(
+            &mut handle,
+            &mut writer,
+            ChunkWriteOptions::V1,
+            &CancelToken::standalone(),
+        )
+        .unwrap_err();
 
         assert!(error.contains("无法创建文件快照"), "{error}");
         assert!(
@@ -746,7 +992,8 @@ mod tests {
             nodes_before
         );
         assert_eq!(
-            super::super::restore::scrub_history(&root, || false, |_, _| {}).unwrap(),
+            super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
+                .unwrap(),
             nodes_before as u64
         );
         let head = history::list(&root, &artwork_id).unwrap().nodes[0]

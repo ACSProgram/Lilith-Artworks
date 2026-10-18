@@ -19,7 +19,7 @@
 1. 先读所选模块文档和 `docs/planning/current-handoff.md`（当前批次状态）；未完成事项查
    `docs/planning/todo.md`，历史批次记录见 `docs/planning/archive/`。
 2. 再读前端 `types.ts`/`api.ts` 或 Rust `model.rs`/`commands.rs`，确认 DTO 与命令契约。
-3. 最后读实现。数据库工作进入领域仓储；文件格式工作只在必要时进入 `backup/chunk_file.rs`。
+3. 最后读实现。数据库工作进入领域仓储；ChunkFile 格式只在必要时进入 `backup/chunk_file.rs`，`.clip`/`.psd` 容器边界读 `format/container.rs`。
 
 ## 边界
 

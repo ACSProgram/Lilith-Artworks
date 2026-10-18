@@ -35,6 +35,8 @@ export interface AppSettings {
   closeToTray: boolean;
   pauseAutomaticBackups: boolean;
   automaticBackupCheckMode: BackupCheckMode;
+  /** 新节点是否使用 ChunkFile v2；旧 v1 节点始终可读。 */
+  chunkFileFormatV2: boolean;
   window: WindowSettings;
   content: ContentSettings;
   pinBoard: PinBoardSettings;

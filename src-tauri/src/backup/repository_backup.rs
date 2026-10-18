@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{authenticity, library, repository_lock, storage};
+use crate::{authenticity, cancel::CancelToken, library, repository_lock, storage};
 
 use super::restore;
 
@@ -173,7 +173,7 @@ fn is_staging_directory_name(name: &str) -> bool {
 pub(crate) fn create_repository_backup(
     root: &Path,
     destination_parent: &Path,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
     progress: impl Fn(&str, u64, u64),
 ) -> Result<RepositoryBackupReport, String> {
     validate_destination(root, destination_parent)?;
@@ -184,7 +184,7 @@ pub(crate) fn create_repository_backup(
             StagingSweep::default()
         }
     };
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     progress("正在固定数据库一致性视图", 0, 0);
     checkpoint_database(root)?;
 
@@ -225,7 +225,7 @@ pub(crate) fn create_repository_backup(
         let mut copied_bytes = 0_u64;
         progress("正在复制仓库文件", 0, source_bytes);
         for source in &source_files {
-            ensure_not_cancelled(&cancelled)?;
+            ensure_not_cancelled(cancel)?;
             let relative = source
                 .strip_prefix(root)
                 .map_err(|_| "无法计算仓库文件相对路径")?;
@@ -234,22 +234,21 @@ pub(crate) fn create_repository_backup(
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("无法创建备份子目录：{error}"))?;
             }
-            copy_file_stable(source, &target, &cancelled, |bytes| {
+            copy_file_stable(source, &target, cancel, |bytes| {
                 copied_bytes = copied_bytes.saturating_add(bytes);
                 progress("正在复制仓库文件", copied_bytes, source_bytes);
             })?;
         }
 
-        ensure_not_cancelled(&cancelled)?;
+        ensure_not_cancelled(cancel)?;
         progress("正在校验备份", 0, 0);
         library::open_existing(&repository_copy)?;
-        let history_nodes =
-            restore::scrub_history(&repository_copy, &cancelled, |current, total| {
-                progress("正在校验备份历史链", current, total)
-            })?;
+        let history_nodes = restore::scrub_history(&repository_copy, cancel, |current, total| {
+            progress("正在校验备份历史链", current, total)
+        })?;
         let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
             &repository_copy,
-            &cancelled,
+            &|| cancel.is_cancelled(),
             |current, total| progress("正在校验备份发布文件", current, total),
         )?;
         checkpoint_database(&repository_copy)?;
@@ -259,7 +258,7 @@ pub(crate) fn create_repository_backup(
         let mut manifest_files = Vec::with_capacity(copied_files.len());
         let mut total_bytes = 0_u64;
         for (index, path) in copied_files.iter().enumerate() {
-            ensure_not_cancelled(&cancelled)?;
+            ensure_not_cancelled(cancel)?;
             progress(
                 "正在生成备份校验清单",
                 index as u64,
@@ -275,7 +274,7 @@ pub(crate) fn create_repository_backup(
             manifest_files.push(ManifestFile {
                 path: storage::relative_path(&repository_copy, path)?,
                 bytes,
-                sha256: sha256_file(path, &cancelled)?,
+                sha256: sha256_file(path, cancel)?,
             });
         }
         progress(
@@ -297,8 +296,8 @@ pub(crate) fn create_repository_backup(
             files: manifest_files,
         };
         write_manifest(&staging_path, &manifest)?;
-        verify_backup_bundle(&staging_path, &cancelled)?;
-        ensure_not_cancelled(&cancelled)?;
+        verify_backup_bundle(&staging_path, cancel)?;
+        ensure_not_cancelled(cancel)?;
 
         progress("正在发布备份", 0, 1);
         fs::rename(&staging_path, &final_path).map_err(|error| format!("无法发布备份：{error}"))?;
@@ -417,7 +416,7 @@ fn is_database_sidecar(relative: &Path) -> bool {
 fn copy_file_stable(
     source: &Path,
     target: &Path,
-    cancelled: &impl Fn() -> bool,
+    cancel: &CancelToken,
     mut on_progress: impl FnMut(u64),
 ) -> Result<(), String> {
     let before = source
@@ -432,7 +431,7 @@ fn copy_file_stable(
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     let mut copied = 0_u64;
     loop {
-        ensure_not_cancelled(cancelled)?;
+        ensure_not_cancelled(cancel)?;
         let read = input
             .read(&mut buffer)
             .map_err(|error| format!("无法读取仓库文件：{error}"))?;
@@ -471,12 +470,12 @@ fn remove_database_sidecars(root: &Path) -> Result<(), String> {
     Ok(())
 }
 
-fn sha256_file(path: &Path, cancelled: &impl Fn() -> bool) -> Result<String, String> {
+fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
     loop {
-        ensure_not_cancelled(cancelled)?;
+        ensure_not_cancelled(cancel)?;
         let read = file
             .read(&mut buffer)
             .map_err(|error| format!("无法校验备份文件：{error}"))?;
@@ -502,7 +501,7 @@ fn write_manifest(bundle: &Path, manifest: &RepositoryBackupManifest) -> Result<
         .map_err(|error| format!("无法同步备份校验清单：{error}"))
 }
 
-fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<(), String> {
+fn verify_backup_bundle(bundle: &Path, cancel: &CancelToken) -> Result<(), String> {
     let manifest: RepositoryBackupManifest = serde_json::from_slice(
         &fs::read(bundle.join(MANIFEST_NAME))
             .map_err(|error| format!("无法读取备份校验清单：{error}"))?,
@@ -530,14 +529,13 @@ fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<
     }
     let mut total_bytes = 0_u64;
     for entry in &manifest.files {
-        ensure_not_cancelled(cancelled)?;
+        ensure_not_cancelled(cancel)?;
         let path = storage::resolve_path(&repository, &entry.path)?;
         let bytes = path
             .metadata()
             .map_err(|error| format!("无法读取备份文件属性：{error}"))?
             .len();
-        if bytes != entry.bytes
-            || !sha256_file(&path, cancelled)?.eq_ignore_ascii_case(&entry.sha256)
+        if bytes != entry.bytes || !sha256_file(&path, cancel)?.eq_ignore_ascii_case(&entry.sha256)
         {
             return Err(format!("备份文件校验失败：{}", entry.path));
         }
@@ -551,8 +549,8 @@ fn verify_backup_bundle(bundle: &Path, cancelled: &impl Fn() -> bool) -> Result<
     Ok(())
 }
 
-fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
-    if cancelled() {
+fn ensure_not_cancelled(cancel: &CancelToken) -> Result<(), String> {
+    if cancel.is_cancelled() {
         Err("备份操作已取消".into())
     } else {
         Ok(())
@@ -584,20 +582,42 @@ mod tests {
         library::initialize(&root).unwrap();
         let artwork =
             library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
-        run_backup(&root, &artwork.branch_id, "First", "manual", || false).unwrap();
+        run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            crate::backup::chunk_file::ChunkWriteOptions::V1,
+        )
+        .unwrap();
         fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
-        run_backup(&root, &artwork.branch_id, "Second", "manual", || false).unwrap();
+        run_backup(
+            &root,
+            &artwork.branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            crate::backup::chunk_file::ChunkWriteOptions::V1,
+        )
+        .unwrap();
 
-        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+        let report = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap();
         let restored = PathBuf::from(&report.repository_path);
         assert_eq!(report.history_nodes, 2);
         assert!(report.file_count >= 3);
-        verify_backup_bundle(Path::new(&report.backup_path), &|| false).unwrap();
+        verify_backup_bundle(Path::new(&report.backup_path), &CancelToken::standalone()).unwrap();
 
         fs::remove_dir_all(&root).unwrap();
         library::open_existing(&restored).unwrap();
         assert_eq!(
-            restore::scrub_history(&restored, || false, |_, _| {}).unwrap(),
+            restore::scrub_history(&restored, &CancelToken::standalone(), |_, _| {}).unwrap(),
             2
         );
         assert_eq!(
@@ -617,8 +637,13 @@ mod tests {
         let destination = root.join("backups");
         fs::create_dir(&destination).unwrap();
 
-        let error =
-            create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap_err();
+        let error = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap_err();
 
         assert!(error.contains("不能位于作品仓库内部"), "{error}");
     }
@@ -638,14 +663,20 @@ mod tests {
         .unwrap();
         fs::write(root.join(repository_lock::OWNER_FILE_NAME), b"owner").unwrap();
 
-        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+        let report = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap();
         let restored = PathBuf::from(&report.repository_path);
         assert!(!restored.join(repository_lock::LOCK_FILE_NAME).exists());
         assert!(!restored
             .join(format!("{}-journal", repository_lock::LOCK_FILE_NAME))
             .exists());
         assert!(!restored.join(repository_lock::OWNER_FILE_NAME).exists());
-        verify_backup_bundle(Path::new(&report.backup_path), &|| false).unwrap();
+        verify_backup_bundle(Path::new(&report.backup_path), &CancelToken::standalone()).unwrap();
     }
 
     #[test]
@@ -656,14 +687,13 @@ mod tests {
         library::initialize(&root).unwrap();
         fs::create_dir(&destination).unwrap();
 
-        let cancellation_checks = AtomicUsize::new(0);
-        let error = create_repository_backup(
-            &root,
-            &destination,
-            || cancellation_checks.fetch_add(1, Ordering::SeqCst) >= 2,
-            |_, _, _| {},
-        )
-        .unwrap_err();
+        let cancellation_checks = std::sync::Arc::new(AtomicUsize::new(0));
+        let cancel = CancelToken::with_source({
+            let cancellation_checks = cancellation_checks.clone();
+            move || cancellation_checks.fetch_add(1, Ordering::SeqCst) >= 2
+        });
+        let error =
+            create_repository_backup(&root, &destination, &cancel, |_, _, _| {}).unwrap_err();
 
         assert!(error.contains("已取消"), "{error}");
         assert!(error.contains("临时备份已清理"), "{error}");
@@ -677,7 +707,13 @@ mod tests {
         let destination = directory.path().join("backups");
         library::initialize(&root).unwrap();
         fs::create_dir(&destination).unwrap();
-        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+        let report = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap();
         let bundle = PathBuf::from(report.backup_path);
 
         fs::write(
@@ -687,7 +723,7 @@ mod tests {
             b"replaced database",
         )
         .unwrap();
-        let error = verify_backup_bundle(&bundle, &|| false).unwrap_err();
+        let error = verify_backup_bundle(&bundle, &CancelToken::standalone()).unwrap_err();
 
         assert!(error.contains("校验失败"), "{error}");
     }
@@ -754,13 +790,19 @@ mod tests {
         let recent = staging_directory(&destination);
         fs::create_dir(&recent).unwrap();
 
-        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+        let report = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap();
 
         assert_eq!(report.reclaimed_staging_directories, 0);
         assert_eq!(report.failed_staging_directories, 0);
         assert!(recent.exists(), "本次备份不得删除宽限期内的暂存目录");
         let bundle = PathBuf::from(&report.backup_path);
         assert!(bundle.is_dir(), "本次备份必须正常发布");
-        verify_backup_bundle(&bundle, &|| false).unwrap();
+        verify_backup_bundle(&bundle, &CancelToken::standalone()).unwrap();
     }
 }

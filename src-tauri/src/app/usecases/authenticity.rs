@@ -18,7 +18,13 @@ pub(crate) fn enter_publication(
         let (_, history_id) = authenticity::branch_head(session.root(), &request.branch_id)
             .map_err(CommandError::from)?;
         context.report_progress("正在固化发布检查点", 0, 2);
-        backup::ensure_checkpoint(session.root(), &history_id).map_err(CommandError::from)?;
+        backup::ensure_checkpoint(
+            session.root(),
+            &history_id,
+            context.cancel(),
+            context.chunk_write_options(),
+        )
+        .map_err(CommandError::from)?;
         context.report_progress("正在保存最终成品", 1, 2);
         authenticity::store_final_artifact(
             session.root(),

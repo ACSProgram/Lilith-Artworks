@@ -48,9 +48,20 @@
   导出状态移出组件；导入/导出进度改经 `CommandContext` 广播 `operationProgress`，不再使用
   `Channel`。`cargo check --features headless`、`cargo test --lib`、`npx tsc --noEmit`、
   `npm test`、`cargo fmt --check` 已通过；GUI 人工验收与压力测试**未做**。
-- **下一步**：由维护者验收阶段 1、阶段 2、阶段 3 的产品行为；随后进入阶段 4（分块、恢复与
-  完整性算法）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
-- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1–3（待验收）、阶段 4–9。
+- **阶段 4 已实现并提交、待维护者验收**：ChunkFile 新增 v2 写入（80 B snapshot / 120 B delta
+  头、44 B 块记录、`stored_len=0` 快照去重）并保留 v1 reader，`chunkFileFormatV2` 应用设置默认开启、
+  只影响新节点；新增 `src-tauri/src/format/container.rs`，`.clip` 按 CSFC/tile 边界做容器感知分块，
+  `.psd` 只探测并回退 CDC，`min_size` 只约束 CDC 布局、结构单元只受 `max_size` 约束；
+  `ChunkStore` 增加排序段索引与 reader 游标，`ChunkReader` 顺序/跳跃/跨段
+  读取不再线性扫段；`materialization_chain` 改为一次递归 CTE；快速检查基线升级为版本化 cheap
+  fingerprint（大小、纳秒 mtime、首尾 64 KiB，复用 `last_source_modified_ms`）；`CancelToken` 移到
+  crate 根并贯穿创建、delta、复制、链解析、导出与 scrub，进度按字节报告；`stress_bench` 新增 P1B
+  多段链 p50/p95 基准。`cargo check --lib`（含 `headless`）、`cargo check --features headless --test
+  stress_bench`、`cargo test --lib`（224 通过）、`npx tsc --noEmit`、`npm test`（219 通过）、
+  `cargo fmt --check` 与 `git diff --check` 已通过；P1B 与整套压力测试、GUI 人工验收**未运行**。
+- **下一步**：由维护者验收阶段 1–4 的产品行为；随后进入阶段 5（调度、清理与灾备算法）。
+  alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
+- 未完成事项全部在 `todo.md`：0.3 前的补强候选、阶段 1–4（待验收）与阶段 5–9。
 
 ## 当前基线
 
@@ -58,8 +69,8 @@
   `dev` = 0.3 开发线，从 `0be6224` 创建。
 - 版本：`dev` 尚未切 0.3 版本号，五处版本字段仍为 `0.2.0`；日常改动写入 `CHANGELOG.md`
   的 `## Unreleased`，切版本与打标签由维护者按 `docs/guides/release-policy.md` 单独决定。
-- repository schema v4，ChunkFile format v1；0.3-alpha1 保持 v4（仅连接内临时表），
-  0.3-alpha2 阶段 7 执行唯一一次 v4 → v5 迁移。
+- repository schema v4；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1），
+  0.3-alpha1 保持 v4（仅连接内临时表），0.3-alpha2 阶段 7 执行唯一一次 v4 → v5 迁移。
 - 0.3 基线（阶段 0 一次性采集）：临时仓库副本 `D:\temp\Artworks`（3 作品 / 59 历史节点 /
   ≈9.83 GiB），采集后已按采集前状态还原。该副本是**外部临时资料**，随 0.3 计划落实后撤除，
   不作为本项目的长期测试夹具或门槛；后续批次的回归对照用 `stress_bench` 与 `stress_baseline`

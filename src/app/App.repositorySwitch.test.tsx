@@ -85,6 +85,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     closeToTray: true,
     pauseAutomaticBackups: false,
     automaticBackupCheckMode: "quick",
+    chunkFileFormatV2: true,
     window: {
       x: null,
       y: null,

@@ -17,7 +17,8 @@ src/modules/pin-board    按 Artwork 的素材板画布、图片导入导出与�
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 
 src-tauri/src/app/                     配置、窗口和应用生命周期
-src-tauri/src/app/command_runtime/     CommandContext、typed error、CancelToken、AppEvent v1 与 OperationCoordinator
+src-tauri/src/app/command_runtime/     CommandContext、typed error、AppEvent v1 与 OperationCoordinator
+src-tauri/src/cancel.rs               跨模块 CancelToken（命令运行时与 ChunkFile I/O 共用）
 src-tauri/src/app/usecases/            GUI 与 headless 共享的业务入口
 src-tauri/src/app/workflows.rs         跨领域 Tauri 命令适配器
 src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领域分组）
@@ -26,7 +27,8 @@ src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
 src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务
 src-tauri/src/history/                 分支、历史节点、创建分支、裁剪和历史图契约
-src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备、调度和取消
+src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备与调度
+src-tauri/src/format/                  `.clip`/`.psd` 容器探测与结构单元定位（备份与后续缩略图共用）
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
 src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
 src-tauri/src/cleanup.rs                 文件清理账本：提交后重放、路径校验、未引用文件扫描与确认清理

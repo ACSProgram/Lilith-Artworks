@@ -4,7 +4,6 @@
 //! 映射错误；业务入口是 `app::usecases` 中的函数，运行时由
 //! [`OperationCoordinator`] 统一取锁、取消与观测。
 
-mod cancel;
 mod coordinator;
 mod error;
 mod events;
@@ -14,7 +13,6 @@ mod types;
 // feature 或测试构建中被引用，非该构建下保留再导出是有意为之。
 #[allow(unused_imports)]
 pub(crate) use self::{
-    cancel::CancelToken,
     coordinator::{CommandContext, OperationCoordinator, RepositorySession},
     error::{CommandError, CommandErrorKind, CommandErrorSummary},
     events::{
@@ -23,3 +21,5 @@ pub(crate) use self::{
     },
     types::{OperationClass, OperationDomain, OperationId},
 };
+#[allow(unused_imports)]
+pub(crate) use crate::cancel::CancelToken;

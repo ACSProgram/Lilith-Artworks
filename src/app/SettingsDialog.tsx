@@ -277,7 +277,7 @@ export function SettingsDialog() {
                   </label>
                   <div className="settings-preference-row">
                     <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
-                    <span className="settings-row-copy"><strong>默认检查方式</strong><small>{draft.automaticBackupCheckMode === "quick" ? "快速：仅比较大小与修改时间，有变化再全量备份" : "全量：每次都完整校验内容"}</small></span>
+                    <span className="settings-row-copy"><strong>默认检查方式</strong><small>{draft.automaticBackupCheckMode === "quick" ? "快速：比较大小、修改时间与首尾采样，有变化再全量备份" : "全量：每次都完整校验内容"}</small></span>
                     <select
                       aria-label="自动备份默认检查方式"
                       value={draft.automaticBackupCheckMode}
@@ -287,6 +287,26 @@ export function SettingsDialog() {
                       <option value="full">全量校验</option>
                     </select>
                   </div>
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <div className="settings-section-title"><Layers aria-hidden="true" size={17} /><h3>存储格式</h3></div>
+                <div className="settings-preference-list">
+                  <label className="settings-preference-row">
+                    <span className="settings-row-icon"><Layers aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy is-descriptive">
+                      <strong>ChunkFile v2</strong>
+                      <small>新节点使用容器对齐分块与快照去重，旧 v1 节点仍可正常读取；关闭后只影响此后新写入的节点。</small>
+                    </span>
+                    <input
+                      className="switch-input"
+                      type="checkbox"
+                      aria-label="ChunkFile v2"
+                      checked={draft.chunkFileFormatV2}
+                      onChange={(event) => update({ chunkFileFormatV2: event.target.checked })}
+                    />
+                  </label>
                 </div>
               </div>
 

@@ -74,6 +74,36 @@ decision, so an untagged version is transitional.
   settlement registration and save/import/export state. The WebGPU renderer
   stays a pure renderer; pin-board import/export progress now travels through
   `CommandContext` as `operationProgress` events instead of a `Channel`.
+- ChunkFile v2 as an opt-out write format: 80 B snapshot and 120 B delta
+  headers record version, chunker, hash, codec and adapter; 44 B chunk records
+  carry stored/logical lengths, codec, recipe and flags. Snapshots store
+  duplicate chunks once as `stored_len = 0` references (tile-level dedup), and
+  the v1 reader stays in place so a repository can mix both versions. Errors
+  now separate `InvalidFormat`, `Integrity` and `Incompatible` from the
+  file/container/chunker/hash/codec/recipe/adapter/chunk dimension.
+- A shared container parser in `src-tauri/src/format/container.rs` that detects
+  `.clip` (`CSFCHUNK`) and `.psd` (`8BPS`) and walks `.clip` CSFC blocks, tiles
+  and Exta records without loading payloads. v2 snapshot and delta writes use
+  its structural units for tile-aligned chunking, split oversized units with
+  CDC and fall back to CDC when parsing fails; `.psd` is detect-only for now.
+- A sorted virtual-segment index and cached reader cursor in `ChunkStore`.
+  Sequential reads stay in the current segment, jumps use binary search, and a
+  read that crosses segment boundaries completes in one call instead of
+  rescanning the segment list per chunk.
+- A versioned quick-check fingerprint for automatic backups (version 1:
+  SHA-256 over a version byte, size, nanosecond mtime and 64 KiB head/tail
+  samples, high bit cleared and stored in the existing
+  `branches.last_source_modified_ms` column). Baselines holding a raw mtime,
+  timestamps without subsecond precision, missing files or failed sampling
+  fall back to a full check; manual commits stay full.
+- A `chunkFileFormatV2` application setting (default on) and a settings-page
+  switch. It only selects the format of newly written snapshots/deltas; old v1
+  nodes remain readable and switching off restores v1 writes without rewriting
+  existing files. Commit, checkpoint and compaction logs record the format.
+- A `stress_bench` P1B benchmark that builds a 4 MiB × 6-node chain, restores
+  the oldest and newest nodes repeatedly and reports p50/p95 plus throughput
+  for multi-segment reads. It is release-time decision evidence and does not
+  run in daily checks or CI.
 
 ### Changed
 
@@ -112,9 +142,27 @@ decision, so an untagged version is transitional.
 - Pin-board commands no longer accept a progress `Channel`; import, clipboard
   import and export report progress through the coordinator. The
   `PinBoardRenderer` API and all command names/DTOs are unchanged.
+- `history::materialization_chain` resolves the nearest descendant snapshot
+  and the whole parent chain in one recursive CTE instead of one query per
+  node. The returned chain still starts at the base snapshot and ends at the
+  requested node, so compaction, checkpoints, restore and scrub share the same
+  resolution semantics.
+- Chunk creation, reverse deltas, payload copies, chain resolution, export,
+  checkpoints and scrubs now take the crate-root `CancelToken` directly.
+  Cancellation is checked at every structural unit (tile) and CDC chunk,
+  progress is reported in processed logical bytes, and cancelled temporary
+  outputs are still removed by their guards.
 
 ### Fixed
 
+- v2 snapshots written with container-aligned chunking can be reopened. The
+  reader applied the CDC minimum chunk length to every non-final record, but
+  structural units follow the container layout (a 24 B file header, a 56 B
+  `Exta` header), so every `.clip` snapshot written with the default v2
+  settings failed to open and blocked restore, checkpoints and scrubs for that
+  node. The minimum now only binds CDC layouts; `max_size` still bounds every
+  record, and a regression test reopens a structurally chunked snapshot and
+  restores it byte-identically.
 - Permanently deleting or emptying the library trash no longer hides the
   "N files are still pending cleanup" warning: the trash reload that follows the
   mutation does not touch the shared error channel anymore, so a partial file

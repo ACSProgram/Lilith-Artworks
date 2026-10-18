@@ -5,9 +5,9 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::{cleanup, history, storage};
+use crate::{cancel::CancelToken, cleanup, history, storage};
 
-use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore};
+use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore, ChunkTask, ChunkWriteOptions};
 
 /// A materialization chain resolved into a chunk store.
 ///
@@ -19,8 +19,9 @@ use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore};
 struct ResolvedChain {
     layout: ChunkFile,
     store: ChunkStore<'static>,
-    /// Chain nodes, including the starting snapshot. Progress is reported
-    /// against this dimension so the final publication step can share it.
+    /// Chain nodes, including the starting snapshot. Chain resolution reports
+    /// progress against this dimension; the export phase afterwards reports
+    /// logical bytes instead, because that is what the caller can size a bar by.
     steps: u64,
 }
 
@@ -28,10 +29,10 @@ pub(crate) fn restore(
     root: &Path,
     history_id: &str,
     output_path: &str,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
     progress: impl Fn(&str, u64, u64),
 ) -> Result<String, String> {
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let output = validate_output_path(root, output_path)?;
     let output_parent = output.parent().ok_or("恢复输出路径无效")?;
     let ResolvedChain {
@@ -42,17 +43,20 @@ pub(crate) fn restore(
         root,
         history_id,
         "正在计算历史节点",
-        &cancelled,
+        cancel,
         &|label, current, total| progress(label, current, total),
     )?;
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let mut output_temp = NamedTempFile::new_in(output_parent)
         .map_err(|error| format!("无法创建恢复输出：{error}"))?;
-    progress("正在导出恢复文件", steps.saturating_sub(1), steps);
+    let logical_size = layout.logical_size();
+    progress("正在导出恢复文件", 0, logical_size);
     {
+        let export_progress = |bytes| progress("正在导出恢复文件", bytes, logical_size);
+        let task = ChunkTask::new(cancel, Some(&export_progress));
         let mut reader = store.reader();
         layout
-            .copy_original(&mut reader, output_temp.as_file_mut())
+            .copy_original(&mut reader, output_temp.as_file_mut(), &task)
             .map_err(|error| format!("无法导出恢复文件：{error}"))?;
     }
     output_temp
@@ -64,7 +68,7 @@ pub(crate) fn restore(
         .metadata()
         .map(|metadata| metadata.len())
         .unwrap_or(0);
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     output_temp
         .persist_noclobber(&output)
         .map_err(|error| format!("无法发布恢复文件：{}", error.error))?;
@@ -87,7 +91,8 @@ pub(crate) fn restore(
 pub(crate) fn compact_node(
     root: &Path,
     history_id: &str,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
     progress: impl Fn(&str, u64, u64),
 ) -> Result<(), String> {
     let target = history::compaction_target(root, history_id)?;
@@ -95,18 +100,18 @@ pub(crate) fn compact_node(
         root,
         &target.parent_id,
         "正在回溯保留节点",
-        &cancelled,
+        cancel,
         &|label, current, total| progress(label, current, total),
     )?;
     let child_layout = resolve_chain(
         root,
         &target.child_id,
         "正在回溯精简节点",
-        &cancelled,
+        cancel,
         &|label, current, total| progress(label, current, total),
     )?
     .layout;
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
 
     let artwork_directory = history::artwork_directory(root, &target.artwork_id);
     let delta_directory = artwork_directory.join("deltas");
@@ -122,17 +127,26 @@ pub(crate) fn compact_node(
         mut store,
         ..
     } = parent_resolved;
+    let logical_size = parent_layout.logical_size();
     {
+        let delta_progress = |bytes| progress("正在重建精简 delta", bytes, logical_size);
+        let task = ChunkTask::new(cancel, Some(&delta_progress));
         let mut reader = store.reader();
         child_layout
-            .create_reverse_delta(&parent_layout, &mut reader, delta_temp.as_file_mut())
+            .create_reverse_delta(
+                &parent_layout,
+                &mut reader,
+                delta_temp.as_file_mut(),
+                options,
+                &task,
+            )
             .map_err(|error| format!("无法重建精简 delta：{error}"))?;
     }
     delta_temp
         .as_file()
         .sync_all()
         .map_err(|error| format!("无法同步精简 delta：{error}"))?;
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let delta_size = delta_temp
         .as_file()
         .metadata()
@@ -150,10 +164,11 @@ pub(crate) fn compact_node(
         }
     };
     log::info!(
-        "compacted history node: removed={}, parent={}, child={}, new_delta_bytes={delta_size}, queued_cleanup={}",
+        "compacted history node: removed={}, parent={}, child={}, new_delta_bytes={delta_size}, format={:?}, queued_cleanup={}",
         target.node_id,
         target.parent_id,
         target.child_id,
+        options.format,
         cleanup_ids.len()
     );
     // 被移除节点与旧边占用的文件已在改接事务内入队，提交成功后单遍重放；
@@ -162,29 +177,35 @@ pub(crate) fn compact_node(
     Ok(())
 }
 
-pub(crate) fn ensure_checkpoint(root: &Path, history_id: &str) -> Result<(), String> {
-    ensure_checkpoint_with_progress(root, history_id, || false, |_, _, _| {})
+pub(crate) fn ensure_checkpoint(
+    root: &Path,
+    history_id: &str,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
+) -> Result<(), String> {
+    ensure_checkpoint_with_progress(root, history_id, cancel, options, |_, _, _| {})
 }
 
 pub(crate) fn scrub_history(
     root: &Path,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
     progress: impl Fn(u64, u64),
 ) -> Result<u64, String> {
     let node_ids = history::all_node_ids(root)?;
     let total = node_ids.len() as u64;
     for (index, history_id) in node_ids.iter().enumerate() {
-        ensure_not_cancelled(&cancelled)?;
+        ensure_not_cancelled(cancel)?;
         // Resolving the chain already proves that every delta links to the
         // digest recorded in the database. Streaming the result into the sink
         // then verifies each chunk payload and the assembled file without
         // writing any temporary snapshot.
         let ResolvedChain {
             layout, mut store, ..
-        } = resolve_chain(root, history_id, "正在校验历史", &cancelled, &|_, _, _| {})?;
+        } = resolve_chain(root, history_id, "正在校验历史", cancel, &|_, _, _| {})?;
+        let task = ChunkTask::cancel(cancel);
         let mut reader = store.reader();
         layout
-            .copy_original(&mut reader, &mut std::io::sink())
+            .copy_original(&mut reader, &mut std::io::sink(), &task)
             .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))?;
         progress(index as u64 + 1, total);
     }
@@ -194,14 +215,15 @@ pub(crate) fn scrub_history(
 pub(crate) fn ensure_checkpoint_with_progress(
     root: &Path,
     history_id: &str,
-    cancelled: impl Fn() -> bool,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
     progress: impl Fn(&str, u64, u64),
 ) -> Result<(), String> {
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let target = history::load_node(root, history_id)?;
     if let Some(relative) = target.snapshot_path.as_deref() {
         let path = storage::resolve_path(root, relative)?;
-        validate_snapshot(&path, &target, "检查点")?;
+        validate_snapshot(&path, &target, "检查点", cancel)?;
         history::mark_checkpoint(root, history_id)?;
         progress("检查点已就绪", 1, 1);
         return Ok(());
@@ -212,7 +234,7 @@ pub(crate) fn ensure_checkpoint_with_progress(
         root,
         history_id,
         "正在回溯并生成检查点",
-        &cancelled,
+        cancel,
         &|label, current, total| progress(label, current, total),
     )?;
     history::ensure_directories(root, &target.artwork_id)?;
@@ -223,10 +245,15 @@ pub(crate) fn ensure_checkpoint_with_progress(
     let relative = storage::relative_path(root, &final_path)?;
     let mut checkpoint = NamedTempFile::new_in(artwork_directory.join("temp"))
         .map_err(|error| format!("无法创建 checkpoint 临时文件：{error}"))?;
+    let logical_size = layout.logical_size();
     {
+        let checkpoint_progress = |bytes| {
+            progress("正在写入检查点", bytes, logical_size);
+        };
+        let task = ChunkTask::new(cancel, Some(&checkpoint_progress));
         let mut reader = store.reader();
         layout
-            .write_snapshot(&mut reader, checkpoint.as_file_mut())
+            .write_snapshot(&mut reader, checkpoint.as_file_mut(), options, &task)
             .map_err(|error| format!("无法写入 checkpoint：{error}"))?;
     }
     checkpoint
@@ -238,7 +265,7 @@ pub(crate) fn ensure_checkpoint_with_progress(
         .metadata()
         .map_err(|error| format!("无法读取 checkpoint 大小：{error}"))?
         .len();
-    ensure_not_cancelled(&cancelled)?;
+    ensure_not_cancelled(cancel)?;
     checkpoint
         .persist_noclobber(&final_path)
         .map_err(|error| format!("无法发布 checkpoint：{}", error.error))?;
@@ -252,7 +279,10 @@ pub(crate) fn ensure_checkpoint_with_progress(
     // 建立检查点时该节点原本没有 snapshot，正常返回空；若登记替换了旧 snapshot
     // （非空）同样在提交成功后重放。
     cleanup::replay(root, &cleanup_ids);
-    log::info!("checkpoint published: history_id={history_id}, bytes={file_size}, path={relative}");
+    log::info!(
+        "checkpoint published: history_id={history_id}, bytes={file_size}, format={:?}, path={relative}",
+        options.format
+    );
     progress("检查点已就绪", 1, 1);
     Ok(())
 }
@@ -262,10 +292,10 @@ fn resolve_chain(
     root: &Path,
     history_id: &str,
     step_label: &str,
-    cancelled: &impl Fn() -> bool,
+    cancel: &CancelToken,
     progress: &impl Fn(&str, u64, u64),
 ) -> Result<ResolvedChain, String> {
-    ensure_not_cancelled(cancelled)?;
+    ensure_not_cancelled(cancel)?;
     let chain = history::materialization_chain(root, history_id)?;
     let first = chain.first().ok_or("恢复链为空")?;
     let snapshot_path = storage::resolve_path(
@@ -297,16 +327,17 @@ fn resolve_chain(
 
     let total = chain.len() as u64;
     let temp_directory = root.join("temp");
+    let task = ChunkTask::cancel(cancel);
     let mut steps = 1_u64;
     for (index, node) in chain.iter().take(chain.len().saturating_sub(1)).enumerate() {
-        ensure_not_cancelled(cancelled)?;
+        ensure_not_cancelled(cancel)?;
         let delta_path = node.delta_path.as_deref().ok_or("恢复链缺少反向 delta")?;
         let mut delta_file = File::open(storage::resolve_path(root, delta_path)?)
             .map_err(|error| format!("无法打开恢复链 delta：{error}"))?;
-        let delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory)
+        let delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory, &task)
             .map_err(|error| format!("无法读取恢复链 delta：{error}"))?;
         layout = delta
-            .resolve(&layout, &mut store)
+            .resolve(&layout, &mut store, &task)
             .map_err(|error| format!("无法回溯历史链：{error}"))?;
         let expected = &chain[index + 1];
         if !layout
@@ -333,6 +364,7 @@ pub(crate) fn validate_snapshot(
     path: &Path,
     record: &history::HistoryRecord,
     label: &str,
+    cancel: &CancelToken,
 ) -> Result<(), String> {
     let mut file =
         File::open(path).map_err(|error| format!("无法打开{label} snapshot：{error}"))?;
@@ -345,13 +377,14 @@ pub(crate) fn validate_snapshot(
     {
         return Err(format!("{label} snapshot 摘要与历史数据库不匹配"));
     }
+    let task = ChunkTask::cancel(cancel);
     snapshot
-        .copy_original(&mut file, &mut std::io::sink())
+        .copy_original(&mut file, &mut std::io::sink(), &task)
         .map_err(|error| format!("{label} snapshot 完整性校验失败：{error}"))
 }
 
-fn ensure_not_cancelled(cancelled: &impl Fn() -> bool) -> Result<(), String> {
-    if cancelled() {
+fn ensure_not_cancelled(cancel: &CancelToken) -> Result<(), String> {
+    if cancel.is_cancelled() {
         // 恢复、精简、检查点与删除子树共用这条检查，因此文案保持中性：
         // 写成「恢复操作」会在精简或检查点取消时误报。
         Err("操作已取消".into())
@@ -390,15 +423,18 @@ mod tests {
     use std::io::Cursor;
 
     use super::*;
-    use crate::backup::chunk_file::ChunkingConfig;
+    use crate::backup::chunk_file::{ChunkWriteOptions, ChunkingConfig};
 
     /// 生成一个合法 snapshot 文件的内容与它记录在数据库里的 `sha256`。
     fn snapshot_bytes(bytes: &[u8]) -> (Vec<u8>, String) {
         let mut output = Cursor::new(Vec::new());
+        let task = ChunkTask::untracked();
         let chunk_file = ChunkFile::create(
             &mut Cursor::new(bytes),
             &mut output,
             ChunkingConfig::default(),
+            ChunkWriteOptions::V1,
+            &task,
         )
         .unwrap();
         (output.into_inner(), chunk_file.file_digest().to_hex())
@@ -422,7 +458,7 @@ mod tests {
         let (bytes, digest) = snapshot_bytes(&[b'A'; 64 * 1024]);
         fs::write(&path, bytes).unwrap();
 
-        validate_snapshot(&path, &record(digest), "检查点").unwrap();
+        validate_snapshot(&path, &record(digest), "检查点", &CancelToken::standalone()).unwrap();
     }
 
     #[test]
@@ -432,7 +468,13 @@ mod tests {
         let (bytes, _) = snapshot_bytes(&[b'B'; 64 * 1024]);
         fs::write(&path, bytes).unwrap();
 
-        let error = validate_snapshot(&path, &record("0".repeat(64)), "检查点").unwrap_err();
+        let error = validate_snapshot(
+            &path,
+            &record("0".repeat(64)),
+            "检查点",
+            &CancelToken::standalone(),
+        )
+        .unwrap_err();
         assert!(error.contains("摘要"), "{error}");
     }
 
@@ -444,7 +486,8 @@ mod tests {
         fs::write(&path, bytes).unwrap();
         fs::write(&path, b"replacement").unwrap();
 
-        let error = validate_snapshot(&path, &record(digest), "检查点").unwrap_err();
+        let error = validate_snapshot(&path, &record(digest), "检查点", &CancelToken::standalone())
+            .unwrap_err();
         assert!(error.contains("snapshot"), "{error}");
     }
 }

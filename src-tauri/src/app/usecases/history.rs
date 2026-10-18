@@ -33,8 +33,13 @@ pub(crate) fn fork_branch(
 ) -> Result<history::ArtworkHistory, CommandError> {
     let quick_default = context.app_state().automatic_backup_quick_default();
     let result = context.run_write(|session| {
-        backup::ensure_checkpoint(session.root(), &request.from_history_id)
-            .map_err(CommandError::from)?;
+        backup::ensure_checkpoint(
+            session.root(),
+            &request.from_history_id,
+            context.cancel(),
+            context.chunk_write_options(),
+        )
+        .map_err(CommandError::from)?;
         history::create_branch(
             session.root(),
             &request.artwork_id,
@@ -61,7 +66,13 @@ pub(crate) fn create_branch_created(
 ) -> Result<String, CommandError> {
     let quick_default = context.app_state().automatic_backup_quick_default();
     context.run_write(|session| {
-        backup::ensure_checkpoint(session.root(), from_history_id).map_err(CommandError::from)?;
+        backup::ensure_checkpoint(
+            session.root(),
+            from_history_id,
+            context.cancel(),
+            context.chunk_write_options(),
+        )
+        .map_err(CommandError::from)?;
         history::create_branch(
             session.root(),
             artwork_id,

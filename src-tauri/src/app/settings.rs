@@ -55,6 +55,9 @@ pub(crate) struct AppSettings {
     close_to_tray: bool,
     pub(crate) pause_automatic_backups: bool,
     automatic_backup_check_mode: String,
+    /// ChunkFile v2 写入开关。默认开启：只影响此后新写出的 snapshot/delta，
+    /// 旧 v1 节点继续由 v1 reader 读取；关闭后新写入回到 v1。
+    chunk_file_format_v2: bool,
     window: WindowSettings,
     content: ContentSettings,
     pin_board: PinBoardSettings,
@@ -70,6 +73,7 @@ impl Default for AppSettings {
             close_to_tray: true,
             pause_automatic_backups: false,
             automatic_backup_check_mode: "quick".into(),
+            chunk_file_format_v2: true,
             window: WindowSettings::default(),
             content: ContentSettings::default(),
             pin_board: PinBoardSettings::default(),
@@ -505,6 +509,19 @@ impl AppState {
         self.settings
             .read_with(|settings| settings.automatic_backup_check_mode.as_str() != "full")
             .unwrap_or(true)
+    }
+
+    /// 新写入的 ChunkFile 版本。默认 v2；设置损坏或缺失时保持 v2。
+    pub(crate) fn chunk_write_options(&self) -> crate::backup::chunk_file::ChunkWriteOptions {
+        let enabled = self
+            .settings
+            .read_with(|settings| settings.chunk_file_format_v2)
+            .unwrap_or(true);
+        if enabled {
+            crate::backup::chunk_file::ChunkWriteOptions::V2
+        } else {
+            crate::backup::chunk_file::ChunkWriteOptions::V1
+        }
     }
 
     /// 素材板原生纹理解码结果缓存等级（low/medium/high）。

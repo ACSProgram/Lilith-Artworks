@@ -27,10 +27,14 @@ pub(crate) fn commit(
         note.chars().count()
     );
     let result = context.run_write_scoped(Some(branch_id), |session| {
-        let result =
-            backup::worker::run_backup(session.root(), branch_id, note, commit_kind, || {
-                context.is_cancelled()
-            });
+        let result = backup::worker::run_backup(
+            session.root(),
+            branch_id,
+            note,
+            commit_kind,
+            context.cancel(),
+            context.chunk_write_options(),
+        );
         if let Err(error) = result.as_ref() {
             history::mark_error(session.root(), branch_id, &error.to_string());
         }
@@ -73,7 +77,7 @@ pub(crate) fn restore(
             session.root(),
             history_id,
             output_path,
-            || context.is_cancelled(),
+            context.cancel(),
             |label, current, total| context.report_progress(label, current, total),
         )
         .map_err(CommandError::from)
@@ -89,7 +93,8 @@ pub(crate) fn compact(context: &CommandContext, history_id: &str) -> Result<(), 
         backup::restore::compact_node(
             session.root(),
             history_id,
-            || context.is_cancelled(),
+            context.cancel(),
+            context.chunk_write_options(),
             |label, current, total| context.report_progress(label, current, total),
         )
         .map_err(CommandError::from)
@@ -114,7 +119,8 @@ pub(crate) fn delete_subtree(
             backup::restore::ensure_checkpoint_with_progress(
                 session.root(),
                 parent_id,
-                || context.is_cancelled(),
+                context.cancel(),
+                context.chunk_write_options(),
                 |label, current, total| context.report_progress(label, current, total),
             )
             .map_err(CommandError::from)?;
@@ -143,7 +149,8 @@ pub(crate) fn set_checkpoint(
             return backup::restore::ensure_checkpoint_with_progress(
                 session.root(),
                 history_id,
-                || context.is_cancelled(),
+                context.cancel(),
+                context.chunk_write_options(),
                 |label, current, total| context.report_progress(label, current, total),
             )
             .map_err(CommandError::from);
@@ -166,11 +173,9 @@ pub(crate) fn scrub_repository(
     context.run_foreground_read(None, |session| {
         let root = session.root();
         context.report_progress("正在检查历史文件", 0, 0);
-        let history_nodes = backup::scrub_history(
-            root,
-            || context.is_cancelled(),
-            |current, total| context.report_progress("正在检查历史文件", current, total),
-        )
+        let history_nodes = backup::scrub_history(root, context.cancel(), |current, total| {
+            context.report_progress("正在检查历史文件", current, total)
+        })
         .map_err(CommandError::from)?;
         context.report_progress("正在检查发布文件", 0, 0);
         let controlled = authenticity::scrub_controlled_files(
@@ -206,11 +211,9 @@ pub(crate) fn scrub_history_and_controlled(
 ) -> Result<(u64, u64, u64), CommandError> {
     context.run_foreground_read(None, |session| {
         let root = session.root();
-        let nodes = backup::scrub_history(
-            root,
-            || context.is_cancelled(),
-            |current, total| context.report_progress("全库扫描", current, total),
-        )
+        let nodes = backup::scrub_history(root, context.cancel(), |current, total| {
+            context.report_progress("全库扫描", current, total)
+        })
         .map_err(CommandError::from)?;
         let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
             root,
@@ -231,7 +234,7 @@ pub(crate) fn create_repository_backup(
         backup::create_repository_backup(
             session.root(),
             destination_parent,
-            || context.is_cancelled(),
+            context.cancel(),
             |label, current, total| context.report_progress(label, current, total),
         )
         .map_err(CommandError::from)

@@ -335,6 +335,10 @@ fn load_node_from(
         .ok_or_else(|| "找不到历史节点".into())
 }
 
+/// Returns the chain from the nearest descendant snapshot down to `history_id`
+/// (the snapshot itself when the target holds one). A single recursive CTE
+/// resolves the snapshot pick and the parent walk, so deep chains no longer
+/// issue one SQL query per node.
 pub(crate) fn materialization_chain(
     root: &Path,
     history_id: &str,
@@ -344,39 +348,59 @@ pub(crate) fn materialization_chain(
     if target.snapshot_path.is_some() {
         return Ok(vec![target]);
     }
-    let snapshot_id = connection
-        .query_row(
-            "WITH RECURSIVE descendants(id, depth) AS (
+    let mut statement = connection
+        .prepare(
+            "WITH RECURSIVE
+             descendants(id, depth) AS (
                SELECT id, 0 FROM history_nodes WHERE id = ?1
                UNION ALL
                SELECT child.id, descendants.depth + 1
                FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
+             ),
+             snapshot_pick(id) AS (
+               SELECT descendants.id FROM descendants
+               JOIN history_nodes node ON node.id = descendants.id
+               WHERE node.snapshot_path IS NOT NULL
+               ORDER BY descendants.depth, node.created_ms, node.id LIMIT 1
+             ),
+             chain(id, artwork_id, parent_id, sha256, snapshot_path, delta_path, depth) AS (
+               SELECT node.id, node.artwork_id, node.parent_id, node.sha256,
+                      node.snapshot_path, COALESCE(edge.delta_path, node.delta_path), 0
+               FROM history_nodes node
+               LEFT JOIN history_edges edge ON edge.child_history_id = node.id
+               JOIN snapshot_pick ON snapshot_pick.id = node.id
+               UNION ALL
+               SELECT parent.id, parent.artwork_id, parent.parent_id, parent.sha256,
+                      parent.snapshot_path,
+                      COALESCE(edge.delta_path, parent.delta_path), chain.depth + 1
+               FROM history_nodes parent
+               LEFT JOIN history_edges edge ON edge.child_history_id = parent.id
+               JOIN chain ON parent.id = chain.parent_id
+               WHERE chain.id != ?1
              )
-             SELECT descendants.id FROM descendants
-             JOIN history_nodes node ON node.id = descendants.id
-             WHERE node.snapshot_path IS NOT NULL
-             ORDER BY descendants.depth, node.created_ms, node.id LIMIT 1",
-            [history_id],
-            |row| row.get::<_, String>(0),
+             SELECT id, artwork_id, parent_id, sha256, snapshot_path, delta_path
+             FROM chain ORDER BY depth",
         )
-        .optional()
+        .map_err(storage::database_error)?;
+    let chain = statement
+        .query_map([history_id], |row| {
+            Ok(HistoryRecord {
+                id: row.get(0)?,
+                artwork_id: row.get(1)?,
+                parent_id: row.get(2)?,
+                sha256: row.get(3)?,
+                snapshot_path: row.get(4)?,
+                delta_path: row.get(5)?,
+            })
+        })
         .map_err(storage::database_error)?
-        .ok_or("历史节点没有可用的后代 snapshot")?;
-    let mut chain = Vec::new();
-    let mut cursor = load_node_from(&connection, &snapshot_id)?;
-    loop {
-        let reached = cursor.id == history_id;
-        let parent_id = cursor.parent_id.clone();
-        chain.push(cursor);
-        if reached {
-            break;
-        }
-        cursor = load_node_from(
-            &connection,
-            parent_id
-                .as_deref()
-                .ok_or("snapshot 后代不在目标历史链上")?,
-        )?;
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    if chain.is_empty() {
+        return Err("历史节点没有可用的后代 snapshot".into());
+    }
+    if chain.last().map_or(true, |node| node.id != history_id) {
+        return Err("snapshot 后代不在目标历史链上".into());
     }
     Ok(chain)
 }
