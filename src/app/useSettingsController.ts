@@ -27,11 +27,12 @@ import type {
   SettingsSnapshot,
 } from "./types";
 
-export type SettingsPage = "general" | "repository" | "pin-board" | "debug";
+export type SettingsPage = "general" | "repository" | "backup" | "pin-board" | "debug";
 
 export const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
   { id: "general", label: "通用" },
-  { id: "repository", label: "仓库与备份" },
+  { id: "repository", label: "仓储" },
+  { id: "backup", label: "备份" },
   { id: "pin-board", label: "素材板" },
   { id: "debug", label: "调试" },
 ];

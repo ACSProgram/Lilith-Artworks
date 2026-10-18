@@ -25,12 +25,17 @@
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：先收口 `todo.md` 里 alpha1 的剩余项（release 档五档大文件数值采集、`extreme` 档
-  复跑、压力测试的 CPU 时间度量口径）；随后进入 alpha2（阶段 6 + 针对 alpha1 的测试与修复），
-  再到 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、依赖与阶段口径见
-  `0.3-architecture-algorithm-plan-2026-10-05.md`。
+- **下一步**：先由维护者验收 alpha2 阶段 6（设置拆分与仓储空间仪表盘），并继续收口 `todo.md`
+  里 alpha1 的剩余项（release 档五档大文件数值采集、`extreme` 档复跑、压力测试的 CPU 时间
+  度量口径）；随后进入 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、依赖与阶段
+  口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
+- **alpha2 阶段 6 已实现（待维护者验收）**：设置页左侧导航拆为「仓储 / 备份」，仓储页内用
+  「设置 / 空间」页内 tab；空间仪表盘新增只读数据库聚合 `get_repository_storage_overview`
+  与按需、可取消的仓库目录扫描 `scan_repository_storage_disk`，两套口径分别显示；备份页承接
+  自动备份、创建备份与本次运行的最近结果。仍保持 repository schema v4，不新增持久表。最近一次
+  备份结果的持久化已记入 alpha3 阶段 7 的 v5 迁移计划（`repository_backup_runs`）。
 - 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
-  阶段 6–9。
+  阶段 7–9。
 
 ## 当前基线
 

@@ -13,6 +13,19 @@ decision, so an untagged version is transitional.
 
 ### Added
 
+- The repository now has a read-only storage dashboard. `get_repository_storage_overview`
+  aggregates the database-recorded size (snapshot files, `history_edges` deltas,
+  final artifacts and certification outputs) and `scan_repository_storage_disk`
+  optionally walks the repository directory for actual disk usage; the two views
+  are shown side by side and never silently merged. Non-snapshot nodes'
+  `chunk_file_size` (rebuild read amount) is excluded from stored totals, final
+  artifacts and certification outputs are deduplicated by normalized path, and
+  board DDS classification depends on a non-empty `file_path` rather than the
+  pin-board item `kind`. The dashboard breaks sizes down by category and by
+  artwork → branch → node, reports snapshot and delta compression layers
+  separately, and marks database-recorded files that are missing on disk. The
+  disk scan is an on-demand, cancellable foreground read task; it counts only
+  the repository directory and excludes external certification exports.
 - Publishing reports a small-selection watermark warning, without blocking the
   publish. Before embedding TrustMark, each framed region's pixel bounds on the
   rendition are measured with the same conversion the encoder uses
@@ -52,6 +65,13 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The settings dialog is split into `仓储` and `备份` pages. The repository page
+  keeps the location, integrity check, storage format and file cleanup, and adds
+  an in-page `设置 / 空间` switch for the storage dashboard; the backup page owns
+  automatic backup scheduling, the default check mode and repository backup, and
+  shows the last backup result for the current run (not persisted yet). Command
+  names, DTOs, settings writes, repository switching and tray refresh keep their
+  previous semantics.
 - Cancellation observation is split into two layers. Hot loops (`ChunkTask` in
   the chunk-file writer/reader) now perform only a **silent** query —
   `CancelToken::observed`, which reads whether cancellation has already been
@@ -94,6 +114,18 @@ decision, so an untagged version is transitional.
   repository (by then uncontended, hence deterministic) and asserted to succeed;
   both refusal kinds are counted per round, and the round count rises from 4 to
   6. The lock and the probe are untouched, so no product behavior changes.
+
+### Fixed
+
+- The settings page now shows the live stage, counts and percentage of its long
+  operations. It matched `BackupRuntimeStatus.operation` against command names
+  (`repository-scrub`, `repository-backup`, `unreferenced-scan`), but the
+  backend reports the serialized `OperationDomain` (`maintenance`, `cleanup`),
+  so the check never matched and the dialog stayed on its "preparing"
+  placeholder until the operation returned. The page now accepts a foreground
+  `userOperation` whose reported domain is `maintenance` or `cleanup`, which
+  keeps background scheduling and unrelated foreground work (publish, pin
+  board) out of the settings progress area.
 
 ## 0.3.0-alpha.1 - 2026-10-18
 

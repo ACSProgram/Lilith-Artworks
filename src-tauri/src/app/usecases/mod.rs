@@ -11,6 +11,7 @@ pub(crate) mod history;
 pub(crate) mod library;
 pub(crate) mod pin_board;
 pub(crate) mod settings;
+pub(crate) mod storage;
 
 use crate::app::command_runtime::{CommandContext, CommandError};
 

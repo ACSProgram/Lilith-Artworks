@@ -11,6 +11,7 @@
 | 发布、成品、C2PA、TrustMark、识别 | `docs/modules/authenticity.md` | `src/modules/authenticity/`、`src-tauri/src/authenticity/` |
 | 素材板、画板、图片导入导出、画板回收站 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
 | 设置、托盘、窗口生命周期 | `docs/architecture/overview.md` | `src-tauri/src/app/`、`src-tauri/src/lib.rs` |
+| 仓储空间状态（数据库记录口径、磁盘扫描） | `docs/modules/history-and-backup.md` 的「仓储空间状态」 | `src-tauri/src/storage_overview.rs`、`src/app/RepositoryStoragePanel.tsx` |
 | 确认弹窗、滑动确认等无领域语义的共享 UI | `docs/architecture/overview.md` 的「前端共享控件」 | `src/shared/` |
 | 构建、格式、静态检查 | `docs/guides/validation.md` | 只运行与改动匹配的检查 |
 

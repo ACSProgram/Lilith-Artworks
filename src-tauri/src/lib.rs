@@ -16,6 +16,7 @@ mod path_scope;
 mod pin_board;
 mod repository_lock;
 mod storage;
+mod storage_overview;
 
 use std::{
     fs::File,

@@ -27,6 +27,8 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::app::cleanup_commands::retry_pending_file_cleanup,
         crate::app::cleanup_commands::scan_repository_unreferenced,
         crate::app::cleanup_commands::cleanup_repository_unreferenced,
+        crate::app::storage_commands::get_repository_storage_overview,
+        crate::app::storage_commands::scan_repository_storage_disk,
         // 应用编排：仓库维护
         crate::app::workflows::acknowledge_backup_disable_notices,
         crate::app::workflows::get_backup_disable_notice_target,

@@ -3,16 +3,38 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { appApi } from "./api";
 import { IDLE_BACKUP_RUNTIME, useRuntimeProgress } from "./RuntimeProgressProvider";
 import { errorMessage } from "../shared/errors";
+import { formatBytes } from "../shared/format";
+import { useRequestEpoch } from "../shared/useRequestEpoch";
 import { useRuntimeSubscription } from "../shared/useRuntimeSubscription";
 import {
   isExternalCleanupEntry,
   type PendingCleanupEntry,
   type UnreferencedScanCandidate,
 } from "../shared/fileCleanup";
-import type { BackupRuntimeStatus } from "./types";
+import type {
+  BackupRuntimeStatus,
+  RepositoryBackupReport,
+  RepositoryStorageDiskScan,
+  RepositoryStorageOverview,
+} from "./types";
 import type { SettingsController } from "./useSettingsController";
 
-export type SettingsOperation = "repository-scrub" | "repository-backup" | "unreferenced-scan";
+export type SettingsOperation =
+  | "repository-scrub"
+  | "repository-backup"
+  | "unreferenced-scan"
+  | "storage-scan";
+
+/**
+ * 设置页长任务在后端上报的运行域。
+ *
+ * 运行状态的 `operation` 是 `OperationDomain` 的序列化值而不是命令名：完整性扫描、
+ * 整仓备份与磁盘扫描都属 `maintenance`，未引用扫描属 `cleanup`。据此只认设置页
+ * 自己的任务，发布（`authenticity`）、素材板（`pinBoard`）等前台任务与后台调度
+ * 任务（`taskKind` 不是 `userOperation`、`operation` 为 `background`）都不会把
+ * 进度串到这个弹窗。
+ */
+const SETTINGS_OPERATION_DOMAINS = new Set(["maintenance", "cleanup"]);
 
 export interface RepositoryMaintenance {
   settingsOperation: SettingsOperation | null;
@@ -29,12 +51,19 @@ export interface RepositoryMaintenance {
   visibleSettingsRuntime: BackupRuntimeStatus | null;
   repositoryCleanupCount: number;
   pendingCleanupSummary: string;
+  storageOverview: RepositoryStorageOverview | null;
+  storageDiskScan: RepositoryStorageDiskScan | null;
+  storageOverviewBusy: boolean;
+  storageOverviewError: string | null;
+  lastRepositoryBackup: { report: RepositoryBackupReport; completedAtMs: number } | null;
   scrubRepository: () => Promise<void>;
   backupRepository: () => Promise<void>;
   refreshPendingCleanup: () => Promise<void>;
   retryCleanup: (ids: string[]) => Promise<void>;
   scanUnreferenced: () => Promise<void>;
   purgeScanCandidates: () => Promise<void>;
+  refreshStorageOverview: () => Promise<void>;
+  scanStorageDisk: () => Promise<void>;
   cancelSettingsOperation: () => Promise<void>;
 }
 
@@ -61,6 +90,30 @@ export function useRepositoryMaintenance(
   const [scanCandidates, setScanCandidates] = useState<UnreferencedScanCandidate[] | null>(null);
   const [scanConfirmOpen, setScanConfirmOpen] = useState(false);
   const [cleanupBusy, setCleanupBusy] = useState(false);
+  const [storageOverview, setStorageOverview] = useState<RepositoryStorageOverview | null>(null);
+  const [storageDiskScan, setStorageDiskScan] = useState<RepositoryStorageDiskScan | null>(null);
+  const [storageOverviewBusy, setStorageOverviewBusy] = useState(false);
+  const [storageOverviewError, setStorageOverviewError] = useState<string | null>(null);
+  const [lastRepositoryBackup, setLastRepositoryBackup] = useState<{
+    report: RepositoryBackupReport;
+    completedAtMs: number;
+  } | null>(null);
+  const {
+    begin: beginStorageRead,
+    invalidate: invalidateStorageReads,
+    isCurrent: isStorageReadCurrent,
+  } = useRequestEpoch();
+
+  // 仓库更换后旧仓库的聚合值与磁盘扫描都不再成立；在途读取一并作废，
+  // 避免旧仓库的结果在新仓库就绪后回填。等待新仓库 ready 再读取。
+  useEffect(() => {
+    invalidateStorageReads();
+    setStorageOverview(null);
+    setStorageDiskScan(null);
+    setStorageOverviewBusy(false);
+    setStorageOverviewError(null);
+    setLastRepositoryBackup(null);
+  }, [invalidateStorageReads, settings.repository.rootPath]);
 
   useEffect(() => {
     const active = settings.settingsOpen || settingsOperation !== null;
@@ -160,6 +213,7 @@ export function useRepositoryMaintenance(
     notify(null);
     try {
       const report = await appApi.createRepositoryBackup(selected);
+      setLastRepositoryBackup({ report, completedAtMs: Date.now() });
       const reclaimed = report.reclaimedStagingDirectories > 0
         ? `，并回收 ${report.reclaimedStagingDirectories} 个残留暂存目录`
         : "";
@@ -175,6 +229,54 @@ export function useRepositoryMaintenance(
       setSettingsOperation(null);
     }
   }, [notify, refreshRuntime]);
+
+  const refreshStorageOverview = useCallback(async () => {
+    if (!settings.repository.ready) {
+      setStorageOverview(null);
+      setStorageOverviewError(null);
+      return;
+    }
+    const epoch = beginStorageRead();
+    setStorageOverviewBusy(true);
+    try {
+      const overview = await appApi.getRepositoryStorageOverview();
+      if (!isStorageReadCurrent(epoch)) return;
+      setStorageOverview(overview);
+      setStorageOverviewError(null);
+    } catch (error) {
+      if (!isStorageReadCurrent(epoch)) return;
+      setStorageOverviewError(errorMessage(error));
+    } finally {
+      // 只有仍属当前代次的读取才能收掉忙碌态：作废后的收尾交给新读取或仓库切换。
+      if (isStorageReadCurrent(epoch)) setStorageOverviewBusy(false);
+    }
+  }, [beginStorageRead, isStorageReadCurrent, settings.repository.ready]);
+
+  const scanStorageDisk = useCallback(async () => {
+    let current: BackupRuntimeStatus;
+    try {
+      current = await refreshRuntime();
+    } catch (error) {
+      notify(errorMessage(error));
+      return;
+    }
+    if (current.busy) {
+      notify("已有备份操作正在运行，请等待完成或先取消当前操作。");
+      return;
+    }
+    setSettingsOperation("storage-scan");
+    notify(null);
+    try {
+      const scan = await appApi.scanRepositoryStorageDisk();
+      setStorageDiskScan(scan);
+      await refreshStorageOverview();
+      notify(`磁盘占用扫描完成：${scan.fileCount} 个文件，共 ${formatBytes(scan.totalBytes)}。`);
+    } catch (error) {
+      notify(errorMessage(error));
+    } finally {
+      setSettingsOperation(null);
+    }
+  }, [notify, refreshRuntime, refreshStorageOverview]);
 
   const retryCleanup = useCallback(async (ids: string[]) => {
     setCleanupBusy(true);
@@ -258,9 +360,9 @@ export function useRepositoryMaintenance(
   }, [cancel, notify]);
 
   const runtimeMatchesSettings = runtime.busy
-    && (runtime.operation === "repository-scrub"
-      || runtime.operation === "repository-backup"
-      || runtime.operation === "unreferenced-scan");
+    && runtime.taskKind === "userOperation"
+    && runtime.operation !== null
+    && SETTINGS_OPERATION_DOMAINS.has(runtime.operation);
   const visibleSettingsRuntime = runtimeMatchesSettings
     ? runtime
     : settingsOperation
@@ -272,7 +374,9 @@ export function useRepositoryMaintenance(
           ? "正在准备创建备份"
           : settingsOperation === "unreferenced-scan"
             ? "正在准备未引用文件扫描"
-            : "正在准备完整性检查",
+            : settingsOperation === "storage-scan"
+              ? "正在准备磁盘占用扫描"
+              : "正在准备完整性检查",
       }
       : null;
   const settingsBusy = settings.busy
@@ -310,12 +414,19 @@ export function useRepositoryMaintenance(
     visibleSettingsRuntime,
     repositoryCleanupCount,
     pendingCleanupSummary,
+    storageOverview,
+    storageDiskScan,
+    storageOverviewBusy,
+    storageOverviewError,
+    lastRepositoryBackup,
     scrubRepository,
     backupRepository,
     refreshPendingCleanup,
     retryCleanup,
     scanUnreferenced,
     purgeScanCandidates,
+    refreshStorageOverview,
+    scanStorageDisk,
     cancelSettingsOperation,
   };
 }

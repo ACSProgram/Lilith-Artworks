@@ -4,6 +4,7 @@ pub(crate) mod command_runtime;
 pub(crate) mod contracts;
 pub(crate) mod diagnostics;
 pub(crate) mod settings;
+pub(crate) mod storage_commands;
 pub(crate) mod usecases;
 pub(crate) mod workflows;
 

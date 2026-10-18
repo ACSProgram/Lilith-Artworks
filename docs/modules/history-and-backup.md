@@ -50,7 +50,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
 
-设置页「仓库与备份」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
+设置页「仓储」视图的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
 
 **空 id 不再等于「处理全部」**：`retry_pending_file_cleanup` 传空 id 时只重放**仓库内条目**（`repository_file` / `repository_directory`），`external_file` 条目一律跳过。外部条目保存的是仓库之外的绝对路径，删除它等于一条任意路径删除，唯一门槛只是攻击者需要知道目标文件的 SHA-256；若它随启动自动重放，被投毒的仓库就等于自带一条「自动、无确认的删除任意文件」原语。因此外部条目改为在队列里**逐条显式确认**：列表直接展示完整路径、所属作品与期望 SHA-256，点击「确认删除…」后由滑动确认控件（`ConfirmDialog` 的 `slideToConfirm`）承担最终动作，确认后以**显式 id** 调用同一命令执行；「全部重试」按钮在只剩外部条目时禁用，并注明它只重放仓库内条目。既有的「摘要不匹配即不删」约束不变（`cleanup::remove_external_file` 仍只在 SHA-256 相等时删除）。首次启动时应用仍会自动重放一次仓库内条目，队列中的残留仓库内条目即上次未清干净的文件。
 
@@ -58,15 +58,32 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 `history_nodes.chunk_file_size` 记录"重建该节点需要读取的字节数"：节点拥有 snapshot 时为 snapshot 文件大小（由发布它的调用方写入），否则为指向其唯一子节点的边 delta 大小；多个子节点时取最小 delta（分支起点通常持有 snapshot，不会走到该分支）。`history_nodes.delta_path` 兼容列与该语义保持一致，仅在没有边（分支根）时被 `load_node_from` 读取。写路径统一由 `refresh_storage_metadata` 从图推导：提交释放父 snapshot、取消检查点、精简改接后都会重算，精简后刷新的是被移除节点的父节点（新 delta 的受益方）与子节点。
 
+## 仓储空间状态
+
+仓储视图的「空间」页是只读仪表盘，数据来自两个命令：
+
+- `get_repository_storage_overview`：从 SQLite 聚合数据库记录口径，走共享读租约、不取运行锁，也不写任何状态。
+- `scan_repository_storage_disk`：按需遍历仓库目录，扫描期间取前台运行锁与仓库操作锁、可经统一取消入口中断；不持有跨进程 owner lock。
+
+**数据库记录口径**：snapshot 文件字节 = `Σ history_nodes.chunk_file_size WHERE snapshot_path IS NOT NULL`；delta 字节 = `Σ history_edges.delta_size`。非 snapshot 节点的 `chunk_file_size` 是重建读取量，**不并入存储总量**。最终成品按规范化 `source_path` 去重后计入 `byte_size`；认证输出按规范化 `output_path` 去重后计入 `output_bytes`。仪表盘按历史快照、历史增量、最终成品、认证输出四类展示，分类之和等于数据库记录总量。
+
+**磁盘实际口径**：只扫描仓库目录本身，外部首次导出路径不计入。manifest 中可识别的 snapshot / delta / 最终成品 / 认证仓库副本 / 画板 DDS 按实际文件大小归类；SQLite 主库与 WAL、仓库 `temp/`、未识别文件合并为「其它」。分类之和等于仓库目录实际文件字节。两套口径并列显示、不静默合并；差异本身用于发现记录与磁盘不一致。
+
+**画板 DDS 分类**按「条目是否存在实体文件」判定：阶段 6 查询 `pin_board_images.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`；阶段 7 重建画板表后只把同一判定改为 `pin_board_bitmaps.file_path`，不引入 kind 枚举。
+
+**压缩比分层报告**：snapshot 压缩比 = `Σ 快照节点 logical_size / Σ 快照文件字节`；delta 还原比 = `Σ 父节点 logical_size / Σ history_edges.delta_size`，不混算整仓平均。明细按作品 → 分支 → 节点展开，逐行给出 `logical_size`、`chunk_file_size`（snapshot 行为快照文件大小，其余行为重建读取量）、`chunk_count`、压缩比与 checkpoint / snapshot 标记；画板与认证输出按类别展开。
+
+聚合固定为 8 条查询（`src-tauri/src/storage_overview.rs` 的 `overview_from_connection`），不按作品或节点逐条回查；30 作品 / 360 节点的 debug 单测记录查询次数与耗时上界。
+
 ## 提交与恢复
 
 提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件（回滚路径上文件本就未被数据库引用，直接删失败只留泄漏、不留不一致，由清理扫描兜底）。提交释放的父 snapshot（父节点不再是 head 或检查点、且无其它分支引用时）在同一事务内入队 `pending_file_cleanup`（原因 `history_commit_release`），提交成功后由 worker 单遍重放删除；删除失败只留队列可重试，不影响已成功的提交结果。head 校验失败触发 snapshot 修复时，被替换的旧文件同样由登记事务入队（原因 `history_snapshot_replaced`）。工作文件与 head 的 SHA-256 相同时，worker 仍会打开受控 snapshot、核对数据库摘要并逐块验证内容；文件缺失、格式损坏、块损坏或摘要不匹配时，使用本次已经生成的 snapshot 以新路径发布并更新原 head 节点，验证通过后才把任务记为内容未变化。有效 snapshot 不重写，修复也不创建新历史节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
 恢复从目标节点向下寻找最近可用 snapshot，再沿父链逐条 `resolve` 反向 delta（惰性，不产生中间 snapshot 文件），最后一次性把结果流式导出为临时文件并禁止覆盖；链起点与每步结果都会与数据库摘要比对，导出时逐块验哈希并核对整文件摘要。`history::materialization_chain` 用一次递归 CTE 同时选出最近 snapshot、父链节点与每步使用的 delta 路径，不再按节点逐条查库；目标自身持有 snapshot 时仍直接返回该节点。恢复、精简和检查点共用同一条惰性解析路径：精简只物化被移除节点的父链，子链只取块索引，然后从父链的虚拟存储中按需读取变化的块重建反向 delta，改接事务内把被移除节点与旧边占用的文件入队 `pending_file_cleanup`（原因 `history_compaction`）；检查点把解析结果一次性写成 snapshot 文件并 `sync_all` 后发布，建立、取消或替换检查点释放的旧 snapshot 在同一事务内入队（原因 `history_checkpoint_release` / `history_snapshot_replaced`）；全库 scrub 走同一条链但把结果流入 sink，只校验不落盘。上述入队均由调用方在提交成功后单遍重放，删除失败只留队列可重试。所有长操作经 `OperationCoordinator` 记录开始、结束、耗时与 typed 错误字段（`code`/`kind`/`retryable`/operation id）。
 
-设置页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
+仓储视图提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
 
-设置页也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。
+备份视图也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。备份视图在本次运行内显示最近一次创建备份的文件数、大小与恢复路径；重启后不保留，持久化改由 alpha3 的 v4 → v5 迁移承接（见计划 §2.2）。
 
 ## 调度
 
@@ -152,6 +169,8 @@ list_pending_file_cleanup
 retry_pending_file_cleanup
 scan_repository_unreferenced
 cleanup_repository_unreferenced
+get_repository_storage_overview
+scan_repository_storage_disk
 ```
 
 应用工作流通过公开 `backup::ensure_checkpoint` 固化分支起点或发布节点，再调用 History/Authenticity 领域服务；history 不导入 backup、成品文件或认证 manifest。当前批次状态见 `docs/planning/current-handoff.md`。

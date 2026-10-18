@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useState } from "react";
 import {
   Activity,
   BookOpen,
@@ -41,7 +41,9 @@ import {
   cleanupReasonLabel,
   isExternalCleanupEntry,
 } from "../shared/fileCleanup";
-import type { AppSettings, BackupRuntimeStatus } from "./types";
+import { RepositoryStoragePanel } from "./RepositoryStoragePanel";
+import { SettingsOperationProgress } from "./SettingsOperationProgress";
+import type { AppSettings } from "./types";
 
 /**
  * 素材板操作手册内容。与 `renderer.ts` 的交互实现一一对应：改动交互时同步更新此处，
@@ -106,6 +108,22 @@ const PIN_BOARD_MANUAL: Array<{
 export function SettingsDialog() {
   const { settings, maintenance } = useAppRuntime();
   const { notify } = useNotice();
+  const [repositoryView, setRepositoryView] = useState<"settings" | "space">("settings");
+  const refreshStorageOverview = maintenance.refreshStorageOverview;
+
+  // Hooks 必须在弹窗关闭的早退之前调用；空间 tab 首次可见时读取一次 DB 口径。
+  useEffect(() => {
+    if (
+      !settings.settingsOpen
+      || settings.settingsPage !== "repository"
+      || repositoryView !== "space"
+      || !settings.repository.ready
+    ) {
+      return;
+    }
+    void refreshStorageOverview();
+  }, [repositoryView, settings.repository.ready, settings.settingsOpen, settings.settingsPage, refreshStorageOverview]);
+
   if (!settings.settingsOpen || !settings.draft) return null;
 
   const { draft, snapshot, repository } = settings;
@@ -128,6 +146,12 @@ export function SettingsDialog() {
     setScanCandidates,
     scanConfirmOpen,
     setScanConfirmOpen,
+    storageOverview,
+    storageDiskScan,
+    storageOverviewBusy,
+    storageOverviewError,
+    lastRepositoryBackup,
+    scanStorageDisk,
   } = maintenance;
 
   const setPinBoardShortcut = (key: "lockShortcut" | "fullscreenShortcut", shortcut: string) => {
@@ -233,6 +257,28 @@ export function SettingsDialog() {
 
             {settingsPage === "repository" && (
               <>
+              <div className="settings-page-tabs" role="tablist" aria-label="仓储视图">
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={repositoryView === "settings"}
+                  className={repositoryView === "settings" ? "active" : ""}
+                  onClick={() => setRepositoryView("settings")}
+                >
+                  设置
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={repositoryView === "space"}
+                  className={repositoryView === "space" ? "active" : ""}
+                  onClick={() => setRepositoryView("space")}
+                >
+                  空间
+                </button>
+              </div>
+              {repositoryView === "settings" ? (
+                <>
               <div className="settings-section">
                 <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
                 <div className="settings-path-field">
@@ -250,13 +296,6 @@ export function SettingsDialog() {
                       <ShieldCheck aria-hidden="true" size={15} />开始检查
                     </button>
                   </div>
-                  <div className="settings-preference-row">
-                    <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
-                    <span className="settings-row-copy"><strong>创建备份</strong><small>复制数据库与全部仓库文件，并校验备份</small></span>
-                    <button className="secondary-button" type="button" onClick={() => void maintenance.backupRepository()} disabled={settingsBusy || !repository.ready}>
-                      <DatabaseBackup aria-hidden="true" size={15} />创建备份
-                    </button>
-                  </div>
                 </div>
                 {visibleSettingsRuntime && (
                   <SettingsOperationProgress
@@ -265,29 +304,6 @@ export function SettingsDialog() {
                     onCancel={() => void maintenance.cancelSettingsOperation()}
                   />
                 )}
-              </div>
-
-              <div className="settings-section">
-                <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
-                <div className="settings-preference-list">
-                  <label className="settings-preference-row">
-                    <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
-                    <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
-                    <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => update({ pauseAutomaticBackups: !event.target.checked })} />
-                  </label>
-                  <div className="settings-preference-row">
-                    <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
-                    <span className="settings-row-copy"><strong>默认检查方式</strong><small>{draft.automaticBackupCheckMode === "quick" ? "快速：比较大小、修改时间与首尾采样，有变化再全量备份" : "全量：每次都完整校验内容"}</small></span>
-                    <select
-                      aria-label="自动备份默认检查方式"
-                      value={draft.automaticBackupCheckMode}
-                      onChange={(event) => update({ automaticBackupCheckMode: event.target.value as AppSettings["automaticBackupCheckMode"] })}
-                    >
-                      <option value="quick">快速检查（推荐）</option>
-                      <option value="full">全量校验</option>
-                    </select>
-                  </div>
-                </div>
               </div>
 
               <div className="settings-section">
@@ -419,6 +435,94 @@ export function SettingsDialog() {
                       </ul>
                     )}
                   </div>
+                )}
+              </div>
+                </>
+              ) : (
+                <RepositoryStoragePanel
+                  ready={repository.ready}
+                  overview={storageOverview}
+                  scan={storageDiskScan}
+                  loading={storageOverviewBusy}
+                  error={storageOverviewError}
+                  scanning={maintenance.settingsOperation === "storage-scan"}
+                  cancelPending={cancelPending}
+                  runtime={visibleSettingsRuntime}
+                  onRefresh={() => void refreshStorageOverview()}
+                  onScan={() => void scanStorageDisk()}
+                  onCancelScan={() => void maintenance.cancelSettingsOperation()}
+                />
+              )}
+              </>
+            )}
+
+            {settingsPage === "backup" && (
+              <>
+              <div className="settings-section">
+                <div className="settings-section-title"><Clock3 aria-hidden="true" size={17} /><h3>自动备份</h3></div>
+                <div className="settings-preference-list">
+                  <label className="settings-preference-row">
+                    <span className="settings-row-icon"><Clock3 aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy"><strong>自动备份调度</strong><small>{snapshot?.automaticBackupFileCount == null ? "仓库不可用" : `${snapshot.automaticBackupFileCount} 个工作文件已启用 · ${draft.pauseAutomaticBackups ? "已暂停" : "正在运行"}`}</small></span>
+                    <input className="switch-input" type="checkbox" checked={!draft.pauseAutomaticBackups} onChange={(event) => update({ pauseAutomaticBackups: !event.target.checked })} />
+                  </label>
+                  <div className="settings-preference-row">
+                    <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy"><strong>默认检查方式</strong><small>{draft.automaticBackupCheckMode === "quick" ? "快速：比较大小、修改时间与首尾采样，有变化再全量备份" : "全量：每次都完整校验内容"}</small></span>
+                    <select
+                      aria-label="自动备份默认检查方式"
+                      value={draft.automaticBackupCheckMode}
+                      onChange={(event) => update({ automaticBackupCheckMode: event.target.value as AppSettings["automaticBackupCheckMode"] })}
+                    >
+                      <option value="quick">快速检查（推荐）</option>
+                      <option value="full">全量校验</option>
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              <div className="settings-section">
+                <div className="settings-section-title"><DatabaseBackup aria-hidden="true" size={17} /><h3>整仓备份</h3></div>
+                <div className="settings-preference-list settings-repository-actions">
+                  <div className="settings-preference-row">
+                    <span className="settings-row-icon"><DatabaseBackup aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy is-descriptive">
+                      <strong>创建备份</strong>
+                      <small>复制数据库与全部仓库文件并校验副本；恢复时选择副本中的 repository 目录。</small>
+                    </span>
+                    <button className="secondary-button" type="button" onClick={() => void maintenance.backupRepository()} disabled={settingsBusy || !repository.ready}>
+                      <DatabaseBackup aria-hidden="true" size={15} />创建备份
+                    </button>
+                  </div>
+                </div>
+                {lastRepositoryBackup ? (
+                  <div className="settings-backup-result" role="status">
+                    <strong>最近一次结果（本次运行）</strong>
+                    <small>
+                      {new Date(lastRepositoryBackup.completedAtMs).toLocaleString()} ·
+                      {" "}{lastRepositoryBackup.report.fileCount} 个文件 ·
+                      {" "}{formatBytes(lastRepositoryBackup.report.totalBytes)}
+                    </small>
+                    <small>
+                      历史节点 {lastRepositoryBackup.report.historyNodes} ·
+                      成品 {lastRepositoryBackup.report.finalArtifacts} ·
+                      认证记录 {lastRepositoryBackup.report.certificationRecords}
+                    </small>
+                    <small title={lastRepositoryBackup.report.repositoryPath}>
+                      恢复副本：{lastRepositoryBackup.report.repositoryPath}
+                    </small>
+                  </div>
+                ) : (
+                  <p className="settings-backup-empty">
+                    本次运行尚未创建备份；重启后这里不会保留历史结果。
+                  </p>
+                )}
+                {visibleSettingsRuntime && (
+                  <SettingsOperationProgress
+                    runtime={visibleSettingsRuntime}
+                    cancelPending={cancelPending}
+                    onCancel={() => void maintenance.cancelSettingsOperation()}
+                  />
                 )}
               </div>
               </>
@@ -697,41 +801,6 @@ export function SettingsDialog() {
         />
       )}
     </>
-  );
-}
-
-function SettingsOperationProgress({
-  runtime,
-  cancelPending,
-  onCancel,
-}: {
-  runtime: BackupRuntimeStatus;
-  cancelPending: boolean;
-  onCancel: () => void;
-}) {
-  const hasTotal = runtime.progressTotal > 0;
-  const percent = hasTotal
-    ? Math.round(runtime.progressCurrent / runtime.progressTotal * 100)
-    : 0;
-  return (
-    <div className="settings-operation-progress" role="status" aria-live="polite">
-      <div>
-        <LoaderCircle className="spin" aria-hidden="true" size={15} />
-        <span>{runtime.progressLabel ?? "正在处理"}</span>
-        <strong>{hasTotal ? `${percent}%` : "准备中"}</strong>
-      </div>
-      <progress value={runtime.progressCurrent} max={Math.max(runtime.progressTotal, 1)} />
-      <button
-        className="icon-button"
-        type="button"
-        title="取消当前操作"
-        aria-label="取消当前操作"
-        disabled={cancelPending}
-        onClick={onCancel}
-      >
-        {cancelPending ? <LoaderCircle className="spin" aria-hidden="true" size={15} /> : <X aria-hidden="true" size={15} />}
-      </button>
-    </div>
   );
 }
 

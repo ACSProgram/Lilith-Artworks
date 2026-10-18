@@ -94,6 +94,11 @@ export interface BackupRuntimeStatus {
   busy: boolean;
   activeBranchId: string | null;
   taskKind: BackupTaskKind | null;
+  /**
+   * 上报进度的运行域（后端 `OperationDomain` 的序列化值，如 `maintenance`、
+   * `cleanup`），并行后台任务汇总时为 `background`；尚未上报进度时为 `null`。
+   * 它不是命令名。
+   */
   operation: string | null;
   progressLabel: string | null;
   progressCurrent: number;
@@ -105,4 +110,146 @@ export interface BackupRuntimeStatus {
 export interface BackupDisableNoticeTarget {
   artworkId: string;
   branchId: string;
+}
+
+export type StorageCategoryKind =
+  | "snapshot"
+  | "delta"
+  | "finalArtifact"
+  | "certification"
+  | "boardDds"
+  | "other";
+
+export interface StorageRatio {
+  logicalBytes: number;
+  storedBytes: number;
+  ratio: number | null;
+}
+
+export interface StorageCategory {
+  kind: StorageCategoryKind;
+  bytes: number;
+  fileCount: number;
+}
+
+export interface StorageCompression {
+  snapshot: StorageRatio;
+  delta: StorageRatio;
+}
+
+export interface StorageNode {
+  id: string;
+  title: string;
+  createdMs: number;
+  isCheckpoint: boolean;
+  hasSnapshot: boolean;
+  logicalSize: number;
+  /** snapshot 行是快照文件大小；其余行是重建该节点需要读取的字节数。 */
+  chunkFileSize: number;
+  chunkCount: number;
+  compressionRatio: number | null;
+  snapshotPath: string | null;
+  deltaPath: string | null;
+}
+
+export interface StorageArtifact {
+  id: string;
+  sourcePath: string;
+  byteSize: number;
+  createdMs: number;
+}
+
+export interface StorageCertification {
+  id: string;
+  title: string;
+  outputPath: string;
+  storedPath: string;
+  outputBytes: number;
+  createdMs: number;
+}
+
+export interface StorageBranch {
+  branchId: string;
+  title: string;
+  snapshotBytes: number;
+  deltaBytes: number;
+  finalArtifactBytes: number;
+  certificationBytes: number;
+  recordedBytes: number;
+  finalArtifact: StorageArtifact | null;
+  certificationRecords: StorageCertification[];
+  nodes: StorageNode[];
+}
+
+export interface StorageBoard {
+  boardId: number;
+  name: string;
+  trashed: boolean;
+  imageCount: number;
+}
+
+export interface StorageArtwork {
+  artworkId: string;
+  title: string;
+  groupPath: string[];
+  trashed: boolean;
+  snapshotBytes: number;
+  deltaBytes: number;
+  finalArtifactBytes: number;
+  certificationBytes: number;
+  recordedBytes: number;
+  nodeCount: number;
+  branchCount: number;
+  branches: StorageBranch[];
+  boards: StorageBoard[];
+}
+
+export interface StorageUnassigned {
+  kind: StorageCategoryKind;
+  bytes: number;
+  count: number;
+}
+
+export interface RepositoryStorageOverview {
+  calculatedAtMs: number;
+  databaseRecordedBytes: number;
+  categories: StorageCategory[];
+  compression: StorageCompression;
+  artworks: StorageArtwork[];
+  unassigned: StorageUnassigned[];
+}
+
+export interface StorageOtherBreakdown {
+  sqliteBytes: number;
+  tempBytes: number;
+  unrecognizedBytes: number;
+  sqliteFiles: number;
+  tempFiles: number;
+  unrecognizedFiles: number;
+}
+
+export interface StorageArtworkDiskBytes {
+  artworkId: string;
+  bytes: number;
+}
+
+export interface StorageBoardDiskBytes {
+  boardId: number;
+  bytes: number;
+}
+
+export interface StorageMissingFile {
+  kind: StorageCategoryKind;
+  count: number;
+}
+
+export interface RepositoryStorageDiskScan {
+  scannedAtMs: number;
+  fileCount: number;
+  totalBytes: number;
+  categories: StorageCategory[];
+  otherBreakdown: StorageOtherBreakdown;
+  artworkBytes: StorageArtworkDiskBytes[];
+  ddsByBoard: StorageBoardDiskBytes[];
+  missingFiles: StorageMissingFile[];
 }

@@ -2,7 +2,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import packageInfo from "../../package.json";
 import { dragSlideToEnd } from "../shared/slideToConfirmTesting";
-import type { SettingsSnapshot } from "./types";
+import type {
+  RepositoryStorageDiskScan,
+  RepositoryStorageOverview,
+  SettingsSnapshot,
+} from "./types";
 import type { LibraryTree } from "../modules/library/types";
 
 const appApi = vi.hoisted(() => ({
@@ -19,6 +23,8 @@ const appApi = vi.hoisted(() => ({
   createRepositoryBackup: vi.fn(),
   getBackupRuntimeStatus: vi.fn(),
   cancelBackupOperation: vi.fn(),
+  getRepositoryStorageOverview: vi.fn(),
+  scanRepositoryStorageDisk: vi.fn(),
   openSettingsDirectory: vi.fn(),
   openLogDirectory: vi.fn(),
   openLegalDirectory: vi.fn(),
@@ -136,6 +142,85 @@ const tree = (title: string, sourcePath: string, backupDisableNoticeCount = 0): 
   artworkCount: 1,
 });
 
+const storageOverviewFixture = (): RepositoryStorageOverview => ({
+  calculatedAtMs: 1,
+  databaseRecordedBytes: 2048,
+  categories: [
+    { kind: "snapshot", bytes: 1024, fileCount: 2 },
+    { kind: "delta", bytes: 1024, fileCount: 3 },
+    { kind: "finalArtifact", bytes: 0, fileCount: 0 },
+    { kind: "certification", bytes: 0, fileCount: 0 },
+  ],
+  compression: {
+    snapshot: { logicalBytes: 4096, storedBytes: 1024, ratio: 4 },
+    delta: { logicalBytes: 8192, storedBytes: 1024, ratio: 8 },
+  },
+  artworks: [{
+    artworkId: "shared-artwork-id",
+    title: "Repository artwork",
+    groupPath: ["Sketches"],
+    trashed: false,
+    snapshotBytes: 1024,
+    deltaBytes: 1024,
+    finalArtifactBytes: 0,
+    certificationBytes: 0,
+    recordedBytes: 2048,
+    nodeCount: 1,
+    branchCount: 1,
+    branches: [{
+      branchId: "shared-branch-id",
+      title: "Main",
+      snapshotBytes: 1024,
+      deltaBytes: 1024,
+      finalArtifactBytes: 0,
+      certificationBytes: 0,
+      recordedBytes: 2048,
+      finalArtifact: null,
+      certificationRecords: [],
+      nodes: [{
+        id: "node-1",
+        title: "First snapshot",
+        createdMs: 1,
+        isCheckpoint: true,
+        hasSnapshot: true,
+        logicalSize: 4096,
+        chunkFileSize: 1024,
+        chunkCount: 4,
+        compressionRatio: 4,
+        snapshotPath: "artworks/shared-artwork-id/snapshots/node-1.lbc",
+        deltaPath: null,
+      }],
+    }],
+    boards: [],
+  }],
+  unassigned: [],
+});
+
+const storageDiskScanFixture = (): RepositoryStorageDiskScan => ({
+  scannedAtMs: 2,
+  fileCount: 5,
+  totalBytes: 4096,
+  categories: [
+    { kind: "snapshot", bytes: 1024, fileCount: 1 },
+    { kind: "delta", bytes: 1024, fileCount: 1 },
+    { kind: "finalArtifact", bytes: 0, fileCount: 0 },
+    { kind: "certification", bytes: 0, fileCount: 0 },
+    { kind: "boardDds", bytes: 512, fileCount: 1 },
+    { kind: "other", bytes: 1536, fileCount: 2 },
+  ],
+  otherBreakdown: {
+    sqliteBytes: 1024,
+    tempBytes: 512,
+    unrecognizedBytes: 0,
+    sqliteFiles: 1,
+    tempFiles: 1,
+    unrecognizedFiles: 0,
+  },
+  artworkBytes: [{ artworkId: "shared-artwork-id", bytes: 2560 }],
+  ddsByBoard: [],
+  missingFiles: [],
+});
+
 describe("App repository switching", () => {
   afterEach(cleanup);
 
@@ -159,6 +244,8 @@ describe("App repository switching", () => {
       completionRevision: 0,
     });
     appApi.cancelBackupOperation.mockResolvedValue(true);
+    appApi.getRepositoryStorageOverview.mockResolvedValue(storageOverviewFixture());
+    appApi.scanRepositoryStorageDisk.mockResolvedValue(storageDiskScanFixture());
     appApi.createRepositoryBackup.mockResolvedValue({
       backupPath: "C:\\backups\\Lilith-Artworks-backup-1",
       repositoryPath: "C:\\backups\\Lilith-Artworks-backup-1\\repository",
@@ -215,7 +302,7 @@ describe("App repository switching", () => {
     await waitFor(() => expect(libraryApi.search).toHaveBeenCalledWith("only-in-a"));
 
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     const repositoryInput = await screen.findByLabelText("作品仓库路径");
     fireEvent.change(repositoryInput, { target: { value: repositoryB } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
@@ -264,13 +351,15 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "备份" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     await waitFor(() => {
       expect(appApi.createRepositoryBackup).toHaveBeenCalledWith("C:\\backups");
     });
     expect(await screen.findByText(/备份已校验：4 个文件、2 个历史节点/)).toBeTruthy();
+    expect(await screen.findByText("最近一次结果（本次运行）")).toBeTruthy();
+    expect(screen.getAllByText(/Lilith-Artworks-backup-1/).length).toBeGreaterThan(0);
   });
 
   it("reports reclaimed staging directories after a repository backup", async () => {
@@ -300,7 +389,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "备份" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     expect(await screen.findByText(/并回收 2 个残留暂存目录/)).toBeTruthy();
@@ -333,7 +422,8 @@ describe("App repository switching", () => {
       busy: true,
       activeBranchId: null,
       taskKind: "userOperation",
-      operation: "repository-backup",
+      // 运行状态上报的是运行域（`OperationDomain`），不是命令名。
+      operation: "maintenance",
       progressLabel: "正在复制仓库文件",
       progressCurrent: 512,
       progressTotal: 1024,
@@ -360,7 +450,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "备份" }));
     fireEvent.click(await screen.findByRole("button", { name: "创建备份" }));
 
     expect(await screen.findByText("正在复制仓库文件")).toBeTruthy();
@@ -408,7 +498,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始检查" }));
 
     expect(
@@ -442,7 +532,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始检查" }));
 
     expect(
@@ -450,6 +540,43 @@ describe("App repository switching", () => {
         "完整性检查完成，但发现画板 DDS 问题：缺失 1、损坏 0、孤儿 2（共 5 张画板图片）。",
       ),
     ).toBeTruthy();
+  });
+
+  it("shows the storage overview and scans disk usage on demand", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "空间" }));
+
+    expect(await screen.findByRole("radio", { name: "数据库记录" })).toBeTruthy();
+    await waitFor(() => expect(appApi.getRepositoryStorageOverview).toHaveBeenCalled());
+    expect(screen.getAllByText("2.00 KiB").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("4.00×").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("8.00×").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Repository artwork").length).toBeGreaterThan(0);
+    expect(screen.getByText(/Sketches/)).toBeTruthy();
+    expect(appApi.scanRepositoryStorageDisk).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /扫描磁盘占用/ }));
+    await waitFor(() => expect(appApi.scanRepositoryStorageDisk).toHaveBeenCalledOnce());
+
+    const diskMode = await screen.findByRole("radio", { name: "磁盘实际" });
+    await waitFor(() => expect(diskMode.getAttribute("aria-checked")).toBe("true"));
+    expect(await screen.findByText("画板图片（DDS）")).toBeTruthy();
+    expect(await screen.findByText(/SQLite \/ WAL：1.00 KiB/)).toBeTruthy();
+    expect(screen.getAllByText("2.50 KiB").length).toBeGreaterThan(0);
   });
 
   it("shows release identity and opens the bundled legal directory", async () => {    const repositoryPath = "C:\\repositories\\A";
@@ -536,7 +663,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
 
     expect(await screen.findByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeTruthy();
     expect(screen.getByText(/提交释放旧快照/)).toBeTruthy();
@@ -576,7 +703,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
 
     // 仓库外条目展示完整路径、所属作品与期望摘要，且不提供「全部重试」入口。
     expect(await screen.findByText(externalPath)).toBeTruthy();
@@ -616,7 +743,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始扫描" }));
 
     expect(await screen.findByText("发现 2 个未引用文件")).toBeTruthy();
@@ -652,7 +779,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository A artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: repositoryB } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 
@@ -715,7 +842,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository A artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓库与备份" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
     fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: repositoryB } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
 

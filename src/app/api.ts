@@ -12,6 +12,8 @@ import type {
   RepositoryBackupReport,
   RepositoryScrubReport,
   RepositoryStatus,
+  RepositoryStorageDiskScan,
+  RepositoryStorageOverview,
   SettingsSnapshot,
 } from "./types";
 
@@ -37,6 +39,10 @@ export const appApi = {
     invokeCommand<UnreferencedScanCandidate[]>("scan_repository_unreferenced"),
   cleanupRepositoryUnreferenced: (paths: string[]) =>
     invokeCommand<CleanupReport>("cleanup_repository_unreferenced", { paths }),
+  getRepositoryStorageOverview: () =>
+    invokeCommand<RepositoryStorageOverview>("get_repository_storage_overview"),
+  scanRepositoryStorageDisk: () =>
+    invokeCommand<RepositoryStorageDiskScan>("scan_repository_storage_disk"),
   acknowledgeBackupDisableNotices: (artworkIds: string[]) =>
     invokeCommand<void>("acknowledge_backup_disable_notices", { artworkIds }),
   getBackupDisableNoticeTarget: () =>
