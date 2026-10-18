@@ -40,9 +40,17 @@
   `cargo fmt --check`、`npx tsc --noEmit`、`npm test` 已通过；GUI 人工验收与压力测试**未做**。
   owner lock 的锁冲突不区分同进程，后台任务持锁期间前台写命令会直接拿到 `repository_busy`
   而不是排队等待，这一取舍连同其他待决项记在 `todo.md`。
-- **下一步**：由维护者验收阶段 1、阶段 2 的产品行为；随后进入阶段 3（App 组件剩余拆分、
-  事件通道消费侧、controller 模板）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
-- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1–2（待验收）、阶段 3–9。
+- **阶段 3 已实现、待维护者验收**：新增统一 `AppEvent` 订阅 bridge（单原生监听、版本/仓库 key/
+  时间戳过滤）与共享 `useRequestEpoch`、`useAsyncOperation` 工具；History、Library、
+  Authenticity、Pin-board 四个 controller 统一请求代次、busy 与错误策略。History/备份运行态由
+  事件即时唤醒，原 350 ms 高频轮询降为 3 秒兜底（作品树保留 30 秒兜底）；设置页维护进度在事件
+  到达时按 150 ms 合并读取。素材板新增 `usePinBoardController`，生命周期、画板选择与保存/导入/
+  导出状态移出组件；导入/导出进度改经 `CommandContext` 广播 `operationProgress`，不再使用
+  `Channel`。`cargo check --features headless`、`cargo test --lib`、`npx tsc --noEmit`、
+  `npm test`、`cargo fmt --check` 已通过；GUI 人工验收与压力测试**未做**。
+- **下一步**：由维护者验收阶段 1、阶段 2、阶段 3 的产品行为；随后进入阶段 4（分块、恢复与
+  完整性算法）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
+- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1–3（待验收）、阶段 4–9。
 
 ## 当前基线
 

@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { appApi } from "./api";
 import { IDLE_BACKUP_RUNTIME, useRuntimeProgress } from "./RuntimeProgressProvider";
 import { errorMessage } from "../shared/errors";
+import { useRuntimeSubscription } from "../shared/useRuntimeSubscription";
 import {
   isExternalCleanupEntry,
   type PendingCleanupEntry,
@@ -67,6 +68,12 @@ export function useRepositoryMaintenance(
     return () => setPolling(false);
   }, [setPolling, settings.settingsOpen, settingsOperation]);
 
+  // 操作刚启动时立即读一次运行状态：事件会让进度随后持续到达，但首帧
+  // 不能等 3 秒兜底轮询。
+  useEffect(() => {
+    if (settingsOperation !== null) void refreshRuntime().catch(() => undefined);
+  }, [refreshRuntime, settingsOperation]);
+
   // 打开设置或切到仓库页时读取一次待清理队列；只读，失败时保持上一次结果。
   useEffect(() => {
     if (!settings.settingsOpen || settings.settingsPage !== "repository" || !settings.repository.ready) {
@@ -94,6 +101,12 @@ export function useRepositoryMaintenance(
       // 队列读取失败保持上一次结果；重试/清理的结果已由命令返回值给出。
     }
   }, [settings.repository.ready]);
+
+  // 提交、删除、结算与清理命令会广播队列变化；设置页打开时据此即时刷新，
+  // 不依赖操作结束后的手动调用。
+  useRuntimeSubscription((event) => {
+    if (event.type === "cleanupQueueChanged") void refreshPendingCleanup();
+  }, { enabled: settings.settingsOpen && settings.repository.ready });
 
   const scrubRepository = useCallback(async () => {
     let current: BackupRuntimeStatus;

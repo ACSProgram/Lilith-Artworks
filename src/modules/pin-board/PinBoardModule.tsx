@@ -48,17 +48,12 @@ import { ContextMenu, type ContextMenuItem } from "../../shared/ui/ContextMenu";
 import { PromptDialog } from "../../shared/ui/PromptDialog";
 import {
   getPinBoardWindowFullscreen,
-  pinBoardApi,
-  pickPinBoardExportDirectory,
-  pickPinBoardImagePaths,
   setPinBoardWindowFullscreen,
 } from "./api";
+import type { BoardDropPosition } from "./boardOrder";
 import type {
-  PinBoardClipboardImage,
-  PinBoardMutationResult,
+  PinBoardModuleSettings,
   PinBoardSummary,
-  PinBoardTextureCacheLevel,
-  PinBoardTransferProgress,
   PinBoardView,
 } from "./types";
 import {
@@ -66,20 +61,15 @@ import {
   type PinBoardContextMenuRequest,
   type PinBoardInteractionState,
 } from "./renderer";
-import {
-  textureBudgetsForLevel,
-  type PinBoardTextureBudgets,
-} from "./texturePolicy";
-import { registerPinBoardLifecycleParticipant } from "./lifecycle";
+import { textureBudgetsForLevel, type PinBoardTextureBudgets } from "./texturePolicy";
 import {
   getBoardSession,
-  getSelectedBoardId,
   getSidebarVisible,
   setBoardSession,
-  setSelectedBoardId,
   setSidebarVisible,
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
+import { usePinBoardController } from "./usePinBoardController";
 
 /**
  * 素材板快捷键默认值，与设置页默认项保持一致。
@@ -88,14 +78,6 @@ import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
  */
 export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+R";
 export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
-
-export interface PinBoardModuleSettings {
-  arrangementGapPx: number;
-  textureCacheLevel: PinBoardTextureCacheLevel;
-  autosave: boolean;
-  lockShortcut: string;
-  fullscreenShortcut: string;
-}
 
 interface PinBoardModuleProps {
   artworkId: string;
@@ -136,86 +118,8 @@ export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
   return hasView && locked && !unavailable;
 }
 
-const IMAGE_PATH_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif|tga|dds)$/i;
-
-/**
- * 拖入导入走「原始字节解码」路径（`import_pin_board_clipboard_image`），只能接受
- * 可被内容嗅探识别的位图格式；DDS/TGA 需要文件路径，仍通过「导入图片」选择器处理。
- */
-const DROP_IMAGE_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif)$/i;
-
 /** 侧栏画板拖放排序使用的自定义 dataTransfer 类型。 */
 const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
-
-type BoardDropPosition = "before" | "after";
-
-/**
- * 计算拖放后的画板 id 顺序：把 `draggedId` 插到 `targetId` 的前或后。
- * 返回 `null` 表示顺序没有变化（同位置、id 不在列表中或拖到自己身上）。
- */
-export function reorderBoardIds(
-  boardIds: number[],
-  draggedId: number,
-  targetId: number,
-  position: BoardDropPosition,
-): number[] | null {
-  if (draggedId === targetId || !boardIds.includes(draggedId)) return null;
-  const withoutDragged = boardIds.filter((boardId) => boardId !== draggedId);
-  const targetIndex = withoutDragged.indexOf(targetId);
-  if (targetIndex < 0) return null;
-  const insertAt = position === "before" ? targetIndex : targetIndex + 1;
-  const next = [
-    ...withoutDragged.slice(0, insertAt),
-    draggedId,
-    ...withoutDragged.slice(insertAt),
-  ];
-  return next.every((boardId, index) => boardId === boardIds[index]) ? null : next;
-}
-
-async function clipboardImageBytes(): Promise<number[] | null> {
-  if (!navigator.clipboard?.read) return null;
-  try {
-    const items = await navigator.clipboard.read();
-    for (const item of items) {
-      const imageType = ["image/png", "image/jpeg", "image/webp", "image/bmp", "image/gif"]
-        .find((type) => item.types.includes(type));
-      if (!imageType) continue;
-      const blob = await item.getType(imageType);
-      return Array.from(new Uint8Array(await blob.arrayBuffer()));
-    }
-  } catch {
-    // Clipboard access may be unavailable; import falls back to paths and the dialog.
-  }
-  return null;
-}
-
-async function renderTextImage(text: string, fontSize: number, color: string): Promise<number[]> {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("无法创建文字画布");
-  const font = `${fontSize}px "Microsoft YaHei UI", "Segoe UI", sans-serif`;
-  const padding = Math.max(12, Math.ceil(fontSize * 0.35));
-  const lineHeight = Math.ceil(fontSize * 1.3);
-  context.font = font;
-  const textWidth = Math.max(...lines.map((line) => context.measureText(line || " ").width));
-  const width = Math.max(4, Math.ceil(textWidth + padding * 2));
-  const height = Math.max(4, lineHeight * lines.length + padding * 2);
-  canvas.width = Math.ceil(width / 4) * 4;
-  canvas.height = Math.ceil(height / 4) * 4;
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.font = font;
-  context.fillStyle = color;
-  context.textBaseline = "top";
-  lines.forEach((line, index) => context.fillText(line, padding, padding + index * lineHeight));
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((result) => {
-      if (result) resolve(result);
-      else reject(new Error("无法生成文字图片"));
-    }, "image/png");
-  });
-  return Array.from(new Uint8Array(await blob.arrayBuffer()));
-}
 
 function afterLayoutSettles(): Promise<void> {
   return new Promise((resolve) => {
@@ -257,7 +161,6 @@ function GpuCanvas({
   /** 渲染器实例常驻：创建 effect 只随画布生命周期运行一次。 */
   const rendererRef = useRef<PinBoardRenderer | null>(null);
   const bootRef = useRef<Promise<PinBoardRenderer | null> | null>(null);
-  const unregisterLifecycleRef = useRef<(() => void) | null>(null);
   const destroyTimerRef = useRef<number | null>(null);
   const disposedRef = useRef(false);
   /** 渲染器就绪后自增，触发「装载画板」effect 用最新 view 装载。 */
@@ -329,7 +232,6 @@ function GpuCanvas({
           created.setActive(activeRef.current);
           rendererRef.current = created;
           onUnavailableRef.current(null);
-          unregisterLifecycleRef.current = registerPinBoardLifecycleParticipant(created);
           onRendererRef.current(created);
           onStateRef.current(created.interactionState);
           setReadyVersion((current) => current + 1);
@@ -352,8 +254,6 @@ function GpuCanvas({
       destroyTimerRef.current = window.setTimeout(() => {
         destroyTimerRef.current = null;
         bootRef.current = null;
-        unregisterLifecycleRef.current?.();
-        unregisterLifecycleRef.current = null;
         const current = rendererRef.current;
         rendererRef.current = null;
         onRendererRef.current(null);
@@ -560,23 +460,40 @@ function PinBoardContextMenu({
   );
 }
 
-const DEFAULT_INTERACTION: PinBoardInteractionState = {
-  imageCount: 0,
-  selectedCount: 0,
-  canUndo: false,
-  canRedo: false,
-  dirty: false,
-  saving: false,
-  locked: true,
-  zoomPercent: 100,
-};
-
 export function PinBoardModule({ artworkId, active, settings }: PinBoardModuleProps) {
-  const [boards, setBoards] = useState<PinBoardSummary[] | null>(null);
-  const [trash, setTrash] = useState<PinBoardSummary[]>([]);
-  const [view, setView] = useState<PinBoardView | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [status, setStatus] = useState<string | null>(null);
+  const {
+    boards,
+    trash,
+    view,
+    selected,
+    status,
+    transferProgress,
+    clipboardCount,
+    interaction,
+    renderer,
+    setRenderer,
+    setStatus,
+    setInteraction,
+    syncInteraction,
+    selectBoard,
+    moveBoard,
+    createBoard,
+    renameBoard,
+    trashBoard,
+    restoreBoard,
+    permanentlyDeleteBoard,
+    emptyTrash,
+    save,
+    toggleLock,
+    copyImages,
+    copyImageToClipboard,
+    pasteImages,
+    importImages,
+    importDroppedFiles,
+    addText,
+    deleteImages,
+    exportImages,
+  } = usePinBoardController({ artworkId, active, settings });
   /**
    * 渲染器创建失败的常驻原因。素材板完全依赖 WebGPU，创建失败后画布不会再可用，
    * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
@@ -606,105 +523,28 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     x: number;
     y: number;
   } | null>(null);
-  const [transferProgress, setTransferProgress] = useState<PinBoardTransferProgress | null>(null);
-  const [clipboardCount, setClipboardCount] = useState(0);
-  const [interaction, setInteraction] = useState(DEFAULT_INTERACTION);
   /** 侧栏画板拖放排序：正在拖动的画板与当前落点。 */
   const [draggingBoardId, setDraggingBoardId] = useState<number | null>(null);
   const [boardDropTarget, setBoardDropTarget] = useState<
     { boardId: number; position: BoardDropPosition } | null
   >(null);
-  const rendererRef = useRef<PinBoardRenderer | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
-  const loadSequence = useRef(0);
-  const clipboardRef = useRef<PinBoardClipboardImage[]>([]);
   const textPlacementRef = useRef<[number, number] | null>(null);
   const fullscreenRef = useRef(false);
   const fullscreenBusyRef = useRef(false);
-  const transferBusyRef = useRef(false);
-  const reorderBusyRef = useRef(false);
-  const setRenderer = useCallback((renderer: PinBoardRenderer | null) => {
-    rendererRef.current = renderer;
-  }, []);
-  const handleRendererState = useCallback((state: PinBoardInteractionState) => {
-    setInteraction(state);
-  }, []);
+
   const handleRendererContextMenu = useCallback((request: PinBoardContextMenuRequest | null) => {
     setListContextMenu(null);
     setContextMenu(request);
   }, []);
 
-  const refreshBoards = useCallback(async () => {
-    const [nextBoards, nextTrash] = await Promise.all([
-      pinBoardApi.listPinBoards(artworkId),
-      pinBoardApi.listPinBoardTrash(),
-    ]);
-    setBoards(nextBoards);
-    setTrash(nextTrash);
-    return nextBoards;
-  }, [artworkId]);
-
-  /**
-   * 侧栏拖放排序：把 `draggedId` 放到 `targetId` 的前/后，先本地重排再落库，
-   * 失败时回滚。重排只改列表顺序，不影响已打开画板的保存。
-   */
-  const moveBoard = useCallback((
-    draggedId: number,
-    targetId: number,
-    position: BoardDropPosition,
-  ) => {
-    if (!boards || reorderBusyRef.current || transferBusyRef.current) return;
-    const nextOrder = reorderBoardIds(
-      boards.map((board) => board.boardId),
-      draggedId,
-      targetId,
-      position,
-    );
-    if (!nextOrder) return;
-    const byId = new Map(boards.map((board) => [board.boardId, board]));
-    const optimistic = nextOrder
-      .map((boardId) => byId.get(boardId))
-      .filter((board): board is PinBoardSummary => board !== undefined);
-    const previous = boards;
-    setBoards(optimistic);
-    reorderBusyRef.current = true;
-    void pinBoardApi.reorderPinBoards(artworkId, nextOrder)
-      .then((next) => setBoards(next))
-      .catch((error) => {
-        setBoards(previous);
-        setStatus(errorMessage(error));
-      })
-      .finally(() => {
-        reorderBusyRef.current = false;
-      });
-  }, [artworkId, boards]);
-
   useEffect(() => {
-    rendererRef.current?.setActive(active);
     if (!active) {
       setContextMenu(null);
       setListContextMenu(null);
       setDropActive(false);
     }
   }, [active]);
-
-  useEffect(() => {
-    rendererRef.current?.setArrangementGapCssPixels(settings.arrangementGapPx);
-  }, [settings.arrangementGapPx]);
-
-  useEffect(() => {
-    rendererRef.current?.setAutosaveEnabled(settings.autosave);
-  }, [settings.autosave]);
-
-  useEffect(() => {
-    rendererRef.current?.setTextureCacheBudgets(textureBudgetsForLevel(settings.textureCacheLevel));
-  }, [settings.textureCacheLevel]);
-
-  useEffect(() => {
-    if (!status) return undefined;
-    const timer = window.setTimeout(() => setStatus(null), 4500);
-    return () => window.clearTimeout(timer);
-  }, [status]);
 
   useEffect(() => {
     if (!listContextMenu) return undefined;
@@ -722,290 +562,13 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     };
   }, [listContextMenu]);
 
-  useEffect(() => {
-    let cancelled = false;
-    const sequence = ++loadSequence.current;
-    const current = rendererRef.current;
-    // 素材板渲染器跨作品保活：这里只换数据，不销毁渲染器/GPU 设备。
-    // 旧画板的结算由随后的 `loadBoard`（或 `unloadBoard`）完成。
-    diagnosticsLog(
-      "info",
-      `pin-board artwork switch start: artworkId=${artworkId}, hadRenderer=${current !== null}`,
-    );
-    setBoards(null);
-    setTrash([]);
-    setSelected(null);
-    setInteraction(DEFAULT_INTERACTION);
-    setContextMenu(null);
-    setListContextMenu(null);
-    setStatus(null);
-
-    void pinBoardApi.listPinBoards(artworkId)
-      .then(async (next) => {
-        if (cancelled || sequence !== loadSequence.current) return;
-        setBoards(next);
-        diagnosticsLog(
-          "info",
-          `pin-board artwork switch done: artworkId=${artworkId}, boards=${next.length}`,
-        );
-        setTrash(await pinBoardApi.listPinBoardTrash().catch(() => []));
-        const preferredId = getSelectedBoardId(artworkId);
-        const first = next.find((board) => board.boardId === preferredId) ?? next[0];
-        if (!first) {
-          // 新作品没有画板：清空画布（渲染器保持挂载）。
-          setView(null);
-          return;
-        }
-        setSelected(first.boardId);
-        setSelectedBoardId(artworkId, first.boardId);
-        void pinBoardApi.loadPinBoard(first.boardId)
-          .then((loaded) => {
-            if (!cancelled && sequence === loadSequence.current) setView(loaded);
-          })
-          .catch((error) => {
-            if (!cancelled && sequence === loadSequence.current) setStatus(errorMessage(error));
-          });
-      })
-      .catch((error) => {
-        if (!cancelled && sequence === loadSequence.current) setStatus(errorMessage(error));
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [artworkId]);
-
-  useEffect(() => () => {
-    loadSequence.current += 1;
-    rendererRef.current?.destroy();
-    rendererRef.current = null;
-  }, []);
-
-  const select = async (board: PinBoardSummary) => {
-    if (board.boardId === selected) return;
-    const sequence = ++loadSequence.current;
-    diagnosticsLog(
-      "info",
-      `pin-board board select start: artworkId=${artworkId}, boardId=${board.boardId}`,
-    );
-    setContextMenu(null);
-    try {
-      const loaded = await pinBoardApi.loadPinBoard(board.boardId);
-      if (sequence !== loadSequence.current) return;
-      const current = rendererRef.current;
-      if (current) {
-        // 复用同一渲染器与 GPU 设备：先以旧 boardId 结算旧画板再装载新画板；
-        // 结算失败则中止切换，渲染器与 UI 都停在旧画板。
-        const switched = await current.loadBoard(
-          loaded,
-          getBoardSession(artworkId, loaded.boardId),
-        );
-        if (!switched || sequence !== loadSequence.current) return;
-      }
-      setSelected(board.boardId);
-      setSelectedBoardId(artworkId, board.boardId);
-      setView(loaded);
-      setInteraction(rendererRef.current?.interactionState ?? DEFAULT_INTERACTION);
-      diagnosticsLog(
-        "info",
-        `pin-board board select done: artworkId=${artworkId}, boardId=${board.boardId}`,
-      );
-    } catch (error) {
-      diagnosticsLog(
-        "warn",
-        `pin-board board select failed: artworkId=${artworkId}, boardId=${board.boardId}, error=${errorMessage(error)}`,
-      );
-      if (sequence === loadSequence.current) setStatus(errorMessage(error));
-    }
-  };
-
-  const replaceAfterImageMutation = useCallback(async (
-    action: (renderer: PinBoardRenderer, revision: string) => Promise<PinBoardMutationResult>,
-    success: (count: number) => string,
-  ): Promise<PinBoardMutationResult | null> => {
-    const current = rendererRef.current;
-    if (!current || current.interactionState.locked) return null;
-    const sequence = ++loadSequence.current;
-    if (!await current.save() || sequence !== loadSequence.current) return null;
-    try {
-      const result = await action(current, current.boardRevision);
-      if (sequence !== loadSequence.current) return null;
-      setContextMenu(null);
-      current.applyMutationResult(result.view, result.imageIds);
-      setInteraction(current.interactionState);
-      setStatus(success(result.imageIds.length));
-      return result;
-    } catch (error) {
-      if (sequence === loadSequence.current) setStatus(errorMessage(error));
-      return null;
-    }
-  }, []);
-
-  const copyImages = useCallback(() => {
-    const images = rendererRef.current?.copySelection() ?? [];
-    if (images.length === 0) return;
-    clipboardRef.current = images;
-    setClipboardCount(images.length);
-    setStatus(`已复制 ${images.length} 张画板图片`);
-  }, []);
-
-  const copyImageToClipboard = useCallback(async () => {
-    const current = rendererRef.current;
-    const imageId = current?.copyImageToClipboardId() ?? null;
-    if (!current || imageId === null || selected === null) return;
-    try {
-      const response = await pinBoardApi.readPinBoardImagePng(selected, imageId);
-      const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
-      const buffer = bytes.slice().buffer as ArrayBuffer;
-      await navigator.clipboard.write([
-        new ClipboardItem({ "image/png": new Blob([buffer], { type: "image/png" }) }),
-      ]);
-      setStatus("已复制图片到系统剪贴板");
-    } catch (error) {
-      setStatus(`无法复制图片到系统剪贴板：${errorMessage(error)}`);
-    }
-  }, [selected]);
-
-  const pasteImages = useCallback(() => {
-    if (clipboardRef.current.length === 0 || selected === null) return;
-    void replaceAfterImageMutation((renderer, revision) => {
-      const [centerX, centerY] = renderer.placementPoint;
-      return pinBoardApi.pastePinBoardImages(
-        selected ?? 0,
-        clipboardRef.current,
-        centerX,
-        centerY,
-        renderer.placementGap(settings.arrangementGapPx),
-        revision,
-      );
-    }, (count) => `已粘贴 ${count} 张图片`);
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
-
-  const importImages = useCallback(async () => {
-    const current = rendererRef.current;
-    if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
-    transferBusyRef.current = true;
-    try {
-      const bytes = await clipboardImageBytes();
-      if (bytes) {
-        setTransferProgress({ label: "正在处理剪贴板图片", current: 0, total: 3 });
-        await replaceAfterImageMutation((renderer, revision) => {
-          const [centerX, centerY] = renderer.placementPoint;
-          return pinBoardApi.importPinBoardClipboardImage(
-            selected,
-            bytes,
-            centerX,
-            centerY,
-            revision,
-            setTransferProgress,
-          );
-        }, (count) => `已从剪贴板导入 ${count} 张图片`);
-        return;
-      }
-
-      // 路径来源只剩两条：剪贴板里的文件（由 `read_pin_board_clipboard_paths`
-      // 读出并加入文件系统 scope）与文件选择器。粘贴纯文本路径不再导入——那种
-      // 路径没有任何授权来源，Rust 层会以「未由文件选择器授权」拒绝。
-      let paths: string[] = [];
-      try {
-        paths = (await pinBoardApi.readPinBoardClipboardPaths())
-          .filter((path) => IMAGE_PATH_PATTERN.test(path));
-      } catch {
-        // Fall back to the file picker when the native clipboard is unavailable.
-      }
-      if (paths.length === 0) {
-        paths = await pickPinBoardImagePaths();
-        if (paths.length === 0) return;
-      }
-      setTransferProgress({ label: "正在导入图片", current: 0, total: paths.length });
-      await replaceAfterImageMutation((renderer, revision) => {
-        const [centerX, centerY] = renderer.placementPoint;
-        return pinBoardApi.importPinBoardImages(
-          selected,
-          paths,
-          centerX,
-          centerY,
-          renderer.placementGap(settings.arrangementGapPx),
-          revision,
-          setTransferProgress,
-        );
-      }, (count) => `已导入 ${count} 张图片`);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setTransferProgress(null);
-      transferBusyRef.current = false;
-    }
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
-
-  /**
-   * 拖放导入：把拖进画板的图片文件读成字节后逐个导入。窗口以 `dragDropEnabled: false`
-   * 运行（HTML5 拖放可用），浏览器不再暴露文件系统路径，因此只能走字节导入命令；
-   * 多张一起拖入时按前一张的显示宽度向右排开，避免完全重叠。
-   */
-  const importDroppedFiles = useCallback(async (
-    files: FileList,
-    clientX: number,
-    clientY: number,
-  ) => {
-    const current = rendererRef.current;
-    if (!current || selected === null || transferBusyRef.current) return;
-    if (current.interactionState.locked) {
-      setStatus("画板已锁定，无法导入图片");
-      return;
-    }
-    const images = Array.from(files).filter((file) => DROP_IMAGE_PATTERN.test(file.name));
-    if (images.length === 0) {
-      setStatus("请拖入 PNG、JPEG、WebP、BMP 或 GIF 图片");
-      return;
-    }
-    transferBusyRef.current = true;
-    current.setPlacementFromClient(clientX, clientY);
-    const gap = current.placementGap(settings.arrangementGapPx);
-    let [centerX, centerY] = current.placementPoint;
-    try {
-      let imported = 0;
-      for (const file of images) {
-        const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
-        if (bytes.length === 0) continue;
-        setTransferProgress({ label: "正在导入图片", current: imported, total: images.length });
-        const result = await replaceAfterImageMutation(
-          (renderer, revision) => pinBoardApi.importPinBoardClipboardImage(
-            selected,
-            bytes,
-            centerX,
-            centerY,
-            revision,
-            setTransferProgress,
-          ),
-          (count) => `已导入 ${count} 张图片`,
-        );
-        if (!result) break;
-        imported += result.imageIds.length;
-        const placed = result.view.images.find((image) => result.imageIds.includes(image.imageId));
-        if (placed) {
-          centerX += Math.hypot(
-            placed.points[1][0] - placed.points[0][0],
-            placed.points[1][1] - placed.points[0][1],
-          ) + gap;
-        }
-      }
-      if (imported > 0) setStatus(`已导入 ${imported} 张图片`);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setTransferProgress(null);
-      transferBusyRef.current = false;
-    }
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
-
   const handleStageDragOver = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     if (!event.dataTransfer.types.includes("Files")) return;
     // 必须取消默认行为，否则浏览器会把它当成导航并拒绝这次放置。
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
-    const current = rendererRef.current;
-    if (current && !current.interactionState.locked) setDropActive(true);
-  }, []);
+    if (renderer && !renderer.interactionState.locked) setDropActive(true);
+  }, [renderer]);
 
   const handleStageDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
     if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
@@ -1019,169 +582,49 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     void importDroppedFiles(event.dataTransfer.files, event.clientX, event.clientY);
   }, [importDroppedFiles]);
 
-  const addText = useCallback(async (text: string, fontSize: number, color: string) => {
-    const current = rendererRef.current;
-    if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
-    const placementPoint = textPlacementRef.current ?? current.placementPoint;
-    textPlacementRef.current = null;
-    setTextOptions({ fontSize, color });
-    setTextDialogOpen(false);
-    transferBusyRef.current = true;
-    setTransferProgress({ label: "正在生成文字", current: 0, total: 3 });
-    try {
-      const bytes = await renderTextImage(text, fontSize, color);
-      await replaceAfterImageMutation((renderer, revision) => {
-        const [centerX, centerY] = placementPoint;
-        return pinBoardApi.importPinBoardClipboardImage(
-          selected,
-          bytes,
-          centerX,
-          centerY,
-          revision,
-          setTransferProgress,
-        );
-      }, () => "已添加文字");
-    } catch (error) {
-      setStatus(`无法添加文字：${errorMessage(error)}`);
-    } finally {
-      setTransferProgress(null);
-      transferBusyRef.current = false;
-    }
-  }, [replaceAfterImageMutation, selected]);
-
   const openTextDialog = useCallback(() => {
-    const current = rendererRef.current;
+    const current = renderer;
     if (!current || current.interactionState.locked) return;
     textPlacementRef.current = current.placementPoint;
     setTextDialogOpen(true);
-  }, []);
+  }, [renderer]);
 
   const closeTextDialog = useCallback(() => {
     textPlacementRef.current = null;
     setTextDialogOpen(false);
   }, []);
 
-  const deleteImages = useCallback(() => {
-    rendererRef.current?.deleteSelected();
-  }, []);
-
-  const exportImages = useCallback(async () => {
-    const current = rendererRef.current;
-    if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
-    const imageIds = current.selectedImageIds();
-    if (imageIds.length === 0) return;
-    transferBusyRef.current = true;
-    try {
-      const directory = await pickPinBoardExportDirectory();
-      if (!directory || !await current.save()) return;
-      setTransferProgress({ label: "正在导出图片", current: 0, total: imageIds.length });
-      const count = await pinBoardApi.exportPinBoardImages(
-        selected,
-        imageIds,
-        directory,
-        setTransferProgress,
-      );
-      setStatus(`已导出 ${count} 张图片`);
-    } catch (error) {
-      setStatus(errorMessage(error));
-    } finally {
-      setTransferProgress(null);
-      transferBusyRef.current = false;
-    }
-  }, [selected]);
-
-  useEffect(() => {
-    const keyDown = (event: KeyboardEvent) => {
-      if (!active) return;
-      if (!shortcutCanHandle(event) || !(event.ctrlKey || event.metaKey)) return;
-      const key = event.key.toLowerCase();
-      if (key === "c") {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        copyImages();
-      } else if (key === "v" && clipboardRef.current.length > 0) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        pasteImages();
-      }
-    };
-    window.addEventListener("keydown", keyDown, true);
-    return () => window.removeEventListener("keydown", keyDown, true);
-  }, [active, copyImages, pasteImages]);
+  const submitText = useCallback((text: string, fontSize: number, color: string) => {
+    const placement = textPlacementRef.current ?? renderer?.placementPoint ?? [0, 0];
+    textPlacementRef.current = null;
+    setTextOptions({ fontSize, color });
+    setTextDialogOpen(false);
+    void addText(text, fontSize, color, placement);
+  }, [addText, renderer]);
 
   const submitLabelPrompt = useCallback((label: string) => {
     const trimmed = label.trim();
     if (!trimmed) return;
     if (labelPrompt?.kind === "rename") {
-      void pinBoardApi.renamePinBoard(labelPrompt.board.boardId, trimmed)
-        .then(() => refreshBoards())
-        .catch((error) => setStatus(errorMessage(error)));
+      void renameBoard(labelPrompt.board.boardId, trimmed);
     } else if (labelPrompt?.kind === "create") {
-      void pinBoardApi.createPinBoard(artworkId, trimmed)
-        .then((next) => {
-          setBoards(next);
-          if (!selected) {
-            const first = next[0];
-            if (first) {
-              setSelected(first.boardId);
-              setSelectedBoardId(artworkId, first.boardId);
-              void pinBoardApi.loadPinBoard(first.boardId)
-                .then((loaded) => setView(loaded))
-                .catch((error) => setStatus(errorMessage(error)));
-            }
-          }
-        })
-        .catch((error) => setStatus(errorMessage(error)));
+      void createBoard(trimmed);
     }
     setLabelPrompt(null);
-  }, [artworkId, labelPrompt, refreshBoards, selected]);
+  }, [createBoard, labelPrompt, renameBoard]);
 
   const submitConfirmRequest = useCallback(() => {
     if (!confirmRequest) return;
     const request = confirmRequest;
     setConfirmRequest(null);
-    const run = async () => {
-      if (request.kind === "trash") {
-        await pinBoardApi.trashPinBoard(request.board.boardId);
-        const next = await refreshBoards();
-        if (selected !== null && request.board.boardId === selected) {
-          // 画板已进入回收站：对旧画板跳过 finalize 保存（否则会对已删除画板再次写库）。
-          // 渲染器保持挂载，只切换到回退画板或清空。
-          const current = rendererRef.current;
-          setSelected(null);
-          setInteraction(DEFAULT_INTERACTION);
-          const fallback = next[0];
-          if (fallback) {
-            const loaded = await pinBoardApi.loadPinBoard(fallback.boardId);
-            await current?.loadBoard(
-              loaded,
-              getBoardSession(artworkId, loaded.boardId),
-              false,
-            );
-            setSelected(fallback.boardId);
-            setSelectedBoardId(artworkId, fallback.boardId);
-            setView(loaded);
-          } else {
-            await current?.unloadBoard(false);
-            setView(null);
-          }
-        }
-      } else if (request.kind === "permanent-delete") {
-        const report = await pinBoardApi.deletePinBoardPermanently(request.board.boardId);
-        await refreshBoards();
-        if (report.pendingCount > 0) {
-          setStatus(`画板已删除，但有 ${report.pendingCount} 个图片文件仍待清理，将在下次启动时重试。`);
-        }
-      } else {
-        const report = await pinBoardApi.emptyPinBoardTrash();
-        await refreshBoards();
-        if (report.pendingCount > 0) {
-          setStatus(`回收站已清空，但有 ${report.pendingCount} 个图片文件仍待清理，将在下次启动时重试。`);
-        }
-      }
-    };
-    void run().catch((error) => setStatus(errorMessage(error)));
-  }, [artworkId, confirmRequest, refreshBoards, selected]);
+    if (request.kind === "trash") {
+      void trashBoard(request.board);
+    } else if (request.kind === "permanent-delete") {
+      void permanentlyDeleteBoard(request.board.boardId);
+    } else {
+      void emptyTrash();
+    }
+  }, [confirmRequest, emptyTrash, permanentlyDeleteBoard, trashBoard]);
 
   const confirmView: ConfirmView | null = useMemo(() => {
     if (!confirmRequest) return null;
@@ -1226,10 +669,9 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     return boards.find((board) => board.boardId === selected)?.name ?? `画板 ${selected}`;
   }, [boards, selected]);
 
-  const renderer = rendererRef.current;
   const run = (action: () => void) => {
     action();
-    setInteraction(rendererRef.current?.interactionState ?? DEFAULT_INTERACTION);
+    syncInteraction();
   };
 
   const toggleSidebar = () => {
@@ -1239,18 +681,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     });
   };
 
-  const toggleLock = useCallback(() => {
-    const current = rendererRef.current;
-    if (!current) return;
-    current.toggleLock();
-    setInteraction(current.interactionState);
-  }, []);
-
   const toggleFullscreen = useCallback(async () => {
     if (!workspaceRef.current || fullscreenBusyRef.current) return;
     const previous = fullscreenRef.current;
     const next = !previous;
-    const current = rendererRef.current;
+    const current = renderer;
     fullscreenBusyRef.current = true;
     fullscreenRef.current = next;
     current?.finishActiveInteraction();
@@ -1270,7 +705,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       current?.endViewportResize();
       fullscreenBusyRef.current = false;
     }
-  }, []);
+  }, [renderer, setStatus]);
 
   useEffect(() => {
     if (!active && fullscreenRef.current) void toggleFullscreen();
@@ -1291,6 +726,25 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       cancelled = true;
     };
   }, []);
+
+  useEffect(() => {
+    const keyDown = (event: KeyboardEvent) => {
+      if (!active) return;
+      if (!shortcutCanHandle(event) || !(event.ctrlKey || event.metaKey)) return;
+      const key = event.key.toLowerCase();
+      if (key === "c") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        copyImages();
+      } else if (key === "v" && clipboardCount > 0) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        pasteImages();
+      }
+    };
+    window.addEventListener("keydown", keyDown, true);
+    return () => window.removeEventListener("keydown", keyDown, true);
+  }, [active, clipboardCount, copyImages, pasteImages]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
@@ -1353,7 +807,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
                     key={board.boardId}
                     className={`pin-board-tree-row${board.boardId === selected ? " active" : ""}${dragging ? " dragging" : ""}${dropPosition ? ` drop-${dropPosition}` : ""}`}
                     draggable={boards.length > 1 && transferProgress === null}
-                    onClick={() => void select(board)}
+                    onClick={() => {
+                      setContextMenu(null);
+                      void selectBoard(board);
+                    }}
                     onContextMenu={(event) => {
                       event.preventDefault();
                       setContextMenu(null);
@@ -1497,7 +954,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
             <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
             <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={() => void toggleFullscreen()} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", settings.fullscreenShortcut)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
-            <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={() => void renderer?.save()} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
+            <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={() => void save()} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
           </div>
         </header>
         {status && (
@@ -1533,7 +990,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             setStatus={setStatus}
             onUnavailable={setUnavailable}
             onRenderer={setRenderer}
-            onState={handleRendererState}
+            onState={setInteraction}
             onContextMenu={handleRendererContextMenu}
           />
           {unavailable ? (
@@ -1578,7 +1035,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           <PinBoardTextDialog
             initialFontSize={textOptions.fontSize}
             initialColor={textOptions.color}
-            onSubmit={(text, fontSize, color) => void addText(text, fontSize, color)}
+            onSubmit={submitText}
             onClose={closeTextDialog}
           />
         )}
@@ -1636,9 +1093,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
                       { key: "restore", label: "恢复到原作品", icon: <Undo2 size={15} />, onClick: () => {
                         const board = listContextMenu.board!;
                         setListContextMenu(null);
-                        void pinBoardApi.restorePinBoard(board.boardId)
-                          .then(() => refreshBoards())
-                          .catch((error) => setStatus(errorMessage(error)));
+                        void restoreBoard(board.boardId);
                       } },
                       { key: "permanent-delete", label: "永久删除", icon: <Trash2 size={15} />, danger: true, onClick: () => {
                         setConfirmRequest({ kind: "permanent-delete", board: listContextMenu.board! });

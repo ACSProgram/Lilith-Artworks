@@ -12,10 +12,7 @@ pub(crate) mod scrub;
 use std::path::Path;
 
 use serde::Serialize;
-use tauri::{
-    ipc::{Channel, Response},
-    State,
-};
+use tauri::{ipc::Response, State};
 use tauri_plugin_fs::FsExt;
 
 use crate::{
@@ -26,27 +23,6 @@ use repository::{
     EditablePinBoardImage, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
     SavePinBoardResult,
 };
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct PinBoardTransferProgress {
-    label: String,
-    current: usize,
-    total: usize,
-}
-
-fn report_transfer_progress(
-    channel: &Channel<PinBoardTransferProgress>,
-    label: &str,
-    current: usize,
-    total: usize,
-) {
-    let _ = channel.send(PinBoardTransferProgress {
-        label: label.to_owned(),
-        current: current.min(total),
-        total,
-    });
-}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -265,7 +241,6 @@ pub(crate) async fn import_pin_board_images(
     center_y: f64,
     gap: f64,
     expected_revision: String,
-    on_progress: Channel<PinBoardTransferProgress>,
 ) -> Result<PinBoardMutationResult, String> {
     // 源图路径必须由文件选择器（或剪贴板读取命令）写入文件系统 scope；仓库边界校验
     // 在 `repository::import_images` 里对 GUI 与无头两个入口一起生效。
@@ -275,7 +250,7 @@ pub(crate) async fn import_pin_board_images(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            report_transfer_progress(&on_progress, "正在导入图片", 0, 0);
+            context.report_progress("正在导入图片", 0, 0);
             let (view, image_ids) = usecases::pin_board::import_images(
                 context,
                 board_id,
@@ -285,7 +260,7 @@ pub(crate) async fn import_pin_board_images(
                 gap,
                 &expected_revision,
                 |current, total| {
-                    report_transfer_progress(&on_progress, "正在导入图片", current, total)
+                    context.report_progress("正在导入图片", current as u64, total as u64)
                 },
             )?;
             Ok(PinBoardMutationResult { view, image_ids })
@@ -302,12 +277,11 @@ pub(crate) async fn import_pin_board_clipboard_image(
     center_x: f64,
     center_y: f64,
     expected_revision: String,
-    on_progress: Channel<PinBoardTransferProgress>,
 ) -> Result<PinBoardMutationResult, String> {
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            report_transfer_progress(&on_progress, "正在处理剪贴板图片", 0, 3);
+            context.report_progress("正在处理剪贴板图片", 0, 3);
             let (view, image_ids) = usecases::pin_board::import_clipboard_image(
                 context,
                 board_id,
@@ -316,7 +290,7 @@ pub(crate) async fn import_pin_board_clipboard_image(
                 center_y,
                 &expected_revision,
             )?;
-            report_transfer_progress(&on_progress, "正在保存剪贴板图片", 3, 3);
+            context.report_progress("正在保存剪贴板图片", 3, 3);
             Ok(PinBoardMutationResult { view, image_ids })
         })
         .await
@@ -330,7 +304,6 @@ pub(crate) async fn export_pin_board_images(
     board_id: i64,
     image_ids: Vec<i64>,
     output_directory: String,
-    on_progress: Channel<PinBoardTransferProgress>,
 ) -> Result<usize, String> {
     path_scope::ensure_authorized(
         &window.fs_scope(),
@@ -346,7 +319,7 @@ pub(crate) async fn export_pin_board_images(
                 &image_ids,
                 &output_directory,
                 |current, total| {
-                    report_transfer_progress(&on_progress, "正在导出图片", current, total)
+                    context.report_progress("正在导出图片", current as u64, total as u64)
                 },
             )
         })

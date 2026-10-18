@@ -1,5 +1,10 @@
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { APP_EVENT_VERSION, type AppEvent } from "../../shared/appEvents";
+import {
+  dispatchRuntimeEvent,
+  resetRuntimeEventBridgeForTests,
+} from "../../shared/useRuntimeSubscription";
 import type { ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
 
 const historyApi = vi.hoisted(() => ({
@@ -86,9 +91,41 @@ async function readyController() {
 describe("useHistoryController runtime polling", () => {
   afterEach(() => {
     cleanup();
+    resetRuntimeEventBridgeForTests();
     vi.useRealTimers();
     vi.clearAllMocks();
     latest = null;
+  });
+
+  it("reloads immediately when a history operation finishes", async () => {
+    vi.useFakeTimers();
+    let currentRuntime = runtime(0);
+    historyApi.get.mockResolvedValue(history);
+    historyApi.runtime.mockImplementation(async () => currentRuntime);
+
+    render(<Harness />);
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(historyApi.get).toHaveBeenCalledTimes(1);
+
+    currentRuntime = runtime(1);
+    await act(async () => {
+      dispatchRuntimeEvent({
+        version: APP_EVENT_VERSION,
+        type: "operationFinished",
+        outcome: "succeeded",
+        domain: "history",
+        cancellable: true,
+        completionRevision: 1,
+        timestampMs: 1,
+      } as AppEvent);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(historyApi.get).toHaveBeenCalledTimes(2);
   });
 
   it("reloads after a short operation that was never observed busy", async () => {

@@ -33,7 +33,7 @@ src-tauri/src/cleanup.rs                 文件清理账本：提交后重放、
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
-前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`；素材板保留 Lilith Client 的直连结构，由 `PinBoardModule.tsx` 与 `renderer.ts` 直接消费 `pin-board/api.ts`，不额外插入控制器层。控制器与素材板页面组件只保留视图选择、弹窗和渲染状态，统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
+前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图。History、Library、Authenticity 和 Pin-board 分别由 `useHistoryController.ts`、`useLibraryController.ts`、`useAuthenticityController.ts` 和 `usePinBoardController.ts` 独占各自 `api.ts`。素材板控制器负责画板列表、选择、生命周期结算与保存/导入/导出状态；`PinBoardRenderer` 仍是纯渲染器，只处理 GPU 与交互。四个 controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，History、Library 与 Authenticity 的 busy/finally 与错误上报来自 `useAsyncOperation.ts`；素材板的传输忙碌由传输流程自己持有（同一时刻只允许一次导入或导出），不复用按计数合并的 busy。页面组件只保留视图选择、弹窗和局部交互状态。工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
 Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权、装配 `CommandContext`，然后调用 `app/usecases/` 中 GUI 与 headless 共享的业务入口。所有仓库入口都经 `OperationCoordinator` 统一取锁、取消、进度、耗时日志与事件；需要组合 checkpoint、调度唤醒、清理队列或发布流程的跨领域用例写在 `app/usecases/` 里，`app/workflows.rs` 只保留这些命令的 Tauri 适配函数。`pin_board` 命令直接在 `app/command_registry.rs` 注册，写命令走 `run_repository_write`（仓库 lease + 仓库操作锁，不取共享 `BackupState` 运行锁），浏览走共享读租约。前端命令名和 DTO 不因内部所有权变化而改变。
 
@@ -125,6 +125,39 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 - 命令注册表集中在 `app/command_registry.rs` 的 `handler()` 中按领域分组列出全部命令，`lib.rs`
   只把它交给 `invoke_handler`；Tauri 的 `generate_handler!` 需要编译期函数列表，因此这里是一张
   静态表，不是运行时注册。
+
+## 前端模块契约与事件消费（0.3 阶段 3）
+
+每个业务模块按同一目录契约组织，模块之间不直接导入：
+
+- `types.ts`：边界 DTO；纯前端计算放模块自己的 model/helper 文件。
+- `api.ts`：该领域 Tauri 命令的唯一前端入口，统一经 `invokeCommand` 重建结构化错误。
+- `use*Controller.ts`：读取、mutation 回填、忙碌状态、错误上报与请求代次的唯一位置。
+- `Module.tsx`：只做视图、弹窗、局部交互与 controller 注入。
+
+三个共享工具避免每个 controller 复制同一段竞态代码：
+
+- `useRequestEpoch`：`begin()` 取得本次读取编号，`isCurrent(id)` 丢弃过期结果；
+  `invalidate()` 在切换仓库/作品或发起 mutation 时让在途读取失效。四个模块的
+  controller 都用它，不再各自持有 `useRef` 计数器。
+- `useAsyncOperation`：按计数维护 `busy`，在 `finally` 中复位；可选 `onError` 只负责上报，
+  错误仍原样抛给调用方，避免「失败也被当成成功」地关闭弹窗。History、Library 与
+  Authenticity 使用它；素材板同一时刻只允许一次导入或导出，忙碌由传输流程自己持有。
+- `useRuntimeSubscription`：`AppEvent` v1 的统一消费入口。全进程只有一个原生监听，
+  按版本、当前仓库 key 与事件时间戳过滤后分发给所有订阅者；controller 不各自 `listen`。
+  消费方是 History、Library、Pin-board 三个 controller 与应用层的运行态、维护队列订阅；
+  Authenticity 的写入结果只由命令响应带回，不订阅事件。
+
+事件只做即时唤醒，命令响应仍是最终状态。运行态与历史刷新保留 3 秒快照轮询作为兜底：
+事件丢失、进程启动恢复以及不经过 coordinator 的后台调度任务都由它收敛；设置页与维护操作
+在收到进度事件时以 150 ms 合并读取一次运行状态。作品树另保留 30 秒刷新，用于后台自动备份
+失败告警这类没有事件的写库。订阅失败与订阅者异常只写 `[runtime]` 诊断，不改变业务路径；
+事件的开始/结束、耗时与失败仍由原生 `operation` 日志记录，不重复一套通道。
+
+素材板导入/导出的进度不再使用 `Channel`：命令在 `CommandContext` 上报告进度并广播
+`operationProgress`，controller 按 `domain = pinBoard` 消费；`Channel` 只保留给需要传输
+大块载荷的通道。Pin-board 的生命周期结算由 controller 注册，画板切换、仓库切换与退出
+仍走 `preparePinBoardRuntimeChange` 的既有语义。
 
 ## 日志与诊断
 

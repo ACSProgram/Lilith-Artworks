@@ -77,7 +77,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 History 公开只读的 `next_backup_disable_notice_target` 查询，按分支更新时间和 ID 稳定返回一个仍未进回收站的待确认 `{ artworkId, branchId }`。应用层命令使用它编排作品库告警到历史分支设置的导航；查询本身不确认通知，也不改变失败计数或重新启用状态。
 
-调度器选出候选分支后，必须先取得共享运行锁，再重新查询分支是否仍启用、未进回收站、未进入发布状态且仍到期；分支设置写入也使用同一运行锁。用户取消、应用退出和候选资格失效使用结构化结果，不增加连续失败次数；只有实际备份错误进入上述失败退避。运行状态携带单调 `completionRevision`，每个共享操作结束时推进，因此前端即使没有轮询到短任务的 `busy` 窗口，也会在下一次轮询刷新历史。
+调度器选出候选分支后，必须先取得共享运行锁，再重新查询分支是否仍启用、未进回收站、未进入发布状态且仍到期；分支设置写入也使用同一运行锁。用户取消、应用退出和候选资格失效使用结构化结果，不增加连续失败次数；只有实际备份错误进入上述失败退避。运行状态携带单调 `completionRevision`，每个共享操作结束时推进，因此前端即使没有观察到短任务的 `busy` 窗口，也会在完成事件或下一次 3 秒快照轮询时刷新历史。
 
 ## 空闲链路校验
 
@@ -190,7 +190,7 @@ cleanup_repository_unreferenced
 - 总览使用弱强调标出当前分支的祖先路径，并对当前分支 HEAD 标签使用实色强调；节点选中态使用更强的边框、背景和外框，不与当前分支提示混淆。
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
-- `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态轮询和 mutation 回填。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
+- `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。
 - 窄布局下页面标题、分支选择、提交区和精简工具栏分行排列，长 Artwork 标题使用省略显示；未保存状态使用主题化警告色。

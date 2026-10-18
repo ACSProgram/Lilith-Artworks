@@ -1,4 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorMessage } from "../../shared/errors";
+import { useAsyncOperation } from "../../shared/useAsyncOperation";
+import { useRequestEpoch } from "../../shared/useRequestEpoch";
+import { useRuntimeSubscription } from "../../shared/useRuntimeSubscription";
 import { historyApi } from "./api";
 import type {
   ArtworkHistory, BackupCommitResult, BackupRuntimeStatus, ForkBranchRequest,
@@ -24,10 +28,6 @@ interface HistoryControllerOptions {
   onError: (message: string | null) => void;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 export function useHistoryController({
   artworkId,
   refreshVersion,
@@ -36,15 +36,19 @@ export function useHistoryController({
 }: HistoryControllerOptions) {
   const [history, setHistory] = useState<ArtworkHistory | null>(null);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
+  const { busy, run: runBusy } = useAsyncOperation();
   const [runtime, setRuntime] = useState(IDLE_RUNTIME);
   const [localOperation, setLocalOperation] = useState<{ operation: string; label: string } | null>(null);
   const artworkIdRef = useRef(artworkId);
   const onHistoryChangedRef = useRef(onHistoryChanged);
   const onErrorRef = useRef(onError);
-  const requestSequence = useRef(0);
+  const { begin: beginRead, invalidate: invalidateReads, isCurrent: isCurrentRead } = useRequestEpoch();
   const lastRefresh = useRef({ artworkId, refreshVersion });
   const lastCompletionRevision = useRef<number | null>(null);
+  const runtimeRequest = useRef<Promise<void> | null>(null);
+  /** 在途读取期间到达的刷新请求：当前请求结束后补读一次。 */
+  const runtimeRefreshQueued = useRef(false);
+  const mountedRef = useRef(true);
   /**
    * 批级取消标志：原生命令的取消检查点只覆盖「正在执行的那一个节点」，
    * 精简这类逐节点循环需要自己记住用户已经取消，否则后面的节点会继续删。
@@ -59,10 +63,6 @@ export function useHistoryController({
     onErrorRef.current(errorMessage(error));
   }, []);
 
-  const invalidateReads = useCallback(() => {
-    requestSequence.current += 1;
-  }, []);
-
   const replaceHistory = useCallback((next: ArtworkHistory): boolean => {
     if (next.artworkId !== artworkIdRef.current) return false;
     invalidateReads();
@@ -73,10 +73,10 @@ export function useHistoryController({
 
   const reload = useCallback(async (): Promise<ArtworkHistory | null> => {
     const requestedArtworkId = artworkId;
-    const requestId = ++requestSequence.current;
+    const requestId = beginRead();
     try {
       const next = await historyApi.get(requestedArtworkId);
-      if (requestId !== requestSequence.current
+      if (!isCurrentRead(requestId)
         || artworkIdRef.current !== requestedArtworkId
         || next.artworkId !== requestedArtworkId) {
         return null;
@@ -85,14 +85,14 @@ export function useHistoryController({
       onHistoryChangedRef.current(next);
       return next;
     } catch (error) {
-      if (requestId !== requestSequence.current || artworkIdRef.current !== requestedArtworkId) {
+      if (!isCurrentRead(requestId) || artworkIdRef.current !== requestedArtworkId) {
         return null;
       }
       throw error;
     } finally {
-      if (requestId === requestSequence.current) setLoading(false);
+      if (isCurrentRead(requestId)) setLoading(false);
     }
-  }, [artworkId]);
+  }, [artworkId, beginRead, isCurrentRead]);
 
   useEffect(() => {
     setHistory(null);
@@ -108,32 +108,65 @@ export function useHistoryController({
     void reload().catch(reportError);
   }, [artworkId, refreshVersion, reload, reportError]);
 
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+
   useEffect(() => {
-    let cancelled = false;
-    let timer: number | undefined;
-    const poll = async () => {
-      let delay = busy ? 350 : 3000;
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  /**
+   * 读取共享运行状态，并在 `completionRevision` 推进时刷新历史。
+   * 事件只负责即时唤醒；3 秒兜底轮询保证丢事件或后台调度任务的状态最终一致。
+   * 在途读取只合并并发调用，但会为期间到达的新请求补读一次：否则事件恰好落在
+   * 上一次快照发出之后、返回之前时，这次唤醒就丢了，只能等 3 秒后的兜底。
+   */
+  const refreshRuntime = useCallback((): Promise<void> => {
+    if (runtimeRequest.current) {
+      runtimeRefreshQueued.current = true;
+      return runtimeRequest.current;
+    }
+    const request = (async () => {
       try {
         const next = await historyApi.runtime();
-        if (cancelled) return;
+        if (!mountedRef.current) return;
         const previousRevision = lastCompletionRevision.current;
         const operationCompleted = previousRevision !== null
           && previousRevision !== next.completionRevision;
         lastCompletionRevision.current = next.completionRevision;
         setRuntime(next);
-        delay = busy || next.busy ? 350 : 3000;
-        if (operationCompleted) await reload();
+        if (operationCompleted) await reloadRef.current();
       } catch {
-        // Commands surface repository errors; polling remains best-effort.
+        // Commands surface repository errors; the snapshot is best-effort.
       }
-      if (!cancelled) timer = window.setTimeout(poll, delay);
-    };
-    void poll();
-    return () => {
-      cancelled = true;
-      if (timer !== undefined) window.clearTimeout(timer);
-    };
-  }, [busy, reload]);
+    })().finally(() => {
+      runtimeRequest.current = null;
+      if (!runtimeRefreshQueued.current) return;
+      runtimeRefreshQueued.current = false;
+      void refreshRuntimeRef.current();
+    });
+    runtimeRequest.current = request;
+    return request;
+  }, []);
+
+  const refreshRuntimeRef = useRef(refreshRuntime);
+  refreshRuntimeRef.current = refreshRuntime;
+
+  useEffect(() => {
+    void refreshRuntime();
+    const timer = window.setInterval(() => void refreshRuntime(), 3_000);
+    return () => window.clearInterval(timer);
+  }, [refreshRuntime]);
+
+  useRuntimeSubscription((event) => {
+    if (event.type !== "operationFinished" && event.type !== "repositoryChanged") return;
+    if (event.domain === "history" || event.domain === "backup" || event.domain === "authenticity") {
+      void refreshRuntime();
+    }
+  });
 
   const runOperation = useCallback(async (
     operation: string,
@@ -143,28 +176,25 @@ export function useHistoryController({
     invalidateReads();
     // 每次新操作都从「未请求取消」开始：上一次留下的请求只属于上一次操作。
     cancelRequested.current = false;
-    setBusy(true);
     setLocalOperation({ operation, label });
     onErrorRef.current(null);
     let completed = false;
     try {
-      await action();
+      await runBusy(action, { onError: reportError });
       completed = true;
       return true;
-    } catch (error) {
-      reportError(error);
+    } catch {
       return false;
     } finally {
-      setBusy(false);
       setLocalOperation(null);
-      try { setRuntime(await historyApi.runtime()); } catch { /* best-effort */ }
+      void refreshRuntime();
       // 用户请求了取消但操作仍走完成功：请求落在最后一个取消检查点之后（或两条
       // 批量命令之间的空档里）。不说明的话，用户会以为取消无效。
       if (completed && cancelRequested.current) {
         onErrorRef.current("取消请求未被接受，操作已在取消到达前完成。");
       }
     }
-  }, [invalidateReads, reportError]);
+  }, [invalidateReads, refreshRuntime, reportError, runBusy]);
 
   const saveBranch = useCallback(async (request: UpdateBranchBackupRequest) => {
     invalidateReads();

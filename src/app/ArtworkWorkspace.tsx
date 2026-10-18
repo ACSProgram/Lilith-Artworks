@@ -6,7 +6,7 @@ import { HistoryModule } from "../modules/history/HistoryModule";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
 import { useArtworkSummary } from "../modules/history/useArtworkSummary";
 import { PinBoardModule } from "../modules/pin-board/PinBoardModule";
-import type { PinBoardModuleSettings } from "../modules/pin-board/PinBoardModule";
+import type { PinBoardModuleSettings } from "../modules/pin-board/types";
 import type { CleanupReport } from "../shared/fileCleanup";
 
 type WorkspaceView = "history" | "publish" | "identify" | "pin-board";

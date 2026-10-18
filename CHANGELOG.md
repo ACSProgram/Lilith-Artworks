@@ -63,6 +63,17 @@ decision, so an untagged version is transitional.
   `RuntimeProgressProvider`, `SettingsDialog` and `NoticeCenter`. `App` only
   composes providers and routes the workspace; settings, maintenance progress
   and notices no longer share one God component.
+- One `AppEvent` v1 subscription bridge with a single native listener, filtered
+  by event version, active repository key and event timestamp. The shared
+  `useRequestEpoch` hook now provides request generations for the History,
+  Library, Authenticity and Pin-board controllers, and `useAsyncOperation`
+  provides their busy/finally and error-reporting strategy except for the
+  pin-board import/export transfers, which own their busy flag because only one
+  transfer may run at a time.
+- A `usePinBoardController` that owns board loading and selection, lifecycle
+  settlement registration and save/import/export state. The WebGPU renderer
+  stays a pure renderer; pin-board import/export progress now travels through
+  `CommandContext` as `operationProgress` events instead of a `Channel`.
 
 ### Changed
 
@@ -91,6 +102,23 @@ decision, so an untagged version is transitional.
   v4 → v5 migration in stage 7, pin-board entries use a common item table plus
   per-kind payload tables, and storage totals no longer double-count
   `history_nodes.chunk_file_size` for delta nodes.
+- History/backup runtime progress is event-driven: history and maintenance
+  consumers refresh on progress/finish events and `repositoryChanged`, keeping a
+  3 s snapshot poll as the lost-event and background-scheduler fallback and
+  replacing the 350 ms high-frequency loop. The library tree refreshes on
+  successful write events and keeps its 30 s fallback for scheduler-only writes.
+  Event delivery failures are logged through the existing diagnostics channel
+  and never change business behavior.
+- Pin-board commands no longer accept a progress `Channel`; import, clipboard
+  import and export report progress through the coordinator. The
+  `PinBoardRenderer` API and all command names/DTOs are unchanged.
+
+### Fixed
+
+- Permanently deleting or emptying the library trash no longer hides the
+  "N files are still pending cleanup" warning: the trash reload that follows the
+  mutation does not touch the shared error channel anymore, so a partial file
+  cleanup stays visible together with its retry entry point.
 
 ## 0.2.0 - 2026-10-17
 

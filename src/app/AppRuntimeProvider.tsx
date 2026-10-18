@@ -16,6 +16,7 @@ import {
 import { preparePinBoardRuntimeChange } from "../modules/pin-board/lifecycle";
 import { diagnosticsLog } from "../shared/diagnostics";
 import { errorMessage } from "../shared/errors";
+import { setRuntimeEventRepositoryKey } from "../shared/useRuntimeSubscription";
 
 export interface AppRuntime {
   settings: SettingsController;
@@ -48,6 +49,14 @@ function AppRuntimeState({ children }: { children: ReactNode }) {
     document.documentElement.dataset.theme = draft?.theme ?? "system";
     document.documentElement.dataset.density = draft?.content.density ?? "comfortable";
   }, [draft?.content.density, draft?.theme]);
+
+  // 事件 bridge 的仓库范围：切换仓库后旧仓库的在途命令仍可能广播事件，
+  // 不能让它覆盖新仓库的运行状态或历史刷新。
+  useEffect(() => {
+    setRuntimeEventRepositoryKey(
+      settings.repository.ready ? settings.repository.rootPath : null,
+    );
+  }, [settings.repository.ready, settings.repository.rootPath]);
 
   // 原生端关闭窗口或托盘退出时不再直接结束进程，而是先请求 webview 结算素材板
   // （保存并截断步骤历史），确认完成后再由 confirm_app_shutdown 退出；Rust 侧

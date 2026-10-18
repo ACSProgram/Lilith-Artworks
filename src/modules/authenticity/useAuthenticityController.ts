@@ -1,6 +1,8 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
+import { useAsyncOperation } from "../../shared/useAsyncOperation";
+import { useRequestEpoch } from "../../shared/useRequestEpoch";
 import { authenticityApi } from "./api";
 import type {
   AuthenticityBranch,
@@ -85,15 +87,31 @@ export function usePublicationController({
   const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
   const [viewingRecord, setViewingRecord] = useState<CertificationRecord | null>(null);
   const [viewingPreview, setViewingPreview] = useState<PreviewImage | null>(null);
-  const [exporting, setExporting] = useState(false);
-  const [deletingRecord, setDeletingRecord] = useState(false);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [cleanupFailures, setCleanupFailures] = useState<CleanupFailure[]>([]);
-  const loadRequest = useRef(0);
-  const artifactPreviewRequest = useRef(0);
-  const estimateRequest = useRef(0);
-  const viewingRequest = useRef(0);
-  const outputPreviewRequest = useRef(0);
+  const { begin: beginLoad, invalidate: invalidateLoad, isCurrent: isLoadCurrent } = useRequestEpoch();
+  const {
+    begin: beginArtifactPreview,
+    invalidate: invalidateArtifactPreview,
+    isCurrent: isArtifactPreviewCurrent,
+  } = useRequestEpoch();
+  const {
+    begin: beginEstimate,
+    invalidate: invalidateEstimate,
+    isCurrent: isEstimateCurrent,
+  } = useRequestEpoch();
+  const {
+    begin: beginViewing,
+    invalidate: invalidateViewing,
+    isCurrent: isViewingCurrent,
+  } = useRequestEpoch();
+  const {
+    begin: beginOutputPreview,
+    invalidate: invalidateOutputPreview,
+    isCurrent: isOutputPreviewCurrent,
+  } = useRequestEpoch();
+  const { busy: exporting, run: runExport } = useAsyncOperation();
+  const { busy: deletingRecord, run: runDeleteRecord } = useAsyncOperation();
   const activeOperation = useRef(false);
   const activeOperationKind = useRef<"preview" | "publish" | null>(null);
   const cancellationNotice = useRef<"preview" | "publish" | null>(null);
@@ -119,55 +137,63 @@ export function usePublicationController({
   }, []);
 
   const loadArtifactPreview = useCallback(async (branchId: string) => {
-    const requestId = ++artifactPreviewRequest.current;
+    const requestId = beginArtifactPreview();
     setArtifactPreviewBusy(true);
     setArtifactPreviewError(null);
     setPreview(null);
     try {
       const next = await authenticityApi.previewArtifact(branchId);
-      if (requestId !== artifactPreviewRequest.current
+      if (!isArtifactPreviewCurrent(requestId)
         || selectedBranchIdRef.current !== branchId) return;
       setPreview(next);
     } catch (error) {
-      if (requestId === artifactPreviewRequest.current
+      if (isArtifactPreviewCurrent(requestId)
         && selectedBranchIdRef.current === branchId) {
         setArtifactPreviewError(message(error));
       }
     } finally {
-      if (requestId === artifactPreviewRequest.current) setArtifactPreviewBusy(false);
+      if (isArtifactPreviewCurrent(requestId)) setArtifactPreviewBusy(false);
     }
-  }, []);
+  }, [beginArtifactPreview, isArtifactPreviewCurrent]);
 
   const load = useCallback(async () => {
     if (!selectedBranchId) return;
     const branchId = selectedBranchId;
-    const requestId = ++loadRequest.current;
+    const requestId = beginLoad();
     setBusy(true);
     try {
       const next = await authenticityApi.getPublication(branchId);
-      if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
+      if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
       setBusy(false);
       if (next.artifact) {
         await loadArtifactPreview(branchId);
       } else {
-        artifactPreviewRequest.current += 1;
+        invalidateArtifactPreview();
         setArtifactPreviewBusy(false);
         setArtifactPreviewError(null);
         setPreview(null);
       }
     } catch (error) {
-      if (requestId === loadRequest.current && selectedBranchIdRef.current === branchId) {
+      if (isLoadCurrent(requestId) && selectedBranchIdRef.current === branchId) {
         onError(message(error));
       }
     } finally {
-      if (requestId === loadRequest.current) setBusy(false);
+      if (isLoadCurrent(requestId)) setBusy(false);
     }
-  }, [applyPublication, loadArtifactPreview, onError, selectedBranchId]);
+  }, [
+    applyPublication,
+    beginLoad,
+    invalidateArtifactPreview,
+    isLoadCurrent,
+    loadArtifactPreview,
+    onError,
+    selectedBranchId,
+  ]);
 
   useEffect(() => {
-    loadRequest.current += 1;
-    artifactPreviewRequest.current += 1;
+    invalidateLoad();
+    invalidateArtifactPreview();
     setPublication(null);
     setConfig(null);
     setPreview(null);
@@ -178,15 +204,15 @@ export function usePublicationController({
     setOutputPreviewBusy(false);
     setPublishing(false);
     setCancelling(false);
-    outputPreviewRequest.current += 1;
+    invalidateOutputPreview();
     setViewingRecord(null);
     setResult(null);
     setPublishMetrics(null);
     setWatermarkId("");
     setBusy(Boolean(selectedBranchId));
     void load();
-    return () => { loadRequest.current += 1; };
-  }, [load, selectedBranchId]);
+    return invalidateLoad;
+  }, [invalidateArtifactPreview, invalidateLoad, invalidateOutputPreview, load, selectedBranchId]);
 
   useEffect(() => () => {
     if (activeOperation.current) void authenticityApi.cancelOperation();
@@ -200,7 +226,7 @@ export function usePublicationController({
 
   useEffect(() => {
     if (!publication?.artifact || !config) return;
-    const requestId = ++estimateRequest.current;
+    const requestId = beginEstimate();
     setSizeEstimate(null);
     const timer = window.setTimeout(async () => {
       try {
@@ -209,16 +235,23 @@ export function usePublicationController({
           config.jpegQuality,
           config.backgroundColor,
         );
-        if (requestId === estimateRequest.current) setSizeEstimate(value.jpegBytes);
+        if (isEstimateCurrent(requestId)) setSizeEstimate(value.jpegBytes);
       } catch {
-        if (requestId === estimateRequest.current) setSizeEstimate(null);
+        if (isEstimateCurrent(requestId)) setSizeEstimate(null);
       }
     }, 180);
     return () => {
       window.clearTimeout(timer);
-      estimateRequest.current += 1;
+      invalidateEstimate();
     };
-  }, [config?.backgroundColor, config?.jpegQuality, publication?.artifact]);
+  }, [
+    beginEstimate,
+    config?.backgroundColor,
+    config?.jpegQuality,
+    invalidateEstimate,
+    isEstimateCurrent,
+    publication?.artifact,
+  ]);
 
   useEffect(() => {
     if (config) saveSharedSigning(config);
@@ -233,18 +266,18 @@ export function usePublicationController({
   }, [publication, recordNavigationKey, selectedRecordId]);
 
   useEffect(() => {
-    const requestId = ++viewingRequest.current;
+    const requestId = beginViewing();
     setViewingPreview(null);
     if (!viewingRecord) return;
     authenticityApi.previewRecord(viewingRecord.id)
       .then((next) => {
-        if (requestId === viewingRequest.current) setViewingPreview(next);
+        if (isViewingCurrent(requestId)) setViewingPreview(next);
       })
       .catch((error) => {
-        if (requestId === viewingRequest.current) onError(message(error));
+        if (isViewingCurrent(requestId)) onError(message(error));
       });
-    return () => { viewingRequest.current += 1; };
-  }, [onError, viewingRecord]);
+    return invalidateViewing;
+  }, [beginViewing, invalidateViewing, isViewingCurrent, onError, viewingRecord]);
 
   const enterPublication = useCallback(async () => {
     if (!selectedBranch) return;
@@ -254,12 +287,12 @@ export function usePublicationController({
     });
     if (typeof artifactPath !== "string") return;
     const branchId = selectedBranch.id;
-    const requestId = ++loadRequest.current;
+    const requestId = beginLoad();
     setBusy(true);
     onError(null);
     try {
       const next = await authenticityApi.enterPublication(branchId, artifactPath);
-      if (requestId !== loadRequest.current || selectedBranchIdRef.current !== branchId) return;
+      if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
       applyPublication(next);
       setBusy(false);
       await Promise.all([
@@ -267,11 +300,19 @@ export function usePublicationController({
         onPublicationChanged?.() ?? Promise.resolve(),
       ]);
     } catch (error) {
-      if (requestId === loadRequest.current) onError(message(error));
+      if (isLoadCurrent(requestId)) onError(message(error));
     } finally {
-      if (requestId === loadRequest.current) setBusy(false);
+      if (isLoadCurrent(requestId)) setBusy(false);
     }
-  }, [applyPublication, loadArtifactPreview, onError, onPublicationChanged, selectedBranch]);
+  }, [
+    applyPublication,
+    beginLoad,
+    isLoadCurrent,
+    loadArtifactPreview,
+    onError,
+    onPublicationChanged,
+    selectedBranch,
+  ]);
 
   const retryArtifactPreview = useCallback(async () => {
     if (!selectedBranch || publication?.branchId !== selectedBranch.id || !publication.artifact) return;
@@ -303,7 +344,7 @@ export function usePublicationController({
     }
     const branchId = selectedBranch.id;
     const signature = publicationPreviewSignature(config, watermarkId);
-    const requestId = ++outputPreviewRequest.current;
+    const requestId = beginOutputPreview();
     operationCancelRequested.current = false;
     cancellationNotice.current = null;
     completedCancellation.current = null;
@@ -319,7 +360,7 @@ export function usePublicationController({
         config,
         watermarkId: watermarkId.trim() || null,
       });
-      if (requestId !== outputPreviewRequest.current
+      if (!isOutputPreviewCurrent(requestId)
         || selectedBranchIdRef.current !== branchId
         || !configRef.current
         || publicationPreviewSignature(configRef.current, watermarkIdRef.current) !== signature) return;
@@ -327,14 +368,14 @@ export function usePublicationController({
       setOutputPreview(next);
       setOutputPreviewOpen(true);
     } catch (error) {
-      if (requestId === outputPreviewRequest.current && !operationCancelRequested.current) {
+      if (isOutputPreviewCurrent(requestId) && !operationCancelRequested.current) {
         onError(message(error));
       }
       cancelled = operationCancelRequested.current;
     } finally {
       activeOperation.current = false;
       activeOperationKind.current = null;
-      if (requestId === outputPreviewRequest.current) setOutputPreviewBusy(false);
+      if (isOutputPreviewCurrent(requestId)) setOutputPreviewBusy(false);
       setCancelling(false);
       operationCancelRequested.current = false;
       if (cancelled && cancellationNotice.current === "preview") {
@@ -346,7 +387,16 @@ export function usePublicationController({
         cancellationNotice.current = null;
       }
     }
-  }, [config, onError, privateKey, publication, selectedBranch, watermarkId]);
+  }, [
+    beginOutputPreview,
+    config,
+    isOutputPreviewCurrent,
+    onError,
+    privateKey,
+    publication,
+    selectedBranch,
+    watermarkId,
+  ]);
 
   const cancelAuthenticityOperation = useCallback(async () => {
     const operationKind = activeOperationKind.current;
@@ -518,32 +568,35 @@ export function usePublicationController({
       filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
     });
     if (!outputPath) return;
-    setExporting(true);
-    onError(null);
-    try { await authenticityApi.exportRecord(record.id, outputPath); }
-    catch (error) { onError(message(error)); }
-    finally { setExporting(false); }
-  }, [onError]);
-
-  const deleteRecord = useCallback(async (record: CertificationRecord) => {
-    setDeletingRecord(true);
     onError(null);
     try {
-      const report = await authenticityApi.deleteRecord(record.id);
-      setCleanupFailures(report.failures);
-      if (report.failures.length > 0) {
-        onError(`记录已删除，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
-      }
-      if (selectedBranchIdRef.current === record.branchId) {
-        setViewingRecord(null);
-        await load();
-      }
-    } catch (error) {
-      onError(message(error));
-    } finally {
-      setDeletingRecord(false);
+      await runExport(
+        () => authenticityApi.exportRecord(record.id, outputPath),
+        { onError: (error) => onError(message(error)) },
+      );
+    } catch {
+      // 错误已由 onError 提示。
     }
-  }, [load, onError]);
+  }, [onError, runExport]);
+
+  const deleteRecord = useCallback(async (record: CertificationRecord) => {
+    onError(null);
+    try {
+      await runDeleteRecord(async () => {
+        const report = await authenticityApi.deleteRecord(record.id);
+        setCleanupFailures(report.failures);
+        if (report.failures.length > 0) {
+          onError(`记录已删除，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
+        }
+        if (selectedBranchIdRef.current === record.branchId) {
+          setViewingRecord(null);
+          await load();
+        }
+      }, { onError: (error) => onError(message(error)) });
+    } catch {
+      // 错误已由 onError 提示。
+    }
+  }, [load, onError, runDeleteRecord]);
 
   return {
     publication,

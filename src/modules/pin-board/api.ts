@@ -1,4 +1,3 @@
-import { Channel } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invokeCommand } from "../../shared/tauri";
@@ -7,17 +6,15 @@ import type {
   PinBoardEditableImage,
   PinBoardMutationResult,
   PinBoardSummary,
-  PinBoardTransferProgress,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
 
-function progressChannel(onProgress: (progress: PinBoardTransferProgress) => void) {
-  const channel = new Channel<PinBoardTransferProgress>();
-  channel.onmessage = onProgress;
-  return channel;
-}
-
+/**
+ * 进度不再走 `Channel`：导入/导出与其它长命令一样经 `CommandContext`
+ * 广播 `operationProgress`，由统一订阅 bridge 分发。`Channel` 只保留给
+ * 未来确实需要传输大块载荷的通道。
+ */
 export const pinBoardApi = {
   listPinBoards: (artworkId: string) =>
     invokeCommand<PinBoardSummary[]>("list_pin_boards", { artworkId }),
@@ -65,10 +62,8 @@ export const pinBoardApi = {
     centerY: number,
     gap: number,
     expectedRevision: string,
-    onProgress: (progress: PinBoardTransferProgress) => void,
   ) => invokeCommand<PinBoardMutationResult>("import_pin_board_images", {
     boardId, paths, centerX, centerY, gap, expectedRevision,
-    onProgress: progressChannel(onProgress),
   }),
   importPinBoardClipboardImage: (
     boardId: number,
@@ -76,19 +71,15 @@ export const pinBoardApi = {
     centerX: number,
     centerY: number,
     expectedRevision: string,
-    onProgress: (progress: PinBoardTransferProgress) => void,
   ) => invokeCommand<PinBoardMutationResult>("import_pin_board_clipboard_image", {
     boardId, bytes, centerX, centerY, expectedRevision,
-    onProgress: progressChannel(onProgress),
   }),
   exportPinBoardImages: (
     boardId: number,
     imageIds: number[],
     outputDirectory: string,
-    onProgress: (progress: PinBoardTransferProgress) => void,
   ) => invokeCommand<number>("export_pin_board_images", {
     boardId, imageIds, outputDirectory,
-    onProgress: progressChannel(onProgress),
   }),
   readPinBoardClipboardPaths: () => invokeCommand<string[]>("read_pin_board_clipboard_paths"),
   readPinBoardImagePng: (boardId: number, imageId: number) =>

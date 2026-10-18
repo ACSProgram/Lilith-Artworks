@@ -33,7 +33,9 @@
   GUI 与 headless 共享；跨领域流程仍由 `src-tauri/src/app/workflows.rs` 的适配器编排。
   领域模块只暴露单领域服务。
 - History、Library、Authenticity、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费，
-  页面组件不直接调用命令。
+  页面组件不直接调用命令。controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，
+  busy 与错误上报来自 `useAsyncOperation.ts`（素材板的传输忙碌由传输流程自己持有），
+  事件只经 `src/shared/useRuntimeSubscription.ts` 订阅，不各自 `listen`。
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。

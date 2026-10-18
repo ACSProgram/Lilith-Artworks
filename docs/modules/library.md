@@ -25,7 +25,7 @@
 - 侧栏底部统计固定在树滚动区之外，同时显示分组数和 Artwork 数；回收站入口显示当前项目数量，树滚动和侧栏高度变化不会带走入口。
 - 右键菜单提供新建、重命名和移到回收站。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
 - Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器、文件清理重试和自动备份关闭通知的目标查询，并把认证记录或待处理分支转换为应用层导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
-- `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
+- `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。成功的仓库写操作经统一 `AppEvent` 的 `repositoryChanged` 即时刷新作品树；30 秒刷新保留为后台调度写库（没有事件）与丢事件的兜底。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
 - `src/app/App.repositorySwitch.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互已于 2026-10-04 由维护者在生产使用中验证通过，记录见 `docs/planning/archive/handoff-log-2026-09-12-to-2026-10-08.md`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
@@ -55,7 +55,7 @@
 
 分支表保存连续自动备份失败次数、下一次重试时间和待确认的自动备份关闭通知；认证记录的仓库副本路径为非空约束；`pending_file_cleanup` 队列规定：仓库文件/目录只保存相对路径并在执行前校验仓库边界；仅发布创建失败等应用仍拥有外部临时结果的流程登记外部文件，取消发布不删除用户的首次导出文件。成功项出队，失败项记录错误；应用启动时的自动重放与页面「全部重试」都只处理仓库内条目，外部文件条目必须在设置页逐条确认后凭显式 id 执行（空 id 不等于「处理全部」），细节见 `docs/modules/history-and-backup.md`。
 
-清理命令仍由应用层拥有；Library 通过注入回调重试失败项。作品树的 Artwork 摘要包含自动备份关闭通知计数；应用层提供确认命令和 `get_backup_disable_notice_target` 导航查询，后者通过 History 公开仓储能力稳定选择一个仍在作品树中的待处理分支。告警中的“查看分支设置”只打开对应 Artwork 的历史页并选择该分支，不确认通知；“知道了”继续独立确认当前全部 Artwork 通知。前端持续刷新摘要以显示后台调度产生的新通知。跨 Library、Authenticity 和应用层复用的清理结果 DTO 位于 `src/shared/fileCleanup.ts`，不再反向导入 `src/app/types.ts`。
+清理命令仍由应用层拥有；Library 通过注入回调重试失败项。作品树的 Artwork 摘要包含自动备份关闭通知计数；应用层提供确认命令和 `get_backup_disable_notice_target` 导航查询，后者通过 History 公开仓储能力稳定选择一个仍在作品树中的待处理分支。告警中的“查看分支设置”只打开对应 Artwork 的历史页并选择该分支，不确认通知；“知道了”继续独立确认当前全部 Artwork 通知。前端在成功写操作的 `repositoryChanged` 事件上即时刷新摘要，并以 30 秒轮询兜底后台自动备份等不经过 coordinator 事件的写库，从而显示调度产生的新通知。跨 Library、Authenticity 和应用层复用的清理结果 DTO 位于 `src/shared/fileCleanup.ts`，不再反向导入 `src/app/types.ts`。
 
 ## 当前命令
 

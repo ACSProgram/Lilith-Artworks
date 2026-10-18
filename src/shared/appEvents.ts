@@ -2,7 +2,8 @@
  * `AppEvent` v1 契约（0.3 阶段 1）。
  *
  * 信封字段与语义冻结：后续只能追加可选字段，新事件类型以独立版本号引入。
- * 阶段 3 的前端订阅 provider 只消费这一个通道；命令响应仍负责最终状态。
+ * 前端由 `useRuntimeSubscription.ts` 的单一 bridge 消费这一个通道；
+ * 命令响应仍负责最终状态。
  */
 export const APP_EVENT_VERSION = 1;
 export const APP_EVENT_NAME = "app_event";

@@ -2,6 +2,18 @@
 
 export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 
+/**
+ * 工作区传给素材板的设置快照（应用层与模块之间的边界类型，不是命令 DTO）。
+ * 默认值由设置页与 `useSettingsController` 决定，模块只消费。
+ */
+export interface PinBoardModuleSettings {
+  arrangementGapPx: number;
+  textureCacheLevel: PinBoardTextureCacheLevel;
+  autosave: boolean;
+  lockShortcut: string;
+  fullscreenShortcut: string;
+}
+
 /** 画板摘要：`deleted` 为 true 时条目位于画板回收站。 */
 export interface PinBoardSummary {
   boardId: number;

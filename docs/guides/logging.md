@@ -75,11 +75,12 @@
 | `[forensic]` | 取证通道（面包屑、Worker 回读） | 启动回读或检测到停顿 |
 | `[owner]` | 跨进程仓库 owner lock | 取锁冲突、覆盖 stale 元数据、心跳写失败、内容级只读被拒 |
 | `[watchdog]` | 原生看门狗与退出链路等待 | 前端主线程停摆、关闭确认超时、结算或活动操作阻塞退出 |
+| `[runtime]` | `AppEvent` 订阅 bridge | 原生订阅失败、订阅者异常或收到不支持的事件版本 |
 | `[gpu]` | GPU 设备丢失 / 未捕获错误 | 发生即记录 |
 | `[error]` | 全局未捕获异常 / 资源加载失败 | 发生即记录 |
 
 - 关注事件流时排除探针噪声：`grep -vE '\[(hb|lag|task)\]'`。
-- 关注异常时：`grep -E '\[(slow|forensic|owner|watchdog|gpu|error)\]'`。
+- 关注异常时：`grep -E '\[(slow|forensic|owner|watchdog|gpu|error|runtime)\]'`。
 - 新增日志时，若属于周期性或异常探针，必须复用已有标签；事件类记录不加标签。
 
 ## 验证
