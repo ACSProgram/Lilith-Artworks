@@ -34,6 +34,42 @@ decision, so an untagged version is transitional.
   `stress_format`, keeping the format matrix under daily regression
   protection.
 
+### Changed
+
+- Cancellation observation is split into two layers. Hot loops (`ChunkTask` in
+  the chunk-file writer/reader) now perform only a **silent** query —
+  `CancelToken::observed`, which reads whether cancellation has already been
+  decided without writing an interlock marker or blocking — while explicit
+  boundaries keep the interactive checkpoint (`is_cancelled`). Interactive
+  checkpoints therefore appear only at boundaries: their count no longer scales
+  with how many chunks a file produces, checkpoint marker files stay in the
+  hundreds of bytes instead of reaching megabytes, and the fixed checkpoint
+  indices the crash/cancel stress tests rely on address the positions their
+  comments claim. Cancellation latency does not regress, because a cancellation
+  decided at a boundary is immediately visible to the next silent query.
+  Release builds are unchanged bit for bit: `CancelToken::for_backup`, the GUI's
+  only source, uses the same closure for both layers, and the layered token is
+  constructed only in the headless entry, which is not part of release
+  artifacts.
+- The `stress_large` snapshot-size assertions follow the v2 format instead of
+  the v1 one. They now assert "not larger than the logical size plus per-chunk
+  overhead", assert separately that v2 dedup/compression really takes effect on
+  the sparse fixtures, and add a dense, incompressible case (`C8`) asserting the
+  snapshot tracks the logical size, so "the snapshot got smaller" can no longer
+  hide content loss. The two `deltas * 4 <= snapshots` ratio assertions, which
+  only tracked the dedup ratio, are replaced by change-volume-based bounds.
+- `stress_large`'s disk ledger counts only the repository, the work file and the
+  product-facing outputs; the fixture's own bookkeeping (`scratch/` markers,
+  results and stderr) no longer inflates the measured workspace usage. Repository
+  temporary files under the repository root `temp/` (the delta payload overflow
+  directory) are now visible to the stray-file assertion as well.
+- `stress_authenticity` G4 publishes from a 512-level generated source instead
+  of the 128x128 fixture. Pixel-domain TrustMark readback is unstable at the
+  96/128 level — an inherent robustness limit of the external watermark engine,
+  about 5% failures at 128 — while C2PA soft binding always matches. The
+  readback rate per selection edge is recorded as an observation, and the
+  guarantee boundary is stated in the report.
+
 ## 0.3.0-alpha.1 - 2026-10-18
 
 ### Added

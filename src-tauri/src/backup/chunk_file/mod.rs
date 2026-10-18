@@ -216,6 +216,14 @@ impl ChunkWriteOptions {
 /// `cancel` is the same `CancelToken` the command runtime uses; `progress`
 /// receives the number of logical bytes processed in this operation so callers
 /// can report byte-based progress instead of only node counts.
+///
+/// This task is polled inside the chunking hot loop (once per chunk / structural
+/// unit), so it only performs the token's **silent** observation
+/// ([`CancelToken::observed`]): reading whether cancellation has already been
+/// decided, without writing an interlock marker or blocking. Explicit boundary
+/// checks keep using [`CancelToken::is_cancelled`]. This keeps the number of
+/// interactive checkpoints equal to the number of boundaries, independent of how
+/// many chunks a file happens to produce.
 pub(crate) struct ChunkTask<'a> {
     cancel: Option<&'a CancelToken>,
     progress: Option<&'a dyn Fn(u64)>,
@@ -249,8 +257,9 @@ impl<'a> ChunkTask<'a> {
         }
     }
 
+    /// 热循环里的取消查询：只走静默观察，不发交互检查点（见结构体注释）。
     pub(super) fn is_cancelled(&self) -> bool {
-        self.cancel.is_some_and(|token| token.is_cancelled())
+        self.cancel.is_some_and(|token| token.observed())
     }
 
     pub(super) fn report(&self, bytes: u64) {

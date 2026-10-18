@@ -8,8 +8,10 @@
 //! 关键手法（见计划 §4.6）：
 //!
 //! - **稀疏工作文件**：`set_len` 建逻辑长度，只向有界区域写真实随机字节，其余部分不占簇。
-//!   因此 4 GiB 逻辑文件的实际磁盘占用约等于写入的区域总量，而 snapshot 仍约 4 GiB——
-//!   这正是「逻辑体积」与「磁盘成本」分离的地方。
+//!   因此 4 GiB 逻辑文件的实际磁盘占用约等于写入的区域总量；v2 快照又对全零区去重并压缩，
+//!   快照同样**远小于**逻辑大小。这正是「逻辑体积」与「磁盘成本」分离的地方——也正因为
+//!   稀疏内容会合法地把快照压小，C8 另用**密集不可压缩**内容单独断言「快照跟随逻辑大小」，
+//!   否则「快照变小」既可能是去重/压缩生效，也可能是内容在别处丢了。
 //! - **逐场景一个临时工作区**：每个场景持有自己的 `TempDir`，随场景结束（含断言失败展开）
 //!   被析构回收，因此「运行结束后工作区自动清理、磁盘占用回落」由语言保证。工作区**不能**
 //!   放进 `static`/`OnceLock`——Rust 不为 static 运行析构函数，那样每轮都会在 `%TEMP%`
@@ -30,11 +32,12 @@
 //! | 大文件（`large`/`heavy`/`extreme`） | 大文件的日常编辑 | 最坏存储放大（4 GiB 改 1 GiB） |
 //!
 //! 小改动档的轮数随档位下降（`default`/`large` 20 轮、`heavy` 10 轮、`extreme`/`manual`
-//! 5 轮）：每轮都要重写整份快照，轮数必须随文件大小下降才能让耗时可控，而链深行为与
-//! 文件大小无关，20 层链已在小档位覆盖。
+//! 5 轮）：每轮都要重读整份工作文件并重写快照，轮数必须随文件大小下降才能让耗时可控，
+//! 而链深行为与文件大小无关，20 层链已在小档位覆盖。
 //!
 //! 场景：C1 端到端（小改动链）、C2 精简、C3 峰值内存、C4 链体积与账本、C5 恢复产物即删、
-//! C6 大改动端到端。C1–C5 走小改动档，C6 走大改动档。
+//! C6 大改动端到端、C7 大文件中断、C8 密集不可压缩快照体积。C1–C5 走小改动档，C6 走大改动
+//! 档，C7 用当前档位的工作文件，C8 固定 8 MiB（与档位无关：它断言格式语义，不是存储放大）。
 //!
 //! 档位由 `LILITH_STRESS_TIERS` 选择（`default` 64 MiB / `large` 256 MiB / `heavy`
 //! 1 GiB / `extreme` 4 GiB / `manual` 8 GiB）。峰值内存、存储放大与耗时只有指向发布档
@@ -63,7 +66,7 @@ const SCENARIO_TIMEOUT: Duration = Duration::from_secs(3600);
 /// 账本允许的偏差：实测工作区增量与预期之差不得超过预期值的 10% 加 1 MiB。
 const LEDGER_TOLERANCE_RATIO: f64 = 0.10;
 const LEDGER_TOLERANCE_BYTES: u64 = MIB;
-/// snapshot 允许高出逻辑大小的比例（每块 36 字节开销）加固定冗余。
+/// snapshot 允许高出逻辑大小的比例（每块记录开销，v2 为 44 字节）加固定冗余。
 const SNAPSHOT_OVERHEAD_RATIO: f64 = 0.02;
 const SNAPSHOT_OVERHEAD_BYTES: u64 = MIB;
 /// 小改动场景里 delta 总量相对改动量的允许倍数（内容定义分块在改动边界附近重新同步的开销）。
@@ -105,9 +108,9 @@ impl ChangeProfile {
 
     /// 固定轮数。
     ///
-    /// 小改动场景每轮都要**重写整份快照**（格式不压缩、不去重），因此轮数必须随文件大小
-    /// 下降，否则单场景耗时按「轮数 × 逻辑大小」增长：4 GiB 档跑 20 轮要写约 80 GiB 快照。
-    /// 链深行为与文件大小无关，20 层链已在 `default`/`large` 覆盖，高档位因此缩短到 10/5 轮。
+    /// 小改动场景每轮都要**重读整份工作文件并重写快照**，因此轮数必须随文件大小下降，
+    /// 否则单场景耗时按「轮数 × 逻辑大小」增长：4 GiB 档跑 20 轮要读约 80 GiB。链深行为
+    /// 与文件大小无关，20 层链已在 `default`/`large` 覆盖，高档位因此缩短到 10/5 轮。
     /// 大改动场景每轮增量接近改动量、固定 3 轮，覆盖最坏存储放大。
     fn rounds(self, tier: Tier) -> usize {
         match self {
@@ -421,14 +424,41 @@ fn record_ledger(
     (measured, expected_delta, tolerance)
 }
 
-/// 断言 head snapshot 的大小符合文档记录的「不压缩、不去重」特征：约等于逻辑大小加
-/// 每块开销。
+/// 断言 snapshot 不超过「逻辑大小 + 每块开销」。
+///
+/// v2 快照对内容相同的块只写引用并用 zstd 压缩，因此**可压缩或含重复内容**的快照合法
+/// 地小于逻辑大小（稀疏夹具里的全零区会被折叠）。这条只守住上界；「去重/压缩确实生效」
+/// 由 [`assert_snapshot_compressed`] 断言，「内容不会凭空变小」由 C8 的密集用例断言。
 #[track_caller]
-fn assert_snapshot_matches_logical(label: &str, snapshot_bytes: u64, logical: u64) {
+fn assert_snapshot_within_logical(label: &str, snapshot_bytes: u64, logical: u64) {
+    let allowance = (logical as f64 * SNAPSHOT_OVERHEAD_RATIO) as u64 + SNAPSHOT_OVERHEAD_BYTES;
+    assert!(
+        snapshot_bytes <= logical + allowance,
+        "{label}：snapshot 不得超过逻辑大小加每块开销（逻辑 {logical} 字节 + 允许 {allowance}），\
+         实际 {snapshot_bytes} 字节"
+    );
+}
+
+/// 断言 v2 的去重/压缩在稀疏夹具上确实生效：快照应**小于**逻辑大小。
+///
+/// 二者相等说明块引用与压缩都没有发生——那要么是格式回退，要么是去重被关掉了。
+#[track_caller]
+fn assert_snapshot_compressed(label: &str, snapshot_bytes: u64, logical: u64) {
+    assert!(
+        snapshot_bytes < logical,
+        "{label}：稀疏内容下 snapshot 应小于逻辑大小（{logical} 字节），实际 {snapshot_bytes} 字节；\
+         相等说明去重与压缩都未生效"
+    );
+}
+
+/// 断言**密集不可压缩**内容的快照约等于逻辑大小（下界证明内容没有在别处丢失）。
+#[track_caller]
+fn assert_dense_snapshot_tracks_logical(label: &str, snapshot_bytes: u64, logical: u64) {
     let allowance = (logical as f64 * SNAPSHOT_OVERHEAD_RATIO) as u64 + SNAPSHOT_OVERHEAD_BYTES;
     assert!(
         snapshot_bytes >= logical && snapshot_bytes <= logical + allowance,
-        "{label}：snapshot 应约等于逻辑大小（{logical} 字节），实际 {snapshot_bytes} 字节"
+        "{label}：密集不可压缩内容的 snapshot 应约等于逻辑大小（{logical} 字节），\
+         实际 {snapshot_bytes} 字节"
     );
 }
 
@@ -559,15 +589,19 @@ fn c2_large_file_compaction_keeps_restorable_history() {
     let (head, head_output) = scenario.restore(&scenario.nodes[3], "c2-head.bin");
     assert_files_identical(&scenario.work, &head_output);
 
-    // 替换后的 delta 覆盖两次改动，体积仍应远小于 snapshot。
+    // 替换后的 delta 覆盖两次改动，体积仍应跟随改动量——不再拿它和 snapshot 比：
+    // v2 的 snapshot 会被去重与压缩压小，那个比例只是去重率的函数，不反映存储放大。
     let after = tree_usage(&scenario.workspace);
+    let changed = scenario.change_bytes * 3;
+    let delta_allowance = changed * DELTA_CHANGE_FACTOR + MIB;
     assert!(
-        after.deltas > 0 && after.deltas * 4 <= after.snapshots,
-        "精简后的 delta 总量应远小于 snapshot：delta {} 字节，snapshot {} 字节",
+        after.deltas > 0 && after.deltas <= delta_allowance,
+        "精简后的 delta 总量应跟随改动量：delta {} 字节，改动 {} 字节，允许 {} 字节",
         after.deltas,
-        after.snapshots
+        changed,
+        delta_allowance
     );
-    assert_snapshot_matches_logical("精简后", after.snapshots, scenario.logical);
+    assert_snapshot_within_logical("精简后", after.snapshots, scenario.logical);
 
     record(
         "C2 large file compaction",
@@ -678,18 +712,14 @@ fn c4_large_file_chain_volume_stays_bounded() {
     let changed = scenario.change_bytes * scenario.rounds() as u64;
     let region_growth = scenario.region_bytes() - regions_before;
 
-    // head 恒持有 snapshot，且 snapshot 不压缩、不去重：约等于逻辑大小。
-    assert_snapshot_matches_logical("C4", usage.snapshots, scenario.logical);
-    assert!(
-        usage.deltas * 4 <= usage.snapshots,
-        "delta 总量（{} 字节）应远小于 snapshot（{} 字节）",
-        usage.deltas,
-        usage.snapshots
-    );
+    // head 恒持有 snapshot；v2 对稀疏夹具里的全零区去重并压缩，因此快照不大于逻辑大小，
+    // 而且必须确实小于它——这才是「去重与压缩真的生效」的证据。
+    assert_snapshot_within_logical("C4", usage.snapshots, scenario.logical);
+    assert_snapshot_compressed("C4", usage.snapshots, scenario.logical);
     // delta 跟随改动量：允许内容定义分块在改动边界附近重新同步的固定倍数开销。
     let delta_allowance = changed * DELTA_CHANGE_FACTOR + MIB;
     assert!(
-        usage.deltas <= delta_allowance,
+        usage.deltas > 0 && usage.deltas <= delta_allowance,
         "delta 总量应跟随改动量：delta {} 字节，改动 {} 字节，允许 {} 字节",
         usage.deltas,
         changed,
@@ -848,7 +878,9 @@ fn c6_large_file_large_change_round_trip() {
     let usage = tree_usage(&scenario.workspace);
     let rounds = scenario.rounds() as u64;
     let changed = scenario.change_bytes * rounds;
-    assert_snapshot_matches_logical("C6", usage.snapshots, scenario.logical);
+    assert_snapshot_within_logical("C6", usage.snapshots, scenario.logical);
+    // 大改动只触及有界区域，其余仍是全零区，因此快照同样应被去重与压缩压小。
+    assert_snapshot_compressed("C6", usage.snapshots, scenario.logical);
 
     // 大改动下不再断言「增量远小于快照」，改为断言增量与改动量同量级且不失控。
     let delta_allowance = changed * LARGE_DELTA_CHANGE_FACTOR + MIB;
@@ -1038,4 +1070,54 @@ fn c7_large_file_commit_survives_cancellation_and_kill() {
     );
     fs::remove_file(&output).expect("无法清理恢复输出");
     assert!(directory_names(&scenario.workspace.out_directory()).is_empty());
+}
+
+/// C8 密集不可压缩内容：快照体积必须跟随逻辑大小，内容不得在别处丢失。
+///
+/// C1–C7 的夹具都是**稀疏**的（有界区域是真实随机字节，其余是全零区），v2 快照折叠
+/// 重复块并用 zstd 压缩，快照因此合法地远小于逻辑大小——「快照变小」既可能是去重/压缩
+/// 生效，也可能是内容在别处丢了。本用例把这两件事分开：工作文件**全部**写满真实随机
+/// 字节（没有任何可去重或可压缩的内容），此时快照必须约等于逻辑大小，并且能逐位恢复。
+///
+/// 固定 8 MiB、不随档位增长：它断言的是格式语义而不是存储放大，跟着档位长大只会让每档
+/// 多写一份无意义的全尺寸快照。
+#[test]
+fn c8_dense_snapshot_tracks_the_logical_size() {
+    const DENSE_BYTES: u64 = 8 * MIB;
+    const DENSE_SEED: u64 = 0xD3A5_0001;
+    let fixture = ArtworkFixture::new();
+
+    write_work_file(&fixture.work, DENSE_BYTES as usize, DENSE_SEED);
+    let commit = fixture
+        .commit_command()
+        .arg("note", "dense baseline")
+        .finish();
+    commit.expect_ok();
+    let history_id = commit.data_str("historyId");
+    assert!(!history_id.is_empty(), "{}", commit.describe());
+    assert_eq!(fixture.healthy(), 1);
+
+    // 单次提交：head 持一枚 snapshot，没有 delta。
+    let state = storage_state(&fixture.repository);
+    assert_eq!(state.snapshots.len(), 1, "{:?}", state.snapshots);
+    assert_eq!(state.deltas.len(), 0, "{:?}", state.deltas);
+    let snapshot_bytes = tree_usage(&fixture.workspace).snapshots;
+    assert_dense_snapshot_tracks_logical("C8", snapshot_bytes, DENSE_BYTES);
+
+    // 内容确实完整：恢复产物与写入时的随机字节逐位一致（「快照没变小」不能靠丢内容换取）。
+    let restored = fixture.restore_to(&history_id, "c8.bin");
+    assert_eq!(restored.len() as u64, DENSE_BYTES);
+    assert_eq!(restored, pattern_bytes(DENSE_BYTES as usize, DENSE_SEED));
+
+    record(
+        "C8 dense snapshot size",
+        "C",
+        "fixed-8MiB",
+        &commit,
+        json!({
+            "logicalBytes": DENSE_BYTES,
+            "snapshotBytes": snapshot_bytes,
+            "deltaBytes": 0,
+        }),
+    );
 }

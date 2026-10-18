@@ -1232,8 +1232,9 @@ impl Tier {
 
     /// 该档位在「提交期间新旧两份快照 + 一份全尺寸恢复输出」下的峰值磁盘下界。
     ///
-    /// 快照不压缩、不去重，因此每份约等于逻辑大小；提交期间旧快照要等新快照落库后才释放，
-    /// 两份会同时存在。场景的实际预期还要加上全部增量与工作文件的实际占用。
+    /// 提交期间旧快照要等新快照落库后才释放，两份会同时存在。v2 快照对稀疏内容去重并压缩，
+    /// 实际远小于逻辑大小，但预算守卫刻意按**名义**大小取保守上界（低估会写坏磁盘），
+    /// 场景的实际预期再加全部增量与工作文件的实际占用。
     pub fn peak_disk_floor(self) -> u64 {
         self.logical_size() * 3 + 64 * MIB
     }
@@ -1270,8 +1271,8 @@ pub fn tier() -> Tier {
 
 /// 磁盘上限默认值。
 ///
-/// 24 GiB 的依据是「最坏场景的诚实峰值」：提交期间同时存在新旧两份完整快照，之后还要放
-/// 一份全尺寸恢复输出，因此峰值约 `3 × 逻辑大小 + 全部增量 + 工作文件实际占用`。
+/// 24 GiB 的依据是「最坏场景的诚实峰值」：提交期间同时存在新旧两份快照，之后还要放
+/// 一份全尺寸恢复输出，因此峰值按名义大小估为 `3 × 逻辑大小 + 全部增量 + 工作文件实际占用`。
 /// 4 GiB 档 + 每次 1 GiB 变动（大变动场景）约 16 GiB，因此 12 GiB 会把它误判为超预算。
 /// 8 GiB 档（`manual`）在最坏情况下需要约 25 GiB，需显式调高上限。
 pub const DEFAULT_DISK_BUDGET: u64 = 24 * GIB;
@@ -1413,9 +1414,15 @@ impl TreeUsage {
     /// 目录内文件长度之和是**上界**：稀疏工作文件的名义长度远大于它占用的簇，因此
     /// 把工作文件替换为 `work_allocated`（该文件实际写入的字节数）。这也是预算守卫
     /// 使用的口径——偏保守，不会因为低估而写坏磁盘。
+    ///
+    /// 不计 `other`：那是**测试夹具自己**的记账（`scratch/` 下的 marker / result / stderr
+    /// 与工作区根下的 `ledger.jsonl`），它们的增长不是产品的存储放大。仓库实体、恢复输出
+    /// 与灾备目标仍全额计入，因此泄漏的中间快照、未回收的临时文件、游离实体与未清空的
+    /// 恢复输出照样会越界。
     pub fn allocated_estimate(&self, work_allocated: u64) -> u64 {
-        self.total
-            .saturating_sub(self.work)
+        self.repository
+            .saturating_add(self.out)
+            .saturating_add(self.backup)
             .saturating_add(work_allocated)
     }
 }
@@ -1619,7 +1626,11 @@ pub fn storage_state(repository: &Path) -> StorageState {
     let mut deltas = Vec::new();
     let mut temporaries = Vec::new();
     for path in files {
-        if path.contains("/temp/") {
+        // 临时文件出现在两处：作品目录下的 `artworks/<id>/temp/`（提交、检查点、精简的
+        // 中间产物）与仓库根下的 `temp/`（链解析时 delta 解码 payload 的溢出目录，
+        // `restore.rs` 的 `root.join("temp")`）。后者没有前导斜杠，因此判定必须同时
+        // 覆盖「路径以 `temp/` 开头」这一形态，否则该目录对 `assert_no_stray` 不可见。
+        if path.starts_with("temp/") || path.contains("/temp/") {
             temporaries.push(path);
         } else if path.contains("/snapshots/") {
             snapshots.push(path);

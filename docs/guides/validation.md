@@ -60,6 +60,13 @@ CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，�
   `tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言这一行存在，缺了会直接失败（该守护测试
   自身不带门控，因此在裸 `cargo test` 下就运行），把「漏写门控 → 裸 `cargo test` 拉起 GUI」
   这类事故挡在提交前。
+- **交互检查点只出现在边界，热循环只做静默观察**：取消观察分两层（`CancelToken::is_cancelled`
+  与 `CancelToken::observed`）。显式边界（提交、恢复、精简、检查点、灾备的阶段边界）仍发一枚
+  交互检查点，写一行 marker、并在 `--cancel-on-stdin` 下阻塞等判定；分块主循环（`ChunkTask`）
+  只读「取消是否已被判定」，不发 marker、不阻塞。因此**检查点序号与阶段数量由边界决定、与
+  文件分成多少块无关**，marker 文件也不会随处理字节数膨胀——测试因此可以按固定序号强杀/取消，
+  且删除或新增一处边界时会同时改变序号（改测试的定位断言时要连注释一起核对）。边界判定的取消
+  会被热循环在下一次静默查询时立刻看到，取消延迟不回退。
 - **按成本分层**：**九组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
   `stress_damage` / `stress_format` / `stress_pin_board` / `stress_authenticity` /
   `stress_concurrency` / `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；

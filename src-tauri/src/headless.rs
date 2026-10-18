@@ -562,9 +562,14 @@ fn resolve_within(workspace: &Path, path: &Path, label: &str) -> Result<PathBuf,
 /// 阶段标记与取消闸门。
 ///
 /// - `--marker`：每个可观察阶段追加一行，只写不阻塞，供测试观察与后续强杀场景使用。
-/// - `--cancel-on-stdin`：每个取消检查点先写 marker，再阻塞等待 stdin 的一行判定
+/// - `--cancel-on-stdin`：每个**交互检查点**先写 marker，再阻塞等待 stdin 的一行判定
 ///   （`cancel` / `continue`，EOF 视为取消）。因此测试可以**逐检查点**决定取消时机，
 ///   不存在「读到 marker 时进程已经跑过下一个检查点」的竞态。
+///
+/// 检查点只出现在显式边界（提交的 5 处、恢复/精简/检查点各自的链与发布边界等），
+/// 分块主循环走的是静默观察（[`CancelToken::observed`]），因此检查点总数与分块数
+/// 无关、marker 文件也不会随处理字节数膨胀。静默层读的正是这里的 `cancelled` 标志，
+/// 所以边界判定的取消仍会被热循环立刻看到。
 ///
 /// 两种模式都只通过文件与 stdin 干预被测进程，不触碰任何内部状态。
 struct Interlock {
@@ -680,7 +685,12 @@ impl HeadlessRuntime {
             Arc::new(NoopEventSink),
         )
         .with_observer(Arc::new(HeadlessObserver { interlock }));
-        let cancel = CancelToken::with_source(move || interlock.checkpoint());
+        let cancel = CancelToken::with_layers(
+            // 静默层：热循环只读「取消是否已被判定」，不写 marker、不阻塞。
+            move || interlock.cancelled(),
+            // 交互层：显式边界处的检查点，写一行 marker 并在带闸门时等一行判定。
+            move || interlock.checkpoint(),
+        );
         Self {
             coordinator,
             cancel,
