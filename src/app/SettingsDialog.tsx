@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect } from "react";
 import {
   Activity,
   BookOpen,
@@ -108,21 +108,19 @@ const PIN_BOARD_MANUAL: Array<{
 export function SettingsDialog() {
   const { settings, maintenance } = useAppRuntime();
   const { notify } = useNotice();
-  const [repositoryView, setRepositoryView] = useState<"settings" | "space">("settings");
   const refreshStorageOverview = maintenance.refreshStorageOverview;
 
-  // Hooks 必须在弹窗关闭的早退之前调用；空间 tab 首次可见时读取一次 DB 口径。
+  // Hooks 必须在弹窗关闭的早退之前调用；空间页首次可见时读取一次 DB 口径。
   useEffect(() => {
     if (
       !settings.settingsOpen
-      || settings.settingsPage !== "repository"
-      || repositoryView !== "space"
+      || settings.settingsPage !== "space"
       || !settings.repository.ready
     ) {
       return;
     }
     void refreshStorageOverview();
-  }, [repositoryView, settings.repository.ready, settings.settingsOpen, settings.settingsPage, refreshStorageOverview]);
+  }, [settings.repository.ready, settings.settingsOpen, settings.settingsPage, refreshStorageOverview]);
 
   if (!settings.settingsOpen || !settings.draft) return null;
 
@@ -257,28 +255,6 @@ export function SettingsDialog() {
 
             {settingsPage === "repository" && (
               <>
-              <div className="settings-page-tabs" role="tablist" aria-label="仓储视图">
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={repositoryView === "settings"}
-                  className={repositoryView === "settings" ? "active" : ""}
-                  onClick={() => setRepositoryView("settings")}
-                >
-                  设置
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={repositoryView === "space"}
-                  className={repositoryView === "space" ? "active" : ""}
-                  onClick={() => setRepositoryView("space")}
-                >
-                  空间
-                </button>
-              </div>
-              {repositoryView === "settings" ? (
-                <>
               <div className="settings-section">
                 <div className="settings-section-title"><FolderOpen aria-hidden="true" size={17} /><h3>仓库与数据安全</h3></div>
                 <div className="settings-path-field">
@@ -325,6 +301,24 @@ export function SettingsDialog() {
                   </label>
                 </div>
               </div>
+              </>
+            )}
+
+            {settingsPage === "space" && (
+              <>
+              <RepositoryStoragePanel
+                ready={repository.ready}
+                overview={storageOverview}
+                scan={storageDiskScan}
+                loading={storageOverviewBusy}
+                error={storageOverviewError}
+                scanning={maintenance.settingsOperation === "storage-scan"}
+                cancelPending={cancelPending}
+                runtime={visibleSettingsRuntime}
+                onRefresh={() => void refreshStorageOverview()}
+                onScan={() => void scanStorageDisk()}
+                onCancelScan={() => void maintenance.cancelSettingsOperation()}
+              />
 
               <div className="settings-section">
                 <div className="settings-section-title"><Trash2 aria-hidden="true" size={17} /><h3>文件清理</h3></div>
@@ -437,22 +431,6 @@ export function SettingsDialog() {
                   </div>
                 )}
               </div>
-                </>
-              ) : (
-                <RepositoryStoragePanel
-                  ready={repository.ready}
-                  overview={storageOverview}
-                  scan={storageDiskScan}
-                  loading={storageOverviewBusy}
-                  error={storageOverviewError}
-                  scanning={maintenance.settingsOperation === "storage-scan"}
-                  cancelPending={cancelPending}
-                  runtime={visibleSettingsRuntime}
-                  onRefresh={() => void refreshStorageOverview()}
-                  onScan={() => void scanStorageDisk()}
-                  onCancelScan={() => void maintenance.cancelSettingsOperation()}
-                />
-              )}
               </>
             )}
 

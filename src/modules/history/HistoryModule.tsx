@@ -44,9 +44,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
     restoreNode, compactNodes, deleteBranch, reverifyBranch, deleteSubtree, setCheckpoint,
-    forkBranch, renameNode, cancelOperation,
+    forkBranch, renameNode, readNodeFormat, cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  const [nodeFormat, setNodeFormat] = useState<{
+    nodeId: string;
+    value: string | null;
+    loading: boolean;
+  } | null>(null);
   const [commitNote, setCommitNote] = useState("");
   const [commitFeedback, setCommitFeedback] = useState<string | null>(null);
   const [view, setView] = useState<ViewMode>("overview");
@@ -112,6 +117,24 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
 
   const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
   const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+
+  // 详情面板的格式版本只按选中的节点读取文件头；历史刷新后节点对象会更新，
+  // 因此检查点替换快照等操作也会重新读取。
+  useEffect(() => {
+    if (!selectedNode || view !== "branch") {
+      setNodeFormat(null);
+      return;
+    }
+    let cancelled = false;
+    setNodeFormat({ nodeId: selectedNode.id, value: null, loading: true });
+    void readNodeFormat(selectedNode.id).then((value) => {
+      if (!cancelled) setNodeFormat({ nodeId: selectedNode.id, value, loading: false });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [readNodeFormat, selectedNode, view]);
+
   const roots = useMemo(() => buildHistoryTree(history?.nodes ?? []), [history?.nodes]);
   const branchLine = useMemo(() => selectedBranch && history
     ? buildBranchLine(history.nodes, selectedBranch.headHistoryId) : [], [history, selectedBranch]);
@@ -353,6 +376,16 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
           <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
           {selectedNode.note && <div><dt>提交备注</dt><dd>{selectedNode.note}</dd></div>}
           <div><dt>提交类型</dt><dd>{selectedNode.commitKind === "automatic" ? "自动备份" : "主动提交"}</dd></div>
+          <div>
+            <dt>格式版本</dt>
+            <dd>
+              {nodeFormat?.nodeId === selectedNode.id && !nodeFormat.loading
+                ? nodeFormat.value
+                  ? <span className="history-format-tag">ChunkFile {nodeFormat.value}</span>
+                  : <span className="history-format-muted">未知</span>
+                : <span className="history-format-muted">读取中…</span>}
+            </dd>
+          </div>
           <div><dt>原文件</dt><dd>{formatBytes(selectedNode.logicalSize)}</dd></div>
           <div><dt>当前存储</dt><dd>{formatBytes(selectedNode.chunkFileSize)}</dd></div>
           <div><dt>数据块</dt><dd>{selectedNode.chunkCount}</dd></div>

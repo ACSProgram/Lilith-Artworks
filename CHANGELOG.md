@@ -62,16 +62,24 @@ decision, so an untagged version is transitional.
 - The cheap headless stress groups in Windows CI grow from eight to nine with
   `stress_format`, keeping the format matrix under daily regression
   protection.
+- The history branch-view inspector now labels the selected node's ChunkFile
+  format (`ChunkFile v1` / `ChunkFile v2`). `get_history_node_format` resolves
+  the node's current storage file the same way as `chunk_file_size` (snapshot
+  when the node owns one, otherwise the cheapest child-edge delta) and reads
+  only the 10-byte common header; missing or unreadable files show 未知 without
+  surfacing a global error. No schema change and no extra work on periodic
+  history polling.
 
 ### Changed
 
-- The settings dialog is split into `仓储` and `备份` pages. The repository page
-  keeps the location, integrity check, storage format and file cleanup, and adds
-  an in-page `设置 / 空间` switch for the storage dashboard; the backup page owns
-  automatic backup scheduling, the default check mode and repository backup, and
-  shows the last backup result for the current run (not persisted yet). Command
-  names, DTOs, settings writes, repository switching and tray refresh keep their
-  previous semantics.
+- The settings dialog is split into `仓储`, `空间` and `备份` pages. The
+  repository page keeps the location, integrity check and storage format; the
+  space page hosts the storage dashboard and the file cleanup queue/scan; the
+  backup page owns automatic backup scheduling, the default check mode and
+  repository backup, and shows the last backup result for the current run (not
+  persisted yet). The in-page `设置 / 空间` switch is gone. Command names, DTOs,
+  settings writes, repository switching and tray refresh keep their previous
+  semantics.
 - Cancellation observation is split into two layers. Hot loops (`ChunkTask` in
   the chunk-file writer/reader) now perform only a **silent** query —
   `CancelToken::observed`, which reads whether cancellation has already been

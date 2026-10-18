@@ -120,6 +120,7 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     setCheckpoint: vi.fn(),
     forkBranch: vi.fn(),
     renameNode: vi.fn(),
+    readNodeFormat: vi.fn().mockResolvedValue("v2"),
     cancelOperation: vi.fn(),
     ...overrides,
   };
@@ -311,5 +312,32 @@ describe("HistoryModule overview interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "查看链路校验失败详情" }));
     fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
     expect(reverifyBranch).toHaveBeenCalledWith("main");
+  });
+});
+
+describe("HistoryModule node inspector", () => {
+  beforeEach(() => {
+    controller.useHistoryController.mockReturnValue(controllerReturn());
+  });
+
+  afterEach(() => cleanup());
+
+  it("shows the selected node's ChunkFile format in branch view", async () => {
+    const readNodeFormat = vi.fn().mockResolvedValue("v2");
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeFormat }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    expect(await screen.findByText("ChunkFile v2")).toBeTruthy();
+    expect(readNodeFormat).toHaveBeenCalledWith("main-head");
   });
 });

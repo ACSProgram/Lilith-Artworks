@@ -11,6 +11,8 @@ import type {
 export const historyApi = {
   get: (artworkId: string) =>
     invokeCommand<ArtworkHistory>("get_artwork_history", { artworkId }),
+  nodeFormat: (historyId: string) =>
+    invokeCommand<string | null>("get_history_node_format", { historyId }),
   fork: (request: ForkBranchRequest) =>
     invokeCommand<ArtworkHistory>("fork_artwork_branch", { request }),
   updateBranch: (request: UpdateBranchBackupRequest) =>

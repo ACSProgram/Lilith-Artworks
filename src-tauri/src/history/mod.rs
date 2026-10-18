@@ -20,6 +20,6 @@ pub(crate) use repository::{
     load_idle_verify_target, load_node, load_scheduled, load_source_metadata,
     mark_automatic_backup_error, mark_automatic_backup_skipped, mark_checkpoint, mark_error,
     mark_unchanged, mark_verified, mark_verify_error, materialization_chain,
-    next_backup_disable_notice_target, record_source_metadata, rename_node, set_snapshot,
-    unmark_checkpoint, update_branch,
+    next_backup_disable_notice_target, node_storage_path, record_source_metadata, rename_node,
+    set_snapshot, unmark_checkpoint, update_branch,
 };

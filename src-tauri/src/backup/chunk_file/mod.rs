@@ -14,7 +14,14 @@
 //! Errors separate what to do (`InvalidFormat` / `Integrity` / `Incompatible`)
 //! from where it happened ([`ErrorDimension`]).
 
-use std::{error::Error, fmt, io, mem::size_of};
+use std::{
+    error::Error,
+    fmt,
+    fs::File,
+    io::{self, Read},
+    mem::size_of,
+    path::Path,
+};
 
 use crate::cancel::CancelToken;
 
@@ -152,6 +159,22 @@ pub(super) fn incompatible(
 pub(crate) enum FormatVersion {
     V1,
     V2,
+}
+
+/// 读取 snapshot / delta 文件头中的格式版本，只消费文件前 10 个字节。
+///
+/// 节点详情只需要展示版本标签，不应为此打开块表或解压 delta 载荷。
+pub(crate) fn stored_format_label(path: &Path) -> ChunkFileResult<&'static str> {
+    let mut file = File::open(path)?;
+    let mut header = [0_u8; 10];
+    file.read_exact(&mut header)?;
+    if header[..8] != SNAPSHOT_MAGIC && header[..8] != DELTA_MAGIC {
+        return Err(invalid_format(ErrorDimension::File, "不是受管理的历史文件"));
+    }
+    match FormatVersion::from_number(u16::from_le_bytes([header[8], header[9]]))? {
+        FormatVersion::V1 => Ok("v1"),
+        FormatVersion::V2 => Ok("v2"),
+    }
 }
 
 impl FormatVersion {

@@ -94,6 +94,15 @@ export function useHistoryController({
     }
   }, [artworkId, beginRead, isCurrentRead]);
 
+  /** 详情面板的格式版本按选中节点读取；文件不可读时返回 null，不进入全局错误提示。 */
+  const readNodeFormat = useCallback(async (historyId: string): Promise<string | null> => {
+    try {
+      return await historyApi.nodeFormat(historyId);
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     setHistory(null);
     setLoading(true);
@@ -328,6 +337,7 @@ export function useHistoryController({
     setCheckpoint,
     forkBranch,
     renameNode,
+    readNodeFormat,
     cancelOperation,
   };
 }

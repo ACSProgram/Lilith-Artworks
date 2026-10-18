@@ -2,7 +2,7 @@ use std::path::Path;
 
 use crate::{
     app::command_runtime::{CommandContext, CommandError},
-    backup, cleanup, history,
+    backup, cleanup, history, storage,
 };
 
 pub(crate) fn list(
@@ -11,6 +11,24 @@ pub(crate) fn list(
 ) -> Result<history::ArtworkHistory, CommandError> {
     context.run_read("get_artwork_history", |session| {
         history::list(session.root(), artwork_id).map_err(CommandError::from)
+    })
+}
+
+/// 读取节点当前存储文件的格式标签；文件缺失或损坏时返回 `None`，不阻断详情展示。
+pub(crate) fn node_format(
+    context: &CommandContext,
+    history_id: &str,
+) -> Result<Option<String>, CommandError> {
+    context.run_read("get_history_node_format", |session| {
+        let Some(relative) =
+            history::node_storage_path(session.root(), history_id).map_err(CommandError::from)?
+        else {
+            return Ok(None);
+        };
+        let path = storage::resolve_path(session.root(), &relative).map_err(CommandError::from)?;
+        Ok(backup::chunk_file::stored_format_label(&path)
+            .ok()
+            .map(str::to_string))
     })
 }
 

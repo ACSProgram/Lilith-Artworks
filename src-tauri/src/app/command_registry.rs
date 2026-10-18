@@ -49,6 +49,7 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::library::move_library_nodes,
         // History / Backup
         crate::history::get_artwork_history,
+        crate::history::get_history_node_format,
         crate::app::workflows::fork_artwork_branch,
         crate::app::workflows::update_artwork_branch,
         crate::history::rename_history_node,

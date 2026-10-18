@@ -372,10 +372,6 @@ button { color: inherit; }
 .cleanup-candidate-list span { overflow: hidden; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .cleanup-candidate-list small { color: var(--muted); font-size: 10px; }
 
-.settings-page-tabs { display: flex; gap: 4px; padding: 10px 20px 0; border-bottom: 1px solid var(--border); }
-.settings-page-tabs button { padding: 7px 12px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 11px; }
-.settings-page-tabs button:hover { color: var(--text); }
-.settings-page-tabs button.active { border-bottom-color: var(--accent); color: var(--accent); font-weight: 600; }
 .settings-backup-result { display: grid; gap: 4px; margin-top: 12px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
 .settings-backup-result strong { font-size: 12px; }
 .settings-backup-result small { overflow-wrap: anywhere; color: var(--muted); font-size: 10px; }

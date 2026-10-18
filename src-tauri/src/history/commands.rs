@@ -19,6 +19,20 @@ pub(crate) async fn get_artwork_history(
 }
 
 #[tauri::command]
+pub(crate) async fn get_history_node_format(
+    history_id: String,
+    coordinator: State<'_, OperationCoordinator>,
+) -> Result<Option<String>, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::History, move |context| {
+            usecases::history::node_format(context, &history_id)
+        })
+        .await
+        .map_err(String::from)
+}
+
+#[tauri::command]
 pub(crate) async fn rename_history_node(
     request: RenameHistoryNodeRequest,
     coordinator: State<'_, OperationCoordinator>,

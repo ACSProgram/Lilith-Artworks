@@ -557,8 +557,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
-    fireEvent.click(await screen.findByRole("tab", { name: "空间" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空间" }));
 
     expect(await screen.findByRole("radio", { name: "数据库记录" })).toBeTruthy();
     await waitFor(() => expect(appApi.getRepositoryStorageOverview).toHaveBeenCalled());
@@ -663,7 +662,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空间" }));
 
     expect(await screen.findByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeTruthy();
     expect(screen.getByText(/提交释放旧快照/)).toBeTruthy();
@@ -703,7 +702,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空间" }));
 
     // 仓库外条目展示完整路径、所属作品与期望摘要，且不提供「全部重试」入口。
     expect(await screen.findByText(externalPath)).toBeTruthy();
@@ -743,7 +742,7 @@ describe("App repository switching", () => {
     render(<App />);
     await screen.findByRole("treeitem", { name: /Repository artwork/ });
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
-    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空间" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始扫描" }));
 
     expect(await screen.findByText("发现 2 个未引用文件")).toBeTruthy();

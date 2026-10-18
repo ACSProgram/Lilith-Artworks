@@ -530,6 +530,22 @@ fn compressed_delta_rejects_data_beyond_declared_payload() {
 }
 
 #[test]
+fn stored_format_label_reads_only_the_file_header() {
+    for (bytes, expected) in [
+        (encode_snapshot(b"v1 payload"), "v1"),
+        (encode_v2_snapshot(b"v2 payload"), "v2"),
+    ] {
+        let mut file = tempfile::NamedTempFile::new().unwrap();
+        file.write_all(&bytes).unwrap();
+        assert_eq!(stored_format_label(file.path()).unwrap(), expected);
+    }
+
+    let mut foreign = tempfile::NamedTempFile::new().unwrap();
+    foreign.write_all(b"not a chunk file").unwrap();
+    assert!(stored_format_label(foreign.path()).is_err());
+}
+
+#[test]
 fn declared_limit_allows_multi_gigabyte_targets() {
     let target_size = 4 * 1024 * 1024 * 1024_u64;
     let header = DeltaHeader {

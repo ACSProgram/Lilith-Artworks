@@ -29,11 +29,14 @@
   里 alpha1 的剩余项（release 档五档大文件数值采集、`extreme` 档复跑、压力测试的 CPU 时间
   度量口径）；随后进入 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、依赖与阶段
   口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
-- **alpha2 阶段 6 已实现（待维护者验收）**：设置页左侧导航拆为「仓储 / 备份」，仓储页内用
-  「设置 / 空间」页内 tab；空间仪表盘新增只读数据库聚合 `get_repository_storage_overview`
-  与按需、可取消的仓库目录扫描 `scan_repository_storage_disk`，两套口径分别显示；备份页承接
-  自动备份、创建备份与本次运行的最近结果。仍保持 repository schema v4，不新增持久表。最近一次
-  备份结果的持久化已记入 alpha3 阶段 7 的 v5 迁移计划（`repository_backup_runs`）。
+- **alpha2 阶段 6 已实现（待维护者验收）**：设置页左侧导航拆为「仓储 / 空间 / 备份」；仓储页
+  只保留仓库位置、完整性检查与存储格式，空间页承接仓储仪表盘与文件清理队列/扫描，备份页承接
+  自动备份、创建备份与本次运行的最近结果。空间仪表盘由只读数据库聚合
+  `get_repository_storage_overview` 与按需、可取消的仓库目录扫描
+  `scan_repository_storage_disk` 提供，两套口径分别显示。历史「当前分支」视图的节点信息栏新增
+  按需读取的 ChunkFile v1/v2 版本标签（`get_history_node_format`，只读文件头，不改 schema）。
+  仍保持 repository schema v4，不新增持久表。最近一次备份结果的持久化已记入 alpha3 阶段 7 的
+  v5 迁移计划（`repository_backup_runs`）。
 - 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
   阶段 7–9。
 

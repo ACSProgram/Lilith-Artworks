@@ -50,7 +50,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
 
-设置页「仓储」视图的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
+设置页「空间」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
 
 **空 id 不再等于「处理全部」**：`retry_pending_file_cleanup` 传空 id 时只重放**仓库内条目**（`repository_file` / `repository_directory`），`external_file` 条目一律跳过。外部条目保存的是仓库之外的绝对路径，删除它等于一条任意路径删除，唯一门槛只是攻击者需要知道目标文件的 SHA-256；若它随启动自动重放，被投毒的仓库就等于自带一条「自动、无确认的删除任意文件」原语。因此外部条目改为在队列里**逐条显式确认**：列表直接展示完整路径、所属作品与期望 SHA-256，点击「确认删除…」后由滑动确认控件（`ConfirmDialog` 的 `slideToConfirm`）承担最终动作，确认后以**显式 id** 调用同一命令执行；「全部重试」按钮在只剩外部条目时禁用，并注明它只重放仓库内条目。既有的「摘要不匹配即不删」约束不变（`cleanup::remove_external_file` 仍只在 SHA-256 相等时删除）。首次启动时应用仍会自动重放一次仓库内条目，队列中的残留仓库内条目即上次未清干净的文件。
 
@@ -60,7 +60,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 ## 仓储空间状态
 
-仓储视图的「空间」页是只读仪表盘，数据来自两个命令：
+设置页「空间」页的仓储仪表盘是只读视图，数据来自两个命令：
 
 - `get_repository_storage_overview`：从 SQLite 聚合数据库记录口径，走共享读租约、不取运行锁，也不写任何状态。
 - `scan_repository_storage_disk`：按需遍历仓库目录，扫描期间取前台运行锁与仓库操作锁、可经统一取消入口中断；不持有跨进程 owner lock。
@@ -81,7 +81,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 恢复从目标节点向下寻找最近可用 snapshot，再沿父链逐条 `resolve` 反向 delta（惰性，不产生中间 snapshot 文件），最后一次性把结果流式导出为临时文件并禁止覆盖；链起点与每步结果都会与数据库摘要比对，导出时逐块验哈希并核对整文件摘要。`history::materialization_chain` 用一次递归 CTE 同时选出最近 snapshot、父链节点与每步使用的 delta 路径，不再按节点逐条查库；目标自身持有 snapshot 时仍直接返回该节点。恢复、精简和检查点共用同一条惰性解析路径：精简只物化被移除节点的父链，子链只取块索引，然后从父链的虚拟存储中按需读取变化的块重建反向 delta，改接事务内把被移除节点与旧边占用的文件入队 `pending_file_cleanup`（原因 `history_compaction`）；检查点把解析结果一次性写成 snapshot 文件并 `sync_all` 后发布，建立、取消或替换检查点释放的旧 snapshot 在同一事务内入队（原因 `history_checkpoint_release` / `history_snapshot_replaced`）；全库 scrub 走同一条链但把结果流入 sink，只校验不落盘。上述入队均由调用方在提交成功后单遍重放，删除失败只留队列可重试。所有长操作经 `OperationCoordinator` 记录开始、结束、耗时与 typed 错误字段（`code`/`kind`/`retryable`/operation id）。
 
-仓储视图提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
+仓储页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
 
 备份视图也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。备份视图在本次运行内显示最近一次创建备份的文件数、大小与恢复路径；重启后不保留，持久化改由 alpha3 的 v4 → v5 迁移承接（见计划 §2.2）。
 
@@ -151,6 +151,7 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 ```text
 get_artwork_history
+get_history_node_format
 fork_artwork_branch
 update_artwork_branch
 run_branch_backup
@@ -220,6 +221,7 @@ scan_repository_storage_disk
 - 总览使用弱强调标出当前分支的祖先路径，并对当前分支 HEAD 标签使用实色强调；节点选中态使用更强的边框、背景和外框，不与当前分支提示混淆。
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
+- 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节，走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
 - `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。

@@ -294,6 +294,33 @@ pub(crate) fn load_node(root: &Path, history_id: &str) -> Result<HistoryRecord, 
     load_node_from(&connection, history_id)
 }
 
+/// 节点当前存储文件的仓库内相对路径；只读图元数据，不打开文件。
+///
+/// 口径与 `chunk_file_size` 一致：节点持有 snapshot 时取快照，否则取重建该节点
+/// 所读的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。
+pub(crate) fn node_storage_path(root: &Path, history_id: &str) -> Result<Option<String>, String> {
+    Ok(storage::open(root)?
+        .query_row(
+            "SELECT COALESCE(
+                        NULLIF(TRIM(node.snapshot_path), ''),
+                        (SELECT NULLIF(TRIM(edge.delta_path), '')
+                           FROM history_edges edge
+                           JOIN history_nodes child ON child.id = edge.child_history_id
+                          WHERE child.parent_id = node.id
+                          ORDER BY edge.delta_size, edge.child_history_id
+                          LIMIT 1),
+                        NULLIF(TRIM(node.delta_path), '')
+                    )
+               FROM history_nodes node
+              WHERE node.id = ?1",
+            [history_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .flatten())
+}
+
 pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection

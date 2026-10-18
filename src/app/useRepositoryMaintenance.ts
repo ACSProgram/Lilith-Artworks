@@ -127,9 +127,9 @@ export function useRepositoryMaintenance(
     if (settingsOperation !== null) void refreshRuntime().catch(() => undefined);
   }, [refreshRuntime, settingsOperation]);
 
-  // 打开设置或切到仓库页时读取一次待清理队列；只读，失败时保持上一次结果。
+  // 打开设置或切到空间页时读取一次待清理队列；只读，失败时保持上一次结果。
   useEffect(() => {
-    if (!settings.settingsOpen || settings.settingsPage !== "repository" || !settings.repository.ready) {
+    if (!settings.settingsOpen || settings.settingsPage !== "space" || !settings.repository.ready) {
       return undefined;
     }
     let disposed = false;
