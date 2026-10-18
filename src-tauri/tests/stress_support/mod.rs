@@ -209,10 +209,21 @@ pub struct ArtworkFixture {
 
 impl ArtworkFixture {
     pub fn new() -> Self {
+        Self::build("artwork.bin", &pattern_bytes(96 * 1024, 1))
+    }
+
+    /// 用调用方给定的工作文件名与初始内容建夹具（例如合成 `.clip`）。
+    /// 文件扩展名不参与任何产品判定，`create-artwork --source` 只校验
+    /// 「普通文件、绝对路径、仓库之外」。
+    pub fn with_work_file(name: &str, contents: &[u8]) -> Self {
+        Self::build(name, contents)
+    }
+
+    fn build(name: &str, contents: &[u8]) -> Self {
         let workspace = Workspace::new();
         let repository = workspace.repository();
-        let work = workspace.work("artwork.bin");
-        write_work_file(&work, 96 * 1024, 1);
+        let work = workspace.work(name);
+        fs::write(&work, contents).expect("无法写入工作文件");
         headless(&workspace, "init-repository").finish().expect_ok();
         let created = headless(&workspace, "create-artwork")
             .arg("title", "Artwork")
@@ -237,6 +248,11 @@ impl ArtworkFixture {
         headless(&self.workspace, command).repository(&self.repository)
     }
 
+    /// 该 Artwork 的仓库目录（`snapshots/`、`deltas/`、`temp/` 所在处）。
+    pub fn artwork_directory(&self) -> PathBuf {
+        self.repository.join("artworks").join(&self.artwork_id)
+    }
+
     /// 写入新内容并做一次普通提交，返回历史节点标识。
     pub fn commit(&self, len: usize, seed: u64, note: &str) -> String {
         write_work_file(&self.work, len, seed);
@@ -245,6 +261,50 @@ impl ArtworkFixture {
         let history_id = outcome.data_str("historyId");
         assert!(!history_id.is_empty(), "{}", outcome.describe());
         history_id
+    }
+
+    /// 用给定内容覆盖工作文件并做一次普通提交（跟随当前设置的写入格式）。
+    pub fn commit_contents(&self, contents: &[u8], note: &str) -> String {
+        self.commit_contents_with_format(contents, note, None)
+    }
+
+    /// 同 [`Self::commit_contents`]，但显式指定本次提交的 ChunkFile 格式
+    /// （`Some("v1")` / `Some("v2")`，经无头 `--chunk-format` 落到进程级设置），
+    /// 用于在同一仓库内构造 v1/v2 混存的历史。
+    pub fn commit_contents_with_format(
+        &self,
+        contents: &[u8],
+        note: &str,
+        format: Option<&str>,
+    ) -> String {
+        fs::write(&self.work, contents).expect("无法写入工作文件");
+        let mut command = self.commit_command().arg("note", note);
+        if let Some(format) = format {
+            command = command.arg("chunk-format", format);
+        }
+        let outcome = command.finish();
+        outcome.expect_ok();
+        let history_id = outcome.data_str("historyId");
+        assert!(!history_id.is_empty(), "{}", outcome.describe());
+        history_id
+    }
+
+    /// 恢复历史节点到 `<workspace>/out/<name>`，断言成功，返回（产物路径, 结果）。
+    pub fn restore_outcome(&self, history_id: &str, name: &str) -> (PathBuf, Outcome) {
+        let output = self.workspace.out(name);
+        let outcome = self
+            .command("restore")
+            .arg("history", history_id)
+            .arg("output", output.to_string_lossy())
+            .finish();
+        outcome.expect_ok();
+        (output, outcome)
+    }
+
+    /// 恢复历史节点并返回恢复产物的字节（[`Self::restore_outcome`] 的便捷封装）。
+    pub fn restore_to(&self, history_id: &str, name: &str) -> Vec<u8> {
+        let (output, _) = self.restore_outcome(history_id, name);
+        fs::read(&output).expect("无法读取恢复输出")
     }
 
     /// 提交命令的公共参数（分支与提交类型）。
@@ -828,6 +888,93 @@ pub fn pattern_bytes(len: usize, seed: u64) -> Vec<u8> {
 
 pub fn write_work_file(path: &Path, len: usize, seed: u64) {
     fs::write(path, pattern_bytes(len, seed)).expect("无法写入工作文件");
+}
+
+// ---------------------------------------------------------------------------
+// 合成 CSFC（.clip）容器
+// ---------------------------------------------------------------------------
+
+/// 合成 CSFC（`.clip`）容器：`Head` + 带 tile 记录的 `Exta` + `Foot`。
+///
+/// 布局契约见 `src/format/container.rs` 头注释（890 个真实 `.clip` 的实测回流）：
+/// 文件头 24 B、块头 16 B、Exta 载荷头 56 B，tile 记录以 `BlockDataBeginChunk`
+/// 起、`BlockDataEndChunk` 止，记录之后是 12 B 尾部。`tile_bodies` 每个元素成为
+/// 一个 tile 记录的载荷；同一输入永远得到同一份字节，因此恢复产物可逐位比对。
+///
+/// 它证明的是「自洽容器能走通容器感知分块与恢复」；真实 Clip Studio 输出的
+/// 形态（块类型全集、异常组合）由此生成器**不代表**，由维护者手工验收覆盖。
+pub fn synthetic_clip(tile_bodies: &[&[u8]]) -> Vec<u8> {
+    fn utf16be(name: &str) -> Vec<u8> {
+        let mut output = Vec::new();
+        for byte in name.bytes() {
+            output.push(0);
+            output.push(byte);
+        }
+        output
+    }
+    fn tile(body: &[u8]) -> Vec<u8> {
+        let begin = utf16be("BlockDataBeginChunk");
+        let end = utf16be("BlockDataEndChunk");
+        let size = 4 + 4 + begin.len() + body.len() + 4 + end.len();
+        let mut output = Vec::new();
+        output.extend_from_slice(&(size as u32).to_be_bytes());
+        output.extend_from_slice(&(19_u32).to_be_bytes());
+        output.extend_from_slice(&begin);
+        output.extend_from_slice(body);
+        output.extend_from_slice(&(17_u32).to_be_bytes());
+        output.extend_from_slice(&end);
+        output
+    }
+
+    let mut exta_payload = exta_header();
+    for body in tile_bodies {
+        exta_payload.extend_from_slice(&tile(body));
+    }
+    exta_payload.extend_from_slice(&[0xAA; 12]);
+    csfc_with_exta(&exta_payload)
+}
+
+/// 合成「无 tile 记录」的 CSFC（screencast 形态）：Exta 载荷头之后直接是尾部，
+/// 解析器把整个 Exta 块当作单一结构单元（与 `container.rs` 的同名单测同形）。
+/// `tail` 的前 8 B 会被当作记录头读取， namelen 不匹配即结束记录扫描。
+pub fn synthetic_clip_without_tiles(tail: &[u8]) -> Vec<u8> {
+    let mut exta_payload = exta_header();
+    exta_payload.extend_from_slice(tail);
+    csfc_with_exta(&exta_payload)
+}
+
+/// Exta 载荷头：`u64be 40 + "extrnlid" + GUID(32 ascii) + u32be + u32be`，共 56 B。
+fn exta_header() -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(&40_u64.to_be_bytes());
+    payload.extend_from_slice(b"extrnlid");
+    payload.extend_from_slice(b"0123456789ABCDEF0123456789ABCDEF");
+    payload.extend_from_slice(&0_u32.to_be_bytes());
+    payload.extend_from_slice(&0_u32.to_be_bytes());
+    payload
+}
+
+/// 用给定的 Exta 载荷组装完整容器：`Head` + `Exta` + `Foot`，文件头声明总长。
+fn csfc_with_exta(exta_payload: &[u8]) -> Vec<u8> {
+    fn block(tag: &[u8; 4], payload: &[u8]) -> Vec<u8> {
+        let mut output = Vec::new();
+        output.extend_from_slice(&[0, 0, 0, 0]);
+        output.extend_from_slice(tag);
+        output.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+        output.extend_from_slice(payload);
+        output
+    }
+
+    let mut body = Vec::new();
+    body.extend_from_slice(&block(b"Head", &[0_u8; 8]));
+    body.extend_from_slice(&block(b"Exta", exta_payload));
+    body.extend_from_slice(&block(b"Foot", &[]));
+    let mut output = Vec::new();
+    output.extend_from_slice(b"CSFCHUNK");
+    output.extend_from_slice(&((24 + body.len()) as u64).to_be_bytes());
+    output.extend_from_slice(&24_u64.to_be_bytes());
+    output.extend_from_slice(&body);
+    output
 }
 
 /// 把文件修改时间回拨 `seconds` 秒。

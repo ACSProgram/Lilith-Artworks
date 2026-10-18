@@ -36,10 +36,13 @@
 
 ## 压力测试：便宜的分组进 CI，昂贵的仍只在发布前运行
 
-`src-tauri/tests/` 下的十二组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`src-tauri/tests/` 下的十三组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
 `stress_large` 大文件端到端与大文件中断、`stress_scale` 规模与灾备与参数边界、`stress_cleanup`
 崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
 `stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏与画板 DDS 损坏）、
+`stress_format` ChunkFile 格式矩阵——合成 `.clip` 容器感知分块（tile 结构 / 无 tile / 截断回退
+CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，断言用磁盘事实（ChunkFile 公共头的
+版本 / chunker / adapter 字节，delta 先过 zstd 解压）逐提交核对、
 `stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读、
 写哨兵持有期间全库校验的明确拒绝）、
 `stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准、`stress_baseline` 0.3
@@ -57,9 +60,9 @@
   `tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言这一行存在，缺了会直接失败（该守护测试
   自身不带门控，因此在裸 `cargo test` 下就运行），把「漏写门控 → 裸 `cargo test` 拉起 GUI」
   这类事故挡在提交前。
-- **按成本分层**：**八组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
-  `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
-  `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
+- **按成本分层**：**九组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
+  `stress_damage` / `stress_format` / `stress_pin_board` / `stress_authenticity` /
+  `stress_concurrency` / `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
   **`stress_large`（数十分钟到两小时，视档位）、`stress_scale`（约 1 分钟）、`stress_bench`
   与 `stress_baseline` 仍只在发布前手动运行**
   ——前两组依赖大量磁盘与时间，后两组是性能基准（`stress_baseline` 还需一份临时仓库副本），
@@ -69,7 +72,7 @@
   阈值、不进 CI；长期回归对照用它的合成场景（深链恢复、取消延迟）与 `stress_bench`，不要在
   日常改动或后续批次里把它当默认测试标准。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
-  `cargo test --lib`、`git diff --check`。CI 已覆盖的八组不必在本地反复跑；**其余分组不要顺手
+  `cargo test --lib`、`git diff --check`。CI 已覆盖的九组不必在本地反复跑；**其余分组不要顺手
   运行**——即使到了收尾、整理、提交前的阶段也一样。
 - **昂贵分组的耗时与磁盘是设计属性而不是卡住**：测试以真实落盘路径执行，覆盖「逻辑文件大小 ×
   单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行常以十分钟计，峰值磁盘占用
@@ -85,6 +88,13 @@
   准入，可多个并行，但保留峰值之和不超过 `LILITH_STRESS_DISK_BUDGET`（默认 24 GiB），并发数
   不超过 `LILITH_STRESS_JOBS`（默认可用核数）。这样在有磁盘余量的机器上充分利用多核——
   被测子进程是单线程的，串行只会用一个核——同时避免盲目并行把磁盘写满。
+- **墙钟不能作为跨版本性能标准**：正因为上面这条与 `cargo test` 默认并行跑测试函数，同一台机器
+  上会同时跑多个单线程被测进程，「整机 CPU 占用」随并发场景数变化、「单次操作墙钟」被调度拉长。
+  2026-10-18 的实测差异是 2.3–4.1 倍（同一基准并行时 P1 单次提交 121.6 ms、P3 导入 1450.7 ms；
+  `--test-threads=1` 后 53.7 ms / 353.0 ms）。因此：`stress_bench` 的数字**只认
+  `--test-threads=1` 采集**，且只在同一机器、同一构建档内比较；跨版本谈快慢不要引用群跑墙钟。
+  测试目前只采墙钟与峰值内存，**不采进程 CPU 时间**——要评估 CPU 成本需另加度量，见
+  `docs/planning/todo.md`。
 - 运行方式（构建无头入口、档位选择、环境变量与输出文件）见下方「运行方式」；各档位的实测数据、
   磁盘需求与墙钟见 `docs/user/stress-test-report.md` 的「运行成本」一节。
 - **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
@@ -115,6 +125,7 @@ cargo test --features headless --test stress_cancel
 cargo test --features headless --test stress_crash
 cargo test --features headless --test stress_cleanup
 cargo test --features headless --test stress_damage
+cargo test --features headless --test stress_format
 cargo test --features headless --test stress_pin_board
 cargo test --features headless --test stress_authenticity
 cargo test --features headless --test stress_concurrency
@@ -168,10 +179,10 @@ cargo test --features headless --test stress_baseline -- --test-threads=1 --noca
 
 - `windows-ci.yml`：`dependency-audit`（ubuntu，npm audit、`rustsec/audit-check`、SBOM）与
   `validate`（windows，发布元数据、许可证一致性、前端构建与测试、`cargo fmt --check`、
-  `cargo test --lib`、`cargo test --test gate_guard`、以及**八组便宜的无头压力测试**——构建
+  `cargo test --lib`、`cargo test --test gate_guard`、以及**九组便宜的无头压力测试**——构建
   headless 二进制后依次运行 `stress_cancel` / `stress_crash` / `stress_cleanup` /
-  `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
-  `stress_input`）。
+  `stress_damage` / `stress_format` / `stress_pin_board` / `stress_authenticity` /
+  `stress_concurrency` / `stress_input`）。
   把便宜分组前置到 CI 是为了让日常改动也有回归保护：它们此前只在发布前手动跑，问题会在
   「准备发布」时集中爆发。`stress_large` / `stress_scale` / `stress_bench` /
   `stress_baseline` 不进 CI。

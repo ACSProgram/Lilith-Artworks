@@ -11,6 +11,29 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Added
+
+- A new `stress_format` stress group closes the format-layer integration gap
+  that `cargo test --lib` cannot reach: end-to-end commit → delta → restore
+  through the real headless binary for `.clip` container-aware chunking (tile
+  structure, the screencast shape without tile records, and a truncated
+  container falling back to CDC) and for v1/v2 mixed repositories. Assertions
+  use disk facts only: the ChunkFile common header (little-endian version /
+  chunker / adapter, delta frames decompressed through zstd) is checked after
+  every commit, so a silent fallback to CDC or a dropped format flag fails the
+  suite. Because only the branch head keeps a snapshot, the v1 commit's delta
+  is the surviving v1 evidence; checkpointing the branch start then
+  materializes a chain mixing v2 and v1 deltas into a v2 snapshot. All
+  fixtures are synthesized at runtime with deterministic seeds; no binary
+  samples are committed.
+- The headless entry gains `--chunk-format v1|v2`, a process-level override of
+  the `chunkFileFormatV2` setting (default unchanged). It only affects the
+  snapshots/deltas written by that process, which is what lets one test
+  repository hold both layouts; the GUI path is untouched.
+- The cheap headless stress groups in Windows CI grow from eight to nine with
+  `stress_format`, keeping the format matrix under daily regression
+  protection.
+
 ## 0.3.0-alpha.1 - 2026-10-18
 
 ### Added

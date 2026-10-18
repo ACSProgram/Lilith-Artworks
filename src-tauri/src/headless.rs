@@ -214,6 +214,7 @@ fn usage() -> String {
          \x20 --workspace <dir>    作用域根目录；无头进程不读写其之外的路径\n\
          \x20 --repository <dir>   作品仓库目录，默认 <workspace>/repository\n\
          \x20 --models <dir>       TrustMark 模型目录，默认 resources/models\n\
+         \x20 --chunk-format <fmt> 新写入 ChunkFile 的格式（v1/v2），缺省 v2\n\
          \x20 --result <file>      结构化 JSON 结果写入该文件\n\
          \x20 --marker <file>      逐阶段追加阶段名，供测试决定何时干预\n\
          \x20 --cancel-on-stdin    每个取消检查点写 marker 后阻塞等待 stdin 的\n\
@@ -257,15 +258,20 @@ struct Options {
     marker: Option<PathBuf>,
     cancel_on_stdin: bool,
     peak_memory: Option<PathBuf>,
+    /// 新写入 ChunkFile 的格式覆盖：`Some(false)` = v1、`Some(true)` = v2、
+    /// `None` = 跟随设置默认（无头构造即 v2）。只影响本进程此后写出的
+    /// snapshot/delta，既有文件与读取路径不受影响。
+    chunk_format: Option<bool>,
     values: HashMap<String, String>,
 }
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 40] = [
+        const KNOWN: [&str; 41] = [
             "workspace",
             "repository",
             "models",
+            "chunk-format",
             "result",
             "marker",
             "peak-memory",
@@ -357,6 +363,13 @@ impl Options {
                 .join("models"),
         };
 
+        let chunk_format = match values.get("chunk-format").map(String::as_str) {
+            Some("v1") => Some(false),
+            Some("v2") => Some(true),
+            Some(other) => return Err(format!("--chunk-format 只接受 v1/v2，收到 {other:?}")),
+            None => None,
+        };
+
         Ok(Self {
             command,
             workspace,
@@ -366,6 +379,7 @@ impl Options {
             marker: values.get("marker").map(PathBuf::from),
             cancel_on_stdin,
             peak_memory: values.get("peak-memory").map(PathBuf::from),
+            chunk_format,
             values,
         })
     }
@@ -415,9 +429,14 @@ impl Options {
     }
 
     /// 与 Tauri 侧同样可无 Tauri 构造的状态装配：仓库路径来自命令行，设置与日志
-    /// 目录只用于填满字段，无头进程不会调用依赖它们的命令。
+    /// 目录只用于填满字段，无头进程不会调用依赖它们的命令。`--chunk-format`
+    /// 覆盖本进程新写入的 ChunkFile 格式，缺省跟随设置默认（v2）。
     fn app_state(&self) -> AppState {
-        AppState::for_headless_repository(&self.repository, &self.workspace.join(".headless"))
+        AppState::for_headless_repository(
+            &self.repository,
+            &self.workspace.join(".headless"),
+            self.chunk_format.unwrap_or(true),
+        )
     }
 
     fn backup_state(&self) -> BackupState {

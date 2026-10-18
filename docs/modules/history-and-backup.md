@@ -34,7 +34,7 @@
 
 `backup/chunk_file/` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`，按职责拆为：`mod.rs`（结果类型、错误分类、`FormatVersion`/`ChunkWriteOptions`/`ChunkingConfig`、`ChunkDigest`/`ChunkRecord`、`ChunkTask` 与格式常量）、`format.rs`（头与块记录的读写、长度与能力校验）、`store.rs`（虚拟偏移段与 reader 游标）、`chunking.rs`（CDC 与容器对齐分块）、`snapshot.rs`（快照写入/打开/物化）、`delta.rs`（反向增量、payload 落盘与链解析）、`tests.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。
 
-ChunkFile v1 的字节布局保持只读兼容：76 B snapshot 头、116 B delta 头、36 B 块记录。v2 默认用于**新写出的节点**（设置项 `chunkFileFormatV2`，默认开启，设置页可关闭后回退到 v1），头部为 80 B snapshot / 120 B delta，显式记录 `version/chunker/hash/codec/adapter`，块记录扩为 44 B（`stored_len/logical_len/codec/recipe/flags`）。reader 按文件头分派，因此同一仓库可长期混存 v1/v2；关闭开关只影响此后新生成的 snapshot/delta，不重写既有文件、不做仓库级迁移。v2 快照对内容相同的块写 `stored_len=0` 的引用而不是重复 payload（tile 级去重），打开时按先出现的同摘要块解析引用；delta 仍只用外层 zstd 包装，不做逐块转码。块长度校验按布局分派：`min_size` 只约束 CDC 布局，容器对齐产生的结构单元（24 B 文件头、56 B `Exta` 头）只受 `max_size` 约束，超出时才交给 CDC 切分。成功提交、检查点与精简的日志都会记录本次写入的 `format`/`chunking`，便于解释仓库内的版本分布。
+ChunkFile v1 的字节布局保持只读兼容：76 B snapshot 头、116 B delta 头、36 B 块记录。v2 默认用于**新写出的节点**（设置项 `chunkFileFormatV2`，默认开启，设置页可关闭后回退到 v1），头部为 80 B snapshot / 120 B delta，显式记录 `version/chunker/hash/codec/adapter`，块记录扩为 44 B（`stored_len/logical_len/codec/recipe/flags`）。reader 按文件头分派，因此同一仓库可长期混存 v1/v2；关闭开关只影响此后新生成的 snapshot/delta，不重写既有文件、不做仓库级迁移。无头入口另以 `--chunk-format v1|v2` 在**进程级**覆盖该开关（缺省跟随设置默认值），供 `stress_format` M4 在同一仓库内构造 v1/v2 混存历史；该选项只影响本进程新写入的节点，既有文件与读取路径不受影响。v2 快照对内容相同的块写 `stored_len=0` 的引用而不是重复 payload（tile 级去重），打开时按先出现的同摘要块解析引用；delta 仍只用外层 zstd 包装，不做逐块转码。块长度校验按布局分派：`min_size` 只约束 CDC 布局，容器对齐产生的结构单元（24 B 文件头、56 B `Exta` 头）只受 `max_size` 约束，超出时才交给 CDC 切分。成功提交、检查点与精简的日志都会记录本次写入的 `format`/`chunking`，便于解释仓库内的版本分布。
 
 v2 的容器感知分块由 `format/container.rs` 提供结构单元：`.clip` 按 CSFC 块、tile 与 Exta 记录边界切块，超出 `max` 的结构单元再交给 CDC 切分；`.psd` 当前只做 `8BPS` 探测（适配器结构待逆向确认），探测到但取不到结构单元时与解析失败一样回退 CDC。`.clip` 解析只校验头部与块边界、跳过 payload，不在内存里保留整份文件。
 
@@ -158,7 +158,7 @@ cleanup_repository_unreferenced
 
 ## 可靠性不变量与覆盖
 
-以下命题是历史/备份模块对使用者的承诺，每条都由自动化压力测试（`src-tauri/tests/`；八组便宜的
+以下命题是历史/备份模块对使用者的承诺，每条都由自动化压力测试（`src-tauri/tests/`；九组便宜的
 分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench`/`stress_baseline` 仍在发布
 前手动运行，见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）以**独立进程
 调用真实可执行文件**的方式验证；断言只用子命令返回的 JSON 与磁盘事实，不读内部状态。
@@ -184,6 +184,8 @@ cleanup_repository_unreferenced
 | 整仓灾备与精简这两类**长**写任务持锁期间，只读命令仍作答、未超时，且看到改接 / 复制之前的一致状态（树逐字段一致、历史未推进） | `stress_concurrency` J3、J4 |
 | 不构造窗口的真并发「精简 + 全库校验」不挂起、不损坏仓库（结束后完整且每个仍存在的节点逐位可恢复）；写者持 owner lock 时全库校验以「仓库正在被写入，请稍后重试」明确拒绝，轻量只读命令不受影响 | `stress_concurrency` J5、J6 |
 | 快照/增量容器面对不受信任的字节：绝不 panic、越界或无界分配；被接受的容器块数量不超过文件容量、可物化且长度等于声明值；截断与续写必须被拒绝 | `backup/chunk_file/tests.rs` 单测（确定性畸形输入模糊） |
+| `.clip` 容器感知分块在真实链路上逐字节一致：tile 结构快照与 delta（磁盘事实确认 chunker/adapter 为 CLIP）、无 tile 形态（Exta 单结构单元）、截断容器回退 CDC 后照常提交与恢复 | `stress_format` M1–M3 |
+| v1/v2 混存仓库：`--chunk-format v1` 写出的节点与默认 v2 节点并存，跨格式链全部可恢复；检查点把含 v1 delta 的链物化为 v2 快照；格式随提交步进在磁盘上可核对 | `stress_format` M4 |
 | 磁盘写满时快照写入干净失败：返回「空间不足」、不推进历史、不留半成品、可重试；写到一半的字节不会被误认为完整快照 | `backup/worker.rs`、`backup/chunk_file/tests.rs` 单测 |
 
 0.3 阶段 4 在 `stress_bench` 增加 P1B：4 MiB 文件 × 6 节点的多段链上反复恢复最早与最新节点，报告 p50/p95 与吞吐；它只作为段索引与读取游标的决策证据，随发布前的整套压力测试手动运行，不进入日常检查、CI 门槛或性能基线更新。快速检查的同尺寸同 mtime 改写由 `backup/worker.rs` 单测覆盖（回拨修改时间但在首尾采样区改动内容，必须触发全量）。0.3 阶段 5 在同一基准里增加 P7（10 个作品、每作品 12 条分支的调度候选扫描）与 P8（120 个无记录画板 DDS 的扫描与确认清理）；P5 整仓灾备同时记录文件数、吞吐与 `verification: sample`，作为摘要管线与抽样复核的基线。

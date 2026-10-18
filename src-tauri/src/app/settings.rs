@@ -293,11 +293,17 @@ impl AppState {
 
     /// 无头入口（`feature = "headless"`）使用的构造：仓库路径由命令行显式给定，
     /// 不读取也不写回任何设置文件。设置与日志目录只用于填满字段，无头进程不会
-    /// 调用依赖它们的命令。
+    /// 调用依赖它们的命令。`chunk_format_v2` 由无头的 `--chunk-format` 给出，
+    /// 缺省 `true`（与设置默认值一致），只影响本进程新写入的 snapshot/delta。
     #[cfg(feature = "headless")]
-    pub(crate) fn for_headless_repository(repository: &Path, state_directory: &Path) -> Self {
+    pub(crate) fn for_headless_repository(
+        repository: &Path,
+        state_directory: &Path,
+        chunk_format_v2: bool,
+    ) -> Self {
         let mut settings = AppSettings::default();
         settings.repository_path = repository.to_string_lossy().into_owned();
+        settings.chunk_file_format_v2 = chunk_format_v2;
         Self::with_role(
             settings,
             state_directory.join("settings.json"),

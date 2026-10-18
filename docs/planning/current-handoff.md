@@ -10,19 +10,25 @@
 
 2026-10-18 批次：**0.3 alpha1（阶段 1–5：统一命令运行时、设置单写入口与跨进程 owner lock、事件
 订阅与 controller 模板、ChunkFile v2 与容器感知分块、调度/清理/灾备算法）已实现并切分为
-`0.3.0-alpha.1`**；GUI 人工验收与发布前压力测试尚未执行，待维护者验收。
+`0.3.0-alpha.1`**；CI 通过。release 档整套压力测试（`manual` 8 GiB 档未跑）已于 2026-10-18 跑完，
+**结果不是全绿**：`stress_crash` 3/4、`stress_cleanup` 1/1 未通过，`stress_large` 四档各 5/7
+未通过，`stress_authenticity` G4 不稳定；新增的 `stress_format` 四场景全部通过。逐条事实见
+`docs/user/stress-test-report.md` 的「本次运行未通过的项」。**alpha1 因此不算收尾完成**——未通过
+项与「墙钟/CPU 时间的度量口径」都记在 `todo.md`。
 
 - **0.2 已收口并归档**：`0be6224` 切分 `0.2.0`，`v0.2.0` 附注标签已打并推送；`main` 固定为 0.2
   发布线。切分内容、压力测试口径、自动与人工门槛、未签名发布说明见
   `archive/handoff-log-2026-10-18.md`。
-- **0.3 alpha1（阶段 1–5）已完成并切分**：`dev` 自 `0be6224` 起落实统一命令运行时、设置单写入口
+- **0.3 alpha1（阶段 1–5）已实现并切分**：`dev` 自 `0be6224` 起落实统一命令运行时、设置单写入口
   与跨进程 owner lock、事件订阅与 controller 模板、ChunkFile v2 与容器感知分块、调度/清理/灾备
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：alpha2（阶段 6 + 针对 alpha1 的测试与修复），随后 alpha3（原阶段 7–9，含唯一一次
-  v4 → v5 迁移）。批次划分、依赖与阶段口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
-- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项、0.3 前的补强候选、阶段 6–9。
+- **下一步**：先处理 `todo.md` 里 alpha1 的未通过压力测试项与度量口径，再进入 alpha2（阶段 6 +
+  针对 alpha1 的测试与修复），随后 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、
+  依赖与阶段口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
+- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与未通过的压力测试项、0.3 前的补强候选、
+  阶段 6–9。
 
 ## 当前基线
 
