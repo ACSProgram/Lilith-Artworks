@@ -238,6 +238,7 @@ describe("usePublicationController", () => {
       width: previewImage.width,
       height: previewImage.height,
       watermarkRegionCount: 1,
+      watermarkWarnings: [],
       renditionCacheHit: true,
       renderMs: 0,
       encodeMs: 0,

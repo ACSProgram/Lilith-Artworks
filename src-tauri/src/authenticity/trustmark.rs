@@ -88,10 +88,7 @@ pub(crate) fn encode_regions(
             "请先框选至少一个 TrustMark 区域".into(),
         ));
     }
-    let bounds = additional_regions
-        .iter()
-        .map(|region| pixel_bounds(*region, width, height, 96))
-        .collect::<AuthenticityResult<Vec<_>>>()?;
+    let bounds = region_bounds(width, height, additional_regions)?;
     state.with_engine(|engine| {
         let mut output = image.clone();
         for (x, y, region_width, region_height) in bounds {
@@ -127,6 +124,21 @@ pub(crate) fn decode_region(
                 && identifier.bytes().all(|byte| matches!(byte, b'0' | b'1'))
         }))
     })
+}
+
+/// 每个选区在 rendition 像素坐标系下的边界（x, y, width, height）。
+///
+/// 编码与小选区警告共用同一套像素换算（起点 floor、终点 ceil，最小 96 px），
+/// 因此两侧对「送进编码器的那张 rendition 的像素边长」始终一致。
+pub(crate) fn region_bounds(
+    image_width: u32,
+    image_height: u32,
+    regions: &[NormalizedRegion],
+) -> AuthenticityResult<Vec<(u32, u32, u32, u32)>> {
+    regions
+        .iter()
+        .map(|region| pixel_bounds(*region, image_width, image_height, 96))
+        .collect()
 }
 
 fn pixel_bounds(

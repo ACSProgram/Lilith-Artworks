@@ -205,6 +205,25 @@ pub(crate) struct BranchPublication {
     pub(crate) decoder_sha256: Option<String>,
 }
 
+/// 小选区水印警告的稳定边长阈值（像素）。
+///
+/// 实测最小稳定边长为 256（见 `docs/user/stress-test-report.md` 的「认证（G 组）」）：
+/// 选区在 rendition 上的任一边长小于该值时，像素域水印回读不保证，发布时给出提示。
+pub(crate) const WATERMARK_MIN_STABLE_EDGE: u32 = 256;
+
+/// 一条小选区水印警告：某个水印选区在 rendition 上的像素边长小于阈值。
+///
+/// 判定用的是**送进编码器的那张 rendition** 的像素尺寸，不是界面预览的显示分辨率。
+/// 这是提示不是错误——发布照常成功。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WatermarkSizeWarning {
+    pub(crate) region_index: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) threshold: u32,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublishResult {
@@ -212,6 +231,7 @@ pub(crate) struct PublishResult {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) watermark_region_count: u32,
+    pub(crate) watermark_warnings: Vec<WatermarkSizeWarning>,
     pub(crate) rendition_cache_hit: bool,
     pub(crate) render_ms: u64,
     pub(crate) encode_ms: u64,

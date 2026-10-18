@@ -134,11 +134,19 @@ export interface DroppedImageImport {
   dataBase64: string;
 }
 
+export interface WatermarkSizeWarning {
+  regionIndex: number;
+  width: number;
+  height: number;
+  threshold: number;
+}
+
 export interface PublishResult {
   record: CertificationRecord;
   width: number;
   height: number;
   watermarkRegionCount: number;
+  watermarkWarnings: WatermarkSizeWarning[];
   renditionCacheHit: boolean;
   renderMs: number;
   encodeMs: number;

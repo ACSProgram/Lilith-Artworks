@@ -294,6 +294,14 @@ fn g4_decode_reads_back_c2pa_and_trustmark() {
     assert!(!record_id.is_empty(), "{}", published.describe());
     assert_eq!(watermark_id.len(), 40, "{}", published.describe());
 
+    // 512 级选区的任一边都不小于稳定边长，不应产生小选区警告（阈值与 G6 同口径）。
+    assert_eq!(
+        published.data("watermarkWarnings").as_array().map(Vec::len),
+        Some(0),
+        "512 级选区不应产生小选区警告：\n{}",
+        published.describe()
+    );
+
     let decoded = fixture
         .command("decode-authenticity")
         .arg("input", output.to_string_lossy())
@@ -460,6 +468,85 @@ fn g5_scrub_covers_final_artifact_and_certified_copy() {
         "small",
         &healthy,
         json!({ "finalArtifacts": 1, "certificationRecords": 1, "tamperRejected": true }),
+    );
+}
+
+/// G6：发布期小选区水印警告（计划 §3.4，产品侧）。
+///
+/// 发布不因警告失败——它是提示不是错误；警告条数与「任一边小于稳定边长」的选区数一致，
+/// 并回传每个选区的 rendition 像素边长。判定用送进编码器的那张 rendition 的像素尺寸，
+/// 与前端框选时的就地提示同口径（阈值 256 取实测最小稳定边长，见 §2.5）。
+#[test]
+fn g6_publish_warns_for_small_watermark_regions() {
+    let fixture = Fixture::new();
+    let artifact = fixture.workspace.work("g6-source.jpg");
+    write_gradient_jpeg(&artifact, TRUSTMARK_READBACK_EDGE);
+    fixture.enter_publication(&artifact).expect_ok();
+
+    // 512 级源图上排布 96 / 128 / 192 级选区：三个都小于 256，互不重叠。
+    let output = fixture.workspace.out("g6-small.jpg");
+    let published = fixture
+        .publish_command(&output, "0,0,0.1875,0.5;0.25,0,0.25,0.5;0.5,0,0.375,0.5")
+        .finish();
+    published.expect_ok();
+
+    let warnings = published
+        .data("watermarkWarnings")
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        warnings.len(),
+        3,
+        "96/128/192 三个小选区都应各产生一条警告：\n{}",
+        published.describe()
+    );
+    for (warning, (index, edge)) in warnings.iter().zip([(0_u64, 96_u64), (1, 128), (2, 192)]) {
+        assert_eq!(
+            warning["regionIndex"].as_u64(),
+            Some(index),
+            "{}",
+            published.describe()
+        );
+        assert_eq!(
+            warning["width"].as_u64(),
+            Some(edge),
+            "{}",
+            published.describe()
+        );
+        assert_eq!(
+            warning["height"].as_u64(),
+            Some(256),
+            "{}",
+            published.describe()
+        );
+        assert_eq!(
+            warning["threshold"].as_u64(),
+            Some(256),
+            "{}",
+            published.describe()
+        );
+    }
+
+    // 256 级选区的任一边都不小于稳定边长，不产生警告（512 级见 G4）。
+    let large_output = fixture.workspace.out("g6-large.jpg");
+    let large = fixture.publish_command(&large_output, "0,0,0.5,1").finish();
+    large.expect_ok();
+    assert_eq!(
+        large.data("watermarkWarnings").as_array().map(Vec::len),
+        Some(0),
+        "256 级选区不应产生小选区警告：\n{}",
+        large.describe()
+    );
+
+    assert_reopens(&fixture.workspace, &fixture.repository);
+
+    record(
+        "G6 watermark size warnings",
+        "G",
+        "small",
+        &published,
+        json!({ "smallRegions": 3, "threshold": 256 }),
     );
 }
 

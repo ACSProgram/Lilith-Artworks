@@ -13,6 +13,22 @@ decision, so an untagged version is transitional.
 
 ### Added
 
+- Publishing reports a small-selection watermark warning, without blocking the
+  publish. Before embedding TrustMark, each framed region's pixel bounds on the
+  rendition are measured with the same conversion the encoder uses
+  (`trustmark::region_bounds`); when either edge is under the stable threshold
+  (`WATERMARK_MIN_STABLE_EDGE`, 256 px, the measured minimum stable edge), the
+  publish result carries a structured `watermarkWarnings` entry (region index,
+  rendition pixel size, threshold) and a `log::warn!` line, while the publish
+  still succeeds — a hint, not an error. The publish page echoes the same warning
+  in place while framing (computed from the source pixel size, which equals the
+  rendition size) and in the publish result area; the headless `publish` result
+  JSON carries the same field for stress assertions. The threshold is a risk
+  reduction, not a guarantee: larger selections or smoother content may still
+  fail pixel-domain readback, while C2PA claims and local record matching are
+  unaffected. `stress_authenticity` gains `G6`, asserting that 96/128/192-level
+  regions warn, 256/512-level regions do not, and the warning count matches the
+  number of sub-threshold regions.
 - A new `stress_format` stress group closes the format-layer integration gap
   that `cargo test --lib` cannot reach: end-to-end commit → delta → restore
   through the real headless binary for `.clip` container-aware chunking (tile

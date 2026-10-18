@@ -22,7 +22,8 @@ use super::{
     image_resource,
     model::{
         CertificationRecord, DecodeRequest, DecodeResult, PreviewImage, PreviewTileSource,
-        PublicationPreview, PublicationPreviewRequest, PublishBranchRequest,
+        PublicationPreview, PublicationPreviewRequest, PublishBranchRequest, WatermarkSizeWarning,
+        WATERMARK_MIN_STABLE_EDGE,
     },
     publication_repository,
     repository::{self, NewCertificationRecord},
@@ -35,6 +36,7 @@ pub(crate) struct PublishedOutput {
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub(crate) watermark_region_count: u32,
+    pub(crate) watermark_warnings: Vec<WatermarkSizeWarning>,
     pub(crate) rendition_cache_hit: bool,
     pub(crate) render_ms: u64,
     pub(crate) encode_ms: u64,
@@ -513,6 +515,37 @@ pub(crate) fn preview_tile(
     })
 }
 
+/// 计算小选区水印警告：某个选区在 rendition 上的任一边长小于稳定边长阈值时提示。
+///
+/// 判定用的是送进编码器的那张 rendition 的像素尺寸（`width`/`height` 来自渲染或
+/// 缓存元数据），与 `trustmark::encode_regions` 共用 `region_bounds` 的像素换算。
+/// 这是提示不是错误——发布照常成功。TrustMark 未启用时没有选区，返回空表。
+fn watermark_size_warnings(
+    width: u32,
+    height: u32,
+    config: &super::model::CertificationConfig,
+) -> AuthenticityResult<Vec<WatermarkSizeWarning>> {
+    if !config.trustmark_enabled {
+        return Ok(Vec::new());
+    }
+    Ok(
+        trustmark::region_bounds(width, height, &config.additional_regions)?
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, (_, _, region_width, region_height))| {
+                (region_width.min(region_height) < WATERMARK_MIN_STABLE_EDGE).then_some(
+                    WatermarkSizeWarning {
+                        region_index: index as u32,
+                        width: region_width,
+                        height: region_height,
+                        threshold: WATERMARK_MIN_STABLE_EDGE,
+                    },
+                )
+            })
+            .collect(),
+    )
+}
+
 pub(crate) fn publish(
     root: &Path,
     state: &AuthenticityState,
@@ -598,6 +631,17 @@ pub(crate) fn publish(
             &target.source_sha256,
         )?
     };
+    let watermark_warnings = watermark_size_warnings(cached.width, cached.height, &request.config)?;
+    for warning in &watermark_warnings {
+        log::warn!(
+            "watermark small region: branch_id={}, region_index={}, width={}, height={}, threshold={}",
+            request.branch_id,
+            warning.region_index,
+            warning.width,
+            warning.height,
+            warning.threshold,
+        );
+    }
     auth_checkpoint(operation, "认证签名")?;
     let identifier = match rendition_identifier {
         Some(identifier) => identifier,
@@ -709,6 +753,7 @@ pub(crate) fn publish(
         } else {
             0
         },
+        watermark_warnings,
         rendition_cache_hit: cached.cache_hit,
         render_ms: cached.render_ms,
         encode_ms: cached.encode_ms,

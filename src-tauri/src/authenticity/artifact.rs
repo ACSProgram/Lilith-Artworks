@@ -135,6 +135,7 @@ pub(crate) fn publish_artifact(
         width: published.width,
         height: published.height,
         watermark_region_count: published.watermark_region_count,
+        watermark_warnings: published.watermark_warnings,
         rendition_cache_hit: published.rendition_cache_hit,
         render_ms: published.render_ms,
         encode_ms: published.encode_ms,

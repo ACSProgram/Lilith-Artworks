@@ -361,6 +361,34 @@ describe("PublicationPreviewDialog", () => {
     expect(await screen.findByText(/进入发布状态/)).toBeTruthy();
   });
 
+  it("warns in place while framing a selection too small for pixel-domain readback", async () => {
+    const smallRegion: BranchPublication = {
+      ...brokenPreviewPublication,
+      modelsReady: true,
+      config: {
+        ...brokenPreviewPublication.config,
+        trustmarkEnabled: true,
+        additionalRegions: [{ x: 0.1, y: 0.1, width: 0.1, height: 0.1 }],
+      },
+    };
+    api.getPublication.mockResolvedValue(smallRegion);
+    api.previewArtifact.mockResolvedValue(preview.image);
+    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    render(<AuthenticityModule
+      mode="publish"
+      artworkTitle="Artwork"
+      branches={[{ id: "branch-1", title: "Main", headHistoryId: "history-1" }]}
+      selectedBranchId="branch-1"
+      onSelectBranch={vi.fn()}
+      onError={vi.fn()}
+      onNavigateRecord={vi.fn()}
+      onRetryFileCleanup={vi.fn().mockResolvedValue({ failures: [] })}
+    />);
+
+    // 1000x800 源图上的 0.1x0.1 选区只有 100x80 px，任一边小于 256：框选时就地提示。
+    expect(await screen.findByText(/小于 256 px/)).toBeTruthy();
+  });
+
   it("shows the source-resolution loupe while hovering the identify image", async () => {
     vi.stubGlobal("PointerEvent", window.MouseEvent);
     // jsdom 没有 2D 上下文；镜片绘制逻辑由 loupe 单测覆盖，这里只验证交互与请求。

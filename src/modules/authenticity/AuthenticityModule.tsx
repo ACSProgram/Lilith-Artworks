@@ -17,6 +17,7 @@ import {
   previewZoomFromWheel, type PreviewViewport, zoomAnchorScrollTarget,
 } from "./previewViewport";
 import { tileCacheKey, tileOverlayStyle, tileRequestForView, type TileRequest } from "./previewTile";
+import { WATERMARK_MIN_STABLE_EDGE, watermarkSizeWarnings } from "./publicationValidation";
 import { RegionLoupe } from "./RegionLoupe";
 import { useIdentificationController, usePublicationController } from "./useAuthenticityController";
 
@@ -151,7 +152,7 @@ function PublishView({
               <p>预览首次自动生成随机 ID，调整后保持一致并在发布时复用。仅在 {config.additionalRegions.length} 个框选区域嵌入水印。</p>
             </>}
           </div>
-          {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code>{publishMetrics && <small>{publishMetrics.renditionCacheHit ? "已复用质量预览编码" : `重新渲染 ${publishMetrics.renderMs} ms · 编码 ${publishMetrics.encodeMs} ms`} · C2PA/时间戳 {publishMetrics.signingMs} ms</small>}</div></div>}
+          {result && <div className="publish-success"><BadgeCheck size={18} /><div><strong>认证发布完成</strong><span>{result.outputPath}</span><code>{result.watermarkId}</code>{publishMetrics && <small>{publishMetrics.renditionCacheHit ? "已复用质量预览编码" : `重新渲染 ${publishMetrics.renderMs} ms · 编码 ${publishMetrics.encodeMs} ms`} · C2PA/时间戳 {publishMetrics.signingMs} ms</small>}{publishMetrics && publishMetrics.watermarkWarnings.length > 0 && <span className="publish-success-note"><AlertCircle size={13} aria-hidden="true" />{publishMetrics.watermarkWarnings.map((warning) => `区域 ${warning.regionIndex + 1}（${warning.width}×${warning.height} px）`).join("、")} 小于稳定边长 {publishMetrics.watermarkWarnings[0].threshold} px，水印可能无法回读。</span>}</div></div>}
           {outputPreviewBusy ? <div className="output-preview-progress" role="status" aria-live="polite">
             <div><LoaderCircle className="spin" aria-hidden="true" size={18} /><span><strong>{cancelling ? "正在取消质量预览" : "正在生成质量预览"}</strong><small>{cancelling ? "等待当前处理阶段安全结束" : "正在渲染并编码正式 JPG 预览"}</small></span></div>
             <button className="secondary-button" type="button" disabled={cancelling} onClick={() => void cancelAuthenticityOperation()}><X aria-hidden="true" size={16} />取消</button>
@@ -341,6 +342,10 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
     draftRef.current = null;
     setDraft(null);
   };
+  // 发布页框选时的就地提示：按送进编码器的那张 rendition 的像素尺寸判定小选区。
+  const sizeWarnings = target === "publish" && !readOnly
+    ? watermarkSizeWarnings(regions, preview.width, preview.height)
+    : [];
   return <div className={`region-stage${readOnly ? " read-only" : ""}`} ref={stageRef}>
     {frame && <div className="region-image-frame" style={frame}>
       <img src={preview.dataUrl} alt={target === "publish" ? "最终成品预览" : "待识别图片预览"} draggable={false} />
@@ -368,6 +373,7 @@ function RegionEditor({ target, preview, regions, maxRegions, onChange, readOnly
       request={loupe.request}
     />}
     {target === "publish" && regions.length > 0 && !readOnly && <button className="clear-regions" type="button" onClick={() => onChange([])}><Trash2 size={13} />清除区域</button>}
+    {sizeWarnings.length > 0 && <p className="region-size-warning" role="status"><AlertCircle size={14} aria-hidden="true" /><span>{sizeWarnings.map(({ regionIndex }) => `区域 ${regionIndex + 1}`).join("、")} 的任一边小于 {WATERMARK_MIN_STABLE_EDGE} px，数字水印可能无法回读；发布仍会继续。</span></p>}
   </div>;
 }
 
