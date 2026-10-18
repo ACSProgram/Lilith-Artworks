@@ -34,8 +34,8 @@
 - [验证策略](guides/validation.md)：分层验证、压力测试边界与持续集成。
 - [发行政策](guides/release-policy.md)：滞后版本号、`Unreleased` 暂存段、发布门槛与产物。
 - [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。
-- [0.3 架构与核心算法改进计划](planning/0.3-architecture-algorithm-plan-2026-10-05.md)：提案，
-  尚未实施。
+- [0.3 架构与核心算法改进计划](planning/0.3-architecture-algorithm-plan-2026-10-05.md)：已于
+  2026-10-18 定稿，在 `dev` 分 alpha1 / alpha2 两批实施（尚未开始阶段 0）。
 - [规划归档](planning/archive/README.md)：已完成或被替代的规划、批次记录与人工验收结论，不再作为执行依据。
 
 ## 目录分工

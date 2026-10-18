@@ -51,8 +51,16 @@ if (nonOfficialPackages.length > 0) {
 
 const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "schema.rs"), "utf8");
 const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
-if (schemaVersion !== "4") {
-  throw new Error(`Release must use repository schema v4 (found: ${schemaVersion ?? "unknown"})`);
+const schemaByVersion = [
+  [/^0\.2\./, "4"],
+  [/^0\.3\./, "5"],
+];
+const expectedSchema = schemaByVersion.find(([pattern]) => pattern.test(expected))?.[1];
+if (!expectedSchema) {
+  throw new Error(`No repository schema mapping for version ${expected}; add it to verify-metadata.mjs`);
+}
+if (schemaVersion !== expectedSchema) {
+  throw new Error(`Release ${expected} must use repository schema v${expectedSchema} (found: ${schemaVersion ?? "unknown"})`);
 }
 
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");

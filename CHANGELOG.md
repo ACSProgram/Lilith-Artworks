@@ -11,6 +11,18 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Changed
+
+- `main` is frozen as the 0.2 release line and `dev` is the 0.3 development
+  line. Windows CI now also runs on pushes to `dev`, and the release
+  metadata check maps versions to repository schemas (`0.2.x` → v4,
+  `0.3.x` → v5) instead of requiring v4 unconditionally.
+- The 0.3 architecture and algorithm plan is finalized for implementation:
+  alpha1 keeps the persistent schema at v4, alpha2 performs the single
+  v4 → v5 migration in stage 7, pin-board entries use a common item table plus
+  per-kind payload tables, and storage totals no longer double-count
+  `history_nodes.chunk_file_size` for delta nodes.
+
 ## 0.2.0 - 2026-10-17
 
 ### Added
