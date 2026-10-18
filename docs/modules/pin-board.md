@@ -78,7 +78,7 @@ SQLite:
 画板内容：
 
 - `load_pin_board`、`save_pin_board`、`finalize_pin_board`
-- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图/文字素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出使用 Tauri IPC channel 逐项回传进度
+- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图/文字素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出进度经 `CommandContext` 广播 `AppEvent.operationProgress` 回传（不再使用 `Channel`，只保留给需要传输大块载荷的通道）
 - `export_pin_board_images`（PNG 到用户选择目录）、`read_pin_board_image_png`（系统剪贴板复制）、`read_pin_board_texture`（画板 ID + 图片 ID + 请求长边）
 - `read_pin_board_clipboard_paths`（Windows `CF_HDROP`）
 

@@ -84,10 +84,10 @@ Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权�
 
 WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewShortcuts.ts` 在应用层拦截，且只取消默认行为、不停止事件传播，使素材板“锁定画板”等模块快捷键仍能复用同一组合键（与 Lilith Client 的实现一致）。
 
-前端运行时由 `AppRuntimeProvider` 组合 `useSettingsController`、
-`useRepositoryMaintenance`、`RuntimeProgressProvider`、`SettingsDialog` 与 `NoticeCenter`；
-`App` 只负责提供者装配、工作区路由与两条 webview 快捷键拦截，不再持有设置、维护进度、提示或
-关闭结算状态。
+前端运行时由 `NoticeCenter` 包住 `AppRuntimeProvider`：`AppRuntimeProvider` 装配
+`useSettingsController`、`useRepositoryMaintenance` 与 `RuntimeProgressProvider`，并注册
+退出结算监听；`AppShell` 渲染 `SettingsDialog` 与工作区。`App` 只负责提供者装配、工作区路由与
+两条 webview 快捷键拦截，不再持有设置、维护进度、提示或关闭结算状态。
 
 设置由应用层聚合仓库与历史公开能力，弹窗按左侧导航分页：通用（外观、应用行为、关于与法律）、仓库与备份（仓库与数据安全、自动备份、文件清理）、素材板（缓存等级、阵列间距、自动保存与退出保存开关、锁定与全屏快捷键）、调试（详细日志、日志文件夹）。每页为单列纵向布局（不再沿用 Client 的两列紧凑排版），片段间距统一。弹窗使用固定头部与底部操作区，中间内容独立滚动，保存与取消不会随内容滚出视口。
 
@@ -244,9 +244,9 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 <repository>/
   lilith-artworks.sqlite3
   artworks/<artwork-id>/
-    history/<history-id>.lbs
-    deltas/<child-id>--<parent-id>.lbd
-    artifacts/<branch-id>/
+    snapshots/<history-id>.lbc
+    deltas/<child-id>-to-<parent-id>.lbd
+    artifacts/<branch-id>/<artifact-id>.<ext>
     boards/<board-id>/<image-id>.dds
     temp/
   temp/

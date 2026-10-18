@@ -34,7 +34,8 @@ const FOREGROUND_YIELD_BACKOFF: Duration = Duration::from_millis(200);
 /// 用户取消后台任务后的短暂退避：不把整支队列一起停 60 秒，也避免立刻重跑。
 const CANCEL_RETRY: Duration = Duration::from_secs(5);
 /// 空闲链路校验前，分支 head 至少需要静默的时长。避免刚提交就整链重读；期间又提交
-/// 会改变 head，本轮随之让位给下一次。取值 10 分钟（见规划 4.3，可由维护者调整）。
+/// 会改变 head，本轮随之让位给下一次。取值 10 分钟（见 0.3 计划 §3.I 的空闲时机门控，
+/// 可由维护者调整）。
 const IDLE_VERIFY_DELAY_MS: i64 = 10 * 60 * 1000;
 /// aging（防饥饿）：每连续完成 N 次自动备份后，若已有就绪的链路校验，先让校验
 /// 跑一轮。维护者 2026-10-18 定稿为按次数、N = 4，不引入时钟规则。

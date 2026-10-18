@@ -42,7 +42,7 @@ v2 的容器感知分块由 `format/container.rs` 提供结构单元：`.clip` �
 
 delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或旧版未压缩 payload 都流式写入仓库 `temp/` 中的自动删除文件；允许的解压字节数由 delta 头声明的目标逻辑大小、数据记录数和操作数推导，超出声明范围按格式错误拒绝。该边界随真实工作文件大小增长，不对 PSD 或其它工作文件设置固定总字节上限；4 GiB 目标的回归测试用于防止安全校验误伤正常大文件。恢复应用阶段只在内存中保存块索引和操作元数据，块内容从临时 payload 或基础 snapshot 流式复制并逐块验哈希。
 
-`ChunkStore` 把基础 snapshot 与各条 delta 的解压 payload 追加为同一段虚拟偏移空间中的分段。`ChunkFileDelta::resolve` 只重写块布局、不写 payload 字节；`write_snapshot`、`copy_original` 在导出或校验时才按虚拟偏移流式读取并逐块验哈希。因此物化一条链的成本取决于链上变化的字节数，而不是"链长 × 文件大小"。`ChunkFileDelta::apply`（物化成完整 snapshot 文件）由 resolve + write_snapshot 组合实现，chunk 格式单测在 `cargo test --lib` 内运行，不依赖 GUI。创建、反向 delta、payload 复制、链解析、导出和 scrub 都直接消费 crate 根部的 `CancelToken`：结构单元（每个 tile）与 CDC 块都是取消检查点，进度按已处理的逻辑字节报告，取消返回 typed `Cancelled`，未发布的临时输出由 guard 清理。
+在同一段虚拟偏移空间上，`ChunkFileDelta::resolve` 只重写块布局、不写 payload 字节；`write_snapshot`、`copy_original` 在导出或校验时才按虚拟偏移流式读取并逐块验哈希。因此物化一条链的成本取决于链上变化的字节数，而不是"链长 × 文件大小"。`ChunkFileDelta::apply`（物化成完整 snapshot 文件）由 resolve + write_snapshot 组合实现，chunk 格式单测在 `cargo test --lib` 内运行，不依赖 GUI。创建、反向 delta、payload 复制、链解析、导出和 scrub 都直接消费 crate 根部的 `CancelToken`：结构单元（每个 tile）与 CDC 块都是取消检查点，进度按已处理的逻辑字节报告，取消返回 typed `Cancelled`，未发布的临时输出由 guard 清理。
 
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
