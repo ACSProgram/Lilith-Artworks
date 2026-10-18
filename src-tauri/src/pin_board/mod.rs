@@ -5,9 +5,12 @@
 //! - 普通浏览走共享读租约，保存/导入/粘贴/删除等变更走仓库 lease + 仓库操作锁
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
+mod contracts;
 pub(crate) mod dds;
 pub(crate) mod repository;
 pub(crate) mod scrub;
+
+pub(crate) use contracts::PinBoardReferenceInventory;
 
 use std::path::Path;
 

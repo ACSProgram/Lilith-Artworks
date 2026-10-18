@@ -273,6 +273,9 @@ impl AppState {
         warning: Option<String>,
         process_role: &'static str,
     ) -> Self {
+        // 引用清单是进程级注册：GUI 与无头共用这一处装配点，重复调用只保留
+        // 第一次注册的实现列表。
+        super::contracts::install_default_reference_inventories();
         Self {
             settings: SettingsService::new(settings, settings_path),
             process_role,

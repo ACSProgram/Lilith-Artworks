@@ -1,7 +1,7 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
@@ -9,15 +9,20 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{authenticity, cancel::CancelToken, library, repository_lock, storage};
-
-use super::restore;
+use crate::{
+    cancel::CancelToken,
+    contracts::{BackupVerificationMode, RepositoryIntegrityProvider},
+    repository_lock, storage,
+};
 
 const BACKUP_FORMAT: &str = "lilith-artworks-repository-backup";
-const BACKUP_FORMAT_VERSION: u32 = 1;
+const BACKUP_FORMAT_VERSION: u32 = 2;
 const MANIFEST_NAME: &str = "manifest.json";
 const REPOSITORY_DIRECTORY: &str = "repository";
 const COPY_BUFFER_SIZE: usize = 256 * 1024;
+/// 发布前抽样复核的采样宽度：首、尾各 64 KiB。复制阶段仍计算完整摘要并写入
+/// manifest；采样只决定发布前重读多少字节。
+const SAMPLE_BYTES: u64 = 64 * 1024;
 /// 未发布暂存目录的命名：`<STAGING_PREFIX><32 位十六进制 backup_id><STAGING_SUFFIX>`。
 /// 前缀 + 后缀 + 定长十六进制 id 足够特异，顶层扫描的误删风险仅限于同名碰撞。
 const STAGING_PREFIX: &str = ".lilith-artworks-";
@@ -63,6 +68,89 @@ struct ManifestFile {
     path: String,
     bytes: u64,
     sha256: String,
+    /// 首尾各 64 KiB 的抽样摘要；发布前 `Sample` 复核只重读这些字节。
+    sample_sha256: String,
+}
+
+/// 复制阶段同时取得的文件摘要。manifest 直接复用，避免复制后又完整重读一遍。
+#[derive(Debug, Clone)]
+struct FileDigests {
+    bytes: u64,
+    sha256: String,
+    sample_sha256: String,
+}
+
+impl FileDigests {
+    /// 重新完整读取一个文件（只用于副本校验会改写的数据库主文件）。
+    fn compute(path: &Path, cancel: &CancelToken) -> Result<Self, String> {
+        let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
+        let mut accumulator = DigestAccumulator::new();
+        let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
+        let mut bytes = 0_u64;
+        loop {
+            ensure_not_cancelled(cancel)?;
+            let read = file
+                .read(&mut buffer)
+                .map_err(|error| format!("无法校验备份文件：{error}"))?;
+            if read == 0 {
+                break;
+            }
+            accumulator.update(&buffer[..read]);
+            bytes = bytes.saturating_add(read as u64);
+        }
+        Ok(accumulator.finish(bytes))
+    }
+}
+
+/// 一次顺序读取同时累计完整 SHA-256 与首尾各 64 KiB 的抽样输入。
+struct DigestAccumulator {
+    full: Sha256,
+    head: Vec<u8>,
+    tail: Vec<u8>,
+}
+
+impl DigestAccumulator {
+    fn new() -> Self {
+        Self {
+            full: Sha256::new(),
+            head: Vec::with_capacity(SAMPLE_BYTES as usize),
+            tail: Vec::with_capacity(SAMPLE_BYTES as usize * 2),
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        self.full.update(bytes);
+        if self.head.len() < SAMPLE_BYTES as usize {
+            let take = (SAMPLE_BYTES as usize - self.head.len()).min(bytes.len());
+            self.head.extend_from_slice(&bytes[..take]);
+        }
+        self.tail.extend_from_slice(bytes);
+        if self.tail.len() > SAMPLE_BYTES as usize * 2 {
+            let excess = self.tail.len() - SAMPLE_BYTES as usize;
+            self.tail.drain(..excess);
+        }
+    }
+
+    fn finish(mut self, bytes: u64) -> FileDigests {
+        // 不超过一个采样宽度的文件整份作为采样；更大的文件取首 64 KiB 与尾
+        // 64 KiB（两者允许重叠），只用于发布前快速复核。
+        let tail_len = if bytes > SAMPLE_BYTES {
+            SAMPLE_BYTES as usize
+        } else {
+            0
+        };
+        if self.tail.len() > tail_len {
+            self.tail.drain(..self.tail.len() - tail_len);
+        }
+        let mut sample = Sha256::new();
+        sample.update(&self.head);
+        sample.update(&self.tail);
+        FileDigests {
+            bytes,
+            sha256: hex::encode_upper(self.full.finalize()),
+            sample_sha256: hex::encode_upper(sample.finalize()),
+        }
+    }
 }
 
 struct StagingDirectory {
@@ -174,6 +262,8 @@ pub(crate) fn create_repository_backup(
     root: &Path,
     destination_parent: &Path,
     cancel: &CancelToken,
+    provider: &dyn RepositoryIntegrityProvider,
+    verification: BackupVerificationMode,
     progress: impl Fn(&str, u64, u64),
 ) -> Result<RepositoryBackupReport, String> {
     validate_destination(root, destination_parent)?;
@@ -223,6 +313,7 @@ pub(crate) fn create_repository_backup(
             .map_err(|error| format!("无法创建备份仓库目录：{error}"))?;
 
         let mut copied_bytes = 0_u64;
+        let mut copied_digests = HashMap::with_capacity(source_files.len());
         progress("正在复制仓库文件", 0, source_bytes);
         for source in &source_files {
             ensure_not_cancelled(cancel)?;
@@ -234,22 +325,19 @@ pub(crate) fn create_repository_backup(
                 fs::create_dir_all(parent)
                     .map_err(|error| format!("无法创建备份子目录：{error}"))?;
             }
-            copy_file_stable(source, &target, cancel, |bytes| {
+            let digests = copy_file_stable(source, &target, cancel, |bytes| {
                 copied_bytes = copied_bytes.saturating_add(bytes);
                 progress("正在复制仓库文件", copied_bytes, source_bytes);
             })?;
+            copied_digests.insert(storage::relative_path(root, source)?, digests);
         }
 
         ensure_not_cancelled(cancel)?;
         progress("正在校验备份", 0, 0);
-        library::open_existing(&repository_copy)?;
-        let history_nodes = restore::scrub_history(&repository_copy, cancel, |current, total| {
-            progress("正在校验备份历史链", current, total)
-        })?;
-        let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
+        let integrity = provider.verify_repository(
             &repository_copy,
-            &|| cancel.is_cancelled(),
-            |current, total| progress("正在校验备份发布文件", current, total),
+            cancel,
+            &mut |label, current, total| progress(label, current, total),
         )?;
         checkpoint_database(&repository_copy)?;
         remove_database_sidecars(&repository_copy)?;
@@ -264,6 +352,7 @@ pub(crate) fn create_repository_backup(
                 index as u64,
                 copied_files.len() as u64,
             );
+            let relative = storage::relative_path(&repository_copy, path)?;
             let bytes = path
                 .metadata()
                 .map_err(|error| format!("无法读取备份文件大小：{error}"))?
@@ -271,10 +360,20 @@ pub(crate) fn create_repository_backup(
             total_bytes = total_bytes
                 .checked_add(bytes)
                 .ok_or_else(|| "备份文件总大小超出支持范围".to_owned())?;
+            // 复制摘要可直接复用；只有副本校验与 checkpoint 会改写数据库主文件，
+            // 对它重新取完整与抽样摘要。
+            let digests = match copied_digests
+                .get(&relative)
+                .filter(|digests| digests.bytes == bytes && relative != storage::DATABASE_NAME)
+            {
+                Some(digests) => digests.clone(),
+                None => FileDigests::compute(path, cancel)?,
+            };
             manifest_files.push(ManifestFile {
-                path: storage::relative_path(&repository_copy, path)?,
+                path: relative,
                 bytes,
-                sha256: sha256_file(path, cancel)?,
+                sha256: digests.sha256,
+                sample_sha256: digests.sample_sha256,
             });
         }
         progress(
@@ -290,13 +389,13 @@ pub(crate) fn create_repository_backup(
             repository_directory: REPOSITORY_DIRECTORY.into(),
             file_count: manifest_files.len() as u64,
             total_bytes,
-            history_nodes,
-            final_artifacts,
-            certification_records,
+            history_nodes: integrity.history_nodes,
+            final_artifacts: integrity.final_artifacts,
+            certification_records: integrity.certification_records,
             files: manifest_files,
         };
         write_manifest(&staging_path, &manifest)?;
-        verify_backup_bundle(&staging_path, cancel)?;
+        verify_backup_bundle(&staging_path, cancel, verification)?;
         ensure_not_cancelled(cancel)?;
 
         progress("正在发布备份", 0, 1);
@@ -308,9 +407,9 @@ pub(crate) fn create_repository_backup(
             repository_path: storage::display_path(&final_path.join(REPOSITORY_DIRECTORY)),
             file_count: manifest.file_count,
             total_bytes: manifest.total_bytes,
-            history_nodes,
-            final_artifacts,
-            certification_records,
+            history_nodes: integrity.history_nodes,
+            final_artifacts: integrity.final_artifacts,
+            certification_records: integrity.certification_records,
             reclaimed_staging_directories: staging_sweep.reclaimed,
             failed_staging_directories: staging_sweep.failed,
         })
@@ -418,7 +517,7 @@ fn copy_file_stable(
     target: &Path,
     cancel: &CancelToken,
     mut on_progress: impl FnMut(u64),
-) -> Result<(), String> {
+) -> Result<FileDigests, String> {
     let before = source
         .metadata()
         .map_err(|error| format!("无法读取仓库文件属性：{error}"))?;
@@ -429,6 +528,7 @@ fn copy_file_stable(
         .open(target)
         .map_err(|error| format!("无法创建备份文件：{error}"))?;
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
+    let mut digests = DigestAccumulator::new();
     let mut copied = 0_u64;
     loop {
         ensure_not_cancelled(cancel)?;
@@ -441,6 +541,7 @@ fn copy_file_stable(
         output
             .write_all(&buffer[..read])
             .map_err(|error| format!("无法写入备份文件：{error}"))?;
+        digests.update(&buffer[..read]);
         copied = copied.saturating_add(read as u64);
         on_progress(read as u64);
     }
@@ -456,7 +557,7 @@ fn copy_file_stable(
     {
         return Err("仓库文件在备份期间发生变化，本次操作已取消".into());
     }
-    Ok(())
+    Ok(digests.finish(copied))
 }
 
 fn remove_database_sidecars(root: &Path) -> Result<(), String> {
@@ -487,6 +588,32 @@ fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, String> {
     Ok(hex::encode_upper(hasher.finalize()))
 }
 
+/// 只重读首尾各 64 KiB 的抽样摘要，口径与复制阶段的 `DigestAccumulator` 一致。
+fn sample_sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, String> {
+    ensure_not_cancelled(cancel)?;
+    let bytes = path
+        .metadata()
+        .map_err(|error| format!("无法读取备份文件属性：{error}"))?
+        .len();
+    let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
+    let head_len = bytes.min(SAMPLE_BYTES) as usize;
+    let mut head = vec![0_u8; head_len];
+    file.read_exact(&mut head)
+        .map_err(|error| format!("无法校验备份文件：{error}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(&head);
+    if bytes > SAMPLE_BYTES {
+        ensure_not_cancelled(cancel)?;
+        file.seek(SeekFrom::Start(bytes - SAMPLE_BYTES))
+            .map_err(|error| format!("无法校验备份文件：{error}"))?;
+        let mut tail = vec![0_u8; SAMPLE_BYTES as usize];
+        file.read_exact(&mut tail)
+            .map_err(|error| format!("无法校验备份文件：{error}"))?;
+        hasher.update(&tail);
+    }
+    Ok(hex::encode_upper(hasher.finalize()))
+}
+
 fn write_manifest(bundle: &Path, manifest: &RepositoryBackupManifest) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|error| format!("无法生成备份校验清单：{error}"))?;
@@ -501,7 +628,11 @@ fn write_manifest(bundle: &Path, manifest: &RepositoryBackupManifest) -> Result<
         .map_err(|error| format!("无法同步备份校验清单：{error}"))
 }
 
-fn verify_backup_bundle(bundle: &Path, cancel: &CancelToken) -> Result<(), String> {
+fn verify_backup_bundle(
+    bundle: &Path,
+    cancel: &CancelToken,
+    mode: BackupVerificationMode,
+) -> Result<(), String> {
     let manifest: RepositoryBackupManifest = serde_json::from_slice(
         &fs::read(bundle.join(MANIFEST_NAME))
             .map_err(|error| format!("无法读取备份校验清单：{error}"))?,
@@ -535,8 +666,15 @@ fn verify_backup_bundle(bundle: &Path, cancel: &CancelToken) -> Result<(), Strin
             .metadata()
             .map_err(|error| format!("无法读取备份文件属性：{error}"))?
             .len();
-        if bytes != entry.bytes || !sha256_file(&path, cancel)?.eq_ignore_ascii_case(&entry.sha256)
-        {
+        let digest_matches = match mode {
+            BackupVerificationMode::Sample => {
+                sample_sha256_file(&path, cancel)?.eq_ignore_ascii_case(&entry.sample_sha256)
+            }
+            BackupVerificationMode::Full => {
+                sha256_file(&path, cancel)?.eq_ignore_ascii_case(&entry.sha256)
+            }
+        };
+        if bytes != entry.bytes || !digest_matches {
             return Err(format!("备份文件校验失败：{}", entry.path));
         }
         total_bytes = total_bytes
@@ -564,9 +702,27 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use crate::{backup::worker::run_backup, history};
+    use crate::{
+        app::contracts::RepositoryScrubProvider, backup::restore, backup::worker::run_backup,
+        history, library,
+    };
 
     use super::*;
+
+    fn backup_to(
+        root: &Path,
+        destination: &Path,
+        cancel: &CancelToken,
+    ) -> Result<RepositoryBackupReport, String> {
+        create_repository_backup(
+            root,
+            destination,
+            cancel,
+            &RepositoryScrubProvider,
+            BackupVerificationMode::Sample,
+            |_, _, _| {},
+        )
+    }
 
     #[test]
     fn backup_copy_reopens_and_scrubs_after_source_is_removed() {
@@ -602,17 +758,16 @@ mod tests {
         )
         .unwrap();
 
-        let report = create_repository_backup(
-            &root,
-            &destination,
-            &CancelToken::standalone(),
-            |_, _, _| {},
-        )
-        .unwrap();
+        let report = backup_to(&root, &destination, &CancelToken::standalone()).unwrap();
         let restored = PathBuf::from(&report.repository_path);
         assert_eq!(report.history_nodes, 2);
         assert!(report.file_count >= 3);
-        verify_backup_bundle(Path::new(&report.backup_path), &CancelToken::standalone()).unwrap();
+        verify_backup_bundle(
+            Path::new(&report.backup_path),
+            &CancelToken::standalone(),
+            BackupVerificationMode::Full,
+        )
+        .unwrap();
 
         fs::remove_dir_all(&root).unwrap();
         library::open_existing(&restored).unwrap();
@@ -637,13 +792,7 @@ mod tests {
         let destination = root.join("backups");
         fs::create_dir(&destination).unwrap();
 
-        let error = create_repository_backup(
-            &root,
-            &destination,
-            &CancelToken::standalone(),
-            |_, _, _| {},
-        )
-        .unwrap_err();
+        let error = backup_to(&root, &destination, &CancelToken::standalone()).unwrap_err();
 
         assert!(error.contains("不能位于作品仓库内部"), "{error}");
     }
@@ -663,20 +812,19 @@ mod tests {
         .unwrap();
         fs::write(root.join(repository_lock::OWNER_FILE_NAME), b"owner").unwrap();
 
-        let report = create_repository_backup(
-            &root,
-            &destination,
-            &CancelToken::standalone(),
-            |_, _, _| {},
-        )
-        .unwrap();
+        let report = backup_to(&root, &destination, &CancelToken::standalone()).unwrap();
         let restored = PathBuf::from(&report.repository_path);
         assert!(!restored.join(repository_lock::LOCK_FILE_NAME).exists());
         assert!(!restored
             .join(format!("{}-journal", repository_lock::LOCK_FILE_NAME))
             .exists());
         assert!(!restored.join(repository_lock::OWNER_FILE_NAME).exists());
-        verify_backup_bundle(Path::new(&report.backup_path), &CancelToken::standalone()).unwrap();
+        verify_backup_bundle(
+            Path::new(&report.backup_path),
+            &CancelToken::standalone(),
+            BackupVerificationMode::Sample,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -692,8 +840,7 @@ mod tests {
             let cancellation_checks = cancellation_checks.clone();
             move || cancellation_checks.fetch_add(1, Ordering::SeqCst) >= 2
         });
-        let error =
-            create_repository_backup(&root, &destination, &cancel, |_, _, _| {}).unwrap_err();
+        let error = backup_to(&root, &destination, &cancel).unwrap_err();
 
         assert!(error.contains("已取消"), "{error}");
         assert!(error.contains("临时备份已清理"), "{error}");
@@ -707,13 +854,7 @@ mod tests {
         let destination = directory.path().join("backups");
         library::initialize(&root).unwrap();
         fs::create_dir(&destination).unwrap();
-        let report = create_repository_backup(
-            &root,
-            &destination,
-            &CancelToken::standalone(),
-            |_, _, _| {},
-        )
-        .unwrap();
+        let report = backup_to(&root, &destination, &CancelToken::standalone()).unwrap();
         let bundle = PathBuf::from(report.backup_path);
 
         fs::write(
@@ -723,7 +864,12 @@ mod tests {
             b"replaced database",
         )
         .unwrap();
-        let error = verify_backup_bundle(&bundle, &CancelToken::standalone()).unwrap_err();
+        let error = verify_backup_bundle(
+            &bundle,
+            &CancelToken::standalone(),
+            BackupVerificationMode::Full,
+        )
+        .unwrap_err();
 
         assert!(error.contains("校验失败"), "{error}");
     }
@@ -790,19 +936,131 @@ mod tests {
         let recent = staging_directory(&destination);
         fs::create_dir(&recent).unwrap();
 
-        let report = create_repository_backup(
-            &root,
-            &destination,
-            &CancelToken::standalone(),
-            |_, _, _| {},
-        )
-        .unwrap();
+        let report = backup_to(&root, &destination, &CancelToken::standalone()).unwrap();
 
         assert_eq!(report.reclaimed_staging_directories, 0);
         assert_eq!(report.failed_staging_directories, 0);
         assert!(recent.exists(), "本次备份不得删除宽限期内的暂存目录");
         let bundle = PathBuf::from(&report.backup_path);
         assert!(bundle.is_dir(), "本次备份必须正常发布");
-        verify_backup_bundle(&bundle, &CancelToken::standalone()).unwrap();
+        verify_backup_bundle(
+            &bundle,
+            &CancelToken::standalone(),
+            BackupVerificationMode::Sample,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn sample_verification_skips_middle_bytes_but_full_verification_catches_them() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let destination = directory.path().join("backups");
+        let source = directory.path().join("artwork.bin");
+        fs::create_dir(&destination).unwrap();
+        // 伪随机内容避免快照被压缩到小于两个采样宽度。
+        let payload = (0..512 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>();
+        fs::write(&source, &payload).unwrap();
+        library::initialize(&root).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
+        run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            crate::backup::chunk_file::ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        let report = backup_to(&root, &destination, &CancelToken::standalone()).unwrap();
+        let bundle = PathBuf::from(&report.backup_path);
+        let manifest: RepositoryBackupManifest =
+            serde_json::from_slice(&fs::read(bundle.join(MANIFEST_NAME)).unwrap()).unwrap();
+        assert_eq!(manifest.format_version, BACKUP_FORMAT_VERSION);
+        assert!(manifest
+            .files
+            .iter()
+            .all(|file| file.sample_sha256.len() == 64));
+        let entry = manifest
+            .files
+            .iter()
+            .find(|file| file.bytes > SAMPLE_BYTES * 2 && file.path != storage::DATABASE_NAME)
+            .expect("快照文件应大于两个采样宽度");
+        let path = storage::resolve_path(&bundle.join(REPOSITORY_DIRECTORY), &entry.path).unwrap();
+
+        // 只改中段字节：抽样复核（首尾 64 KiB）不会发现，全量复核必须发现。
+        let mut bytes = fs::read(&path).unwrap();
+        let middle = bytes.len() / 2;
+        bytes[middle] ^= 0xff;
+        fs::write(&path, &bytes).unwrap();
+        verify_backup_bundle(
+            &bundle,
+            &CancelToken::standalone(),
+            BackupVerificationMode::Sample,
+        )
+        .unwrap();
+        let error = verify_backup_bundle(
+            &bundle,
+            &CancelToken::standalone(),
+            BackupVerificationMode::Full,
+        )
+        .unwrap_err();
+        assert!(error.contains("校验失败"), "{error}");
+
+        // 改首字节：抽样复核必须发现。
+        bytes[0] ^= 0xff;
+        fs::write(&path, &bytes).unwrap();
+        let error = verify_backup_bundle(
+            &bundle,
+            &CancelToken::standalone(),
+            BackupVerificationMode::Sample,
+        )
+        .unwrap_err();
+        assert!(error.contains("校验失败"), "{error}");
+    }
+
+    struct MockIntegrityProvider;
+
+    impl RepositoryIntegrityProvider for MockIntegrityProvider {
+        fn verify_repository(
+            &self,
+            _root: &Path,
+            _cancel: &CancelToken,
+            progress: &mut dyn FnMut(&str, u64, u64),
+        ) -> Result<crate::contracts::BackupIntegrityReport, String> {
+            progress("mock verify", 1, 1);
+            Ok(crate::contracts::BackupIntegrityReport {
+                history_nodes: 7,
+                final_artifacts: 3,
+                certification_records: 5,
+            })
+        }
+    }
+
+    #[test]
+    fn integrity_counts_come_from_the_injected_provider() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let destination = directory.path().join("backups");
+        library::initialize(&root).unwrap();
+        fs::create_dir(&destination).unwrap();
+
+        let report = create_repository_backup(
+            &root,
+            &destination,
+            &CancelToken::standalone(),
+            &MockIntegrityProvider,
+            BackupVerificationMode::Sample,
+            |_, _, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(report.history_nodes, 7);
+        assert_eq!(report.final_artifacts, 3);
+        assert_eq!(report.certification_records, 5);
     }
 }

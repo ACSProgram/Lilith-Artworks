@@ -15,8 +15,9 @@ pub(crate) fn retry_pending(
     context: &CommandContext,
     ids: &[String],
 ) -> Result<cleanup::CleanupReport, CommandError> {
-    let report = context
-        .run_write(|session| cleanup::run(session.root(), ids).map_err(CommandError::from))?;
+    let report = context.run_write(|session| {
+        cleanup::run_cancellable(session.root(), ids, context.cancel()).map_err(CommandError::from)
+    })?;
     super::report_cleanup_queue(context);
     Ok(report)
 }
@@ -40,7 +41,8 @@ pub(crate) fn cleanup_unreferenced(
     paths: &[String],
 ) -> Result<cleanup::CleanupReport, CommandError> {
     let report = context.run_write(|session| {
-        cleanup::cleanup_unreferenced(session.root(), paths).map_err(CommandError::from)
+        cleanup::cleanup_unreferenced_cancellable(session.root(), paths, context.cancel())
+            .map_err(CommandError::from)
     })?;
     super::report_cleanup_queue(context);
     Ok(report)

@@ -11,6 +11,8 @@ use std::{
 use serde::Serialize;
 use tauri::AppHandle;
 
+use crate::{app::command_runtime::OperationId, cancel::CancelToken};
+
 use super::BackupRuntimeStatus;
 
 /// 当前占用共享运行锁的任务类型。
@@ -59,19 +61,35 @@ pub(crate) struct BackupState {
 
 #[derive(Default)]
 struct Inner {
+    /// 串行化所有写任务（用户写命令、自动备份、以及校验结果写回）。
     operation_lock: Mutex<()>,
     runtime: Mutex<BackupRuntimeStatus>,
-    cancel_requested: AtomicBool,
+    /// 当前活跃的任务。每个任务拥有独立 OperationId 与取消令牌；
+    /// `cancel_background` 只取消其中的后台任务，不会误伤前台操作。
+    ///
+    /// 列表里既有占共享运行锁的串行任务，也有空闲校验准备阶段的并行只读探针；
+    /// 取消判定只认串行任务（见 [`BackupState::cancelled`]）。
+    active_tasks: Mutex<Vec<ActiveTask>>,
     shutting_down: AtomicBool,
     /// 手动提交优先：记录有待处理手动提交请求的分支 ID，调度器据此延后
     /// 这些分支的自动备份，避免自动任务抢在手动提交之前占据共享运行锁。
     manual_pending: Mutex<HashSet<String>>,
     /// 正在等待共享运行锁的前台长命令数量。调度器据此在候选选择与取得运行锁后
-    /// 让位，避免后台任务抢先取锁并清掉前台刚设置的取消标志。
+    /// 让位，避免后台任务在前台意图到达后仍抢先取锁。
     foreground_waiting: AtomicUsize,
     scheduler_signal: Mutex<SchedulerSignal>,
     scheduler_wake: Condvar,
     scheduler_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct ActiveTask {
+    operation_id: String,
+    kind: BackupTaskKind,
+    branch_id: Option<String>,
+    /// 是否占用共享运行锁。空闲校验的并行准备阶段是只读探针（`false`）：它们
+    /// 的取消只表示「后台让位」，不能被前台命令当成自己的取消请求。
+    serialized: bool,
+    cancel: CancelToken,
 }
 
 #[derive(Default)]
@@ -133,16 +151,130 @@ impl BackupState {
         self.inner.foreground_waiting.load(Ordering::SeqCst)
     }
 
+    /// 低优先级后台任务（空闲校验）的让位判定：有前台命令在等锁或有待处理的
+    /// 手动提交时，立即停止当前轮次且不写结果。
+    pub(crate) fn should_yield_background(&self) -> bool {
+        self.foreground_waiting() > 0 || self.any_manual_pending()
+    }
+
     /// 请求正在运行的后台任务让位；前台任务不受影响，仍只能由 `request_cancel`
     /// 取消。返回是否实际发出了取消请求。
     pub(crate) fn cancel_background(&self) -> Result<bool, String> {
-        let runtime = self.inner.runtime.lock().map_err(|_| "备份状态已损坏")?;
-        let background =
-            runtime.busy && runtime.task_kind.is_some_and(BackupTaskKind::is_background);
-        if background {
-            self.inner.cancel_requested.store(true, Ordering::SeqCst);
+        let active = self
+            .inner
+            .active_tasks
+            .lock()
+            .map_err(|_| "备份状态已损坏")?;
+        let mut cancelled = false;
+        for task in active.iter().filter(|task| task.kind.is_background()) {
+            task.cancel.cancel();
+            cancelled = true;
         }
-        Ok(background)
+        Ok(cancelled)
+    }
+
+    /// 登记一个占用共享运行锁的串行任务。用户写命令、自动备份与校验结果写回
+    /// 都由 [`Self::run_exclusive_typed_inner`] 内部登记。
+    pub(crate) fn begin_task(
+        &self,
+        kind: BackupTaskKind,
+        branch_id: Option<&str>,
+    ) -> BackgroundTaskGuard {
+        self.register_task(kind, branch_id, true)
+    }
+
+    /// 登记一个并行只读探针（空闲校验的准备阶段）。它不占用共享运行锁，取消
+    /// 令牌只服务后台让位，不参与 [`Self::cancelled`] 的判定。
+    pub(crate) fn begin_probe_task(
+        &self,
+        kind: BackupTaskKind,
+        branch_id: Option<&str>,
+    ) -> BackgroundTaskGuard {
+        self.register_task(kind, branch_id, false)
+    }
+
+    fn register_task(
+        &self,
+        kind: BackupTaskKind,
+        branch_id: Option<&str>,
+        serialized: bool,
+    ) -> BackgroundTaskGuard {
+        let operation_id = OperationId::new().as_str().to_owned();
+        let cancel = CancelToken::standalone();
+        if let Ok(mut active) = self.inner.active_tasks.lock() {
+            active.push(ActiveTask {
+                operation_id: operation_id.clone(),
+                kind,
+                branch_id: branch_id.map(str::to_owned),
+                serialized,
+                cancel: cancel.clone(),
+            });
+            self.refresh_runtime_locked(&active);
+        }
+        log::debug!(
+            "task started: operation_id={operation_id}, kind={kind:?}, serialized={serialized}, branch={}",
+            branch_id.unwrap_or("")
+        );
+        BackgroundTaskGuard {
+            state: self.clone(),
+            operation_id,
+            cancel,
+            completed: false,
+        }
+    }
+
+    fn finish_task(&self, operation_id: &str) {
+        if let Ok(mut active) = self.inner.active_tasks.lock() {
+            active.retain(|task| task.operation_id != operation_id);
+            self.refresh_runtime_locked(&active);
+        }
+        log::debug!("task finished: operation_id={operation_id}");
+    }
+
+    /// 按当前活跃任务重建运行状态。
+    ///
+    /// 串行任务优先：它正在执行用户可见的操作，状态必须反映它而不是同时存在的
+    /// 只读探针。只有探针时保留该探针自己的进度字段；多于一个任务只暴露汇总
+    /// 状态，避免各线程互相覆盖进度标签。
+    fn refresh_runtime_locked(&self, active: &[ActiveTask]) {
+        let Ok(mut runtime) = self.inner.runtime.lock() else {
+            return;
+        };
+        if active.is_empty() {
+            let scheduling = runtime.automatic_scheduling;
+            let completion_revision = runtime.completion_revision.wrapping_add(1);
+            *runtime = BackupRuntimeStatus {
+                automatic_scheduling: scheduling,
+                completion_revision,
+                ..Default::default()
+            };
+            return;
+        }
+        let current = active
+            .iter()
+            .find(|task| task.serialized)
+            .or_else(|| (active.len() == 1).then(|| &active[0]));
+        runtime.busy = true;
+        runtime.task_kind = current
+            .map(|task| task.kind)
+            .or_else(|| active.first().map(|task| task.kind));
+        runtime.active_branch_id = current.and_then(|task| task.branch_id.clone());
+        if current.is_some() {
+            // 只清掉本函数上一轮写下的并行汇总文案，让串行任务自己的
+            // `report_progress` 接管；不要动任务已经上报的进度，否则并行的探针
+            // 逐个结束时会把前台命令的进度反复清空。
+            if runtime.operation.as_deref() == Some("background") {
+                runtime.operation = None;
+                runtime.progress_label = None;
+                runtime.progress_current = 0;
+                runtime.progress_total = 0;
+            }
+            return;
+        }
+        runtime.operation = Some("background".into());
+        runtime.progress_label = Some(format!("正在并行处理 {} 个后台任务", active.len()));
+        runtime.progress_current = 0;
+        runtime.progress_total = 0;
     }
 
     /// 前台长命令入口：先登记等待并请求后台任务让位，再取得共享运行锁。
@@ -215,30 +347,10 @@ impl BackupState {
         if let Some(waiting) = foreground_wait {
             waiting.release();
         }
-        self.inner.cancel_requested.store(false, Ordering::SeqCst);
-        {
-            let mut runtime = self
-                .inner
-                .runtime
-                .lock()
-                .map_err(|_| ExclusiveRunError::State("备份状态已损坏".into()))?;
-            runtime.busy = true;
-            runtime.active_branch_id = branch_id.map(str::to_owned);
-            runtime.task_kind = Some(kind);
-        }
+        // 每个任务拿到新的令牌：上一个任务留下的取消请求不会污染本次执行。
+        let task = self.begin_task(kind, branch_id);
         let result = operation().map_err(ExclusiveRunError::Operation);
-        if let Ok(mut runtime) = self.inner.runtime.lock() {
-            let scheduling = runtime.automatic_scheduling;
-            let completion_revision = runtime.completion_revision.wrapping_add(1);
-            *runtime = BackupRuntimeStatus {
-                automatic_scheduling: scheduling,
-                completion_revision,
-                ..Default::default()
-            };
-        }
-        if !self.inner.shutting_down.load(Ordering::SeqCst) {
-            self.inner.cancel_requested.store(false, Ordering::SeqCst);
-        }
+        task.complete();
         result
     }
 
@@ -260,20 +372,33 @@ impl BackupState {
     }
 
     pub(crate) fn request_cancel(&self) -> Result<bool, String> {
-        let busy = self
+        let active = self
             .inner
-            .runtime
+            .active_tasks
             .lock()
-            .map_err(|_| "备份状态已损坏")?
-            .busy;
-        if busy {
-            self.inner.cancel_requested.store(true, Ordering::SeqCst);
+            .map_err(|_| "备份状态已损坏")?;
+        for task in active.iter() {
+            task.cancel.cancel();
         }
-        Ok(busy)
+        Ok(!active.is_empty())
     }
 
+    /// 当前串行任务是否已被请求取消。
+    ///
+    /// 只看占用共享运行锁的任务：并行只读探针（空闲校验准备阶段）的取消来自
+    /// `cancel_background` 的后台让位，若把它算进来，刚取得运行锁的前台命令会
+    /// 立即读到「已取消」而误伤用户自己的操作。
     pub(crate) fn cancelled(&self) -> bool {
-        self.inner.cancel_requested.load(Ordering::SeqCst)
+        self.inner
+            .active_tasks
+            .lock()
+            .map(|active| {
+                active
+                    .iter()
+                    .filter(|task| task.serialized)
+                    .any(|task| task.cancel.is_cancelled())
+            })
+            .unwrap_or(false)
     }
 
     pub(crate) fn start_scheduler(&self, app: AppHandle) -> Result<(), String> {
@@ -286,7 +411,6 @@ impl BackupState {
             return Ok(());
         }
         self.inner.shutting_down.store(false, Ordering::SeqCst);
-        self.inner.cancel_requested.store(false, Ordering::SeqCst);
         if let Ok(mut signal) = self.inner.scheduler_signal.lock() {
             signal.stop = false;
             signal.generation = signal.generation.wrapping_add(1);
@@ -325,7 +449,11 @@ impl BackupState {
 
     pub(crate) fn shutdown(&self) {
         self.inner.shutting_down.store(true, Ordering::SeqCst);
-        self.inner.cancel_requested.store(true, Ordering::SeqCst);
+        if let Ok(active) = self.inner.active_tasks.lock() {
+            for task in active.iter() {
+                task.cancel.cancel();
+            }
+        }
         if let Ok(mut signal) = self.inner.scheduler_signal.lock() {
             signal.stop = true;
             signal.generation = signal.generation.wrapping_add(1);
@@ -341,6 +469,9 @@ impl BackupState {
             let _ = handle.join();
         }
         let _operation_guard = self.inner.operation_lock.lock().ok();
+        if let Ok(mut active) = self.inner.active_tasks.lock() {
+            active.clear();
+        }
         if let Ok(mut runtime) = self.inner.runtime.lock() {
             *runtime = BackupRuntimeStatus::default();
         }
@@ -371,6 +502,42 @@ impl ForegroundWait {
 impl Drop for ForegroundWait {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+/// 一个已登记的任务守卫。调度器用它在并行只读任务之间隔离取消令牌。
+///
+/// 串行写任务由 `run_exclusive_typed_inner` 自己登记并在结束时完成；并行空闲
+/// 校验在各自线程里持有守卫，无论成功、失败还是取消，`Drop` 都会把任务从活跃
+/// 集合移除并更新运行状态。
+pub(crate) struct BackgroundTaskGuard {
+    state: BackupState,
+    operation_id: String,
+    cancel: CancelToken,
+    completed: bool,
+}
+
+impl BackgroundTaskGuard {
+    pub(crate) fn cancel_token(&self) -> &CancelToken {
+        &self.cancel
+    }
+
+    pub(crate) fn complete(mut self) {
+        self.finish();
+    }
+
+    fn finish(&mut self) {
+        if self.completed {
+            return;
+        }
+        self.completed = true;
+        self.state.finish_task(&self.operation_id);
+    }
+}
+
+impl Drop for BackgroundTaskGuard {
+    fn drop(&mut self) {
+        self.finish();
     }
 }
 

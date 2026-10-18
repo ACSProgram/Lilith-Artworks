@@ -8,8 +8,9 @@
 
 ## 当前批次状态
 
-2026-10-18 批次：**0.3 阶段 1（统一命令运行时）与阶段 2（设置单写入口、跨进程 owner lock、
-退出结算诊断、App 前端拆分）**。
+2026-10-18 批次：**0.3 阶段 1（统一命令运行时）、阶段 2（设置单写入口、跨进程 owner lock、
+退出结算诊断、App 前端拆分）、阶段 3（事件订阅与 controller 模板）、阶段 4（ChunkFile v2、
+容器感知分块、恢复游标与快速检查指纹）、阶段 5（调度、清理与灾备算法）**。
 
 - **0.2 已收口并归档**：`0be6224` 切分 `0.2.0`，`v0.2.0` 附注标签已打并推送；`main` 固定为
   0.2 发布线。切分内容、压力测试口径、自动与人工门槛、未签名发布说明见
@@ -59,9 +60,22 @@
   多段链 p50/p95 基准。`cargo check --lib`（含 `headless`）、`cargo check --features headless --test
   stress_bench`、`cargo test --lib`（224 通过）、`npx tsc --noEmit`、`npm test`（219 通过）、
   `cargo fmt --check` 与 `git diff --check` 已通过；P1B 与整套压力测试、GUI 人工验收**未运行**。
-- **下一步**：由维护者验收阶段 1–4 的产品行为；随后进入阶段 5（调度、清理与灾备算法）。
+- **阶段 5 已实现、待维护者验收**：新增中立 `contracts` 模块（`ReferenceInventory` 与
+  `RepositoryIntegrityProvider`），history/authenticity/pin_board 各自提供引用清单实现，应用层
+  注册；cleanup 改为连接内 `TEMP` 引用表 + anti-join，按 512 条分批、可取消且幂等，未引用扫描
+  改由 provider 声明命名与目录；灾备核心不再导入 Library/Authenticity，复制阶段同时计算完整
+  SHA-256 与首尾 64 KiB 抽样摘要并写入 v2 manifest，发布前默认抽样复核（`Full` 保留为内部
+  选项）。`BackupState` 改为每任务独立 `OperationId`/`CancelToken`，登记时区分占运行锁的串行任务
+  与空闲校验准备阶段的并行只读探针（只有串行任务参与 `cancelled()` 判定）；调度器按 deadline 最小堆
+  选择候选、单分支失败不再阻塞整队，空闲校验按 Artwork 并行（最多 4 个）并在连续 4 次自动备份
+  后 aging 插队，写回仍串行。`stress_bench` 新增 P7（多分支候选扫描）与 P8（120 个孤儿 DDS
+  扫描/确认清理），P5 记录文件数、吞吐与抽样复核。`cargo check --lib`、`cargo check --features
+  headless --tests`、`cargo test --lib`（241 通过、1 忽略）、`npx tsc --noEmit`、`npm test`
+  （219 通过）、`cargo fmt --check` 与 `git diff --check` 已通过；压力测试（含 P7/P8）、GUI
+  人工验收**未运行**。
+- **下一步**：由维护者验收阶段 1–5 的产品行为；随后进入阶段 6（仓储空间状态，alpha2）。
   alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
-- 未完成事项全部在 `todo.md`：0.3 前的补强候选、阶段 1–4（待验收）与阶段 5–9。
+- 未完成事项全部在 `todo.md`：0.3 前的补强候选、阶段 1–5（待验收）与阶段 6–9。
 
 ## 当前基线
 

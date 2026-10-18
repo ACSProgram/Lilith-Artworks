@@ -18,7 +18,7 @@ struct CertificationExpectation {
 pub(crate) fn scrub_controlled_files(
     root: &Path,
     cancelled: impl Fn() -> bool,
-    progress: impl Fn(u64, u64),
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<(u64, u64), String> {
     let connection = storage::open(root)?;
     let artifacts = {

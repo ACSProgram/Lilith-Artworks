@@ -1,8 +1,13 @@
 use std::path::Path;
 
 use crate::{
-    app::command_runtime::{CommandContext, CommandError},
-    authenticity, backup, cleanup, history, pin_board,
+    app::{
+        command_runtime::{CommandContext, CommandError},
+        contracts::RepositoryScrubProvider,
+    },
+    authenticity, backup, cleanup,
+    contracts::BackupVerificationMode,
+    history, pin_board,
 };
 
 pub(crate) fn commit(
@@ -235,6 +240,8 @@ pub(crate) fn create_repository_backup(
             session.root(),
             destination_parent,
             context.cancel(),
+            &RepositoryScrubProvider,
+            BackupVerificationMode::Sample,
             |label, current, total| context.report_progress(label, current, total),
         )
         .map_err(CommandError::from)

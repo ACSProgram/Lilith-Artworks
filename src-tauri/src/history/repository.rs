@@ -1510,7 +1510,7 @@ pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarg
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT b.id, b.head_history_id, node.created_ms
+            "SELECT b.id, b.artwork_id, b.head_history_id, node.created_ms
              FROM branches b
              JOIN library_nodes n ON n.id = b.artwork_id
              JOIN history_nodes node ON node.id = b.head_history_id
@@ -1525,8 +1525,9 @@ pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarg
         .query_map([], |row| {
             Ok(IdleVerifyTarget {
                 branch_id: row.get(0)?,
-                head_history_id: row.get(1)?,
-                head_created_ms: row.get(2)?,
+                artwork_id: row.get(1)?,
+                head_history_id: row.get(2)?,
+                head_created_ms: row.get(3)?,
             })
         })
         .map_err(storage::database_error)?
@@ -1542,7 +1543,7 @@ pub(crate) fn load_idle_verify_target(
 ) -> Result<Option<IdleVerifyTarget>, String> {
     storage::open(root)?
         .query_row(
-            "SELECT b.id, b.head_history_id, node.created_ms
+            "SELECT b.id, b.artwork_id, b.head_history_id, node.created_ms
              FROM branches b
              JOIN library_nodes n ON n.id = b.artwork_id
              JOIN history_nodes node ON node.id = b.head_history_id
@@ -1554,8 +1555,9 @@ pub(crate) fn load_idle_verify_target(
             |row| {
                 Ok(IdleVerifyTarget {
                     branch_id: row.get(0)?,
-                    head_history_id: row.get(1)?,
-                    head_created_ms: row.get(2)?,
+                    artwork_id: row.get(1)?,
+                    head_history_id: row.get(2)?,
+                    head_created_ms: row.get(3)?,
                 })
             },
         )

@@ -25,7 +25,7 @@
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
-- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用复查（五张表）与仓库边界校验由它提供，领域函数在事务内复用它做入队前复查。它另外提供未引用文件扫描（`scan_unreferenced`，只报告）与确认清理（`cleanup_unreferenced`，登记摘要后入队重放），作为队列的发现机制，并提供只读的队列列举（`list_pending`）供设置页展示。
+- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与未引用扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
 
 `backup` 通过 `history` 切换分支 head，不直接操作作品树；`history` 不读取 ChunkFile；C2PA 与 TrustMark 实现彼此独立，只由认证流水线编排。
@@ -46,9 +46,9 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
-删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内逐项复查当前图是否仍引用该路径（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
+删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内先一次收集契约层提供的完整引用清单，再逐路径判定当前图是否仍引用它（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 
-清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历 `artworks/*/snapshots`、`artworks/*/deltas` 与 `artworks/*/boards/*`，只报告匹配既有命名模式（snapshot `<UUID>.lbc` / `<UUID>-repair-<UUID>.lbc`、delta `<UUID>-to-<UUID>.lbd`、画板 DDS `<image-id>.dds`）、修改时间早于 30 分钟宽限期且经 `referenced_path_kind` 复查（含 `pin_board_images`）确认未被引用的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256 入队并单遍重放：重复确认幂等，候选在确认前重新被引用时条目留队可重试。扫描经 GUI 命令持共享运行锁与仓库操作锁，不做无头子命令，入口只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
+清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
 
 设置页「仓库与备份」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
 
@@ -66,17 +66,17 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 设置页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
 
-设置页也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。副本会独立执行仓库语义校验、历史链 scrub 和受控发布文件 scrub，随后生成逐文件 SHA-256 `manifest.json`，复核清单后才以目录重命名发布；取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。
+设置页也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。
 
 ## 调度
 
-每个分支保存独立开关与 1 到 10080 分钟的检查间隔。调度线程随 Tauri 应用启动，主窗口隐藏到托盘时继续运行；显式退出时先进入 `shutting_down`、请求取消，再等待调度线程和共享操作锁结束。已经排队但尚未取得锁的任务不会在退出过程中重新清除取消标志或开始备份。分支绑定最终成品后会自动从调度查询排除。分支起点、分支 head 和显式设置的节点会保留完整 snapshot 作为 checkpoint。
+每个分支保存独立开关与 1 到 10080 分钟的检查间隔。调度线程随 Tauri 应用启动，主窗口隐藏到托盘时继续运行；显式退出时先进入 `shutting_down`、请求取消，再等待调度线程和共享操作锁结束。已经排队但尚未取得锁的任务不会在退出过程中重新清除取消标志或开始备份。分支绑定最终成品后会自动从调度查询排除。分支起点、分支 head 和显式设置的节点会保留完整 snapshot 作为 checkpoint。调度优先级固定为前台等待 > 手动提交 > 到期自动备份 > 空闲校验；候选按 `due_at`、上次检查时间与分支 ID 组成最小堆，`due_at` 已把失败退避写入分支自己的 `retry_at_ms`，因此一条分支失败不会把整支队列停 60 秒。
 
 自动备份支持快速检查与全量检查两种方式，由分支级 `backup_quick_enabled` 逐分支决定，调度器只读该标志。全局设置 `automaticBackupCheckMode`（`quick` / `full`，默认 `quick`）只是"默认检查方式"：在创建 Artwork 与创建分支时写入 `backup_quick_enabled` 作为初始值，此后不参与运行时判定，用户可在分支设置里独立开关。快速检查比较工作文件的大小与上次全量检查成功后记录的 cheap fingerprint（`last_source_size` / `last_source_modified_ms`，由 `run_backup` 在提交或确认内容未变化时写入）：指纹算法版本为 1，内容是 SHA-256 覆盖版本字节、大小、修改时间（秒 + 纳秒）、首 64 KiB 与尾 64 KiB 采样，取摘要前 8 字节并把最高位清零后复用 `last_source_modified_ms` 的整数列存储（不新增 schema）。一致时直接记为内容未变化并推进检查时间，不打开工作文件；缺少基线（如尚无任何提交）、旧数据里保存的是裸 mtime（与新指纹必然不等，因此自然退回一次全量并重写基线）、修改时间缺少亚秒精度、任一元数据不一致或采样读取失败时，退回完整流程。手动提交始终走全量检查。快速检查不校验 head snapshot 的完整性，该职责仍属于内容变化后的全量路径与全库完整性扫描。
 
 手动提交优先于自动备份：手动提交命令在取得共享运行锁前先登记该分支的待处理标记；调度器在候选选择和取得运行锁后两处都会跳过有待处理标记的分支（延后且不计入失败）。若同分支的自动备份已在运行，手动提交会对后台任务请求取消，使自动任务以取消结果退出（不进入失败退避），随后手动提交先执行；自动备份延后到下一次调度周期，此时内容已被手动提交覆盖，通常得到"内容未变化"的结果。
 
-共享运行状态 `BackupRuntimeStatus` 携带 `taskKind`，取值为 `automaticBackup` / `idleVerify` / `userOperation`（`BackupTaskKind`），与 `busy`、`activeBranchId` 在同一临界区内写入并在同一次重置中清除；前端据此区分后台低优先级任务与用户触发的关键操作。取消分两个入口：`request_cancel` 取消任意任务，供用户主动取消；`cancel_background` 只在当前任务是后台任务（自动备份或空闲校验）时置位，不会误取消用户自己的操作。所有前台长命令（恢复、精简、检查点、删除子树、进入发布、发布签名、全库扫描、整仓备份、仓库切换）在取得运行锁之前调用一次 `cancel_background`，让正在运行的后台任务尽快退出，并登记前台等待计数 `foreground_waiting`；调度器在候选选择阶段跳过新任务，并在取得运行锁之后复查该计数，大于零即以让位结果退出、不放行本次后台任务，随后进入退避等待，避免与前台争抢运行锁。计数由 RAII 守卫在取得锁之后自减，取消、失败、退出和提前返回等所有路径都会归零。该让位与手动提交的 `manual_pending` 是同一套"锁内复查后让位"模式：仅置位取消标志并不可靠，因为共享取消标志会在任务取得运行锁后被清零，调度器可能抢先取锁并吞掉前台意图，前台等待登记消除了这种抢占。
+共享运行状态 `BackupRuntimeStatus` 携带 `taskKind`，取值为 `automaticBackup` / `idleVerify` / `userOperation`（`BackupTaskKind`）；同时存在串行任务与并行校验探针时以串行任务为准，只有并行探针时由汇总进度呈现（不单列各任务 id）。每个任务在登记时创建独立的 `OperationId` 与 `CancelToken`，不再维护全局 `cancel_requested` 加补丁集合；登记分为占共享运行锁的串行任务与空闲校验准备阶段的并行只读探针，后者的取消只表示后台让位，不计入 `cancelled()`，因此不会让刚进站的前台命令立即读到「已取消」。取消分两个入口：`request_cancel` 取消全部活动任务，供用户主动取消；`cancel_background` 只取消后台任务（自动备份与空闲校验）的令牌，不会误取消用户自己的操作。所有前台长命令（恢复、精简、检查点、删除子树、进入发布、发布签名、全库扫描、整仓备份、仓库切换）在取得运行锁之前调用一次 `cancel_background`，让正在运行的后台任务尽快退出，并登记前台等待计数 `foreground_waiting`；调度器在候选选择阶段跳过新任务，并在取得运行锁之后复查该计数，大于零即以让位结果退出、不放行本次后台任务，随后进入退避等待，避免与前台争抢运行锁。计数由 RAII 守卫在取得锁之后自减，取消、失败、退出和提前返回等所有路径都会归零。该让位与手动提交的 `manual_pending` 是同一套"锁内复查后让位"模式：前台等待登记使调度器不会在前台意图到达后抢先取锁。
 
 自动备份成功或确认内容未变化时才推进 `last_check_ms`/`last_success_ms`，同时清零连续失败计数。自动任务失败会记录 `last_error` 并按分支间隔退避：首次失败 1 分钟后重试，随后分别等待原间隔的 1/4、1/2 和完整间隔（向上取整）；第 5 次连续失败时持久化关闭该分支自动备份并生成待确认通知。手动重新启用分支会清零失败状态和该通知；成功备份也会清零计数。系统时间读取失败进入调度器自身退避，不使用 `0` 时间戳继续计算。
 
@@ -88,15 +88,15 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 ## 空闲链路校验
 
-调度器在第一优先级（到期自动备份）之外增加第二优先级：仓库空闲时校验分支 head 的链路完整性，作为完整扫描之外的“新链早发现”。它只在前台命令、待处理手动提交和到期备份都不占用时运行，并随托盘“暂停所有自动备份”一并暂停（用户意图是“别动仓库”）。每轮只处理一个分支，处理完回到循环顶部重新评估优先级，保证到期备份与前台操作的响应性。
+调度器在第一优先级（到期自动备份）之外增加第二优先级：仓库空闲时校验分支 head 的链路完整性，作为完整扫描之外的“新链早发现”。它只在前台命令、待处理手动提交和到期备份都不占用时运行，并随托盘“暂停所有自动备份”一并暂停（用户意图是“别动仓库”）。没有到期备份时校验始终先走；有到期备份时，连续完成 4 次自动备份后若已有就绪候选，先插队跑一轮校验（aging，防低优先级饥饿；计数在校验批次完成后清零）。每轮选出一批候选回到循环顶部重新评估优先级，保证到期备份与前台操作的响应性。
 
 派生队列不引入独立的待办表：查询所有未进回收站、`head_history_id` 非空且 `verified_history_id` 与 head 不一致（含 `verified_history_id IS NULL`）的分支，`verify_error` 非空的分支暂不重试。条件显式写成 `head_history_id IS NOT NULL AND (verified_history_id IS NULL OR verified_history_id != head_history_id)`，避免 SQL 的 NULL 语义把无 head 的分支纳入队列并每轮空跑。该查询不要求 `backup_enabled`（手动提交的分支同样需要校验），也不排除已发布分支（其 head 是强制检查点，校验成本低）——与排除已发布分支的备份调度查询是两条不同查询。回收站过滤经 `artworks → library_nodes.trashed_ms` 判断。新提交、精简改接、检查点在改变 head 时天然使分支重新入队，重启后队列自动重建。
 
-每轮只校验 head 节点 `created_ms` 已早于 `now - IDLE_VERIFY_DELAY_MS`（常量，默认 10 分钟）的候选，避免刚写完就整链重读；这里用 head 节点的创建时间而不是 `last_check_ms`——快速检查的“内容未变化”会推进后者但不改变 head，用它会让延迟条件永不满足。单分支校验在运行锁内执行，锁内复查 head 仍与候选快照一致，链间检查取消标志。手动提交成功会经既有 `wake_scheduler` 唤醒调度器，新 head 随之进入派生队列；精简与检查点不改变 head，因此不触发重新入队。
+每轮只校验 head 节点 `created_ms` 已早于 `now - IDLE_VERIFY_DELAY_MS`（常量，默认 10 分钟）的候选，避免刚写完就整链重读；这里用 head 节点的创建时间而不是 `last_check_ms`——快速检查的“内容未变化”会推进后者但不改变 head，用它会让延迟条件永不满足。候选按 Artwork 去重，同一作品同时最多一个校验任务；每批最多 4 个任务并行。每个任务在自己的线程里只做只读准备（复查候选、读取 snapshot 并逐块验证），并持有独立的 `OperationId` 与取消/让位令牌；结果写回仍在共享运行锁内串行执行，锁内再次确认 head 未变。手动提交成功会经既有 `wake_scheduler` 唤醒调度器，新 head 随之进入派生队列；精简与检查点不改变 head，因此不触发重新入队。
 
 校验范围收敛到 head 的单个 snapshot：`materialization_chain` 在目标节点持有 snapshot 时只返回该节点，而 head 恒持有 snapshot（提交以非可选 snapshot 建节点，`unmark_checkpoint` 拒绝取消 head、分支起点与分叉点的检查点），因此校验 head 等价于校验它的一个 snapshot 文件。实现复用 `validate_snapshot`（比对 `ChunkFile::file_digest()` 与数据库 `sha256`，并把全部分块流入 sink 逐块验哈希），不回溯整条链。
 
-结果写入 `branches` 的校验列：成功且锁内确认 head 未变时写 `verified_history_id` 与 `verified_ms` 并清空 `verify_error`；失败写 `verify_error`，分支退出队列（不自动重试），直到 head 变化或用户手动重查。校验失败只记录警告，永不自动禁用备份、不阻断提交与恢复，也不进入自动备份的失败退避——两者独立。全库完整性扫描（`scrub_repository_integrity`）仍是唯一的全量保证，空闲校验与它是互补关系。
+结果写入 `branches` 的校验列：成功且锁内确认 head 未变时写 `verified_history_id` 与 `verified_ms` 并清空 `verify_error`；失败写 `verify_error`，分支退出队列（不自动重试），直到 head 变化或用户手动重查。单个任务的校验失败只影响该分支；取消或前台让位不写结果、不计为失败。校验失败只记录警告，永不自动禁用备份、不阻断提交与恢复，也不进入自动备份的失败退避——两者独立。全库完整性扫描（`scrub_repository_integrity`）仍是唯一的全量保证，空闲校验与它是互补关系。
 
 分支状态行把校验失败作为独立于备份失败的第三态展示：备份失败沿用 `lastError`，链路校验失败单独用警示色摘要 + 可展开详情（含复制入口），并附“重新校验此分支”按钮（清除 `verify_error` 并唤醒调度器重新入队）与“运行全库扫描”引导。两者语义独立、文案不合并。
 
@@ -186,7 +186,7 @@ cleanup_repository_unreferenced
 | 快照/增量容器面对不受信任的字节：绝不 panic、越界或无界分配；被接受的容器块数量不超过文件容量、可物化且长度等于声明值；截断与续写必须被拒绝 | `backup/chunk_file/tests.rs` 单测（确定性畸形输入模糊） |
 | 磁盘写满时快照写入干净失败：返回「空间不足」、不推进历史、不留半成品、可重试；写到一半的字节不会被误认为完整快照 | `backup/worker.rs`、`backup/chunk_file/tests.rs` 单测 |
 
-0.3 阶段 4 在 `stress_bench` 增加 P1B：4 MiB 文件 × 6 节点的多段链上反复恢复最早与最新节点，报告 p50/p95 与吞吐；它只作为段索引与读取游标的决策证据，随发布前的整套压力测试手动运行，不进入日常检查、CI 门槛或性能基线更新。快速检查的同尺寸同 mtime 改写由 `backup/worker.rs` 单测覆盖（回拨修改时间但在首尾采样区改动内容，必须触发全量）。
+0.3 阶段 4 在 `stress_bench` 增加 P1B：4 MiB 文件 × 6 节点的多段链上反复恢复最早与最新节点，报告 p50/p95 与吞吐；它只作为段索引与读取游标的决策证据，随发布前的整套压力测试手动运行，不进入日常检查、CI 门槛或性能基线更新。快速检查的同尺寸同 mtime 改写由 `backup/worker.rs` 单测覆盖（回拨修改时间但在首尾采样区改动内容，必须触发全量）。0.3 阶段 5 在同一基准里增加 P7（10 个作品、每作品 12 条分支的调度候选扫描）与 P8（120 个无记录画板 DDS 的扫描与确认清理）；P5 整仓灾备同时记录文件数、吞吐与 `verification: sample`，作为摘要管线与抽样复核的基线。
 
 **不做的**：断电持久性不做自动化验证——`Child::kill()` 不触及操作系统与磁盘的缓存、也不保证
 目录项落盘，该保证由操作系统、磁盘与 `synchronous = FULL` 声明承担。

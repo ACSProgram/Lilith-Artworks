@@ -189,7 +189,7 @@ pub(crate) fn ensure_checkpoint(
 pub(crate) fn scrub_history(
     root: &Path,
     cancel: &CancelToken,
-    progress: impl Fn(u64, u64),
+    mut progress: impl FnMut(u64, u64),
 ) -> Result<u64, String> {
     let node_ids = history::all_node_ids(root)?;
     let total = node_ids.len() as u64;

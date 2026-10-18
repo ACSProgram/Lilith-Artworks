@@ -104,6 +104,39 @@ decision, so an untagged version is transitional.
   the oldest and newest nodes repeatedly and reports p50/p95 plus throughput
   for multi-segment reads. It is release-time decision evidence and does not
   run in daily checks or CI.
+- A neutral `contracts` module with `ReferenceInventory` and
+  `RepositoryIntegrityProvider`. History, authenticity and pin-board each
+  implement the reference inventory for their managed files; the application
+  registers the list and the disaster-recovery provider. `cleanup` no longer
+  imports pin-board path constants, and the backup core no longer imports
+  Library or Authenticity.
+- Batch cleanup backed by a connection-local `TEMP` reference table and an
+  anti-join. Confirmed cleanup commits every 512 entries, is cancellable
+  between batches, stays idempotent, and skips the reference inventory when
+  the queue is empty; unreferenced scans now collect candidates through the
+  registered inventories.
+- Per-task `OperationId` and `CancelToken` for background backup and idle
+  verification. `cancel_background` only signals background tasks, while
+  `request_cancel` still cancels everything. Tasks are registered either as
+  the serialized run-lock holder or as a read-only parallel probe, and only
+  the former counts for `cancelled()`, so a background yield request can no
+  longer abort the foreground command that asked for it.
+- Deadline-scheduled automatic backups: candidates are ordered by due time,
+  last check and branch id, per-branch failure backoff no longer blocks other
+  branches, and the idle-verification aging rule runs a ready verification
+  after every 4 consecutive automatic backups.
+- Idle verification now prepares up to 4 targets in parallel, one per Artwork,
+  and writes results back serially under the shared runtime lock. Each worker
+  has its own task guard and cancellation token.
+- Repository backup manifest v2 records both the full SHA-256 and a
+  64 KiB head/tail sample digest computed during the copy pass. Manifest
+  generation reuses those digests instead of re-reading every file, and the
+  pre-publish check defaults to sampled verification (`Sample`) while a full
+  verification remains available internally.
+- `stress_bench` gains P7 (scheduler candidate scan over 10 artworks ×
+  12 branches, 121 branches with the fixture's own main branch) and P8 (scan
+  and confirmed cleanup of 120 orphan board DDS files); P5 now records file
+  count, throughput and the sample verification mode.
 
 ### Changed
 
@@ -152,6 +185,16 @@ decision, so an untagged version is transitional.
   Cancellation is checked at every structural unit (tile) and CDC chunk,
   progress is reported in processed logical bytes, and cancelled temporary
   outputs are still removed by their guards.
+- The backup scheduler no longer parks the whole queue for 60 s after one
+  branch fails: each branch carries its own retry deadline and the loop moves
+  straight to other due branches. Idle verification is selected in a batch
+  (deduplicated per Artwork), yields without writing results when paused or
+  when foreground/manual work is pending, and remains paused together with
+  automatic backups.
+- Repository backup publication now verifies the staged bundle with sampled
+  digests by default, while still checking the exact file set, sizes and total
+  bytes. The copy-phase metadata check that rejects work files changed during
+  the copy is unchanged.
 
 ### Fixed
 

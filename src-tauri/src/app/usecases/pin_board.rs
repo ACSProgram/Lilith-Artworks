@@ -119,7 +119,8 @@ pub(crate) fn delete_board_permanently(
         let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
         let cleanup_ids = repository::delete_board_permanently(&mut connection, board_id)
             .map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })?;
     super::report_cleanup_queue(context);
     Ok(report)
@@ -131,7 +132,8 @@ pub(crate) fn empty_trash(
     let report = context.run_repository_write(|session| {
         let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
         let cleanup_ids = repository::empty_trash(&mut connection).map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })?;
     super::report_cleanup_queue(context);
     Ok(report)

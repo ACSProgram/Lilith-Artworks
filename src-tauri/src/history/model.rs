@@ -116,6 +116,8 @@ pub(crate) struct ScheduledBranch {
 #[derive(Debug, Clone)]
 pub(crate) struct IdleVerifyTarget {
     pub(crate) branch_id: String,
+    /// 用于并行校验时按 Artwork 分片：同一作品同时只跑一个校验任务。
+    pub(crate) artwork_id: String,
     pub(crate) head_history_id: String,
     pub(crate) head_created_ms: i64,
 }

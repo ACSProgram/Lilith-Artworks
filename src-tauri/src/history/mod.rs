@@ -1,9 +1,11 @@
 mod commands;
+mod contracts;
 mod deletion_repository;
 mod model;
 mod repository;
 
 pub(crate) use commands::*;
+pub(crate) use contracts::HistoryReferenceInventory;
 pub(crate) use deletion_repository::{delete_branch, delete_subtree, validate_subtree_deletion};
 pub(crate) use model::{
     ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,

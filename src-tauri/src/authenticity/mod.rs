@@ -1,6 +1,7 @@
 mod artifact;
 mod c2pa;
 mod commands;
+mod contracts;
 mod error;
 mod image_resource;
 mod model;
@@ -13,6 +14,7 @@ mod trustmark;
 
 pub(crate) use artifact::{publish_artifact, store_final_artifact};
 pub(crate) use commands::*;
+pub(crate) use contracts::ArtifactReferenceInventory;
 pub(crate) use error::AuthenticityError;
 pub(crate) use model::{
     BranchPublication, DecodeRequest, DecodeResult, EnterPublicationRequest, PublishBranchRequest,

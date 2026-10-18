@@ -31,13 +31,16 @@ src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整�
 src-tauri/src/format/                  `.clip`/`.psd` 容器探测与结构单元定位（备份与后续缩略图共用）
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
 src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
-src-tauri/src/cleanup.rs                 文件清理账本：提交后重放、路径校验、未引用文件扫描与确认清理
+src-tauri/src/contracts/               中立契约：引用清单与灾备完整性 provider
+src-tauri/src/cleanup.rs                 文件清理账本：批量 anti-join、未引用文件扫描与确认清理
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
 前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图。History、Library、Authenticity 和 Pin-board 分别由 `useHistoryController.ts`、`useLibraryController.ts`、`useAuthenticityController.ts` 和 `usePinBoardController.ts` 独占各自 `api.ts`。素材板控制器负责画板列表、选择、生命周期结算与保存/导入/导出状态；`PinBoardRenderer` 仍是纯渲染器，只处理 GPU 与交互。四个 controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，History、Library 与 Authenticity 的 busy/finally 与错误上报来自 `useAsyncOperation.ts`；素材板的传输忙碌由传输流程自己持有（同一时刻只允许一次导入或导出），不复用按计数合并的 busy。页面组件只保留视图选择、弹窗和局部交互状态。工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
 Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权、装配 `CommandContext`，然后调用 `app/usecases/` 中 GUI 与 headless 共享的业务入口。所有仓库入口都经 `OperationCoordinator` 统一取锁、取消、进度、耗时日志与事件；需要组合 checkpoint、调度唤醒、清理队列或发布流程的跨领域用例写在 `app/usecases/` 里，`app/workflows.rs` 只保留这些命令的 Tauri 适配函数。`pin_board` 命令直接在 `app/command_registry.rs` 注册，写命令走 `run_repository_write`（仓库 lease + 仓库操作锁，不取共享 `BackupState` 运行锁），浏览走共享读租约。前端命令名和 DTO 不因内部所有权变化而改变。
+
+跨模块旁路统一走中立契约层 `src-tauri/src/contracts/`：各领域用 `ReferenceInventory` 报告受管理文件、用 `RepositoryIntegrityProvider` 提供灾备副本的领域校验，应用层在 `app/contracts.rs` 注册实现。cleanup 因此不再导入画板路径常量，灾备核心也不再直接导入 Library/Authenticity；阶段 7 的画板 kind 分派在契约上扩展，不需要把领域模块互相接上。
 
 开发/验证期另有一个**无界面命令行入口**（`--headless`，由 `headless` feature 门控、**不进发布产物**）：它与 Tauri 命令层并列，是同一批领域函数的另一个适配器，只做参数解析、锁与状态装配、领域调用，不含业务判断。它只供发布前的压力测试以**独立进程**调用真实可执行文件，不创建窗口、不建托盘、不加载 webview、不经过 IPC，因此发布版的产品行为零变化。定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，面向使用者的结论见 `docs/user/stress-test-report.md`。
 
@@ -253,9 +256,9 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 普通数据库连接只使用 SQLite `READ_WRITE` 打开现有 `lilith-artworks.sqlite3`，不得带 `CREATE`。仓库目录和新 schema 创建只从 Library 显式初始化入口进入。`AppState` 缓存当前路径已通过完整校验的事实：首次访问、启动状态读取和设置保存执行 SQLite 完整性、外键、实体 UUID、受控相对路径、持久化 SHA-256 与 schema 版本检查，之后所有前台命令和后台调度统一执行轻量 format/version 检查。数据库被外部删除、清空或替换为其他格式/不受支持版本时会清除缓存并报告仓库不可用，不创建占位数据库。
 
-提交、完整创建分支、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存经 `OperationCoordinator` 取共享 `BackupState` 运行锁与仓库 lease，再调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。共享运行状态公开当前任务类型（自动备份 / 空闲链路校验 / 用户操作）：前台长命令在取得锁前登记前台等待并请求后台任务让位，调度器据此让位，并在仓库空闲时对分支 head 做链路完整性校验。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本、画板 DDS 及 C2PA 声明；同一取消命令可以中断节点之间的扫描。素材板命令走 `run_repository_write`，因此不持有共享运行锁：浏览走共享读租约，变更只持有仓库 lease + 仓库操作锁，长灾备或扫描运行期间的画板写入会等待操作锁释放。
+提交、完整创建分支、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存经 `OperationCoordinator` 取共享 `BackupState` 运行锁与仓库 lease，再调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。共享运行状态公开当前任务类型（自动备份 / 空闲链路校验 / 用户操作）：前台长命令在取得锁前登记前台等待并请求后台任务让位，调度器据此让位，并在仓库空闲时按 Artwork 并行（最多 4 个）对分支 head 做链路完整性校验，写回仍串行；连续 4 次自动备份后若已有就绪校验，先跑一轮校验防饥饿。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本、画板 DDS 及 C2PA 声明；同一取消命令可以中断节点之间的扫描。素材板命令走 `run_repository_write`，因此不持有共享运行锁：浏览走共享读租约，变更只持有仓库 lease + 仓库操作锁，长灾备或扫描运行期间的画板写入会等待操作锁释放。
 
-整仓灾备核心归 `backup/repository_backup.rs` 所有，但由 `app/workflows.rs` 同时取得共享运行锁和仓库 lease 后调用。它先 checkpoint WAL，再复制仓库内普通文件；副本通过 Library 公开打开校验、History/Backup scrub 和 Authenticity 受控文件 scrub 后生成逐文件 SHA-256 清单，最后以同卷目录重命名发布。前端只能提交文件选择器授权的目标父目录；临时 bundle 在失败或取消时清理，成功 bundle 内的 `repository/` 可作为新仓库打开。该流程不复制仓库外的分支工作文件。
+整仓灾备核心归 `backup/repository_backup.rs` 所有，但由 `app/workflows.rs` 同时取得共享运行锁和仓库 lease 后调用。它先 checkpoint WAL，再复制仓库内普通文件；复制阶段同时计算完整 SHA-256 与首尾各 64 KiB 抽样摘要并写入 v2 manifest，领域校验由应用层注入的 `RepositoryIntegrityProvider` 完成，最后以同卷目录重命名发布。发布前复核按 `Sample` 模式只重读首尾采样（`Full` 作为内部强校验选项保留），同时核对文件集合与大小。前端只能提交文件选择器授权的目标父目录；临时 bundle 在失败或取消时清理，成功 bundle 内的 `repository/` 可作为新仓库打开。该流程不复制仓库外的分支工作文件。
 
 ## 增量历史策略
 

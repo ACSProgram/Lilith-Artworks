@@ -61,7 +61,8 @@ pub(crate) fn cancel_publication(
     context.run_write_scoped(Some(branch_id), |session| {
         let cleanup_ids =
             authenticity::remove_artifact(session.root(), branch_id).map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })
 }
 
@@ -77,7 +78,8 @@ pub(crate) fn delete_certification_record(
     context.run_write_scoped(Some(&branch_id), |session| {
         let cleanup_ids =
             authenticity::remove_record(session.root(), &record_id).map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })
 }
 

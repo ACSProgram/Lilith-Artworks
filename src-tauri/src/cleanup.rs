@@ -1,22 +1,28 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File},
     io::Read,
     path::{Path, PathBuf},
 };
 
-use rusqlite::{params, Transaction};
+use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    pin_board::repository::{is_dds_name, parse_board_dds_path, BOARD_DIRECTORY},
+    cancel::CancelToken,
+    contracts::{reference_inventories, ScanCandidateFile},
     storage,
 };
 
 const REPOSITORY_FILE: &str = "repository_file";
 const REPOSITORY_DIRECTORY: &str = "repository_directory";
 const EXTERNAL_FILE: &str = "external_file";
+
+/// 每批清理的条目数。256–1000 是计划允许的区间；512 在「每批一次事务」与
+/// 「单个文件删除失败的可重试粒度」之间取中，也远低于 SQLite 的绑定参数上限
+/// （anti-join 每批最多用 `CLEANUP_BATCH_SIZE` 个占位符）。
+const CLEANUP_BATCH_SIZE: usize = 512;
 
 /// 未引用文件扫描的宽限期：修改时间晚于 `now - 30 分钟` 的文件视为可能仍属于
 /// 进行中的提交、精简或检查点发布，扫描跳过它们。取值明显大于空闲链路校验的
@@ -138,14 +144,19 @@ pub(crate) fn enqueue_released_repository_files(
     paths: &[String],
     reason: &str,
 ) -> Result<Vec<String>, String> {
+    // 一次收集全部引用，再逐个路径判定：避免「每释放一个文件查五张表」。
+    let referenced = reference_inventories()
+        .collect_paths(transaction)
+        .map_err(|error| format!("无法读取仓库引用清单：{error}"))?;
     let mut seen = HashSet::new();
     let mut ids = Vec::new();
     for path in paths {
-        if !seen.insert(path.as_str()) {
+        let normalized = path.trim();
+        if !seen.insert(normalized) {
             continue;
         }
-        if referenced_path_kind(transaction, REPOSITORY_FILE, path)?.is_none() {
-            ids.push(enqueue_repository_file(transaction, path, reason)?);
+        if !referenced.contains_key(normalized) {
+            ids.push(enqueue_repository_file(transaction, normalized, reason)?);
         }
     }
     Ok(ids)
@@ -255,10 +266,105 @@ pub(crate) fn list_pending(root: &Path) -> Result<Vec<PendingCleanupEntry>, Stri
 /// 任意路径删除；因此它只在用户于设置页逐条确认后，以**显式 id** 才会执行。
 /// 启动时的自动重放与设置页的「全部重试」都走空 id 这条路径，所以被投毒的仓库
 /// 无法借启动流程删除任意文件。
+///
+/// 引用复查使用连接内 `TEMP` 引用表与 anti-join：引用清单由领域 provider 提供，
+/// 本模块不再认识画板路径布局；结果按 [`CLEANUP_BATCH_SIZE`] 分批提交，每批可取消
+/// 且幂等。
 pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport, String> {
+    run_internal(root, requested_ids, &CancelToken::standalone())
+}
+
+/// 与 [`run`] 相同，但允许在批量之间取消；已处理的批次仍会提交，剩余条目留在
+/// 队列，下一次重放幂等继续。
+pub(crate) fn run_cancellable(
+    root: &Path,
+    requested_ids: &[String],
+    cancel: &CancelToken,
+) -> Result<CleanupReport, String> {
+    run_internal(root, requested_ids, cancel)
+}
+
+fn run_internal(
+    root: &Path,
+    requested_ids: &[String],
+    cancel: &CancelToken,
+) -> Result<CleanupReport, String> {
     let requested = requested_ids.iter().cloned().collect::<HashSet<_>>();
     let explicit = !requested.is_empty();
-    let connection = storage::open(root)?;
+    let mut connection = storage::open(root)?;
+    let entries = load_pending_entries(&connection, &requested, explicit)?;
+    if entries.is_empty() {
+        // 队列为空时不读取引用清单：启动时的自动重放与「全部重试」常常无事可做，
+        // 整份清单在大型仓库上并不便宜。
+        return Ok(CleanupReport {
+            cleaned_count: 0,
+            pending_count: pending_count_with_connection(&connection)?,
+            failures: Vec::new(),
+        });
+    }
+    populate_reference_table(&mut connection)?;
+
+    let mut cleaned_count = 0;
+    let mut failures = Vec::new();
+    let mut cancelled = false;
+    for batch in entries.chunks(CLEANUP_BATCH_SIZE) {
+        let exact_paths = batch
+            .iter()
+            .filter(|entry| entry.path_kind != REPOSITORY_DIRECTORY)
+            .map(|entry| entry.path.trim())
+            .collect::<Vec<_>>();
+        let referenced = referenced_exact_batch(&connection, &exact_paths)?;
+        let mut outcomes = Vec::with_capacity(batch.len());
+        for entry in batch {
+            if cancel.is_cancelled() {
+                cancelled = true;
+                break;
+            }
+            let reference = if entry.path_kind == REPOSITORY_DIRECTORY {
+                referenced_directory(&connection, &entry.path)?
+            } else {
+                referenced.get(entry.path.trim()).cloned()
+            };
+            let result = match reference {
+                Some(owner) => Err(format!("文件仍被 {owner} 引用，已保留")),
+                None => remove_entry(root, entry),
+            };
+            outcomes.push((entry.id.clone(), entry.path.clone(), result));
+        }
+        commit_batch(
+            &mut connection,
+            &outcomes,
+            &mut cleaned_count,
+            &mut failures,
+        )?;
+        if cancelled {
+            break;
+        }
+    }
+
+    let pending_count = pending_count_with_connection(&connection)?;
+    log::info!(
+        "file cleanup finished: cleaned={cleaned_count}, failed={}, pending={pending_count}, cancelled={cancelled}",
+        failures.len(),
+    );
+    if cancelled {
+        // 已提交的批次不回滚：报告本次实际清理数量，剩余条目留给下一次重放。
+        return Err(format!(
+            "清理已取消（本次已清理 {cleaned_count} 条，队列剩余 {pending_count} 条）"
+        ));
+    }
+    Ok(CleanupReport {
+        cleaned_count,
+        pending_count,
+        failures,
+    })
+}
+
+fn load_pending_entries(
+    connection: &Connection,
+    requested: &HashSet<String>,
+    explicit: bool,
+) -> Result<Vec<PendingCleanup>, String> {
     let mut statement = connection
         .prepare(
             "SELECT id, path_kind, path, expected_sha256
@@ -277,58 +383,139 @@ pub(crate) fn run(root: &Path, requested_ids: &[String]) -> Result<CleanupReport
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
-    drop(statement);
+    Ok(entries
+        .into_iter()
+        .filter(|entry| {
+            if explicit {
+                requested.contains(&entry.id)
+            } else {
+                entry.path_kind != EXTERNAL_FILE
+            }
+        })
+        .collect())
+}
 
-    let mut cleaned_count = 0;
-    let mut failures = Vec::new();
-    for entry in entries.into_iter().filter(|entry| {
-        if explicit {
-            requested.contains(&entry.id)
-        } else {
-            entry.path_kind != EXTERNAL_FILE
+/// 把领域 provider 提供的引用清单放进连接内临时表。表随连接结束消失，不产生
+/// 持久 schema 变更；持久路径索引留给阶段 7 的 v4 → v5 迁移。
+fn populate_reference_table(connection: &mut Connection) -> Result<(), String> {
+    let targets = reference_inventories()
+        .collect_targets(connection)
+        .map_err(|error| format!("无法读取仓库引用清单：{error}"))?;
+    connection
+        .execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS cleanup_references (
+               path TEXT PRIMARY KEY,
+               owner TEXT NOT NULL
+             ) WITHOUT ROWID;
+             DELETE FROM cleanup_references;",
+        )
+        .map_err(storage::database_error)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    {
+        let mut statement = transaction
+            .prepare("INSERT OR IGNORE INTO cleanup_references (path, owner) VALUES (?1, ?2)")
+            .map_err(storage::database_error)?;
+        for target in targets {
+            statement
+                .execute(params![target.path, target.owner.label()])
+                .map_err(storage::database_error)?;
         }
-    }) {
-        let result = match referenced_path(&connection, &entry) {
-            Ok(Some(reference)) => Err(format!("文件仍被 {reference} 引用，已保留")),
-            Ok(None) => remove_entry(root, &entry),
-            Err(error) => Err(error),
-        };
+    }
+    transaction.commit().map_err(storage::database_error)
+}
+
+/// 一批文件路径的 anti-join：一次查询返回仍被引用的子集。
+fn referenced_exact_batch(
+    connection: &Connection,
+    paths: &[&str],
+) -> Result<HashMap<String, String>, String> {
+    let mut unique = paths
+        .iter()
+        .map(|path| path.trim())
+        .filter(|path| !path.is_empty())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    unique.sort_unstable();
+    if unique.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = std::iter::repeat("?")
+        .take(unique.len())
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!("SELECT path, owner FROM cleanup_references WHERE path IN ({placeholders})");
+    let mut statement = connection.prepare(&sql).map_err(storage::database_error)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(unique.iter().copied()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    Ok(rows.into_iter().collect())
+}
+
+/// 目录条目的引用检查：任意受管理路径位于该目录下即视为仍被引用。
+fn referenced_directory(connection: &Connection, path: &str) -> Result<Option<String>, String> {
+    use rusqlite::OptionalExtension;
+    let prefix = format!(
+        "{}/%",
+        escape_like(path.trim().trim_end_matches(['/', '\\']))
+    );
+    connection
+        .query_row(
+            "SELECT owner FROM cleanup_references WHERE path LIKE ?1 ESCAPE '\\' LIMIT 1",
+            [prefix],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)
+}
+
+fn escape_like(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
+
+fn commit_batch(
+    connection: &mut Connection,
+    outcomes: &[(String, String, Result<(), String>)],
+    cleaned_count: &mut usize,
+    failures: &mut Vec<CleanupFailure>,
+) -> Result<(), String> {
+    if outcomes.is_empty() {
+        return Ok(());
+    }
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let now = storage::now_ms()?;
+    for (id, path, result) in outcomes {
         match result {
             Ok(()) => {
-                connection
-                    .execute(
-                        "DELETE FROM pending_file_cleanup WHERE id = ?1",
-                        [&entry.id],
-                    )
+                transaction
+                    .execute("DELETE FROM pending_file_cleanup WHERE id = ?1", [id])
                     .map_err(storage::database_error)?;
-                cleaned_count += 1;
+                *cleaned_count += 1;
             }
             Err(error) => {
-                connection
+                transaction
                     .execute(
                         "UPDATE pending_file_cleanup
                          SET last_attempt_ms = ?2, last_error = ?3 WHERE id = ?1",
-                        params![entry.id, storage::now_ms()?, error],
+                        params![id, now, error],
                     )
                     .map_err(storage::database_error)?;
                 failures.push(CleanupFailure {
-                    id: entry.id,
-                    path: entry.path,
-                    error,
+                    id: id.clone(),
+                    path: path.clone(),
+                    error: error.clone(),
                 });
             }
         }
     }
-    let pending_count = pending_count_with_connection(&connection)?;
-    log::info!(
-        "file cleanup finished: cleaned={cleaned_count}, failed={}, pending={pending_count}",
-        failures.len(),
-    );
-    Ok(CleanupReport {
-        cleaned_count,
-        pending_count,
-        failures,
-    })
+    transaction.commit().map_err(storage::database_error)
 }
 
 /// 提交成功后重放清理队列（单遍）。
@@ -357,17 +544,14 @@ pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
     }
 }
 
-/// 扫描 `artworks/*/snapshots/`、`artworks/*/deltas/` 与 `artworks/*/boards/*/`
-/// 中未被任何数据库引用的 snapshot/delta 与画板 DDS 文件（崩溃孤儿、手工复制或
-/// 历史迁移遗留），作为清理账本的发现机制。只报告、不删除；确认清理由
-/// `cleanup_unreferenced` 完成。
+/// 扫描 `artworks/*/` 下由各领域 provider 声明的受管理文件（历史 snapshot/delta
+/// 与画板 DDS 等未引用崩溃孤儿、手工复制或历史迁移遗留），作为清理账本的发现
+/// 机制。只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
 ///
-/// 护栏：只考虑匹配既有命名模式的文件（snapshot `<UUID>.lbc` /
-/// `<UUID>-repair-<UUID>.lbc`，delta `<UUID>-to-<UUID>.lbd`，画板 DDS
-/// `<image-id>.dds`）；只报告修改时间早于宽限期（`SCAN_GRACE_MS`）的文件，避免
-/// 与进行中的提交、精简、检查点发布或画板写入赛跑；逐文件复用
-/// `referenced_path_kind` 做反向引用检查（含 `pin_board_images`）。调用方须在仓库
-/// 操作锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
+/// 护栏：只考虑 provider 报告的命名模式与目录；只报告修改时间早于宽限期
+/// （`SCAN_GRACE_MS`）的文件，避免与进行中的提交、精简、检查点发布或画板写入
+/// 赛跑；引用判定一次读取完整引用清单，不再逐文件查五张表。调用方须在仓库操作
+/// 锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
 pub(crate) fn scan_unreferenced(
     root: &Path,
     cancelled: impl Fn() -> bool,
@@ -375,17 +559,20 @@ pub(crate) fn scan_unreferenced(
 ) -> Result<Vec<ScanCandidate>, String> {
     let connection = storage::open(root)?;
     let cutoff = storage::now_ms()?.saturating_sub(SCAN_GRACE_MS);
+    let referenced = reference_inventories()
+        .collect_paths(&connection)
+        .map_err(|error| format!("无法读取仓库引用清单：{error}"))?;
     let mut files = Vec::new();
     collect_scan_files(root, &mut files)?;
-    files.sort_by(|left, right| left.0.cmp(&right.0));
+    files.sort_by(|left, right| left.path.cmp(&right.path));
 
     let total = files.len() as u64;
     let mut candidates = Vec::new();
-    for (index, (path, reason)) in files.into_iter().enumerate() {
+    for (index, file) in files.into_iter().enumerate() {
         if cancelled() {
             return Err("未引用文件扫描已取消".into());
         }
-        let metadata = match fs::metadata(&path) {
+        let metadata = match fs::metadata(&file.path) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 progress(index as u64 + 1, total);
@@ -400,12 +587,12 @@ pub(crate) fn scan_unreferenced(
             progress(index as u64 + 1, total);
             continue;
         }
-        let relative = storage::relative_path(root, &path)?;
-        if referenced_path_kind(&connection, REPOSITORY_FILE, &relative)?.is_none() {
+        let relative = storage::relative_path(root, &file.path)?;
+        if !referenced.contains_key(&relative) {
             candidates.push(ScanCandidate {
                 path: relative,
                 byte_size: metadata.len(),
-                reason: reason.to_owned(),
+                reason: file.reason.to_owned(),
             });
         }
         progress(index as u64 + 1, total);
@@ -418,7 +605,16 @@ pub(crate) fn scan_unreferenced(
 /// 每条候选入队时登记当前 SHA-256 作为期望摘要（重放时内容已变即保留）；候选
 /// 文件已不存在时跳过。幂等：重复调用不会重复删除，文件已被移除也不报错；重放
 /// 前仍会复查引用，候选在确认前重新被引用时条目留队可重试。
+#[cfg(test)]
 pub(crate) fn cleanup_unreferenced(root: &Path, paths: &[String]) -> Result<CleanupReport, String> {
+    cleanup_unreferenced_cancellable(root, paths, &CancelToken::standalone())
+}
+
+pub(crate) fn cleanup_unreferenced_cancellable(
+    root: &Path,
+    paths: &[String],
+    cancel: &CancelToken,
+) -> Result<CleanupReport, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let mut cleanup_ids = Vec::new();
@@ -444,18 +640,20 @@ pub(crate) fn cleanup_unreferenced(root: &Path, paths: &[String]) -> Result<Clea
         });
     }
     drop(connection);
-    run(root, &cleanup_ids)
+    run_cancellable(root, &cleanup_ids, cancel)
 }
 
-/// 收集扫描范围内的候选文件（仓库相对路径不在此处计算），保留其目录归属对应的
-/// 报告原因。目录缺失（如新仓库尚无任何作品）按空处理。
-fn collect_scan_files(root: &Path, files: &mut Vec<(PathBuf, &'static str)>) -> Result<(), String> {
+/// 收集扫描范围内的候选文件。每个 Artwork 的实际布局由领域 provider 自己解释，
+/// 本模块只负责遍历作品目录与统一宽限期/引用判定。目录缺失（如新仓库尚无任何
+/// 作品）按空处理。
+fn collect_scan_files(root: &Path, files: &mut Vec<ScanCandidateFile>) -> Result<(), String> {
     let artworks = root.join("artworks");
     let entries = match fs::read_dir(&artworks) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(format!("无法读取作品目录：{error}")),
     };
+    let inventories = reference_inventories();
     for entry in entries {
         let entry = entry.map_err(|error| format!("无法读取作品目录项：{error}"))?;
         let file_type = entry
@@ -464,101 +662,9 @@ fn collect_scan_files(root: &Path, files: &mut Vec<(PathBuf, &'static str)>) -> 
         if !file_type.is_dir() {
             continue;
         }
-        let directory = entry.path();
-        collect_scan_directory(
-            &directory.join("snapshots"),
-            is_snapshot_name,
-            "历史快照未被引用",
-            files,
-        )?;
-        collect_scan_directory(
-            &directory.join("deltas"),
-            is_delta_name,
-            "历史增量未被引用",
-            files,
-        )?;
-        collect_board_scan_files(&directory, files)?;
+        inventories.scan_candidates(&entry.path(), files)?;
     }
     Ok(())
-}
-
-/// 收集某个 Artwork 下全部画板目录中的 DDS 文件。目录缺失按空处理。
-fn collect_board_scan_files(
-    artwork_directory: &Path,
-    files: &mut Vec<(PathBuf, &'static str)>,
-) -> Result<(), String> {
-    let boards = artwork_directory.join(BOARD_DIRECTORY);
-    let entries = match fs::read_dir(&boards) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("无法读取画板目录：{error}")),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("无法读取画板目录项：{error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("无法读取画板目录项类型：{error}"))?;
-        if !file_type.is_dir() {
-            continue;
-        }
-        collect_scan_directory(&entry.path(), is_dds_name, "画板图片未被引用", files)?;
-    }
-    Ok(())
-}
-
-fn collect_scan_directory(
-    directory: &Path,
-    matches_name: fn(&str) -> bool,
-    reason: &'static str,
-    files: &mut Vec<(PathBuf, &'static str)>,
-) -> Result<(), String> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("无法读取目录 {}：{error}", directory.display())),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("无法读取目录项：{error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("无法读取目录项类型：{error}"))?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if matches_name(name) {
-            files.push((entry.path(), reason));
-        }
-    }
-    Ok(())
-}
-
-/// snapshot 命名：`<history-id>.lbc`，或修复 head snapshot 时的
-/// `<history-id>-repair-<uuid>.lbc`。
-fn is_snapshot_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".lbc") else {
-        return false;
-    };
-    if uuid::Uuid::parse_str(stem).is_ok() {
-        return true;
-    }
-    stem.split_once("-repair-").is_some_and(|(head, suffix)| {
-        uuid::Uuid::parse_str(head).is_ok() && uuid::Uuid::parse_str(suffix).is_ok()
-    })
-}
-
-/// delta 命名：`<child-id>-to-<parent-id>.lbd`。UUID 只含十六进制字符与连字符，
-/// 因此 `-to-` 不会出现在单个 UUID 内部。
-fn is_delta_name(name: &str) -> bool {
-    let Some(stem) = name.strip_suffix(".lbd") else {
-        return false;
-    };
-    stem.split_once("-to-").is_some_and(|(child, parent)| {
-        uuid::Uuid::parse_str(child).is_ok() && uuid::Uuid::parse_str(parent).is_ok()
-    })
 }
 
 fn system_time_ms(time: std::time::SystemTime) -> Result<i64, String> {
@@ -577,94 +683,6 @@ fn remove_entry(root: &Path, entry: &PendingCleanup) -> Result<(), String> {
         EXTERNAL_FILE => remove_external_file(&entry.path, entry.expected_sha256.as_deref()),
         _ => Err("待清理条目的路径类型无效".into()),
     }
-}
-
-fn referenced_path(
-    connection: &rusqlite::Connection,
-    entry: &PendingCleanup,
-) -> Result<Option<String>, String> {
-    referenced_path_kind(connection, &entry.path_kind, &entry.path)
-}
-
-/// 复查某个路径是否仍被数据库引用（五张表），返回引用来源标签。
-///
-/// `run` 的重放与领域函数在事务内入队前的引用复查共用这一份查询：传入
-/// `&Transaction` 时可见本事务尚未提交的写入，因此「先改图、再复查、再入队」
-/// 与「提交后重放」看到的是同一套引用关系，两条路径不会得出相反结论。
-pub(crate) fn referenced_path_kind(
-    connection: &rusqlite::Connection,
-    path_kind: &str,
-    path: &str,
-) -> Result<Option<String>, String> {
-    let reference = match path_kind {
-        REPOSITORY_FILE => {
-            let reference = connection
-                .query_row(
-                    "SELECT CASE
-                       WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path = ?1) THEN '最终成品'
-                       WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path = ?1) THEN '认证副本'
-                       WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1 OR delta_path = ?1) THEN '历史节点'
-                       WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1) THEN '历史边'
-                     END",
-                    [path],
-                    |row| row.get(0),
-                )
-                .map_err(storage::database_error)?;
-            match reference {
-                Some(reference) => Some(reference),
-                None => referenced_pin_board_dds(connection, path)?,
-            }
-        }
-        REPOSITORY_DIRECTORY => {
-            let prefix = format!("{}/%", path.trim_end_matches(['/', '\\']));
-            connection
-                .query_row(
-                    "SELECT CASE
-                       WHEN EXISTS(SELECT 1 FROM final_artifacts WHERE source_path LIKE ?1) THEN '最终成品'
-                       WHEN EXISTS(SELECT 1 FROM certification_records WHERE stored_path LIKE ?1) THEN '认证副本'
-                       WHEN EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path LIKE ?1 OR delta_path LIKE ?1) THEN '历史节点'
-                       WHEN EXISTS(SELECT 1 FROM history_edges WHERE delta_path LIKE ?1) THEN '历史边'
-                     END",
-                    [&prefix],
-                    |row| row.get(0),
-                )
-                .map_err(storage::database_error)?
-        }
-        EXTERNAL_FILE => connection
-            .query_row(
-                "SELECT CASE WHEN EXISTS(
-                   SELECT 1 FROM certification_records WHERE output_path = ?1
-                 ) THEN '认证导出记录' END",
-                [path],
-                |row| row.get(0),
-            )
-            .map_err(storage::database_error)?,
-        _ => None,
-    };
-    Ok(reference)
-}
-
-/// 复查画板 DDS 是否仍被 `pin_board_images` 记录引用（画板记录删除后即不再引用）。
-/// 路径形状交给 `pin_board::repository::parse_board_dds_path` 解析；非画板 DDS 路径
-/// 一律返回 `None`。
-fn referenced_pin_board_dds(
-    connection: &rusqlite::Connection,
-    path: &str,
-) -> Result<Option<String>, String> {
-    let Some((artwork_id, board_id, image_id)) = parse_board_dds_path(path) else {
-        return Ok(None);
-    };
-    connection
-        .query_row(
-            "SELECT CASE WHEN EXISTS(
-               SELECT 1 FROM pin_board_images i
-               JOIN pin_boards b ON b.id = i.board_id
-               WHERE i.id = ?1 AND i.board_id = ?2 AND b.artwork_id = ?3
-             ) THEN '画板图片' END",
-            params![image_id, board_id, artwork_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)
 }
 
 fn remove_repository_file(
@@ -1267,7 +1285,7 @@ mod tests {
         let board = root
             .join("artworks")
             .join(&artwork_id)
-            .join(BOARD_DIRECTORY)
+            .join("boards")
             .join(board_id.to_string());
         fs::create_dir_all(&board).unwrap();
 
@@ -1296,5 +1314,121 @@ mod tests {
         assert_eq!(report.cleaned_count, 1);
         assert!(!orphan.exists());
         assert!(referenced.is_file());
+    }
+
+    fn enqueue_missing_files(root: &Path, count: usize) {
+        let mut connection = storage::open(root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        for index in 0..count {
+            enqueue_repository_file(
+                &transaction,
+                &format!("artworks/missing-{index}.lbc"),
+                "test",
+            )
+            .unwrap();
+        }
+        transaction.commit().unwrap();
+    }
+
+    #[test]
+    fn cleanup_processes_large_queues_in_batches() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        enqueue_missing_files(&root, 1100);
+
+        let report = run(&root, &[]).unwrap();
+
+        assert_eq!(report.cleaned_count, 1100);
+        assert_eq!(report.pending_count, 0);
+        assert!(report.failures.is_empty());
+    }
+
+    #[test]
+    fn cancelled_cleanup_commits_processed_batches_and_keeps_the_rest() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        enqueue_missing_files(&root, 1100);
+        let checks = Arc::new(AtomicUsize::new(0));
+        let cancel = CancelToken::with_source({
+            let checks = checks.clone();
+            move || checks.fetch_add(1, Ordering::SeqCst) >= 600
+        });
+
+        let error = run_cancellable(&root, &[], &cancel).unwrap_err();
+
+        assert!(error.contains("已取消"), "{error}");
+        // 第一批 512 条与第二批已处理的 88 条提交，其余留在队列可幂等重试。
+        assert_eq!(list_pending(&root).unwrap().len(), 500);
+    }
+
+    #[test]
+    fn cleanup_keeps_a_directory_with_a_referenced_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let shared = root.join("artworks").join("shared");
+        fs::create_dir_all(&shared).unwrap();
+        fs::write(shared.join("snapshot.lbc"), b"payload").unwrap();
+        insert_history_node(&root, "artworks/shared/snapshot.lbc");
+        let id = {
+            let mut connection = storage::open(&root).unwrap();
+            let transaction = connection.transaction().unwrap();
+            let id = enqueue_repository_directory(&transaction, "artworks/shared", "test").unwrap();
+            transaction.commit().unwrap();
+            id
+        };
+
+        let report = run(&root, &[id]).unwrap();
+
+        assert_eq!(report.failures.len(), 1);
+        assert!(report.failures[0].error.contains("仍被"), "{report:?}");
+        assert!(shared.is_dir());
+        assert_eq!(report.pending_count, 1);
+    }
+
+    #[test]
+    fn explicit_external_cleanup_keeps_a_path_referenced_by_a_certification_record() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let output = directory.path().join("output.jpg");
+        crate::library::initialize(&root).unwrap();
+        fs::write(&output, b"original").unwrap();
+        let expected = sha256_file(&output).unwrap();
+        let id = enqueue_external(&root, &output, &expected);
+        {
+            let connection = storage::open(&root).unwrap();
+            connection
+                .execute_batch("PRAGMA foreign_keys = OFF;")
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO certification_records
+                       (id, final_artifact_id, branch_id, history_id, watermark_id,
+                        trustmark_enabled, output_path, stored_path, output_sha256,
+                        output_bytes, title, creator, rights_statement,
+                        authentication_content, regions_json, created_ms)
+                     VALUES ('record', 'artifact', 'branch', 'history', NULL, 0, ?1,
+                             'artworks/stored.jpg', ?2, 8, 't', 'c', 'r', 'a', '[]', 0)",
+                    params![storage::display_path(&output), expected],
+                )
+                .unwrap();
+        }
+
+        let report = run(&root, &[id]).unwrap();
+
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0].error.contains("认证导出记录"),
+            "{report:?}"
+        );
+        assert!(output.is_file());
+        assert_eq!(report.pending_count, 1);
     }
 }

@@ -159,7 +159,8 @@ pub(crate) fn permanently_delete_trash(
     let report = context.run_write(|session| {
         let cleanup_ids =
             library::permanently_delete_trash(session.root(), &ids).map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })?;
     context.backup_state().wake_scheduler();
     super::report_cleanup_queue(context);
@@ -171,7 +172,8 @@ pub(crate) fn empty_trash(
 ) -> Result<cleanup::CleanupReport, CommandError> {
     let report = context.run_write(|session| {
         let cleanup_ids = library::empty_trash(session.root()).map_err(CommandError::from)?;
-        cleanup::run(session.root(), &cleanup_ids).map_err(CommandError::from)
+        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+            .map_err(CommandError::from)
     })?;
     context.backup_state().wake_scheduler();
     super::report_cleanup_queue(context);

@@ -5,21 +5,20 @@ use std::sync::{
 
 use crate::backup::BackupState;
 
-/// 0.3 的统一取消令牌。阶段 4 的 ChunkFile I/O 直接消费它；阶段 5 再把它
-/// 扩展为每任务独立令牌。放在 crate 根而不是命令运行时里，是为了让底层
-/// 分块/恢复算法不必依赖 `app` 层。
+/// 0.3 的统一取消令牌。阶段 4 的 ChunkFile I/O 直接消费它；阶段 5 起每个登记
+/// 的任务各持一份独立令牌，`BackupState` 只按目标取消。放在 crate 根而不是命令
+/// 运行时里，是为了让底层的分块/恢复算法不必依赖 `app` 层。
 ///
 /// 结构上刻意只暴露「是否已取消」，不暴露底层标志：调用方不需要知道取消来自
-/// `BackupState`、无头闸门还是未来的 per-operation token。
+/// `BackupState`、无头闸门还是令牌自己的取消位。
 #[derive(Clone)]
 pub(crate) struct CancelToken {
     local: Arc<AtomicBool>,
     source: Arc<dyn Fn() -> bool + Send + Sync>,
 }
 
-#[allow(dead_code)]
 impl CancelToken {
-    /// 不连接任何外部来源的令牌，供测试与尚未接入共享运行态的操作使用。
+    /// 不连接任何外部来源的令牌，供测试与一次性重放使用。
     pub(crate) fn standalone() -> Self {
         Self {
             local: Arc::new(AtomicBool::new(false)),
@@ -27,8 +26,9 @@ impl CancelToken {
         }
     }
 
-    /// 观察现有 `BackupState` 的共享取消标志。GUI 命令在取得运行锁时该标志会被
-    /// 清零，因此它只覆盖当前正在执行的任务。
+    /// 观察 `BackupState` 中串行任务的取消状态。命令取得运行锁后拥有自己的任务
+    /// 令牌，`request_cancel` 置位后由这里读到；并行后台探针的让位取消不计入，
+    /// 因此不会误伤刚进站的前台命令。
     pub(crate) fn for_backup(state: BackupState) -> Self {
         Self {
             local: Arc::new(AtomicBool::new(false)),
@@ -48,8 +48,8 @@ impl CancelToken {
         self.local.load(Ordering::SeqCst) || (self.source)()
     }
 
-    /// 令牌自身的取消位。阶段 5 的 per-operation 取消会走这里；当前共享运行态
-    /// 仍由 `BackupState::request_cancel` 置位。
+    /// 令牌自身的取消位：`BackupState` 的 `request_cancel` / `cancel_background`
+    /// 通过它取消目标任务的独立令牌。
     pub(crate) fn cancel(&self) {
         self.local.store(true, Ordering::SeqCst);
     }

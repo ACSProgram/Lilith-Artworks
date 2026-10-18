@@ -4,7 +4,7 @@
 //! 目的是给重构一个可比的基线——此前的性能断言只有「上界」（例如峰值内存 ≤ 逻辑大小
 //! 的 1/8），没有基线，因此「某次重构让吞吐缓慢退化」不会被任何断言发现。
 //!
-//! 六项都走**真实可执行文件**（与其余压力组同一纪律），因此耗时含进程启动与打开仓库的
+//! 各项都走**真实可执行文件**（与其余压力组同一纪律），因此耗时含进程启动与打开仓库的
 //! 固定开销；这也是产品在被调用时实际付出的成本。小文件让固定开销可见，所以同时记录总
 //! 耗时与摊薄值，回归看的是**同一档位下的相对变化**，不是绝对值。
 //!
@@ -17,11 +17,15 @@
 //! - **P3 画板 DDS**：导入 16 张 512 级 PNG（BC7 编码）与全库 DDS 完整性扫描的每张耗时。
 //! - **P4 库树与搜索**：[`LIBRARY_GROUPS`] 个分组 × [`LIBRARY_PER_GROUP`] 个作品下，
 //!   整树装配（`list-tree`）与两种查询（命中全部 / 命中一个）的耗时。
-//! - **P5 整仓灾备**：多作品多版本的仓库复制（扫描 + 复制 + 校验 + 发布）的总耗时与吞吐。
+//! - **P5 整仓灾备**：多作品多版本的仓库复制（扫描 + 复制 + 校验 + 发布）的总耗时与吞吐；
+//!   复制阶段同时计算完整/抽样摘要，发布前采用首尾各 64 KiB 的抽样复核。
 //! - **P6 清理扫描**：全库未引用文件扫描与待清理队列重放的耗时（此前只有规模数字，
 //!   没有基线，因此 D/E 组的耗时退化不会被任何断言发现）。
+//! - **P7 多分支调度**：夹具作品之外再造 [`SCHEDULER_ARTWORKS`] 个作品、每作品
+//!   1 个主分支 + [`SCHEDULER_FORKS_PER_ARTWORK`] 个分叉下的候选扫描成本。
+//! - **P8 大规模孤儿清理**：[`ORPHAN_FILES`] 个无记录画板 DDS 的扫描与确认清理。
 //!
-//! P4–P6 各测 [`REPEATS`] 轮取最小值，削弱调度抖动；这是**相对基线**能用的前提。
+//! P4–P8 各测 [`REPEATS`] 轮取最小值，削弱调度抖动；这是**相对基线**能用的前提。
 //!
 //! **断言只设灾难性上界**（数量级失控），避免把环境噪声变成 flaky；真正的回归门是
 //! `LILITH_STRESS_PERF_STRICT=1` 与 `tests/perf-baseline.json` 的比对（见 [`emit`]）。
@@ -40,10 +44,10 @@
 mod stress_support;
 
 use std::{
-    fs,
+    fs::{self, File},
     path::{Path, PathBuf},
     sync::Mutex,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use serde_json::{json, Map, Value};
@@ -74,7 +78,14 @@ const IO_FILE_BYTES: usize = 256 * 1024;
 const SCAN_ARTWORKS: usize = 6;
 const SCAN_COMMITS: usize = 4;
 const SCAN_FILE_BYTES: usize = 96 * 1024;
-/// P4–P6 的重测轮数：取最小值以削弱调度抖动（回归看的是同一档位下的相对变化）。
+/// P7 的多分支规模：10 个作品 ×（主分支 + 11 个分叉）+ 夹具自带的主分支
+/// = 121 条调度分支。
+const SCHEDULER_ARTWORKS: usize = 10;
+const SCHEDULER_FORKS_PER_ARTWORK: usize = 11;
+/// P8 的大规模孤儿：120 个画板 DDS 候选，一次扫描并确认清理。
+const ORPHAN_FILES: usize = 120;
+const ORPHAN_FILE_BYTES: usize = 16 * 1024;
+/// P4–P8 的重测轮数：取最小值以削弱调度抖动（回归看的是同一档位下的相对变化）。
 const REPEATS: usize = 3;
 
 /// 灾难性回归护栏（**只拦数量级失控**，正常波动远在其下）。
@@ -88,6 +99,8 @@ const CATASTROPHIC_LIBRARY_LIST_MS: f64 = 60_000.0;
 const CATASTROPHIC_LIBRARY_SEARCH_MS: f64 = 60_000.0;
 const CATASTROPHIC_BACKUP_MS: f64 = 600_000.0;
 const CATASTROPHIC_CLEANUP_SCAN_MS: f64 = 300_000.0;
+const CATASTROPHIC_SCHEDULER_SCAN_MS: f64 = 60_000.0;
+const CATASTROPHIC_ORPHAN_CLEANUP_MS: f64 = 300_000.0;
 
 // ---------------------------------------------------------------------------
 // 性能基线的记录、更新与比对
@@ -890,7 +903,11 @@ fn p5_repository_backup_io_baseline() {
             "commitsPerArtwork": IO_COMMITS,
             "fileBytes": IO_FILE_BYTES,
             "repositoryBytes": repository_bytes,
+            "fileCount": outcome.data_u64("fileCount"),
+            "totalBytes": outcome.data_u64("totalBytes"),
             "mebibytesPerSecond": bytes_per_second / (1024.0 * 1024.0),
+            // 发布前复核采用首尾各 64 KiB 的抽样模式；完整摘要仍在 manifest 里。
+            "verification": "sample",
         }),
     );
 
@@ -952,6 +969,204 @@ fn p6_cleanup_scan_baseline() {
             "commitsPerArtwork": SCAN_COMMITS,
             "repositoryBytes": tree_usage(&fixture.workspace).repository,
             "repeatMinOf": REPEATS,
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P7 多分支调度候选
+// ---------------------------------------------------------------------------
+
+/// P7：多分支仓库上的调度候选扫描。
+///
+/// `scheduler-scan` 走与调度器相同的 `list_scheduled` 只读查询；这里在夹具自带的
+/// 一个作品之外再造 [`SCHEDULER_ARTWORKS`] 个作品，每个作品主分支 +
+/// [`SCHEDULER_FORKS_PER_ARTWORK`] 个分叉，覆盖 deadline 队列在百余条分支上的
+/// 候选生成成本。
+#[test]
+fn p7_scheduler_candidate_scan_baseline() {
+    let fixture = ArtworkFixture::new();
+    // 夹具自带一条主分支。
+    let mut branches = 1_u64;
+    let source = fixture.workspace.work("scheduler-source.bin");
+    for artwork in 0..SCHEDULER_ARTWORKS {
+        write_work_file(&source, 4 * 1024, 0xC00 + artwork as u64);
+        let created = fixture
+            .command("create-artwork")
+            .arg("title", &format!("Scheduler {artwork:03}"))
+            .arg("branch-title", "Main")
+            .arg("source", source.to_string_lossy())
+            .finish();
+        created.expect_ok();
+        let artwork_id = created.data_str("artworkId");
+        let main_branch = created.data_str("branchId");
+        write_work_file(&source, 4 * 1024, 0xC80 + artwork as u64);
+        let committed = fixture
+            .command("commit")
+            .arg("branch", &main_branch)
+            .arg("commit-kind", "manual")
+            .arg("note", "scheduler base")
+            .finish();
+        committed.expect_ok();
+        let history_id = committed.data_str("historyId");
+        branches += 1;
+
+        for fork in 0..SCHEDULER_FORKS_PER_ARTWORK {
+            let branch_source = fixture
+                .workspace
+                .work(&format!("scheduler-{artwork:02}-{fork:02}.bin"));
+            write_work_file(
+                &branch_source,
+                4 * 1024,
+                0xD00 + (artwork * 16 + fork) as u64,
+            );
+            fixture
+                .command("create-branch")
+                .arg("artwork", &artwork_id)
+                .arg("history", &history_id)
+                .arg("branch-title", format!("Fork {fork:02}"))
+                .arg("source", branch_source.to_string_lossy())
+                .finish()
+                .expect_ok();
+            branches += 1;
+        }
+    }
+
+    let scan_ms = repeat_min(|| {
+        let outcome = fixture.command("scheduler-scan").finish();
+        assert_eq!(
+            outcome.data_u64("branchCount"),
+            branches,
+            "调度候选数量与预期不符：\n{}",
+            outcome.describe()
+        );
+        outcome
+    });
+
+    assert!(
+        scan_ms < CATASTROPHIC_SCHEDULER_SCAN_MS,
+        "多分支调度候选扫描耗时失控：{scan_ms:.1} ms"
+    );
+    emit(
+        "P7 scheduler scan",
+        &[("schedulerScanMs", scan_ms)],
+        json!({
+            "artworks": SCHEDULER_ARTWORKS,
+            "branches": branches,
+            "forksPerArtwork": SCHEDULER_FORKS_PER_ARTWORK,
+            "repeatMinOf": REPEATS,
+        }),
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P8 大规模孤儿清理
+// ---------------------------------------------------------------------------
+
+/// 把文件的修改时间退回宽限期之前，让未引用扫描把新造的孤儿当作遗留文件。
+fn age_file(path: &Path) {
+    File::options()
+        .write(true)
+        .open(path)
+        .expect("无法打开待老化文件")
+        .set_modified(SystemTime::UNIX_EPOCH + Duration::from_secs(3_600))
+        .expect("无法设置文件修改时间");
+}
+
+/// P8：大规模孤儿的扫描与确认清理。
+///
+/// [`ORPHAN_FILES`] 个无记录的画板 DDS 分布在同一画板目录：先确认扫描能全部发现，
+/// 再用一次 `cleanup-unreferenced` 批量入队并按批删除（`CLEANUP_BATCH_SIZE` 之内），
+/// 最后复查目录干净。它覆盖 §3.E「临时引用表 + 分批幂等提交」在真实规模下的成本。
+#[test]
+fn p8_large_orphan_scan_and_cleanup_baseline() {
+    let fixture = ArtworkFixture::new();
+    let board = fixture
+        .command("create-board")
+        .arg("artwork", &fixture.artwork_id)
+        .arg("title", "Orphan board")
+        .finish();
+    board.expect_ok();
+    let board_id = board
+        .data("boardId")
+        .as_i64()
+        .unwrap_or_else(|| panic!("创建画板未返回 boardId：\n{}", board.describe()));
+    let board_directory = fixture
+        .repository
+        .join("artworks")
+        .join(&fixture.artwork_id)
+        .join("boards")
+        .join(board_id.to_string());
+    fs::create_dir_all(&board_directory).expect("无法创建画板目录");
+
+    let mut relative_paths = Vec::with_capacity(ORPHAN_FILES);
+    for index in 0..ORPHAN_FILES {
+        let name = format!("{}.dds", index + 1);
+        let path = board_directory.join(&name);
+        fs::write(&path, vec![(index % 251) as u8; ORPHAN_FILE_BYTES]).expect("无法写入孤儿文件");
+        age_file(&path);
+        relative_paths.push(format!(
+            "artworks/{}/boards/{board_id}/{name}",
+            fixture.artwork_id
+        ));
+    }
+
+    let scan_started = Instant::now();
+    let scanned = fixture.command("scan-unreferenced").finish();
+    let scan_ms = millis(scan_started.elapsed());
+    scanned.expect_ok();
+    assert_eq!(
+        scanned.data_u64("count"),
+        ORPHAN_FILES as u64,
+        "扫描应发现全部孤儿：\n{}",
+        scanned.describe()
+    );
+
+    let ids = relative_paths.join(",");
+    let cleanup_started = Instant::now();
+    let cleaned = fixture
+        .command("cleanup-unreferenced")
+        .arg("ids", &ids)
+        .finish();
+    let cleanup_ms = millis(cleanup_started.elapsed());
+    cleaned.expect_ok();
+    assert_eq!(
+        cleaned.data_u64("cleanedCount"),
+        ORPHAN_FILES as u64,
+        "确认清理应删除全部孤儿：\n{}",
+        cleaned.describe()
+    );
+    assert_eq!(cleaned.data_u64("pendingCount"), 0);
+    for relative in &relative_paths {
+        assert!(
+            !fixture.repository.join(relative).exists(),
+            "孤儿文件仍存在：{relative}"
+        );
+    }
+
+    let rescan = fixture.command("scan-unreferenced").finish();
+    rescan.expect_ok();
+    assert_eq!(
+        rescan.data_u64("count"),
+        0,
+        "清理后不应再有未引用文件：\n{}",
+        rescan.describe()
+    );
+
+    assert!(
+        scan_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
+        "大规模孤儿扫描耗时失控：{scan_ms:.1} ms"
+    );
+    assert!(
+        cleanup_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
+        "大规模孤儿确认清理耗时失控：{cleanup_ms:.1} ms"
+    );
+    emit(
+        "P8 orphan cleanup",
+        &[("scanMs", scan_ms), ("confirmedCleanupMs", cleanup_ms)],
+        json!({
+            "orphans": ORPHAN_FILES,
+            "orphanBytes": ORPHAN_FILES * ORPHAN_FILE_BYTES,
         }),
     );
 }
