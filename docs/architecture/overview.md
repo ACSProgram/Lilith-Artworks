@@ -75,13 +75,20 @@ Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权�
 
 ## 应用生命周期
 
-主窗口使用无原生装饰的 48px 应用顶栏，窗口拖动、最小化、最大化/还原与关闭通过受限的 Tauri window capability 调用。应用启用 Tauri single-instance 插件；再次启动时只聚焦并恢复现有主窗口，不创建第二个窗口。关闭按钮仍触发 Rust `CloseRequested`，默认只隐藏到系统托盘；托盘左键或“打开”命令恢复窗口，只有托盘“退出”或关闭到托盘设置被禁用时才结束进程。窗口隐藏期间备份调度器继续运行。真正退出分两段：原生端保存窗口状态后向 webview 发送 `app_shutdown_requested` 并启动 15 秒兜底强退计时器；webview 收到事件后结算素材板（保存并截断步骤历史，`preparePinBoardRuntimeChange`），无论成败都调用 `confirm_app_shutdown` 确认。原生端确认后设置不可逆的 `shutting_down` 状态、请求取消活动操作、停止并等待调度线程，最后等待共享操作锁释放再调用 `app.exit`；排队任务在拿到锁后只返回取消错误，活动任务完成临时文件和事务清理前不会退出。webview 未能在时限内确认（挂起或崩溃）时由兜底计时器强制退出，保证窗口始终可以关闭。
+主窗口使用无原生装饰的 48px 应用顶栏，窗口拖动、最小化、最大化/还原与关闭通过受限的 Tauri window capability 调用。应用启用 Tauri single-instance 插件；再次启动时只聚焦并恢复现有主窗口，不创建第二个窗口。关闭按钮仍触发 Rust `CloseRequested`，默认只隐藏到系统托盘；托盘左键或“打开”命令恢复窗口，只有托盘“退出”或关闭到托盘设置被禁用时才结束进程。窗口隐藏期间备份调度器继续运行。真正退出分两段：原生端保存窗口状态后向 webview 发送 `app_shutdown_requested` 并启动 15 秒兜底强退计时器；webview 收到事件后结算素材板（保存并截断步骤历史，`preparePinBoardRuntimeChange`），无论成败都调用 `confirm_app_shutdown` 确认。原生端确认后设置不可逆的 `shutting_down` 状态、请求取消活动操作、停止并等待调度线程，最后等待共享操作锁释放再调用 `app.exit`；排队任务在拿到锁后只返回取消错误，活动任务完成临时文件和事务清理前不会退出。webview 未能在时限内确认（挂起或崩溃）时由兜底计时器强制退出，保证窗口始终可以关闭。关闭链路的异常接入结构化诊断：前端记录结算结果、耗时与超过 5 秒仍未完成的 `[watchdog]` 告警；原生端记录 15 秒确认超时，以及确认后等待活动操作或仓库操作锁超过阈值时的 `[watchdog]` 记录。这些记录只补充证据，不改变既有的等待与兜底语义。
 
 WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewShortcuts.ts` 在应用层拦截，且只取消默认行为、不停止事件传播，使素材板“锁定画板”等模块快捷键仍能复用同一组合键（与 Lilith Client 的实现一致）。
+
+前端运行时由 `AppRuntimeProvider` 组合 `useSettingsController`、
+`useRepositoryMaintenance`、`RuntimeProgressProvider`、`SettingsDialog` 与 `NoticeCenter`；
+`App` 只负责提供者装配、工作区路由与两条 webview 快捷键拦截，不再持有设置、维护进度、提示或
+关闭结算状态。
 
 设置由应用层聚合仓库与历史公开能力，弹窗按左侧导航分页：通用（外观、应用行为、关于与法律）、仓库与备份（仓库与数据安全、自动备份、文件清理）、素材板（缓存等级、阵列间距、自动保存与退出保存开关、锁定与全屏快捷键）、调试（详细日志、日志文件夹）。每页为单列纵向布局（不再沿用 Client 的两列紧凑排版），片段间距统一。弹窗使用固定头部与底部操作区，中间内容独立滚动，保存与取消不会随内容滚出视口。
 
 设置文件带 `version` 字段，读取时低于当前版本会走追加式迁移并写回；当前 v2 把仍是旧默认值的素材板锁定键位 `CommandOrControl+Shift+K` 升级为 `CommandOrControl+R`，用户自定义过的其他键位保持不变。设置快照附带当前参与自动调度的不同工作文件数，仓库未配置或不可读取时为空，且不阻断设置读取。
+
+设置文件另有独立的单调 `revision` 计数（与 schema、ChunkFile 格式和发布版本号无关）：每次成功写入 +1。设置页保存、托盘暂停开关和窗口几何捕获统一走 `SettingsService`；设置页携带读取时的 revision 做 CAS，陈旧 revision 返回 `settings_conflict` 而不是静默覆盖，托盘/窗口补丁在同一写锁内基于当前快照原子写入。前端在冲突后重新读取设置与仓库状态并保持弹窗打开，由用户确认后再保存。
 
 窗口几何在退出时由原生端捕获写回 `settings.json`，捕获只在窗口处于正常状态时进行：最小化时 `GetWindowRect` 返回的是任务栏图标矩形（实测约 237×39、坐标 -32000），最大化时是铺满屏幕的矩形，二者都不是用户摆放的几何，写进去会让下次启动的尺寸校验失败。尺寸必须落在主窗口允许范围（与 `tauri.conf.json` 的 `minWidth`/`minHeight` 一致的 760×560 起、16384 以内）才被采信，坐标还必须与当前某块显示器重叠出足以看见窗口的范围。加载时对越界字段就地修正（窗口尺寸夹紧到允许范围）而不整份回落默认，避免单字段异常连带清空仓库路径与其它偏好；恢复位置时若保存的坐标已不落在任何当前显示器上则改为居中，避免窗口开到已断开的显示器上而看起来像没有启动。
 
@@ -91,10 +98,20 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 `app/command_runtime/` 是 GUI、headless 与未来维护入口共用的执行底座：
 
-- `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_background`，
-  以及素材板专用的 `run_repository_write` 与设置保存专用的 `run_repository_switch`。固定锁序为
-  「共享运行锁（写 / 前台 / 后台）→ 仓库 lease → 仓库操作锁 → SQLite 事务」；只读入口只取
-  共享 lease。`run_repository_write` 保持素材板既有语义，不取共享运行锁。
+- `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_foreground_read`、
+  `run_background`，以及素材板专用的 `run_repository_write` 与设置保存专用的
+  `run_repository_switch`。固定锁序为「跨进程仓库 owner lock → 共享运行锁（写 / 前台 / 后台）→
+  仓库 lease → 仓库操作锁 → SQLite 事务」；只读入口只取共享 lease。`run_repository_write`
+  保持素材板既有语义，不取共享运行锁。`run_foreground_read` 供全库校验与画板 DDS 检查使用：
+  它取得前台运行锁与仓库操作锁保证扫描期间本进程不写入，但只**探测** owner lock，不持有它，
+  避免只读长任务变成跨进程写者。
+- 跨进程 owner lock 由 GUI、headless 与维护入口共用：每次写操作在运行分类锁之前取锁，冲突立即
+  返回 `repository_busy`，操作结束释放。拒绝不区分持锁者是否在同一进程——自动备份或空闲校验
+  持锁期间，前台的写命令与长命令同样立即被拒，不排队、也不请求后台让位（详见
+  `docs/modules/library.md` 的仓库命令进入规则）。锁仍是仓库根目录下专用 SQLite 库的
+  `BEGIN IMMEDIATE`，由内核在句柄关闭（含强杀）时释放；同目录的 owner 元数据（PID、启动时间、
+  版本、角色、操作、心跳）只用于诊断，取得锁即覆盖上一次的 stale 记录，不按 PID 回收。锁库、
+  锁日志与 owner 元数据不参与作品数据库发现、灾备复制或未引用文件判定。
 - `CommandContext` 携带 `OperationId`、`OperationDomain`、当前运行分类、`CancelToken` 与仓库 key；
   use-case 只能通过它取得已加锁的 `RepositorySession`，不再自行读取设置或拼锁。
 - typed `CommandError` 携带稳定 `code`、`kind`、用户文案、`retryable` 与 operation id。Tauri 适配器

@@ -28,6 +28,8 @@ export interface ContentSettings {
 
 export interface AppSettings {
   version: number;
+  /** 设置文件自己的单调计数；保存时作为 CAS 的期望值。 */
+  revision: number;
   repositoryPath: string;
   theme: Theme;
   closeToTray: boolean;

@@ -36,17 +36,45 @@ decision, so an untagged version is transitional.
   upper bound limited by its 5 ms poll interval) and stamps the build profile
   into each record. No product behavior changes. Results are summarized in
   `docs/planning/0.3-baseline-2026-10-18.md`.
+- A single `SettingsService` write entry for the settings page, tray toggle and
+  window-geometry capture. The settings file gains a monotonic `revision`
+  counter; saves compare it (CAS) and return `settings_conflict` instead of
+  silently overwriting a concurrent change, while internal patches preserve
+  the current snapshot and bump the same counter.
+- A repository-level cross-process owner lock shared by GUI, headless and
+  maintenance commands. Every write operation acquires it before the runtime
+  lock and releases it afterwards; read-only commands still take no lock, and
+  full-library/board scrubs keep the probe-only "仓库正在被写入" refusal. A
+  concurrent writer gets `repository_busy` instead of queueing, and that
+  includes a foreground command arriving while the scheduler's automatic
+  backup or idle verify holds the lock in the same process. The existing
+  SQLite sentinel remains the lock, with a sidecar owner record
+  (PID, process start, version, role, operation, heartbeat) for diagnostics.
+  Kernel release is the liveness proof: metadata left by a crashed process is
+  overwritten on the next acquisition and is never reclaimed by PID. Lock
+  artifacts are excluded from repository backups and from database discovery.
+- Shutdown settlement is now visible in structured diagnostics: the webview
+  records settlement outcome, elapsed time and a `[watchdog]` warning when it
+  is still running after 5 s; the native fallback logs its 15 s confirmation
+  timeout, and `confirm_app_shutdown` logs `[watchdog]` entries when an
+  in-flight operation or the repository operation lock delays exit.
+- The App frontend is split into `AppRuntimeProvider`,
+  `useSettingsController`, `useRepositoryMaintenance`,
+  `RuntimeProgressProvider`, `SettingsDialog` and `NoticeCenter`. `App` only
+  composes providers and routes the workspace; settings, maintenance progress
+  and notices no longer share one God component.
 
 ### Changed
 
 - Library, History/Backup, Authenticity, Cleanup, Settings and Pin-board
   repository entries now go through `OperationCoordinator` and one shared
-  use-case per operation. The lock order is fixed as shared runtime lock
-  (write/foreground/background) → repository lease → repository operation
-  lock → SQLite transaction. Pin-board writes keep their existing semantics
-  via `run_repository_write`: lease plus repository operation lock, no shared
-  runtime lock. Headless is now a context assembler over the same use-cases
-  and keeps its marker/cancel-checkpoint format.
+  use-case per operation. The lock order is fixed as cross-process repository
+  owner lock → shared runtime lock (write/foreground/background) → repository
+  lease → repository operation lock → SQLite transaction. Pin-board writes
+  keep their existing semantics via `run_repository_write`: lease plus
+  repository operation lock, no shared runtime lock. Headless is now a context
+  assembler over the same use-cases and keeps its marker/cancel-checkpoint
+  format.
 - Every Tauri command is registered from one domain-grouped table in
   `app/command_registry.rs`, so `lib.rs` no longer carries the command list;
   adapters stay limited to DTO parsing, picker authorization and error

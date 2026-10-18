@@ -163,7 +163,7 @@ pub(crate) fn set_checkpoint(
 pub(crate) fn scrub_repository(
     context: &CommandContext,
 ) -> Result<crate::app::workflows::RepositoryScrubReport, CommandError> {
-    context.run_foreground(None, |session| {
+    context.run_foreground_read(None, |session| {
         let root = session.root();
         context.report_progress("正在检查历史文件", 0, 0);
         let history_nodes = backup::scrub_history(
@@ -204,7 +204,7 @@ pub(crate) fn scrub_repository(
 pub(crate) fn scrub_history_and_controlled(
     context: &CommandContext,
 ) -> Result<(u64, u64, u64), CommandError> {
-    context.run_foreground(None, |session| {
+    context.run_foreground_read(None, |session| {
         let root = session.root();
         let nodes = backup::scrub_history(
             root,

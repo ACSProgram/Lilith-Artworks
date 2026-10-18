@@ -143,7 +143,8 @@ cargo test --features headless --test stress_baseline -- --test-threads=1 --noca
   **未设置时该组的真实仓库场景明确跳过**（不是失败），因此裸 `cargo test` 与 CI 不受影响。
   该副本是**外部临时资料**，只服务阶段 0 的一次性采集，0.3 计划落实后撤除，不要把它当长期
   测试夹具。运行会在仓库同级的 `baseline-out` 下建输出目录并在结束时删除，唯一残留是写命令
-  取得哨兵时创建的 `.lilith-write-lock.sqlite3`——采集后请用采集前的副本还原仓库。
+  取得跨进程 owner lock 时创建的 `.lilith-write-lock.sqlite3*` 与 `.lilith-write-owner.json`，
+  采集后请用采集前的副本还原仓库。
 - `LILITH_STRESS_TIERS`：档位（`default`/`large`/`heavy`/`extreme`/`manual`），默认 `default`。
 - `LILITH_STRESS_BIN`：被测可执行文件，建议指向发布档。
 - `LILITH_STRESS_DISK_BUDGET`：磁盘峰值上限（接受字节数或 `KiB/MiB/GiB/TiB` 后缀，默认 24 GiB）。

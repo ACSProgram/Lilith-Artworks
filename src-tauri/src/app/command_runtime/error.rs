@@ -90,6 +90,17 @@ impl CommandError {
         Self::new(CommandErrorKind::Busy, "repository_busy", message, true)
     }
 
+    /// 设置文件已被另一个入口（设置页轮次、托盘或窗口几何）改写。调用方应重新
+    /// 读取快照后再提交，而不是静默覆盖。
+    pub(crate) fn settings_conflict() -> Self {
+        Self::new(
+            CommandErrorKind::Conflict,
+            "settings_conflict",
+            "设置已被其他入口修改，请重新加载后再保存",
+            true,
+        )
+    }
+
     pub(crate) fn internal(message: impl Into<String>) -> Self {
         Self::new(
             CommandErrorKind::Internal,

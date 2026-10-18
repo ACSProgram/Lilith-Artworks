@@ -1514,9 +1514,9 @@ pub fn directory_bytes(root: &Path) -> u64 {
 
 /// 与 [`directory_bytes`] 相同，但 `skip` 返回 true 的条目**连同其子树**都不计入。
 ///
-/// 用途：仓库根下的 `.lilith-write-lock.sqlite3*` 是写命令取得哨兵时创建的跨进程锁库，
-/// 与仓库数据无关；断言「源仓库字节数前后不变」时必须排除它，否则第一次写命令就会让
-/// 前后对照失真。
+/// 用途：仓库根下的 `.lilith-write-lock.sqlite3*` 与 `.lilith-write-owner.json` 是写操作
+/// 取得跨进程 owner lock 时创建的运行时文件，与仓库数据无关；断言「源仓库字节数前后
+/// 不变」时必须排除它们，否则第一次写命令就会让前后对照失真。
 pub fn directory_bytes_excluding(root: &Path, skip: impl Fn(&Path) -> bool + Copy) -> u64 {
     fn walk(directory: &Path, skip: impl Fn(&Path) -> bool + Copy, total: &mut u64) {
         let Ok(entries) = fs::read_dir(directory) else {

@@ -14,7 +14,10 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State};
 use tempfile::NamedTempFile;
 
 use super::diagnostics::{self, DiagnosticsState};
-use super::{command_runtime::OperationDomain, usecases, OperationCoordinator};
+use super::{
+    command_runtime::{CommandError, OperationDomain},
+    usecases, OperationCoordinator,
+};
 use crate::backup::BackupState;
 use crate::{history, library, storage};
 
@@ -43,6 +46,10 @@ const READ_HOLD_WARN_MS: u128 = 1_500;
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct AppSettings {
     pub(crate) version: u32,
+    /// 设置文件自己的单调计数：每次成功写入 +1。设置页保存用它做 CAS；它与
+    /// schema、ChunkFile 格式和发布版本号无关。
+    #[serde(default)]
+    pub(crate) revision: u64,
     pub(crate) repository_path: String,
     theme: String,
     close_to_tray: bool,
@@ -57,6 +64,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             version: CURRENT_SETTINGS_VERSION,
+            revision: 0,
             repository_path: String::new(),
             theme: "system".into(),
             close_to_tray: true,
@@ -135,10 +143,91 @@ impl Default for ContentSettings {
     }
 }
 
+/// 设置的唯一写入口。
+///
+/// 设置页保存走 [`Self::update`] 并携带期望 revision；托盘、窗口几何等应用内部
+/// 写入也经同一入口，只是在当前快照上打补丁（无 CAS）。写入顺序固定为：取写锁 →
+/// 复核 revision → 原子替换 JSON → 更新内存快照；任何一步失败都不会留下内存与
+/// 文件不一致的状态。
+#[derive(Clone)]
+pub(crate) struct SettingsService {
+    inner: Arc<SettingsServiceInner>,
+}
+
+struct SettingsServiceInner {
+    current: RwLock<AppSettings>,
+    path: PathBuf,
+    write: Mutex<()>,
+}
+
+impl SettingsService {
+    fn new(settings: AppSettings, path: PathBuf) -> Self {
+        Self {
+            inner: Arc::new(SettingsServiceInner {
+                current: RwLock::new(settings),
+                path,
+                write: Mutex::new(()),
+            }),
+        }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    fn read(&self) -> Result<AppSettings, String> {
+        self.inner
+            .current
+            .read()
+            .map(|settings| settings.clone())
+            .map_err(|_| "设置状态已损坏".to_owned())
+    }
+
+    fn read_with<T>(&self, reader: impl FnOnce(&AppSettings) -> T) -> Result<T, String> {
+        self.inner
+            .current
+            .read()
+            .map(|settings| reader(&settings))
+            .map_err(|_| "设置状态已损坏".to_owned())
+    }
+
+    pub(crate) fn update(
+        &self,
+        expected_revision: Option<u64>,
+        patch: impl FnOnce(&mut AppSettings) -> Result<(), CommandError>,
+    ) -> Result<AppSettings, CommandError> {
+        let _writing = self
+            .inner
+            .write
+            .lock()
+            .map_err(|_| CommandError::internal("设置写入锁已损坏"))?;
+        let current = self
+            .inner
+            .current
+            .read()
+            .map(|settings| settings.clone())
+            .map_err(|_| CommandError::internal("设置状态已损坏"))?;
+        if expected_revision.is_some_and(|expected| expected != current.revision) {
+            return Err(CommandError::settings_conflict());
+        }
+        let mut next = current.clone();
+        patch(&mut next)?;
+        next.revision = current.revision.saturating_add(1);
+        write_json_atomic(&self.inner.path, &next).map_err(CommandError::from)?;
+        *self
+            .inner
+            .current
+            .write()
+            .map_err(|_| CommandError::internal("设置状态已损坏"))? = next.clone();
+        Ok(next)
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct AppState {
-    settings: Arc<RwLock<AppSettings>>,
-    settings_path: PathBuf,
+    settings: SettingsService,
+    /// 进程角色（`gui` / `headless`），写入 owner lock 元数据用于诊断。
+    process_role: &'static str,
     log_directory: PathBuf,
     warning: Arc<RwLock<Option<String>>>,
     validated_repository: Arc<Mutex<Option<PathBuf>>>,
@@ -170,9 +259,19 @@ impl AppState {
         log_directory: PathBuf,
         warning: Option<String>,
     ) -> Self {
+        Self::with_role(settings, settings_path, log_directory, warning, "gui")
+    }
+
+    fn with_role(
+        settings: AppSettings,
+        settings_path: PathBuf,
+        log_directory: PathBuf,
+        warning: Option<String>,
+        process_role: &'static str,
+    ) -> Self {
         Self {
-            settings: Arc::new(RwLock::new(settings)),
-            settings_path,
+            settings: SettingsService::new(settings, settings_path),
+            process_role,
             log_directory,
             warning: Arc::new(RwLock::new(warning)),
             validated_repository: Arc::new(Mutex::new(None)),
@@ -192,18 +291,20 @@ impl AppState {
     pub(crate) fn for_headless_repository(repository: &Path, state_directory: &Path) -> Self {
         let mut settings = AppSettings::default();
         settings.repository_path = repository.to_string_lossy().into_owned();
-        Self::new(
+        Self::with_role(
             settings,
             state_directory.join("settings.json"),
             state_directory.join("logs"),
             None,
+            "headless",
         )
     }
 
     pub(crate) fn repository_path(&self) -> Result<Option<PathBuf>, String> {
-        let settings = self.settings.read().map_err(|_| "设置状态已损坏")?;
-        let value = settings.repository_path.trim();
-        Ok((!value.is_empty()).then(|| PathBuf::from(value)))
+        self.settings.read_with(|settings| {
+            let value = settings.repository_path.trim();
+            (!value.is_empty()).then(|| PathBuf::from(value))
+        })
     }
 
     pub(crate) fn ready_repository_path(&self) -> Result<PathBuf, String> {
@@ -361,13 +462,16 @@ impl AppState {
         operation()
     }
 
-    pub(crate) fn replace_settings(&self, settings: AppSettings) -> Result<(), String> {
-        *self.settings.write().map_err(|_| "设置状态已损坏")? = settings;
-        Ok(())
+    pub(crate) fn settings(&self) -> &SettingsService {
+        &self.settings
+    }
+
+    pub(crate) fn process_role(&self) -> &'static str {
+        self.process_role
     }
 
     pub(crate) fn settings_path(&self) -> &Path {
-        &self.settings_path
+        self.settings.path()
     }
 
     pub(crate) fn clear_warning(&self) -> Result<(), String> {
@@ -385,15 +489,13 @@ impl AppState {
 
     pub(crate) fn close_to_tray(&self) -> bool {
         self.settings
-            .read()
-            .map(|settings| settings.close_to_tray)
+            .read_with(|settings| settings.close_to_tray)
             .unwrap_or(true)
     }
 
     pub(crate) fn automatic_backups_paused(&self) -> bool {
         self.settings
-            .read()
-            .map(|settings| settings.pause_automatic_backups)
+            .read_with(|settings| settings.pause_automatic_backups)
             .unwrap_or(false)
     }
 
@@ -401,16 +503,14 @@ impl AppState {
     /// 设置缺失或状态损坏时保持默认的快速检查。
     pub(crate) fn automatic_backup_quick_default(&self) -> bool {
         self.settings
-            .read()
-            .map(|settings| settings.automatic_backup_check_mode.as_str() != "full")
+            .read_with(|settings| settings.automatic_backup_check_mode.as_str() != "full")
             .unwrap_or(true)
     }
 
     /// 素材板原生纹理解码结果缓存等级（low/medium/high）。
     pub(crate) fn pin_board_texture_cache_level(&self) -> String {
         self.settings
-            .read()
-            .map(|settings| settings.pin_board.texture_cache_level.clone())
+            .read_with(|settings| settings.pin_board.texture_cache_level.clone())
             .unwrap_or_else(|_| "medium".into())
     }
 
@@ -618,7 +718,7 @@ pub(crate) fn open_log_directory(state: State<'_, AppState>) -> Result<(), Strin
 
 #[tauri::command]
 pub(crate) fn open_settings_directory(state: State<'_, AppState>) -> Result<(), String> {
-    let directory = state.settings_path.parent().ok_or("设置文件路径无效")?;
+    let directory = state.settings_path().parent().ok_or("设置文件路径无效")?;
     open_directory(directory, "设置")
 }
 
@@ -734,10 +834,13 @@ pub(crate) fn prepare_repository(
 
 pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let mut settings = state.settings.read().map_err(|_| "设置状态已损坏")?.clone();
-    settings.pause_automatic_backups = paused;
-    write_json_atomic(&state.settings_path, &settings)?;
-    *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
+    state
+        .settings()
+        .update(None, |settings| {
+            settings.pause_automatic_backups = paused;
+            Ok(())
+        })
+        .map_err(String::from)?;
     let backup = app.state::<BackupState>();
     backup.set_automatic_scheduling(!paused);
     backup.wake_scheduler();
@@ -830,7 +933,7 @@ fn plausible_window_size(width: u32, height: u32) -> bool {
 
 pub(crate) fn restore_window_settings(app: &AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
-    let settings = state.settings.read().map_err(|_| "设置状态已损坏")?;
+    let settings = state.settings().read().map_err(|_| "设置状态已损坏")?;
     let window = app.get_webview_window("main").ok_or("找不到主窗口")?;
     // 这里再夹紧一次：来自更高版本的设置文件不会走 `sanitize_settings`，保证无论
     // 来源如何都不会把越界尺寸喂给窗口。
@@ -883,10 +986,10 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
     // 位置校验需要窗口尺寸：优先用刚捕获的值，拿不到时退回设置里的旧值。
     let (width, height) = match size {
         Some(size) => (size.width, size.height),
-        None => {
-            let settings = state.settings.read().map_err(|_| "设置状态已损坏")?;
-            (settings.window.width, settings.window.height)
-        }
+        None => state
+            .settings()
+            .read_with(|settings| (settings.window.width, settings.window.height))
+            .map_err(|_| "设置状态已损坏")?,
     };
     let position = inspectable
         .then(|| window.outer_position().ok())
@@ -895,20 +998,22 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
             saved_position_is_on_a_current_monitor(&window, position.x, position.y, width, height)
         });
 
-    let settings = {
-        let mut settings = state.settings.write().map_err(|_| "设置状态已损坏")?;
-        settings.window.maximized = maximized;
-        if let Some(size) = size {
-            settings.window.width = size.width;
-            settings.window.height = size.height;
-        }
-        if let Some(position) = position {
-            settings.window.x = Some(position.x);
-            settings.window.y = Some(position.y);
-        }
-        settings.clone()
-    };
-    write_json_atomic(&state.settings_path, &settings)
+    state
+        .settings()
+        .update(None, |settings| {
+            settings.window.maximized = maximized;
+            if let Some(size) = size {
+                settings.window.width = size.width;
+                settings.window.height = size.height;
+            }
+            if let Some(position) = position {
+                settings.window.x = Some(position.x);
+                settings.window.y = Some(position.y);
+            }
+            Ok(())
+        })
+        .map(|_| ())
+        .map_err(String::from)
 }
 
 pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
@@ -917,8 +1022,8 @@ pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
         .ok()
         .and_then(|root| history::count_scheduled_files(&root).ok());
     Ok(SettingsSnapshot {
-        settings: state.settings.read().map_err(|_| "设置状态已损坏")?.clone(),
-        settings_path: state.settings_path.to_string_lossy().into_owned(),
+        settings: state.settings.read().map_err(|_| "设置状态已损坏")?,
+        settings_path: state.settings_path().to_string_lossy().into_owned(),
         log_directory: state.log_directory.to_string_lossy().into_owned(),
         warning: state
             .warning
@@ -1009,7 +1114,11 @@ pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread, time::Duration};
+    use std::{
+        sync::{mpsc, Arc},
+        thread,
+        time::Duration,
+    };
 
     use super::*;
 
@@ -1027,6 +1136,132 @@ mod tests {
         assert_eq!(actual.window.width, 1320);
         assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+R");
         assert_eq!(actual.pin_board.fullscreen_shortcut, "F11");
+    }
+
+    #[test]
+    fn settings_updates_use_revision_cas_and_bump_the_counter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let initial = AppSettings::default();
+        write_json_atomic(&path, &initial).unwrap();
+        let service = SettingsService::new(initial, path.clone());
+
+        let saved = service
+            .update(Some(0), |settings| {
+                settings.theme = "dark".into();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(saved.revision, 1);
+        assert_eq!(saved.theme, "dark");
+
+        let conflict = service
+            .update(Some(0), |settings| {
+                settings.theme = "light".into();
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code, "settings_conflict");
+        assert!(conflict.retryable);
+
+        // 冲突不得覆盖文件或内存中的较新设置。
+        let (loaded, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded.theme, "dark");
+        assert_eq!(loaded.revision, 1);
+        assert_eq!(service.read().unwrap().theme, "dark");
+    }
+
+    #[test]
+    fn concurrent_settings_saves_allow_exactly_one_cas_winner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let initial = AppSettings::default();
+        write_json_atomic(&path, &initial).unwrap();
+        let service = Arc::new(SettingsService::new(initial, path.clone()));
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+
+        let handles = (0..2)
+            .map(|index| {
+                let service = service.clone();
+                let barrier = barrier.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    service
+                        .update(Some(0), |settings| {
+                            settings.theme = if index == 0 { "dark" } else { "light" }.into();
+                            Ok(())
+                        })
+                        .map(|_| index)
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let winners = results.iter().filter(|result| result.is_ok()).count();
+        assert_eq!(winners, 1, "同一 revision 只能有一个写入者成功");
+        let conflict = results
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("另一个写入者必须得到冲突");
+        assert_eq!(conflict.code, "settings_conflict");
+
+        let (loaded, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(loaded.revision, 1);
+    }
+
+    #[test]
+    fn internal_patches_preserve_concurrent_fields_and_bump_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut initial = AppSettings::default();
+        initial.theme = "dark".into();
+        write_json_atomic(&path, &initial).unwrap();
+        let service = SettingsService::new(initial, path.clone());
+
+        // 托盘写入不携带期望 revision：直接在当前快照上打补丁，保留设置页已选的
+        // 其他字段。
+        let paused = service
+            .update(None, |settings| {
+                settings.pause_automatic_backups = true;
+                Ok(())
+            })
+            .unwrap();
+        assert!(paused.pause_automatic_backups);
+        assert_eq!(paused.theme, "dark");
+        assert_eq!(paused.revision, 1);
+
+        // 基于旧 revision 的设置页保存必须得到冲突，而不是静默覆盖托盘改动。
+        let conflict = service
+            .update(Some(0), |settings| {
+                settings.theme = "light".into();
+                Ok(())
+            })
+            .unwrap_err();
+        assert_eq!(conflict.code, "settings_conflict");
+    }
+
+    #[test]
+    fn a_failed_settings_patch_leaves_memory_and_file_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let initial = AppSettings::default();
+        write_json_atomic(&path, &initial).unwrap();
+        let before = fs::read(&path).unwrap();
+        let service = SettingsService::new(initial, path.clone());
+
+        let error = service
+            .update(Some(0), |_| {
+                Err(CommandError::invalid_input("主题设置无效"))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_input");
+        assert_eq!(fs::read(&path).unwrap(), before);
+        assert_eq!(service.read().unwrap().revision, 0);
     }
 
     #[test]
@@ -1196,8 +1431,13 @@ mod tests {
         let switching_thread = thread::spawn(move || {
             switching
                 .with_repository_switch(|| {
-                    switching.settings.write().unwrap().repository_path =
-                        second_root.to_string_lossy().into_owned();
+                    switching
+                        .settings
+                        .update(None, |settings| {
+                            settings.repository_path = second_root.to_string_lossy().into_owned();
+                            Ok(())
+                        })
+                        .unwrap();
                     switched_tx.send(()).unwrap();
                     Ok(())
                 })

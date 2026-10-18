@@ -82,6 +82,7 @@ pub(crate) fn auth_checkpoint(stage: &str) -> bool {
 
 /// 命令行入口。返回进程退出码：0 成功、1 失败、2 取消。
 pub fn run(args: &[String]) -> i32 {
+    repository_lock::record_process_start();
     let started = Instant::now();
     if args.is_empty() || matches!(args[0].as_str(), "--help" | "-h" | "help") {
         eprint!("{}", usage());
@@ -107,18 +108,9 @@ pub fn run(args: &[String]) -> i32 {
     interlock.stage(&format!("started command={}", options.command));
     let runtime = HeadlessRuntime::new(&options, interlock);
 
-    // 跨进程仓库哨兵锁：会写仓库的命令独占，第二个进程拿到明确错误，而不是与前者
-    // 在业务层竞态。锁在进程退出（含崩溃）时由操作系统释放，不会残留。取锁失败与
-    // 业务失败走同一条结果路径（写 `--result`、退出码 1），调用方无需区分。
-    let outcome =
-        match repository_lock::RepositoryGuard::acquire(&options.repository, &options.command) {
-            Ok(guard) => {
-                let outcome = dispatch(&options, &runtime);
-                drop(guard);
-                outcome
-            }
-            Err(error) => Err(error),
-        };
+    // 跨进程 owner lock 由每条写命令在协调器内按操作取得/释放；无头入口不再按
+    // 命令名维护第二张表。只读命令不取锁，全库校验在 use-case 内只做一次探测。
+    let outcome = dispatch(&options, &runtime);
     let elapsed_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
     let cancelled = interlock.cancelled();
     let (ok, error, data) = match outcome {
@@ -733,6 +725,17 @@ fn dispatch(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, Strin
 }
 
 fn init_repository(options: &Options) -> Result<Value, CommandError> {
+    // 建库也是写操作：先让目录存在并取得 owner lock，避免两个进程同时初始化。
+    if !options.repository.exists() {
+        std::fs::create_dir_all(&options.repository)
+            .map_err(|error| CommandError::from(format!("无法创建作品仓库目录：{error}")))?;
+    }
+    let _owner = repository_lock::RepositoryOwnerLock::acquire(
+        &options.repository,
+        "headless",
+        "init-repository",
+    )
+    .map_err(|error| CommandError::from(error.user_message()))?;
     library::initialize(&options.repository).map_err(CommandError::from)?;
     Ok(Value::Null)
 }

@@ -13,7 +13,7 @@ use crate::{
 pub(crate) fn scrub_board_dds(
     context: &CommandContext,
 ) -> Result<crate::pin_board::scrub::BoardDdsReport, CommandError> {
-    context.run_foreground(None, |session| {
+    context.run_foreground_read(None, |session| {
         crate::pin_board::scrub::scrub_board_dds(
             session.root(),
             || context.is_cancelled(),

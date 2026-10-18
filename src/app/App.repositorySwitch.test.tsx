@@ -79,6 +79,7 @@ function deferred<T>() {
 const settings = (repositoryPath: string): SettingsSnapshot => ({
   settings: {
     version: 2,
+    revision: 0,
     repositoryPath,
     theme: "system",
     closeToTray: true,
@@ -665,6 +666,33 @@ describe("App repository switching", () => {
     await waitFor(() => expect(appApi.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({ repositoryPath: repositoryB }),
     ));
+  });
+
+  it("keeps the settings dialog open and reloads after a revision conflict", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.saveSettings.mockRejectedValue(Object.assign(
+      new Error("设置已被其他入口修改，请重新加载后再保存"),
+      { code: "settings_conflict" },
+    ));
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("设置已被其他入口修改，请重新加载后再保存")).toBeTruthy();
+    // 冲突后重新读取设置与仓库状态，弹窗保持打开让用户确认后再保存。
+    await waitFor(() => expect(appApi.getSettings.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
   });
 
   it("blocks the repository switch when the pin board cannot be settled", async () => {

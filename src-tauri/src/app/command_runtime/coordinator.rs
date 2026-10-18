@@ -7,6 +7,7 @@ use std::{
 use crate::{
     app::AppState,
     backup::{BackupState, BackupTaskKind, ExclusiveRunError},
+    repository_lock::{self, OwnerLockError, RepositoryOwnerLock},
     storage,
 };
 
@@ -37,9 +38,12 @@ impl<'a> RepositorySession<'a> {
 
 /// GUI、headless 与未来维护入口共用的运行入口。
 ///
-/// 锁序固定为：共享运行锁（仅写/前台/后台分类）→ 仓库 lease → 仓库操作锁 →
-/// SQLite 事务。素材板写命令走 [`Self::run_repository_write`]，按既有语义只取
-/// 仓库 lease 与操作锁，不取共享运行锁。
+/// 写操作的锁序固定为：跨进程仓库 owner lock → 共享运行锁（仅写/前台/后台分类）
+/// → 仓库 lease → 仓库操作锁 → SQLite 事务。owner lock 冲突不排队，直接返回
+/// `repository_busy`。只读命令（[`Self::run_read`]）与内容级只读长任务
+/// （[`Self::run_foreground_read`]）不持有 owner lock。素材板写命令走
+/// [`Self::run_repository_write`]，按既有语义只取仓库 lease 与操作锁，不取共享
+/// 运行锁。
 #[derive(Clone)]
 pub(crate) struct OperationCoordinator {
     inner: Arc<Inner>,
@@ -219,6 +223,9 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Write);
+        // 固定锁序的第一层：跨进程 owner lock。它在运行分类锁之前取得，冲突立即
+        // 返回 repository_busy，不排队等待。
+        let _owner = self.acquire_owner_lock(context, "write")?;
         let result = self.inner.backup_state.run_exclusive_typed(
             branch_id,
             BackupTaskKind::UserOperation,
@@ -239,12 +246,38 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Foreground);
+        let _owner = self.acquire_owner_lock(context, "foreground")?;
         let result = self.inner.backup_state.run_foreground_typed(branch_id, || {
             self.inner
                 .app_state
                 .with_ready_repository_typed(|root| operation(&RepositorySession::new(root)))
         });
         self.finish_write(context, result)
+    }
+
+    /// 内容级只读长任务（全库校验、画板 DDS 检查）：取得与前台命令相同的运行
+    /// 锁与仓库操作锁以保证扫描目标不被本进程改写，但**不持有**跨进程 owner lock
+    /// ——只读命令不得变成写者。开始前只探测一次：已有写者时立即以明确文案拒绝。
+    /// 「探测后写者才开始」的窗口与本阶段之前的哨兵探测口径一致。
+    pub(crate) fn run_foreground_read<T>(
+        &self,
+        context: &CommandContext,
+        branch_id: Option<&str>,
+        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        context.set_class(OperationClass::Foreground);
+        self.probe_repository_owner(context)?;
+        let result = self.inner.backup_state.run_foreground_typed(branch_id, || {
+            self.inner
+                .app_state
+                .with_ready_repository_typed(|root| operation(&RepositorySession::new(root)))
+        });
+        match result {
+            Ok(value) => Ok(value),
+            Err(ExclusiveRunError::ShuttingDown) => Err(CommandError::shutting_down()),
+            Err(ExclusiveRunError::State(message)) => Err(CommandError::internal(message)),
+            Err(ExclusiveRunError::Operation(error)) => Err(error),
+        }
     }
 
     /// 后台任务：共享运行锁（AutomaticBackup）。阶段 5 的调度器会复用它。
@@ -255,6 +288,7 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Background);
+        let _owner = self.acquire_owner_lock(context, "background")?;
         let result = self.inner.backup_state.run_exclusive_typed(
             branch_id,
             BackupTaskKind::AutomaticBackup,
@@ -274,6 +308,7 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::RepositoryWrite);
+        let _owner = self.acquire_owner_lock(context, "repositoryWrite")?;
         let result = self
             .inner
             .app_state
@@ -289,6 +324,7 @@ impl OperationCoordinator {
     pub(crate) fn run_repository_switch<T>(
         &self,
         context: &CommandContext,
+        target_repository: Option<&Path>,
         foreground: bool,
         operation: impl FnOnce() -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
@@ -297,6 +333,10 @@ impl OperationCoordinator {
         } else {
             OperationClass::Write
         });
+        // 切换/首次配置仓库时锁的是目标仓库；清空仓库路径则没有需要保护的写者。
+        let _owner = target_repository
+            .map(|root| self.acquire_owner_for_root(root, "settings:switch"))
+            .transpose()?;
         let result = if foreground {
             self.inner.backup_state.run_foreground_typed(None, || {
                 self.inner.app_state.with_repository_switch_typed(operation)
@@ -309,6 +349,46 @@ impl OperationCoordinator {
                 })
         };
         self.finish_write(context, result)
+    }
+
+    /// 对当前仓库取得跨进程 owner lock。尚未配置仓库或路径尚未建立时返回 `None`，
+    /// 由后续的仓库校验给出规范错误；只读命令不调用这里。
+    fn acquire_owner_lock(
+        &self,
+        context: &CommandContext,
+        action: &str,
+    ) -> Result<Option<RepositoryOwnerLock>, CommandError> {
+        let Some(root) = context.repository_path()? else {
+            return Ok(None);
+        };
+        if !root.is_dir() {
+            return Ok(None);
+        }
+        let operation = format!("{}:{action}", context.domain().as_str());
+        self.acquire_owner_for_root(&root, &operation).map(Some)
+    }
+
+    fn probe_repository_owner(&self, context: &CommandContext) -> Result<(), CommandError> {
+        let Some(root) = context.repository_path()? else {
+            return Ok(());
+        };
+        if !root.is_dir() {
+            return Ok(());
+        }
+        repository_lock::probe(&root).map_err(CommandError::from)
+    }
+
+    fn acquire_owner_for_root(
+        &self,
+        root: &Path,
+        operation: &str,
+    ) -> Result<RepositoryOwnerLock, CommandError> {
+        repository_lock::RepositoryOwnerLock::acquire(
+            root,
+            self.inner.app_state.process_role(),
+            operation,
+        )
+        .map_err(owner_lock_error)
     }
 
     fn finish_write<T>(
@@ -444,6 +524,13 @@ impl OperationCoordinator {
     }
 }
 
+fn owner_lock_error(error: OwnerLockError) -> CommandError {
+    match &error {
+        OwnerLockError::Busy(_) => CommandError::busy(error.user_message()),
+        OwnerLockError::Io(_) => CommandError::from_legacy(error.user_message()),
+    }
+}
+
 pub(crate) struct CommandContext {
     coordinator: OperationCoordinator,
     operation_id: OperationId,
@@ -458,6 +545,10 @@ pub(crate) struct CommandContext {
 impl CommandContext {
     pub(crate) fn operation_id(&self) -> &OperationId {
         &self.operation_id
+    }
+
+    pub(crate) fn domain(&self) -> OperationDomain {
+        self.domain
     }
 
     pub(crate) fn is_cancelled(&self) -> bool {
@@ -529,6 +620,15 @@ impl CommandContext {
         self.coordinator.run_foreground(self, branch_id, operation)
     }
 
+    pub(crate) fn run_foreground_read<T>(
+        &self,
+        branch_id: Option<&str>,
+        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.coordinator
+            .run_foreground_read(self, branch_id, operation)
+    }
+
     pub(crate) fn run_background<T>(
         &self,
         branch_id: Option<&str>,
@@ -546,11 +646,12 @@ impl CommandContext {
 
     pub(crate) fn run_repository_switch<T>(
         &self,
+        target_repository: Option<&Path>,
         foreground: bool,
         operation: impl FnOnce() -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         self.coordinator
-            .run_repository_switch(self, foreground, operation)
+            .run_repository_switch(self, target_repository, foreground, operation)
     }
 
     pub(crate) fn report_progress(&self, label: &str, current: u64, total: u64) {
@@ -581,7 +682,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::app::command_runtime::events::{AppEventKind, EventSink};
+    use crate::app::command_runtime::events::{AppEventKind, EventSink, NoopEventSink};
 
     #[derive(Default)]
     struct RecordingSink {
@@ -689,6 +790,64 @@ mod tests {
             error.kind,
             crate::app::command_runtime::CommandErrorKind::Cancelled
         );
+    }
+
+    #[test]
+    fn a_second_process_cannot_write_the_same_repository() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+
+        let coordinator_for = |name: &str| {
+            let mut settings = crate::app::settings::AppSettings::default();
+            settings.repository_path = root.to_string_lossy().into_owned();
+            let state = AppState::new(
+                settings,
+                directory.path().join(format!("{name}.json")),
+                directory.path().join(format!("{name}-logs")),
+                None,
+            );
+            OperationCoordinator::new(state, BackupState::default(), Arc::new(NoopEventSink))
+        };
+
+        let first = coordinator_for("first");
+        let second = coordinator_for("second");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holding = thread::spawn(move || {
+            first
+                .execute(OperationDomain::Library, |context| {
+                    context.run_write(|_| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok::<_, CommandError>(())
+                    })
+                })
+                .unwrap();
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("第一个写者未取得 owner lock");
+
+        let error = second
+            .execute(OperationDomain::Library, |context| {
+                context.run_write(|_| Ok::<_, CommandError>(()))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, "repository_busy");
+        assert!(
+            error.message.contains("另一个进程写入"),
+            "{}",
+            error.message
+        );
+
+        release_tx.send(()).unwrap();
+        holding.join().unwrap();
+        second
+            .execute(OperationDomain::Library, |context| {
+                context.run_write(|_| Ok::<_, CommandError>(()))
+            })
+            .expect("释放后第二个写者应能继续");
     }
 
     #[test]

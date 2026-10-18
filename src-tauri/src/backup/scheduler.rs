@@ -5,6 +5,7 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app::AppState,
     history::{self, IdleVerifyTarget, ScheduledBranch},
+    repository_lock::{OwnerLockError, RepositoryOwnerLock},
     storage,
 };
 
@@ -46,6 +47,20 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             }
             continue;
         }
+        // 候选筛选会顺带写「自动备份被跳过」的原因，因此同样按一次写操作取得
+        // 跨进程 owner lock。
+        let candidates_owner = match acquire_owner(&app_state, "backup:candidates") {
+            Ok(owner) => owner,
+            Err(error) => {
+                log::warn!(
+                    "automatic backup scheduler could not take the repository owner lock: {error}"
+                );
+                if !state.wait_scheduler(ERROR_RETRY) {
+                    break;
+                }
+                continue;
+            }
+        };
         let branches = match app_state.with_ready_repository(|root| {
             let branches = history::list_scheduled(root)?;
             // 网络位置与设备命名空间的工作文件不进入无人值守流程：快速检查会直接
@@ -77,6 +92,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 continue;
             }
         };
+        drop(candidates_owner);
         let now = match storage::now_ms() {
             Ok(now) => now,
             Err(_) => {
@@ -107,6 +123,18 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             next_due = Some(next_due.map_or(due_at, |current: i64| current.min(due_at)));
         }
         if let Some(branch_id) = due {
+            let backup_owner = match acquire_owner(&app_state, "backup:automatic") {
+                Ok(owner) => owner,
+                Err(error) => {
+                    log::warn!(
+                        "automatic backup could not take the repository owner lock for branch {branch_id}: {error}"
+                    );
+                    if !state.wait_scheduler(ERROR_RETRY) {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let result = state.run_exclusive_typed(
                 Some(&branch_id),
                 BackupTaskKind::AutomaticBackup,
@@ -118,6 +146,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                         .map_err(AutomaticBackupError::Infrastructure)?
                 },
             );
+            drop(backup_owner);
             match result {
                 Ok(_)
                 | Err(ExclusiveRunError::Operation(
@@ -180,6 +209,18 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         if let Some(target) = selection.ready {
             let branch_id = target.branch_id.clone();
             let expected_head = target.head_history_id.clone();
+            let verify_owner = match acquire_owner(&app_state, "backup:idleVerify") {
+                Ok(owner) => owner,
+                Err(error) => {
+                    log::warn!(
+                        "idle verify could not take the repository owner lock for branch {branch_id}: {error}"
+                    );
+                    if !state.wait_scheduler(ERROR_RETRY) {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let result =
                 state.run_exclusive_typed(Some(&branch_id), BackupTaskKind::IdleVerify, || {
                     app_state
@@ -188,6 +229,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                         })
                         .map_err(IdleVerifyError::Infrastructure)?
                 });
+            drop(verify_owner);
             match result {
                 Ok(_)
                 | Err(ExclusiveRunError::Operation(
@@ -475,6 +517,26 @@ fn jitter_ms(branch_id: &str) -> i64 {
         value.wrapping_mul(131).wrapping_add(u64::from(byte))
     });
     ((hash % 21) as i64 - 10) * 1_000
+}
+
+/// 调度器每次真正写仓库前取得与命令层相同的跨进程 owner lock。未配置仓库或目录
+/// 尚未建立时返回 `None`，让候选查询自己给出规范错误。
+fn acquire_owner(
+    app_state: &AppState,
+    operation: &str,
+) -> Result<Option<RepositoryOwnerLock>, String> {
+    let Some(root) = app_state.repository_path()? else {
+        return Ok(None);
+    };
+    if !root.is_dir() {
+        return Ok(None);
+    }
+    RepositoryOwnerLock::acquire(&root, app_state.process_role(), operation)
+        .map(Some)
+        .map_err(|error| match error {
+            OwnerLockError::Busy(_) => crate::repository_lock::BUSY_MESSAGE.to_owned(),
+            OwnerLockError::Io(message) => message,
+        })
 }
 
 #[cfg(test)]

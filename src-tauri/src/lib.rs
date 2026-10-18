@@ -11,7 +11,6 @@ mod history;
 mod library;
 mod path_scope;
 mod pin_board;
-#[cfg(feature = "headless")]
 mod repository_lock;
 mod storage;
 
@@ -122,6 +121,7 @@ fn show_main_window(app: &AppHandle) {
 /// `confirm_app_shutdown`. A fallback thread force-exits when the confirmation
 /// never arrives, so a hung webview cannot keep the application alive.
 fn begin_webview_shutdown(app: &AppHandle) {
+    let started = std::time::Instant::now();
     log::info!("shutdown handshake: emitting app_shutdown_requested");
     if let Err(error) = app.emit("app_shutdown_requested", ()) {
         log::error!("failed to emit shutdown request: {error}");
@@ -135,9 +135,55 @@ fn begin_webview_shutdown(app: &AppHandle) {
         if state.shutdown_confirmed() || state.exit_requested() {
             return;
         }
-        log::warn!("webview shutdown confirmation timed out; forcing exit");
+        log::warn!(
+            "[watchdog] webview shutdown confirmation timed out: timeout_ms={}, elapsed_ms={}; forcing exit",
+            SHUTDOWN_CONFIRM_TIMEOUT_MS,
+            started.elapsed().as_millis()
+        );
         handle.exit(0);
     });
+}
+
+/// 退出确认后，共享运行锁可能仍被一个长命令持有。确认路径必须等它清理完临时
+/// 文件与事务，这里只把等待过程写进结构化诊断，不改变「等锁再退出」的语义。
+fn start_shutdown_wait_watchdog(backup: backup::BackupState) -> std::sync::mpsc::Sender<()> {
+    use std::time::Duration;
+
+    let (stop, stopped) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut next_report = Duration::from_secs(2);
+        loop {
+            match stopped.recv_timeout(Duration::from_millis(500)) {
+                Ok(()) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let waited = started.elapsed();
+                    if waited < next_report {
+                        continue;
+                    }
+                    match backup.status() {
+                        Ok(status) if status.busy => log::warn!(
+                            "[watchdog] shutdown waiting for in-flight operation: waited_ms={}, operation={}, task_kind={:?}, branch={}",
+                            waited.as_millis(),
+                            status.operation.as_deref().unwrap_or(""),
+                            status.task_kind,
+                            status.active_branch_id.as_deref().unwrap_or("")
+                        ),
+                        Ok(_) => log::warn!(
+                            "[watchdog] shutdown waiting for repository operation lock: waited_ms={}",
+                            waited.as_millis()
+                        ),
+                        Err(error) => log::warn!(
+                            "[watchdog] shutdown could not read runtime status: waited_ms={}, error={error}",
+                            waited.as_millis()
+                        ),
+                    }
+                    next_report += Duration::from_secs(5);
+                }
+            }
+        }
+    });
+    stop
 }
 
 /// Confirmation side of the shutdown handshake. Runs the same irreversible
@@ -152,8 +198,16 @@ async fn confirm_app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
         return Ok(());
     }
     log::info!("Lilith Artworks shutting down (webview confirmed)");
-    app.state::<backup::BackupState>().shutdown();
     state.request_exit();
+    let backup = app.state::<backup::BackupState>().inner().clone();
+    let stop_watchdog = start_shutdown_wait_watchdog(backup.clone());
+    let wait_started = std::time::Instant::now();
+    backup.shutdown();
+    let _ = stop_watchdog.send(());
+    log::info!(
+        "shutdown sequence finished: waited_ms={}",
+        wait_started.elapsed().as_millis()
+    );
     app.exit(0);
     Ok(())
 }
@@ -233,6 +287,7 @@ pub fn run_headless(args: &[String]) -> i32 {
 }
 
 pub fn run() {
+    repository_lock::record_process_start();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             show_main_window(app);

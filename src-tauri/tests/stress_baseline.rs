@@ -7,8 +7,9 @@
 //! - **真实仓库场景**（锁等待、任务耗时、调度扫描、清理查询、灾备 I/O）：在
 //!   `LILITH_BASELINE_REPO` 指定的真实仓库副本上运行，测的是仓库规模下的绝对耗时。仓库
 //!   副本允许被测试改动，但本组只做**读操作**与**不写源仓库**的整仓灾备；自建的
-//!   `baseline-out` 在结束时删除，唯一残留是写命令取得哨兵时创建的跨进程哨兵库
-//!   `.lilith-write-lock.sqlite3`，采集后按采集前的副本还原即可。
+//!   `baseline-out` 在结束时删除，唯一残留是写命令取得跨进程 owner lock 时创建的锁库
+//!   `.lilith-write-lock.sqlite3*` 与 owner 元数据 `.lilith-write-owner.json`，采集后按
+//!   采集前的副本还原即可。
 //!
 //! **真实仓库副本是外部临时资料**：`LILITH_BASELINE_REPO` 指向维护者临时准备的目录，随 0.3
 //! 计划落实后撤除。本组只把它当阶段 0 的一次性测量对象——不做长期夹具、不设阈值、不生成
@@ -294,13 +295,14 @@ fn artwork_ids(outcome: &Outcome) -> Vec<String> {
     ids
 }
 
-/// 仓库数据字节总数，**排除**跨进程哨兵库 `.lilith-write-lock.sqlite3*`（写命令取得
-/// 哨兵时会创建它，与仓库数据无关）。用于「源仓库不受影响」的前后对照。
+/// 仓库数据字节总数，**排除**跨进程 owner lock 的运行时文件
+///（`.lilith-write-lock.sqlite3*` 与 `.lilith-write-owner.json`，与仓库数据无关）。
+/// 用于「源仓库不受影响」的前后对照。
 fn repository_data_bytes(repository: &Path) -> u64 {
     directory_bytes_excluding(repository, |path| {
         path.file_name()
             .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(".lilith-write-lock"))
+            .is_some_and(|name| name.starts_with(".lilith-write-"))
     })
 }
 

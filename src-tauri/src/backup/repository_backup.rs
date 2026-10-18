@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::{authenticity, library, storage};
+use crate::{authenticity, library, repository_lock, storage};
 
 use super::restore;
 
@@ -387,7 +387,9 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
             let relative = path
                 .strip_prefix(root)
                 .map_err(|_| "无法计算仓库目录项相对路径")?;
-            if !is_database_sidecar(relative) {
+            // 锁库、锁日志与 owner 元数据是进程级运行时文件，不属于仓库数据；
+            // 灾备副本不应携带它们（心跳也会让副本在复制期间不稳定）。
+            if !is_database_sidecar(relative) && !repository_lock::is_runtime_artifact(relative) {
                 files.push(path);
             }
         } else {
@@ -619,6 +621,31 @@ mod tests {
             create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap_err();
 
         assert!(error.contains("不能位于作品仓库内部"), "{error}");
+    }
+
+    #[test]
+    fn runtime_lock_artifacts_are_not_copied_into_the_backup() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let destination = directory.path().join("backups");
+        library::initialize(&root).unwrap();
+        fs::create_dir(&destination).unwrap();
+        fs::write(root.join(repository_lock::LOCK_FILE_NAME), b"lock").unwrap();
+        fs::write(
+            root.join(format!("{}-journal", repository_lock::LOCK_FILE_NAME)),
+            b"journal",
+        )
+        .unwrap();
+        fs::write(root.join(repository_lock::OWNER_FILE_NAME), b"owner").unwrap();
+
+        let report = create_repository_backup(&root, &destination, || false, |_, _, _| {}).unwrap();
+        let restored = PathBuf::from(&report.repository_path);
+        assert!(!restored.join(repository_lock::LOCK_FILE_NAME).exists());
+        assert!(!restored
+            .join(format!("{}-journal", repository_lock::LOCK_FILE_NAME))
+            .exists());
+        assert!(!restored.join(repository_lock::OWNER_FILE_NAME).exists());
+        verify_backup_bundle(Path::new(&report.backup_path), &|| false).unwrap();
     }
 
     #[test]

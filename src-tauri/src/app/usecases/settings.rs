@@ -1,13 +1,14 @@
 use crate::app::{
     command_runtime::{CommandContext, CommandError},
     settings::{
-        prepare_repository, snapshot, validate_settings, write_json_atomic, AppSettings,
-        SettingsSnapshot, CURRENT_SETTINGS_VERSION,
+        prepare_repository, snapshot, validate_settings, AppSettings, SettingsSnapshot,
+        CURRENT_SETTINGS_VERSION,
     },
 };
 
-/// 设置保存与仓库切换的唯一业务入口。托盘写入在阶段 2 收敛到同一 service；
-/// 阶段 1 先把设置页入口纳入 coordinator，保持命令名、DTO 与用户文案不变。
+/// 设置保存与仓库切换的唯一业务入口。设置页、托盘暂停开关与窗口几何捕获都写同一
+/// 份 `SettingsService` 快照；这里只负责命令语义（校验、切仓库、刷新调度器），
+/// revision/CAS 由 service 负责。
 pub(crate) fn save(
     context: &CommandContext,
     settings: AppSettings,
@@ -18,37 +19,52 @@ pub(crate) fn save(
     }
     let app_state = context.app_state().clone();
     let paused = settings.pause_automatic_backups;
+    let requested_repository = settings.repository_path.trim().to_owned();
+    let expected_revision = settings.revision;
     let repository_changed = app_state
         .repository_path()
         .map_err(CommandError::from)?
         .map(|path| path.to_string_lossy().into_owned())
-        != Some(settings.repository_path.trim().to_owned());
+        != Some(requested_repository.clone());
+    // 切换/首次配置时先保证目标目录存在再取 owner lock；否则锁库无处落盘，
+    // 而初始化本身也是写操作。
+    let target_repository = if repository_changed && !requested_repository.is_empty() {
+        let path = std::path::PathBuf::from(&requested_repository);
+        if !path.exists() {
+            std::fs::create_dir_all(&path)
+                .map_err(|error| CommandError::from(format!("无法创建作品仓库目录：{error}")))?;
+        }
+        Some(path)
+    } else {
+        None
+    };
 
-    let next = context.run_repository_switch(repository_changed, || {
-        let current_repository = app_state.repository_path().map_err(CommandError::from)?;
-        let prepared_repository = prepare_repository(
-            current_repository.as_deref(),
-            settings.repository_path.trim(),
-        )
-        .map_err(CommandError::from)?;
-        write_json_atomic(app_state.settings_path(), &settings).map_err(CommandError::from)?;
-        app_state
-            .replace_settings(settings)
-            .map_err(CommandError::from)?;
-        app_state.clear_warning().map_err(CommandError::from)?;
-        app_state
-            .set_validated_repository(prepared_repository)
-            .map_err(CommandError::from)?;
-        log::info!(
-            "settings saved: repository_changed={repository_changed}, repository_path={}",
+    let next =
+        context.run_repository_switch(target_repository.as_deref(), repository_changed, || {
+            let current_repository = app_state.repository_path().map_err(CommandError::from)?;
+            let prepared_repository =
+                prepare_repository(current_repository.as_deref(), &requested_repository)
+                    .map_err(CommandError::from)?;
             app_state
-                .repository_path()
-                .map_err(CommandError::from)?
-                .map(|path| path.display().to_string())
-                .unwrap_or_default()
-        );
-        snapshot(&app_state).map_err(CommandError::from)
-    })?;
+                .settings()
+                .update(Some(expected_revision), |current| {
+                    *current = settings.clone();
+                    Ok(())
+                })?;
+            app_state.clear_warning().map_err(CommandError::from)?;
+            app_state
+                .set_validated_repository(prepared_repository)
+                .map_err(CommandError::from)?;
+            log::info!(
+                "settings saved: repository_changed={repository_changed}, repository_path={}",
+                app_state
+                    .repository_path()
+                    .map_err(CommandError::from)?
+                    .map(|path| path.display().to_string())
+                    .unwrap_or_default()
+            );
+            snapshot(&app_state).map_err(CommandError::from)
+        })?;
 
     context.backup_state().set_automatic_scheduling(!paused);
     context.backup_state().wake_scheduler();

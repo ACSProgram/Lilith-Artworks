@@ -8,7 +8,8 @@
 
 ## 当前批次状态
 
-2026-10-18 批次：**0.3 阶段 0（建立 0.2 基线，不改变行为）**。
+2026-10-18 批次：**0.3 阶段 1（统一命令运行时）与阶段 2（设置单写入口、跨进程 owner lock、
+退出结算诊断、App 前端拆分）**。
 
 - **0.2 已收口并归档**：`0be6224` 切分 `0.2.0`，`v0.2.0` 附注标签已打并推送；`main` 固定为
   0.2 发布线。切分内容、压力测试口径、自动与人工门槛、未签名发布说明见
@@ -29,10 +30,19 @@
   `authenticity/artifact.rs`。画板写命令保持「仓库 lease + 仓库操作锁、不取共享运行锁」。
   `cargo check`（含 `headless` feature）、`cargo test --lib`、`npx tsc --noEmit`、`npm test`、
   `cargo fmt --check` 已通过；GUI 人工验收与压力测试**未做**。
-- **下一步**：由维护者验收阶段 1 的产品行为；随后进入阶段 2（`SettingsService`、统一 owner lock、
-  关闭结算诊断接入、`AppRuntimeProvider`）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由
-  维护者决定。
-- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1（待验收）–9。
+- **阶段 2 已实现并提交、待维护者验收**：设置文件新增独立 `revision`，设置页走 CAS 并返回
+  `settings_conflict`，托盘与窗口几何统一经 `SettingsService`；跨进程哨兵升级为 GUI/headless/
+  维护入口共用的按写操作 owner lock（SQLite 内核锁即存活证明，owner 元数据只作诊断，锁文件
+  从数据库发现/灾备/未引用扫描中排除）；退出结算的失败、5 秒未完成与原生 15 秒确认超时、
+  等待活动操作的记录接入 `[watchdog]` 结构化诊断；前端按 §3.B 拆为 `AppRuntimeProvider`、
+  `useSettingsController`、`useRepositoryMaintenance`、`RuntimeProgressProvider`、
+  `SettingsDialog` 与 `NoticeCenter`。`cargo check --lib`（含 `headless`）、`cargo test --lib`、
+  `cargo fmt --check`、`npx tsc --noEmit`、`npm test` 已通过；GUI 人工验收与压力测试**未做**。
+  owner lock 的锁冲突不区分同进程，后台任务持锁期间前台写命令会直接拿到 `repository_busy`
+  而不是排队等待，这一取舍连同其他待决项记在 `todo.md`。
+- **下一步**：由维护者验收阶段 1、阶段 2 的产品行为；随后进入阶段 3（App 组件剩余拆分、
+  事件通道消费侧、controller 模板）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
+- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1–2（待验收）、阶段 3–9。
 
 ## 当前基线
 

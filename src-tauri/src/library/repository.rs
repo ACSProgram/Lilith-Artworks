@@ -121,6 +121,11 @@ fn locate_database(root: &Path) -> Result<PathBuf, String> {
         let path = entry
             .map_err(|error| format!("无法读取作品仓库目录项：{error}"))?
             .path();
+        // 跨进程 owner lock 的锁库也是 `.sqlite3`，但它不是作品数据库；初始化时
+        // 它已经存在，不能参与备用数据库发现。
+        if is_runtime_artifact(root, &path) {
+            continue;
+        }
         if path.extension().and_then(|value| value.to_str()) == Some("sqlite3") {
             candidates.push(path);
         }
@@ -187,17 +192,29 @@ fn locate_database(root: &Path) -> Result<PathBuf, String> {
 
     if preferred.exists() {
         Ok(preferred)
-    } else if fs::read_dir(root)
-        .map_err(|error| format!("无法读取作品仓库内容：{error}"))?
-        .next()
-        .transpose()
-        .map_err(|error| format!("无法读取作品仓库内容：{error}"))?
-        .is_some()
-    {
-        Err("所选目录非空，且没有可读取的 Lilith Artworks 数据库".into())
     } else {
-        Ok(preferred)
+        let mut has_repository_content = false;
+        for entry in fs::read_dir(root).map_err(|error| format!("无法读取作品仓库内容：{error}"))?
+        {
+            let entry = entry.map_err(|error| format!("无法读取作品仓库内容：{error}"))?;
+            if !is_runtime_artifact(root, &entry.path()) {
+                has_repository_content = true;
+                break;
+            }
+        }
+        if has_repository_content {
+            Err("所选目录非空，且没有可读取的 Lilith Artworks 数据库".into())
+        } else {
+            Ok(preferred)
+        }
     }
+}
+
+/// 仓库根目录下的锁库、锁日志与 owner 元数据是进程级运行时文件，不参与
+/// 「是否为作品数据库 / 目录是否非空」的判定。
+fn is_runtime_artifact(root: &Path, path: &Path) -> bool {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    crate::repository_lock::is_runtime_artifact(relative)
 }
 
 fn remove_sqlite_sidecars(database: &Path) -> Result<(), String> {
@@ -1259,6 +1276,20 @@ mod tests {
         assert_eq!(row.0, fixture.artwork.artwork_id);
         assert_eq!(row.1, "Main");
         assert!(row.2.is_none());
+    }
+
+    #[test]
+    fn owner_lock_runtime_artifacts_do_not_block_initialization() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        fs::create_dir(&root).unwrap();
+        // 首次配置仓库时，owner lock 先于 initialize 创建锁库与 owner 元数据。
+        let guard =
+            crate::repository_lock::RepositoryOwnerLock::acquire(&root, "gui", "settings:switch")
+                .unwrap();
+        initialize(&root).expect("运行时锁文件不应让新仓库被判为不可初始化");
+        assert!(database_path(&root).is_file());
+        drop(guard);
     }
 
     #[test]
