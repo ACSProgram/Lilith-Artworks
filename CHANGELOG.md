@@ -85,6 +85,15 @@ decision, so an untagged version is transitional.
   about 5% failures at 128 — while C2PA soft binding always matches. The
   readback rate per selection edge is recorded as an observation, and the
   guarantee boundary is stated in the report.
+- The `stress_concurrency` `J5` assertion is aligned with the repository's
+  actual write semantics instead of demanding an outcome the product never
+  promised. `compact` now passes either by succeeding or by taking the explicit
+  cross-process write refusal: the full-library scrub's sentinel *probe* also
+  uses `BEGIN IMMEDIATE`, so under a race the probe can win the lock and the
+  concurrent write is refused. A refused compaction is retried once on the same
+  repository (by then uncontended, hence deterministic) and asserted to succeed;
+  both refusal kinds are counted per round, and the round count rises from 4 to
+  6. The lock and the probe are untouched, so no product behavior changes.
 
 ## 0.3.0-alpha.1 - 2026-10-18
 

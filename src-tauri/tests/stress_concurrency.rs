@@ -406,17 +406,24 @@ fn j4_reads_answer_while_a_compaction_holds_the_lock() {
 /// **构造**出来的。这一条不构造窗口：让 `compact` 与 `scrub` 真正同时启动、各自跑完，
 /// 重复多轮。断言三条不变量：
 /// ① 两者都不得挂起；
-/// ② `compact` 必须成功；`scrub` 成功、以「仓库正在被写入，请稍后重试」**明确拒绝**，
-///    或以退出码 1 干净失败（无 panic）；
-/// ③ 两者都结束后仓库必须完整：`verify` + `scrub` 通过，且仍存在的每个节点都能逐位恢复。
+/// ② `compact` **要么成功、要么拿到那个明确的「多进程写入」拒绝**——`scrub` 的哨兵
+///    **探测**本身也用 `BEGIN IMMEDIATE`，零等待下可与同时启动的写者抢到锁，因此精简可能
+///    拿到拒绝；这是产品已知的不对称，断言对齐「第二个写者拿到明确拒绝」这条实际承诺，
+///    而不是要求一个产品从未承诺过的结果。`scrub` 成功、以「仓库正在被写入，请稍后重试」
+///    **明确拒绝**，或以退出码 1 干净失败（无 panic）；
+/// ③ 两者都结束后仓库必须完整：被拒绝的精简随后重试一次并成功（此时已无并发写者，因此
+///    是确定性的——不 sleep、不轮询），`verify` + `scrub` 通过，且仍存在的每个节点都能
+///    逐位恢复。
 ///
-/// 拒绝计入报告：写者持锁时全库校验给出的是**有意义的**拒绝，不再是边界问题。两者都不
-/// 持锁却仍失败的轮次意味着「精简进行中跑全库校验」还有别的错误路径，那仍然值得暴露。
+/// 两类拒绝都计入报告：写者持锁时全库校验给出的是**有意义的**拒绝；精简被拒绝则说明
+/// `scrub` 的探测先抢到了锁。若一轮里精简不是那条明确的拒绝（而是别的错误），才是需要
+/// 继续关注的信号。
 #[test]
 fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
-    let mut refusals = 0_usize;
+    let mut compact_refusals = 0_usize;
+    let mut scrub_refusals = 0_usize;
     let mut other_failures = 0_usize;
-    for round in 0..4_u64 {
+    for round in 0..6_u64 {
         let fixture = ArtworkFixture::new();
         let first = fixture.commit(96 * 1024, 1 + round, "first");
         let middle = fixture.commit(80 * 1024, 2 + round, "middle");
@@ -438,13 +445,34 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
         });
 
         assert!(
-            !compaction.timed_out && compaction.ok(),
-            "round={round}：精简必须成功：\n{}",
+            !compaction.timed_out,
+            "round={round}：精简不得挂起：\n{}",
             compaction.describe()
         );
+        // 精简的两种合法结果：成功，或拿到那个明确的「多进程写入」拒绝。
+        let compact_refused = !compaction.ok();
+        if compact_refused {
+            assert_eq!(
+                compaction.exit_code,
+                1,
+                "round={round}：精简失败必须是普通错误：\n{}",
+                compaction.describe()
+            );
+            assert!(
+                compaction.error().contains("仓库正在被另一个进程写入"),
+                "round={round}：精简失败的理由应指明多进程写入边界：\n{}",
+                compaction.describe()
+            );
+            assert!(
+                !compaction.stderr.contains("panicked"),
+                "round={round}：精简不得以 panic 收场：\n{}",
+                compaction.describe()
+            );
+            compact_refusals += 1;
+        }
         if !scrub.ok() {
             if scrub.error().contains("仓库正在被写入，请稍后重试") {
-                refusals += 1;
+                scrub_refusals += 1;
             } else {
                 other_failures += 1;
             }
@@ -466,7 +494,15 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
             );
         }
 
-        // 两者都结束后：仓库必须完整，且仍存在的节点都能逐位恢复。
+        // 两者都结束后：被拒绝的精简必须重试成功（此时已无并发写者，确定性成立），
+        // 仓库必须完整，且仍存在的节点都能逐位恢复。
+        if compact_refused {
+            fixture
+                .command("compact")
+                .arg("history", &middle)
+                .finish()
+                .expect_ok();
+        }
         assert_eq!(fixture.healthy(), 2, "round={round}：精简后应剩两个节点");
         for (node, bytes) in &expected {
             let output = fixture.workspace.out(&format!("j5-{round}.bin"));
@@ -492,16 +528,26 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
             &compaction,
             json!({
                 "round": round,
+                "compactOk": compaction.ok(),
+                "compactRefused": compact_refused,
+                "compactRefusals": compact_refusals,
+                "compactError": if compaction.ok() { Value::Null } else { Value::String(compaction.error()) },
                 "scrubOk": scrub.ok(),
                 "scrubRefused": !scrub.ok() && scrub.error().contains("仓库正在被写入"),
+                "scrubRefusals": scrub_refusals,
                 "scrubError": if scrub.ok() { Value::Null } else { Value::String(scrub.error()) },
             }),
         );
     }
 
-    // 如实记录：真并发下全库校验被明确拒绝与以其他错误失败的轮次。前者是既定行为，
-    // 后者才是需要继续关注的信号。
-    eprintln!("J5：4 轮真并发中全库校验被拒绝 {refusals} 轮、其他失败 {other_failures} 轮");
+    // 如实记录：真并发下精简被明确拒绝、全库校验被明确拒绝，以及以其他错误失败的轮次。
+    // 前两类是既定行为（精简的拒绝来自 `scrub` 的探测抢到锁，见报告「边界」），最后一类
+    // 才是需要继续关注的信号。若 6 轮里一次精简拒绝都没出现，说明抢锁窗口本轮未被触发，
+    // 重试分支未覆盖——如实注明，不用 sleep 或人为构造窗口。
+    eprintln!(
+        "J5：6 轮真并发中精简被拒绝 {compact_refusals} 轮、\
+         全库校验被拒绝 {scrub_refusals} 轮、其他失败 {other_failures} 轮"
+    );
 }
 
 /// J6：写哨兵被持有时，内容级全库校验必须**明确拒绝**。

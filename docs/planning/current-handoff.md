@@ -10,16 +10,12 @@
 
 2026-10-18 批次：**0.3 alpha1（阶段 1–5：统一命令运行时、设置单写入口与跨进程 owner lock、事件
 订阅与 controller 模板、ChunkFile v2 与容器感知分块、调度/清理/灾备算法）已实现并切分为
-`0.3.0-alpha.1`**；CI 通过。release 档整套压力测试（`manual` 8 GiB 档未跑）已于 2026-10-18 跑完并
-留下 8 条未通过记录；这些记录已按 `alpha1-stress-failure-fix-plan-2026-10-18.md` 的阶段一处理完毕
-（检查点分层、快照体积断言按 v2 口径改写、G4 夹具改到 512 级），并在本地复验：便宜九组 +
-`gate_guard` 通过，`stress_large` 的 `default` 档 8/8 通过（含新增的 C8）。逐条根因与证据见
-`docs/user/stress-test-report.md` 的「alpha1 未通过项：诊断与修复」；计划的阶段二（小选区水印
-警告）也已实现并本地复验（`stress_authenticity` G6、前端单测全绿）。**alpha1 的收尾仍欠三项**：
-release 档五档大文件存储数值未采集、`stress_authenticity` 的 `extreme` 档未复跑、以及
-`stress_concurrency` J5 的既有偶发（约 15%，与本次修复无关，机制见该报告「边界」——维护者已定
-「改断言不改锁」，落实口径见计划文档 §六，编入该计划的阶段三）。三项都记在 `todo.md`。
-计划的阶段一、阶段二已落地；阶段三（J5 断言口径）尚未实施。
+`0.3.0-alpha.1`**；CI 通过。release 档整套压力测试留下的 8 条未通过记录已按
+`archive/alpha1-stress-failure-fix-plan-2026-10-18.md`（阶段一至阶段三：检查点分层、快照体积断言
+按 v2 口径改写、G4 夹具改到 512 级、小选区水印警告、J5 并发断言口径）处理完毕并归档，逐条根因、
+修复与复验见 `docs/user/stress-test-report.md` 的「alpha1 未通过项：诊断与修复」。**alpha1 的收尾
+仍欠两项**：release 档五档大文件存储数值未采集、`stress_authenticity` 的 `extreme` 档未复跑；
+两项都记在 `todo.md`。
 
 - **0.2 已收口并归档**：`0be6224` 切分 `0.2.0`，`v0.2.0` 附注标签已打并推送；`main` 固定为 0.2
   发布线。切分内容、压力测试口径、自动与人工门槛、未签名发布说明见
@@ -30,11 +26,11 @@ release 档五档大文件存储数值未采集、`stress_authenticity` 的 `ext
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
 - **下一步**：先收口 `todo.md` 里 alpha1 的剩余项（release 档五档大文件数值采集、`extreme` 档
-  复跑、J5 偶发与度量口径；计划的阶段三 = J5 断言口径）；随后进入 alpha2
-  （阶段 6 + 针对 alpha1 的测试与修复），再到 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。
-  批次划分、依赖与阶段口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
-- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、计划的阶段三、0.3 前的
-  补强候选、阶段 6–9。
+  复跑、压力测试的 CPU 时间度量口径）；随后进入 alpha2（阶段 6 + 针对 alpha1 的测试与修复），
+  再到 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、依赖与阶段口径见
+  `0.3-architecture-algorithm-plan-2026-10-05.md`。
+- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
+  阶段 6–9。
 
 ## 当前基线
 
