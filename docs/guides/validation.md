@@ -31,7 +31,7 @@
   锁，会以超时失败而不是无限挂起）。同处还覆盖「切换仓库会等活跃租约」。
 - 仓库内**主库文件本身**被改坏（非数据库内容 / 清空）时的干净失败由 `stress_damage` 的 R3/R4
   覆盖，与该组的 R1/R2（快照/增量内容损坏）互补——两层校验都打不开主库时也应给出可行动的错误。
-- `backup/chunk_file.rs` 与 `backup/restore.rs` 只依赖 sha2、zstd、tempfile（restore 另需 history/storage 少量接口），可以在仓库外用只含这几个依赖的轻量 crate `#[path]` 引入编译并运行其测试；这是重依赖边界内验证分块与物化逻辑的标准做法。
+- `backup/chunk_file/` 与 `backup/restore.rs` 只依赖 sha2、zstd、tempfile（restore 另需 history/storage 少量接口），可以在仓库外用只含这几个依赖的轻量 crate `#[path]` 引入编译并运行其测试；这是重依赖边界内验证分块与物化逻辑的标准做法。
 - `trustmark` 经 `ort-sys` 的构建脚本从 pyke CDN 下载预编译 ONNX Runtime，因此**全新环境首次构建需要网络**。改动依赖版本后必须重跑 `npm run legal` 并提交 `licenses/THIRD_PARTY_LICENSES.html`。
 
 ## 压力测试：便宜的分组进 CI，昂贵的仍只在发布前运行

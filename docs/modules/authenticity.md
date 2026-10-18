@@ -14,7 +14,7 @@
 - 强制发布检查点和共享运行锁：`src-tauri/src/app/usecases/authenticity.rs` 调用公开
   `backup::ensure_checkpoint` 后进入认证服务；跨领域的进入/取消/发布命令适配器在
   `src-tauri/src/app/workflows.rs`，单领域预览与识别适配器在
-  `src-tauri/src/authenticity/commands.rs`；认证模块不导入 backup 或读取 `chunk_file.rs`。
+  `src-tauri/src/authenticity/commands.rs`；认证模块不导入 backup 或读取 `chunk_file/`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 

@@ -12,7 +12,7 @@
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
 - SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
-- snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file.rs`。
+- snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file/`。
 - `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与后续缩略图功能共用这一份解析，不要在备份或认证模块里另写。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
 - 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
@@ -32,7 +32,7 @@
 
 ## ChunkFile
 
-`backup/chunk_file.rs` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。
+`backup/chunk_file/` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`，按职责拆为：`mod.rs`（结果类型、错误分类、`FormatVersion`/`ChunkWriteOptions`/`ChunkingConfig`、`ChunkDigest`/`ChunkRecord`、`ChunkTask` 与格式常量）、`format.rs`（头与块记录的读写、长度与能力校验）、`store.rs`（虚拟偏移段与 reader 游标）、`chunking.rs`（CDC 与容器对齐分块）、`snapshot.rs`（快照写入/打开/物化）、`delta.rs`（反向增量、payload 落盘与链解析）、`tests.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。
 
 ChunkFile v1 的字节布局保持只读兼容：76 B snapshot 头、116 B delta 头、36 B 块记录。v2 默认用于**新写出的节点**（设置项 `chunkFileFormatV2`，默认开启，设置页可关闭后回退到 v1），头部为 80 B snapshot / 120 B delta，显式记录 `version/chunker/hash/codec/adapter`，块记录扩为 44 B（`stored_len/logical_len/codec/recipe/flags`）。reader 按文件头分派，因此同一仓库可长期混存 v1/v2；关闭开关只影响此后新生成的 snapshot/delta，不重写既有文件、不做仓库级迁移。v2 快照对内容相同的块写 `stored_len=0` 的引用而不是重复 payload（tile 级去重），打开时按先出现的同摘要块解析引用；delta 仍只用外层 zstd 包装，不做逐块转码。块长度校验按布局分派：`min_size` 只约束 CDC 布局，容器对齐产生的结构单元（24 B 文件头、56 B `Exta` 头）只受 `max_size` 约束，超出时才交给 CDC 切分。成功提交、检查点与精简的日志都会记录本次写入的 `format`/`chunking`，便于解释仓库内的版本分布。
 
@@ -183,8 +183,8 @@ cleanup_repository_unreferenced
 | 逐个受管理文件（snapshot/delta）做多种子单点改写，每一次都被内容级校验发现（退出码 1、无 panic），数据库级校验不受影响；复原后最早版本仍逐位可恢复 | `stress_damage` R5 |
 | 整仓灾备与精简这两类**长**写任务持锁期间，只读命令仍作答、未超时，且看到改接 / 复制之前的一致状态（树逐字段一致、历史未推进） | `stress_concurrency` J3、J4 |
 | 不构造窗口的真并发「精简 + 全库校验」不挂起、不损坏仓库（结束后完整且每个仍存在的节点逐位可恢复）；写者持 owner lock 时全库校验以「仓库正在被写入，请稍后重试」明确拒绝，轻量只读命令不受影响 | `stress_concurrency` J5、J6 |
-| 快照/增量容器面对不受信任的字节：绝不 panic、越界或无界分配；被接受的容器块数量不超过文件容量、可物化且长度等于声明值；截断与续写必须被拒绝 | `backup/chunk_file.rs` 单测（确定性畸形输入模糊） |
-| 磁盘写满时快照写入干净失败：返回「空间不足」、不推进历史、不留半成品、可重试；写到一半的字节不会被误认为完整快照 | `backup/worker.rs`、`backup/chunk_file.rs` 单测 |
+| 快照/增量容器面对不受信任的字节：绝不 panic、越界或无界分配；被接受的容器块数量不超过文件容量、可物化且长度等于声明值；截断与续写必须被拒绝 | `backup/chunk_file/tests.rs` 单测（确定性畸形输入模糊） |
+| 磁盘写满时快照写入干净失败：返回「空间不足」、不推进历史、不留半成品、可重试；写到一半的字节不会被误认为完整快照 | `backup/worker.rs`、`backup/chunk_file/tests.rs` 单测 |
 
 0.3 阶段 4 在 `stress_bench` 增加 P1B：4 MiB 文件 × 6 节点的多段链上反复恢复最早与最新节点，报告 p50/p95 与吞吐；它只作为段索引与读取游标的决策证据，随发布前的整套压力测试手动运行，不进入日常检查、CI 门槛或性能基线更新。快速检查的同尺寸同 mtime 改写由 `backup/worker.rs` 单测覆盖（回拨修改时间但在首尾采样区改动内容，必须触发全量）。
 
