@@ -90,6 +90,15 @@ impl ReferenceInventory for HistoryReferenceInventory {
             is_delta_name,
             "历史增量未被引用",
             files,
+        )?;
+        // 作品 `temp/` 只存放备份、恢复与检查点在发布前写下的 `NamedTempFile`
+        // （`backup/worker.rs`、`backup/restore.rs`）。正常路径由 `Drop` 删除，
+        // 进程被强杀或断电时残留，且永远不会进入引用清单。
+        collect_scan_directory(
+            &artwork_directory.join("temp"),
+            is_scratch_name,
+            "备份或恢复中断后残留的临时文件",
+            files,
         )
     }
 }
@@ -152,6 +161,14 @@ fn is_delta_name(name: &str) -> bool {
     })
 }
 
+/// 暂存文件命名：`tempfile::NamedTempFile` 的默认前缀是 `.tmp`，随后是随机后缀
+/// （例如 `.tmpd0BGy8`）。作品 `temp/` 只由本进程的备份/恢复写入，因此只认这个
+/// 前缀；用户手工放进该目录的其它文件不会被当成孤儿报告。
+fn is_scratch_name(name: &str) -> bool {
+    name.strip_prefix(".tmp")
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -197,5 +214,29 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.contains(&snapshot));
         assert!(paths.contains(&delta));
+    }
+
+    /// 作品 `temp/` 里的 `.tmp*` 是崩溃后残留的暂存文件：它既没有命名模式可匹配
+    /// 受管理文件，也永远不会被引用，因此必须单独报告，否则收不回来。
+    #[test]
+    fn reports_scratch_files_left_in_the_artwork_temp_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let temp = directory.path().join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let residue = temp.join(".tmpd0BGy8");
+        let unrelated = temp.join("notes.txt");
+        for path in [&residue, &unrelated] {
+            fs::write(path, b"payload").unwrap();
+        }
+
+        let mut files = Vec::new();
+        HistoryReferenceInventory
+            .scan_candidates(directory.path(), &mut files)
+            .unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].path, residue);
+        assert_eq!(files[0].reason, "备份或恢复中断后残留的临时文件");
+        assert!(!is_scratch_name(".tmp"));
     }
 }

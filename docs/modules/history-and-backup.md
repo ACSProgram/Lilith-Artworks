@@ -48,7 +48,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内先一次收集契约层提供的完整引用清单，再逐路径判定当前图是否仍引用它（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 
-清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
+清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里），以及作品 `temp/` 下崩溃残留的 `.tmp*` 暂存文件（备份、恢复与检查点在发布前写下的 `NamedTempFile`，从不进入引用清单，正常路径由 `Drop` 删除）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
 
 设置页「空间」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
 
@@ -67,7 +67,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 **数据库记录口径**：snapshot 文件字节 = `Σ history_nodes.chunk_file_size WHERE snapshot_path IS NOT NULL`；delta 字节 = `Σ history_edges.delta_size`。非 snapshot 节点的 `chunk_file_size` 是重建读取量，**不并入存储总量**。最终成品按规范化 `source_path` 去重后计入 `byte_size`；认证输出按规范化 `output_path` 去重后计入 `output_bytes`。仪表盘按历史快照、历史增量、最终成品、认证输出四类展示，分类之和等于数据库记录总量。
 
-**磁盘实际口径**：只扫描仓库目录本身，外部首次导出路径不计入。manifest 中可识别的 snapshot / delta / 最终成品 / 认证仓库副本 / 画板 DDS 按实际文件大小归类；SQLite 主库与 WAL、仓库 `temp/`、未识别文件合并为「其它」。分类之和等于仓库目录实际文件字节。两套口径并列显示、不静默合并；差异本身用于发现记录与磁盘不一致。
+**磁盘实际口径**：只扫描仓库目录本身，外部首次导出路径不计入。manifest 中可识别的 snapshot / delta / 最终成品 / 认证仓库副本 / 画板 DDS 按实际文件大小归类；SQLite 主库与 WAL、仓库 `temp/`、作品 `artworks/<artwork>/temp/`（备份与恢复的暂存区，含崩溃残留的 `.tmp*`）、未识别文件合并为「其它」。分类之和等于仓库目录实际文件字节。两套口径并列显示、不静默合并；差异本身用于发现记录与磁盘不一致。
 
 **画板 DDS 分类**按「条目是否存在实体文件」判定：阶段 6 查询 `pin_board_images.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`；阶段 7 重建画板表后只把同一判定改为 `pin_board_bitmaps.file_path`，不引入 kind 枚举。
 

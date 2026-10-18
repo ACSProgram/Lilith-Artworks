@@ -633,6 +633,8 @@ fn disk_scan_classifies_repository_files_and_excludes_runtime_artifacts() {
     write_file(&root, "artworks/a/certifications/r1.jpg", &vec![4; 200]);
     write_file(&root, "artworks/a/boards/1/7.dds", &vec![5; 128]);
     write_file(&root, "temp/session/blob.bin", &vec![6; 10]);
+    // 作品 `temp/` 是备份/恢复的暂存区，崩溃残留既不属受管理文件也不该算「未识别」。
+    write_file(&root, "artworks/a/temp/.tmp9f3Kq1", &vec![9; 20]);
     write_file(&root, "notes.txt", b"hello");
     write_file(&root, "legacy.sqlite3", b"old");
     write_file(&root, ".lilith-write-owner.json", &vec![7; 99]);
@@ -651,7 +653,8 @@ fn disk_scan_classifies_repository_files_and_excludes_runtime_artifacts() {
     assert_eq!(category(StorageKind::FinalArtifact).bytes, 300);
     assert_eq!(category(StorageKind::Certification).bytes, 200);
     assert_eq!(category(StorageKind::BoardDds).bytes, 128);
-    assert_eq!(scan.other_breakdown.temp_bytes, 10);
+    assert_eq!(scan.other_breakdown.temp_bytes, 30);
+    assert_eq!(scan.other_breakdown.temp_files, 2);
     assert_eq!(scan.other_breakdown.unrecognized_bytes, 5);
     assert!(scan.other_breakdown.sqlite_bytes >= 3);
     assert_eq!(

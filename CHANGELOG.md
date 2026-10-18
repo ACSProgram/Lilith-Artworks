@@ -125,6 +125,20 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Crash residue in the per-artwork staging directory is now reported and
+  classified correctly. Backups, restores and checkpoints write their snapshot
+  and delta staging files as `NamedTempFile` under
+  `artworks/<artwork>/temp/`; a killed process or power loss skips their `Drop`
+  and leaves `.tmp*` files that no database row references. The disk scan
+  counted them as unrecognized files (1.69 GiB in a real repository) because it
+  only recognized the repository-root `temp/`, and the unreferenced-file scan
+  never looked into the directory, so the application could not reclaim them
+  either. `scan_files` now classifies `artworks/<artwork>/temp/` as repository
+  temp, and `HistoryReferenceInventory::scan_candidates` reports stale `.tmp*`
+  files there (keeping the existing 30-minute grace period and hash-verified,
+  user-confirmed deletion), so they appear in the cleanup scan with the reason
+  "备份或恢复中断后残留的临时文件" instead of hiding in the unrecognized total.
+  Non-`.tmp` files placed in that directory by hand are not reported.
 - The settings page now shows the live stage, counts and percentage of its long
   operations. It matched `BackupRuntimeStatus.operation` against command names
   (`repository-scrub`, `repository-backup`, `unreferenced-scan`), but the

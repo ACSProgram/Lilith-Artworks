@@ -1220,6 +1220,29 @@ mod tests {
             .is_empty());
     }
 
+    /// 备份/恢复崩溃后留在作品 `temp/` 的 `.tmp*` 残骸没有任何引用，必须由扫描
+    /// 报告出来，否则用户既看不到也收不回来。
+    #[test]
+    fn scan_reports_crash_residue_in_the_artwork_temp_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let temp = new_artwork_directory(&root).join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let residue = temp.join(".tmpd0BGy8");
+        fs::write(&residue, b"scratch").unwrap();
+        age_file(&residue);
+
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].path,
+            storage::relative_path(&root, &residue).unwrap()
+        );
+        assert_eq!(candidates[0].reason, "备份或恢复中断后残留的临时文件");
+        assert_eq!(candidates[0].byte_size, 7);
+    }
+
     #[test]
     fn confirmed_cleanup_removes_candidates_idempotently() {
         let directory = tempfile::tempdir().unwrap();

@@ -1092,12 +1092,12 @@ fn scan_files(
         file_count = file_count.saturating_add(1);
         seen.insert(key.clone());
 
-        // 数据库与仓库 temp 先归入「其它」：它们即使与受管理路径同名也不该被
+        // 数据库与暂存目录先归入「其它」：它们即使与受管理路径同名也不该被
         // 当作受管理文件，因此判定顺序固定。
         if is_database_file(&relative) {
             other.sqlite_bytes = other.sqlite_bytes.saturating_add(size);
             other.sqlite_files = other.sqlite_files.saturating_add(1);
-        } else if relative.starts_with("temp/") {
+        } else if is_temp_path(&key) {
             other.temp_bytes = other.temp_bytes.saturating_add(size);
             other.temp_files = other.temp_files.saturating_add(1);
         } else if let Some((kind, artwork_id, board_id)) = plan_lookup(plan, &key) {
@@ -1274,6 +1274,24 @@ fn is_database_file(relative: &str) -> bool {
         || relative.ends_with(".sqlite3-wal")
         || relative.ends_with(".sqlite3-shm")
         || relative.ends_with(".sqlite3-journal")
+}
+
+/// 仓库 `temp/` 与作品 `artworks/<artwork>/temp/` 都是暂存区：备份、恢复与检查点
+/// 在发布前把 snapshot/delta 写在这里，进程被强杀或断电时 `NamedTempFile` 的
+/// `Drop` 不再执行，留下的 `.tmp*` 残骸没有任何数据库引用。它们既不是受管理
+/// 文件，也不该被算作「未识别」，因此统一并入「仓库 temp」。
+///
+/// 入参是 [`normalize_path_key`] 处理后的路径（`/` 分隔、小写），因此判定与
+/// 大小写无关。
+fn is_temp_path(key: &str) -> bool {
+    if key.starts_with("temp/") {
+        return true;
+    }
+    let mut segments = key.split('/');
+    matches!(
+        (segments.next(), segments.next(), segments.next()),
+        (Some("artworks"), Some(_), Some("temp"))
+    )
 }
 
 fn add_category(categories: &mut HashMap<StorageKind, (u64, u64)>, kind: StorageKind, bytes: u64) {
