@@ -174,7 +174,10 @@ pub(crate) fn finalize_board(
     board_id: i64,
     expected_revision: &str,
 ) -> Result<SavePinBoardResult, CommandError> {
-    context.run_repository_write(|session| {
+    // 结算发生在关窗与切仓库时：用 Shutdown 优先级插队到写入闸门最前，并把等待
+    // 上限压到 10 秒（原生端 15 秒兜底强退，留 5 秒余量），避免一次自动备份就让
+    // 画板结算失败。
+    context.run_repository_write_shutdown(|session| {
         let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
         let (result, cleanup_ids) = repository::finalize_board(
             &mut connection,

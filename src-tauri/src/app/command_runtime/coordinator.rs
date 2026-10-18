@@ -1,14 +1,17 @@
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use crate::{
     app::AppState,
     backup::{BackupState, BackupTaskKind, ExclusiveRunError},
     cancel::CancelToken,
-    repository_lock::{self, OwnerLockError, RepositoryOwnerLock},
+    repository_lock::{
+        self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority,
+        WRITE_WAIT_TIMEOUT_MESSAGE,
+    },
     storage,
 };
 
@@ -19,6 +22,20 @@ use super::{
     },
     types::{OperationClass, OperationDomain, OperationId},
 };
+
+/// 交互写（普通写命令、素材板写命令）排队取闸门的上限。
+///
+/// 依据：实测最长持锁 40,234 ms；但交互写会先请求后台让位（`cancel_background`），
+/// 自动备份通常在一个分块边界内退出，因此 10 秒足够覆盖正常情况，超时即按
+/// 「仓库正在写入，请稍后重试」快速失败，而不是让按钮无限转圈。
+const INTERACTIVE_WRITE_WAIT: Duration = Duration::from_secs(10);
+/// 前台长命令排队上限：恢复/精简/检查点/整仓备份这类操作必然与自动备份重叠，
+/// 而自动备份实测最长持锁 40 秒，留出余量。
+const FOREGROUND_WRITE_WAIT: Duration = Duration::from_secs(60);
+/// 切换仓库排队上限：切换本身还要等运行锁与写租约，闸门只占其中一小段。
+const REPOSITORY_SWITCH_WRITE_WAIT: Duration = Duration::from_secs(30);
+/// 退出结算排队上限：原生端有 15 秒兜底强退，这里留 5 秒余量。
+const SHUTDOWN_WRITE_WAIT: Duration = Duration::from_secs(10);
 
 /// 一次仓库操作已被协调器分类并取得锁的证明。use-case 只能通过它拿到仓库根目录，
 /// 避免在锁外重新读取设置里的仓库路径。
@@ -38,12 +55,20 @@ impl<'a> RepositorySession<'a> {
 
 /// GUI、headless 与未来维护入口共用的运行入口。
 ///
-/// 写操作的锁序固定为：跨进程仓库 owner lock → 共享运行锁（仅写/前台/后台分类）
-/// → 仓库 lease → 仓库操作锁 → SQLite 事务。owner lock 冲突不排队，直接返回
-/// `repository_busy`。只读命令（[`Self::run_read`]）与内容级只读长任务
-/// （[`Self::run_foreground_read`]）不持有 owner lock。素材板写命令走
-/// [`Self::run_repository_write`]，按既有语义只取仓库 lease 与操作锁，不取共享
-/// 运行锁。
+/// 写操作的锁序固定为：**进程内写入闸门（排队）** → 跨进程仓库 owner lock（零等待）
+/// → 共享运行锁（仅写/前台/后台分类）→ 仓库 lease → 仓库操作锁 → SQLite 事务。
+///
+/// 两层判定的分工：
+///
+/// - 闸门只处理**同进程**竞争：按 Shutdown > Foreground > Interactive > Background
+///   串行排队，等待有上限且可取消，因此同进程的两条写路径不再互相返回「另一个进程
+///   正在写入」。
+/// - 跨进程 owner lock 的语义**完全不变**：另一个进程持锁时仍然立即拒绝；排队成功
+///   之后才发现 SQLite 被别的进程占用时，闸门随之释放并返回原样文案。
+///
+/// 只读命令（[`Self::run_read`]）与内容级只读长任务（[`Self::run_foreground_read`]）
+/// 不持有 owner lock。素材板写命令走 [`Self::run_repository_write`]，按既有语义只取
+/// 仓库 lease 与操作锁，不取共享运行锁。
 #[derive(Clone)]
 pub(crate) struct OperationCoordinator {
     inner: Arc<Inner>,
@@ -206,7 +231,8 @@ impl OperationCoordinator {
         result.map_err(|error| error.with_operation_id(operation_id.as_str()))
     }
 
-    /// 用户写命令：共享运行锁（UserOperation）→ 仓库 lease → 仓库操作锁。
+    /// 用户写命令：写入闸门（Interactive，排队）→ 共享运行锁（UserOperation）
+    /// → 仓库 lease → 仓库操作锁。
     pub(crate) fn run_write<T>(
         &self,
         context: &CommandContext,
@@ -223,9 +249,8 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Write);
-        // 固定锁序的第一层：跨进程 owner lock。它在运行分类锁之前取得，冲突立即
-        // 返回 repository_busy，不排队等待。
-        let _owner = self.acquire_owner_lock(context, "write")?;
+        // 固定锁序的第一层：进程内闸门（排队）与跨进程 owner lock（零等待）。
+        let _owner = self.acquire_interactive_owner(context, "write")?;
         let result = self.inner.backup_state.run_exclusive_typed(
             branch_id,
             BackupTaskKind::UserOperation,
@@ -238,7 +263,11 @@ impl OperationCoordinator {
         self.finish_write(context, result)
     }
 
-    /// 前台长命令：登记前台等待、请求后台让位，再取共享运行锁。
+    /// 前台长命令：登记前台等待 + 请求后台让位，再取写入闸门（Foreground）与
+    /// 共享运行锁。
+    ///
+    /// 让位必须发生在取闸门**之前**：闸门一失败就直接返回，根本走不到让位那一步；
+    /// 这也是 0.2 → 0.3 回归的原因。
     pub(crate) fn run_foreground<T>(
         &self,
         context: &CommandContext,
@@ -246,12 +275,23 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Foreground);
-        let _owner = self.acquire_owner_lock(context, "foreground")?;
-        let result = self.inner.backup_state.run_foreground_typed(branch_id, || {
+        let mut waiting = self.inner.backup_state.begin_foreground_wait();
+        let _ = self.inner.backup_state.cancel_background();
+        let _owner = self.acquire_owner_lock(
+            context,
+            "foreground",
+            WritePriority::Foreground,
+            WaitPolicy::Until(Instant::now() + FOREGROUND_WRITE_WAIT),
+            &self.gate_cancel(),
+        )?;
+        let result =
             self.inner
-                .app_state
-                .with_ready_repository_typed(|root| operation(&RepositorySession::new(root)))
-        });
+                .backup_state
+                .run_foreground_after_wait(branch_id, &mut waiting, || {
+                    self.inner.app_state.with_ready_repository_typed(|root| {
+                        operation(&RepositorySession::new(root))
+                    })
+                });
         self.finish_write(context, result)
     }
 
@@ -280,7 +320,8 @@ impl OperationCoordinator {
         }
     }
 
-    /// 后台任务：共享运行锁（AutomaticBackup）。阶段 5 的调度器会复用它。
+    /// 后台任务：写入闸门（Background，只 try）→ 共享运行锁（AutomaticBackup）。
+    /// 「拿不到就跳过」由调度器负责，这里只把 busy 如实返回。
     pub(crate) fn run_background<T>(
         &self,
         context: &CommandContext,
@@ -288,7 +329,13 @@ impl OperationCoordinator {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::Background);
-        let _owner = self.acquire_owner_lock(context, "background")?;
+        let _owner = self.acquire_owner_lock(
+            context,
+            "background",
+            WritePriority::Background,
+            WaitPolicy::Try,
+            &CancelToken::standalone(),
+        )?;
         let result = self.inner.backup_state.run_exclusive_typed(
             branch_id,
             BackupTaskKind::AutomaticBackup,
@@ -301,14 +348,41 @@ impl OperationCoordinator {
         self.finish_write(context, result)
     }
 
-    /// 素材板等既有写命令：只取仓库 lease + 仓库操作锁，不取共享运行锁。
+    /// 素材板等既有写命令：写入闸门（Interactive，排队）+ 跨进程 owner lock，
+    /// 之后只取仓库 lease + 仓库操作锁，不取共享运行锁。
     pub(crate) fn run_repository_write<T>(
         &self,
         context: &CommandContext,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         context.set_class(OperationClass::RepositoryWrite);
-        let _owner = self.acquire_owner_lock(context, "repositoryWrite")?;
+        let _owner = self.acquire_interactive_owner(context, "repositoryWrite")?;
+        let result = self
+            .inner
+            .app_state
+            .with_ready_repository_typed(|root| operation(&RepositorySession::new(root)));
+        if result.is_ok() {
+            self.emit_repository_changed(context);
+        }
+        result
+    }
+
+    /// 退出结算专用的素材板写命令：用 Shutdown 优先级插队，并把等待上限压到
+    /// [`SHUTDOWN_WRITE_WAIT`]，保证关窗流程不会拖过原生端的 15 秒兜底强退。
+    pub(crate) fn run_repository_write_shutdown<T>(
+        &self,
+        context: &CommandContext,
+        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        context.set_class(OperationClass::RepositoryWrite);
+        let _owner = self.acquire_owner_lock(
+            context,
+            "repositoryWrite",
+            WritePriority::Shutdown,
+            WaitPolicy::Until(Instant::now() + SHUTDOWN_WRITE_WAIT),
+            // 退出结算不能用「观察退出」的取消来源：它要做的正是退出流程的最后一步。
+            &CancelToken::standalone(),
+        )?;
         let result = self
             .inner
             .app_state
@@ -333,9 +407,31 @@ impl OperationCoordinator {
         } else {
             OperationClass::Write
         });
+        // 切换仓库本来就带前台语义：切换期间让后台让位并排队到上限，避免用户在
+        // 自动备份期间切仓库时被一条「仓库正在写入」挡住。
+        let (priority, wait) = if foreground {
+            (
+                WritePriority::Foreground,
+                WaitPolicy::Until(Instant::now() + REPOSITORY_SWITCH_WRITE_WAIT),
+            )
+        } else {
+            (
+                WritePriority::Interactive,
+                WaitPolicy::Until(Instant::now() + INTERACTIVE_WRITE_WAIT),
+            )
+        };
         // 切换/首次配置仓库时锁的是目标仓库；清空仓库路径则没有需要保护的写者。
         let _owner = target_repository
-            .map(|root| self.acquire_owner_for_root(root, "settings:switch"))
+            .map(|root| {
+                self.acquire_owner_for_root(
+                    root,
+                    "settings:switch",
+                    priority,
+                    wait,
+                    &self.gate_cancel(),
+                )
+                .map_err(owner_lock_error)
+            })
             .transpose()?;
         let result = if foreground {
             self.inner.backup_state.run_foreground_typed(None, || {
@@ -351,9 +447,31 @@ impl OperationCoordinator {
         self.finish_write(context, result)
     }
 
-    /// 对当前仓库取得跨进程 owner lock。尚未配置仓库或路径尚未建立时返回 `None`，
-    /// 由后续的仓库校验给出规范错误；只读命令不调用这里。
+    /// 对当前仓库取得跨进程 owner lock（先排队通过进程内闸门）。尚未配置仓库或
+    /// 路径尚未建立时返回 `None`，由后续的仓库校验给出规范错误；只读命令不调用这里。
     fn acquire_owner_lock(
+        &self,
+        context: &CommandContext,
+        action: &str,
+        priority: WritePriority,
+        wait: WaitPolicy,
+        cancel: &CancelToken,
+    ) -> Result<Option<RepositoryOwnerLock>, CommandError> {
+        let Some(root) = context.repository_path()? else {
+            return Ok(None);
+        };
+        if !root.is_dir() {
+            return Ok(None);
+        }
+        let operation = format!("{}:{action}", context.domain().as_str());
+        self.acquire_owner_for_root(&root, &operation, priority, wait, cancel)
+            .map(Some)
+            .map_err(owner_lock_error)
+    }
+
+    /// 交互写的两段式取锁：先 `Try`，只有真的与本进程写者竞争时才请求后台让位并
+    /// 排队到上限。这样每次画板保存都不会无谓地广播取消请求。
+    fn acquire_interactive_owner(
         &self,
         context: &CommandContext,
         action: &str,
@@ -365,7 +483,30 @@ impl OperationCoordinator {
             return Ok(None);
         }
         let operation = format!("{}:{action}", context.domain().as_str());
-        self.acquire_owner_for_root(&root, &operation).map(Some)
+        match self.acquire_owner_for_root(
+            &root,
+            &operation,
+            WritePriority::Interactive,
+            WaitPolicy::Try,
+            &CancelToken::standalone(),
+        ) {
+            Ok(lock) => Ok(Some(lock)),
+            // 闸门被本进程的写者占用：先请后台让位，再排队到上限。
+            Err(OwnerLockError::InProcessBusy) => {
+                let _ = self.inner.backup_state.cancel_background();
+                self.acquire_owner_for_root(
+                    &root,
+                    &operation,
+                    WritePriority::Interactive,
+                    WaitPolicy::Until(Instant::now() + INTERACTIVE_WRITE_WAIT),
+                    &self.gate_cancel(),
+                )
+                .map(Some)
+                .map_err(owner_lock_error)
+            }
+            // 跨进程占用仍然立即拒绝：排队等不到另一个进程释放。
+            Err(error) => Err(owner_lock_error(error)),
+        }
     }
 
     fn probe_repository_owner(&self, context: &CommandContext) -> Result<(), CommandError> {
@@ -378,17 +519,33 @@ impl OperationCoordinator {
         repository_lock::probe(&root).map_err(CommandError::from)
     }
 
+    /// 闸门排队的取消来源：只观察应用退出。
+    ///
+    /// 不能复用 `context.cancel()`：它读的是「本进程当前是否有串行任务被取消」，
+    /// 而前台/交互写为了拿到闸门会主动 `cancel_background()` 取消正在运行的自动
+    /// 备份——那会让排队中的自己在下一刻就读到「已取消」。队列等待的真正上限是
+    /// 截止时刻；退出流程则用这个来源提前结束等待。
+    fn gate_cancel(&self) -> CancelToken {
+        let backup_state = self.inner.backup_state.clone();
+        CancelToken::with_source(move || backup_state.shutting_down())
+    }
+
     fn acquire_owner_for_root(
         &self,
         root: &Path,
         operation: &str,
-    ) -> Result<RepositoryOwnerLock, CommandError> {
-        repository_lock::RepositoryOwnerLock::acquire(
+        priority: WritePriority,
+        wait: WaitPolicy,
+        cancel: &CancelToken,
+    ) -> Result<RepositoryOwnerLock, OwnerLockError> {
+        RepositoryOwnerLock::acquire_queued(
             root,
             self.inner.app_state.process_role(),
             operation,
+            priority,
+            wait,
+            cancel,
         )
-        .map_err(owner_lock_error)
     }
 
     fn finish_write<T>(
@@ -524,9 +681,19 @@ impl OperationCoordinator {
     }
 }
 
+/// owner lock 失败到命令错误的映射。
+///
+/// - 跨进程占用：保留 0.2 的文案与 `repository_busy`。
+/// - 本进程排队超时/占位：仍是 `repository_busy`（可重试），但文案改成
+///   「仓库正在写入，请稍后重试」——同进程竞争时不能说「另一个进程」。
+/// - 排队被取消：走统一的取消分类，不进入业务闭包。
 fn owner_lock_error(error: OwnerLockError) -> CommandError {
     match &error {
         OwnerLockError::Busy(_) => CommandError::busy(error.user_message()),
+        OwnerLockError::InProcessBusy | OwnerLockError::TimedOut => {
+            CommandError::busy(WRITE_WAIT_TIMEOUT_MESSAGE)
+        }
+        OwnerLockError::Cancelled => CommandError::cancelled(error.user_message()),
         OwnerLockError::Io(_) => CommandError::from_legacy(error.user_message()),
     }
 }
@@ -652,6 +819,15 @@ impl CommandContext {
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
         self.coordinator.run_repository_write(self, operation)
+    }
+
+    /// 退出结算专用入口：Shutdown 优先级插队，等待上限 10 秒。
+    pub(crate) fn run_repository_write_shutdown<T>(
+        &self,
+        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.coordinator
+            .run_repository_write_shutdown(self, operation)
     }
 
     pub(crate) fn run_repository_switch<T>(
@@ -802,8 +978,12 @@ mod tests {
         );
     }
 
+    /// 同进程的两个写者（不同 `AppState`、同一仓库）不再互相拒绝：第二个写者在
+    /// 写入闸门上排队，等第一个闭包退出后进入。
+    ///
+    /// 真正的跨进程拒绝由 `repository_lock` 的单测与压力测试 I1/I2 覆盖。
     #[test]
-    fn a_second_process_cannot_write_the_same_repository() {
+    fn a_second_writer_queues_behind_the_first() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         crate::library::initialize(&root).unwrap();
@@ -824,6 +1004,7 @@ mod tests {
         let second = coordinator_for("second");
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
+        let (first_done_tx, first_done_rx) = mpsc::channel();
         let holding = thread::spawn(move || {
             first
                 .execute(OperationDomain::Library, |context| {
@@ -834,30 +1015,139 @@ mod tests {
                     })
                 })
                 .unwrap();
+            first_done_tx.send(()).unwrap();
         });
         entered_rx
             .recv_timeout(Duration::from_secs(2))
-            .expect("第一个写者未取得 owner lock");
+            .expect("第一个写者未取得仓库锁");
 
-        let error = second
-            .execute(OperationDomain::Library, |context| {
-                context.run_write(|_| Ok::<_, CommandError>(()))
-            })
-            .unwrap_err();
-        assert_eq!(error.code, "repository_busy");
+        let (second_entered_tx, second_entered_rx) = mpsc::channel();
+        let queued = thread::spawn(move || {
+            let result = second.execute(OperationDomain::Library, |context| {
+                context.run_write(|_| {
+                    second_entered_tx.send(()).unwrap();
+                    Ok::<_, CommandError>(())
+                })
+            });
+            result.map_err(|error| (error.code, error.message))
+        });
+
+        // 排队中的写者不得抢在第一个闭包退出之前进入。
         assert!(
-            error.message.contains("另一个进程写入"),
-            "{}",
-            error.message
+            second_entered_rx
+                .recv_timeout(Duration::from_millis(500))
+                .is_err(),
+            "第二个写者不得在第一个写者退出前进入"
         );
 
         release_tx.send(()).unwrap();
+        first_done_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("第一个写者未按时退出");
+        // 第一个释放后第二个应在排队等待的剩余预算内成功进入。
+        second_entered_rx
+            .recv_timeout(Duration::from_millis(500))
+            .expect("释放后第二个写者应立即进入");
+        assert!(
+            queued.join().unwrap().is_ok(),
+            "同进程写者必须排队而不是被拒绝"
+        );
         holding.join().unwrap();
-        second
+    }
+
+    /// 交互写申请让位的代价：只有在真有进程内竞争时才请求后台取消。
+    #[test]
+    fn an_uncontended_interactive_write_does_not_cancel_background_work() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let mut settings = crate::app::settings::AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+
+        let backup_state = BackupState::default();
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+        let coordinator =
+            OperationCoordinator::new(state, backup_state.clone(), Arc::new(NoopEventSink));
+        // 登记一个后台任务，用于观察是否收到了取消请求。
+        let background = backup_state.begin_task(BackupTaskKind::AutomaticBackup, None);
+
+        coordinator
             .execute(OperationDomain::Library, |context| {
                 context.run_write(|_| Ok::<_, CommandError>(()))
             })
-            .expect("释放后第二个写者应能继续");
+            .expect("无竞争时写命令必须成功");
+
+        assert!(
+            !background.cancel_token().is_cancelled(),
+            "没有闸门竞争时不应请求后台让位"
+        );
+        background.complete();
+    }
+
+    /// 排队中的交互写必须活过自己的「后台让位」请求。
+    ///
+    /// 闸门等待若复用命令的取消令牌（读「本进程是否有串行任务被取消」），让位请求
+    /// 取消自动备份的那一刻就会把自己判成已取消，整个排队修复随之失效。
+    #[test]
+    fn a_queued_interactive_write_survives_the_background_yield_request() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let mut settings = crate::app::settings::AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        let backup_state = BackupState::default();
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+        let coordinator =
+            OperationCoordinator::new(state, backup_state.clone(), Arc::new(NoopEventSink));
+
+        // 自动备份已登记任务并正持闸门（模拟跑到一半、还没到分块边界）。
+        let background = backup_state.begin_task(BackupTaskKind::AutomaticBackup, None);
+        let (acquired_tx, acquired_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder_root = root.clone();
+        let holder = thread::spawn(move || {
+            let guard = crate::repository_lock::acquire_write_gate(
+                &holder_root,
+                WritePriority::Interactive,
+                WaitPolicy::Try,
+                &CancelToken::standalone(),
+            )
+            .unwrap();
+            acquired_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(2));
+            drop(guard);
+        });
+        acquired_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("闸门持有者未启动");
+        let releaser = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            release_tx.send(()).unwrap();
+        });
+
+        coordinator
+            .execute(OperationDomain::Library, |context| {
+                context.run_write(|_| Ok::<_, CommandError>(()))
+            })
+            .expect("让位取消不得把排队中的交互写判成已取消");
+        assert!(
+            background.cancel_token().is_cancelled(),
+            "竞争时应请求过后台让位"
+        );
+
+        holder.join().unwrap();
+        releaser.join().unwrap();
+        background.complete();
     }
 
     #[test]

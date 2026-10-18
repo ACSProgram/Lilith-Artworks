@@ -646,7 +646,9 @@ describe("App repository switching", () => {
       error: null,
     });
     libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    // 调用顺序：启动重放（队列为空，不发写命令）→ 维护面板首次列出 → 重试后刷新。
     appApi.listPendingFileCleanup
+      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{
         id: "cleanup-1",
         path: "artworks/artwork-1/snapshots/orphan.lbc",
@@ -672,6 +674,61 @@ describe("App repository switching", () => {
     await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith(["cleanup-1"]));
     await waitFor(() => expect(screen.queryByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeNull());
     expect(await screen.findByText("已清理 1 个待清理文件。")).toBeTruthy();
+  });
+
+  it("does not run the startup cleanup replay when the queue is empty", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.listPendingFileCleanup.mockResolvedValue([]);
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    await waitFor(() => expect(appApi.listPendingFileCleanup).toHaveBeenCalled());
+
+    // 队列为空是启动常态：不该为了重放去抢写锁（那正是启动被 busy 拦住的来源）。
+    expect(appApi.retryFileCleanup).not.toHaveBeenCalled();
+  });
+
+  it("keeps the repository usable when the startup cleanup replay is refused", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.listPendingFileCleanup.mockResolvedValue([{
+      id: "cleanup-1",
+      path: "artworks/artwork-1/snapshots/orphan.lbc",
+      pathKind: "repository_file",
+      reason: "history_commit_release",
+      createdMs: 1,
+      lastAttemptMs: 1_700_000_000_000,
+      lastError: null,
+    }]);
+    // 自动备份正持锁：重放被拒，但界面必须已经完全可用。
+    appApi.retryFileCleanup.mockRejectedValue(
+      Object.assign(new Error("仓库正在写入，请稍后重试"), { code: "repository_busy" }),
+    );
+
+    render(<App />);
+
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith([]));
+    // busy 只留在诊断日志里：不弹提示，也不把仓库停在不可用状态。
+    expect(screen.queryByText(/仓库正在写入/)).toBeNull();
+    expect(screen.queryByText(/仓库不可用/)).toBeNull();
   });
 
   it("requires an explicit confirmation before deleting an external file", async () => {

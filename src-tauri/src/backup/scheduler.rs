@@ -15,7 +15,7 @@ use crate::{
     app::AppState,
     cancel::CancelToken,
     history::{self, IdleVerifyTarget, ScheduledBranch},
-    repository_lock::{self, OwnerLockError, RepositoryOwnerLock},
+    repository_lock::{self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority},
     storage,
 };
 
@@ -71,7 +71,15 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         // 候选筛选会顺带写「自动备份被跳过」的原因，因此同样按一次写操作取得
         // 跨进程 owner lock。
         let candidates_owner = match acquire_owner(&app_state, "backup:candidates") {
-            Ok(owner) => owner,
+            Ok(OwnerAttempt::Owned(owner)) => owner,
+            // 本进程有前台/交互写者：让位，不写分支失败、不推进退避。
+            Ok(OwnerAttempt::Skipped) => {
+                log::debug!("scheduler yields the candidate scan to an in-process writer");
+                if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
+                    break;
+                }
+                continue;
+            }
             Err(error) => {
                 log::warn!(
                     "automatic backup scheduler could not take the repository owner lock: {error}"
@@ -167,7 +175,15 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
 
         if let Some(branch_id) = due {
             let backup_owner = match acquire_owner(&app_state, "backup:automatic") {
-                Ok(owner) => owner,
+                Ok(OwnerAttempt::Owned(owner)) => owner,
+                // 本进程有前台/交互写者：本轮让位，不写失败也不推进退避。
+                Ok(OwnerAttempt::Skipped) => {
+                    log::debug!("scheduler yields branch {branch_id} to an in-process writer");
+                    if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
+                        break;
+                    }
+                    continue;
+                }
                 Err(error) => {
                     log::warn!(
                         "automatic backup could not take the repository owner lock for branch {branch_id}: {error}"
@@ -435,7 +451,13 @@ fn run_verify_batch(
     // 写回也需要跨进程 owner lock；它与上面的 `probe` 之间仍有竞态窗口，因此
     // 这里的「被占用」与 probe 一样按让位处理，而不是记一次错误。
     let owner = match acquire_owner(app_state, "backup:idleVerify") {
-        Ok(owner) => owner,
+        Ok(OwnerAttempt::Owned(owner)) => owner,
+        // 本进程有前台/交互写者：整批让位，本轮不写结果。
+        Ok(OwnerAttempt::Skipped) => {
+            return Err(VerifyBatchError::Busy(
+                "本进程有写入者，空闲校验已让位".to_owned(),
+            ))
+        }
         Err(error) if error == repository_lock::BUSY_MESSAGE => {
             return Err(VerifyBatchError::Busy(error));
         }
@@ -774,24 +796,42 @@ fn jitter_ms(branch_id: &str) -> i64 {
     ((hash % 21) as i64 - 10) * 1_000
 }
 
+/// 调度器一次取锁的结果。
+///
+/// `Skipped` 表示**本进程**已有前台/交互写者占用写入闸门：后台任务永不排队，
+/// 本轮直接让位，既不算失败也不推进分支退避。真实跨进程冲突仍走 `Err`。
+enum OwnerAttempt {
+    /// `Box` 压小枚举（`Skipped` 是空变体，而 `RepositoryOwnerLock` 内含连接与
+    /// 线程句柄），锁本身不因此改变语义。
+    Owned(Option<Box<RepositoryOwnerLock>>),
+    Skipped,
+}
+
 /// 调度器每次真正写仓库前取得与命令层相同的跨进程 owner lock。未配置仓库或目录
 /// 尚未建立时返回 `None`，让候选查询自己给出规范错误。
-fn acquire_owner(
-    app_state: &AppState,
-    operation: &str,
-) -> Result<Option<RepositoryOwnerLock>, String> {
+///
+/// 后台优先级 + `Try` 策略：进程内有写者时立即 [`OwnerAttempt::Skipped`]；
+/// 另一个进程持锁时仍原样返回 [`repository_lock::BUSY_MESSAGE`]。
+fn acquire_owner(app_state: &AppState, operation: &str) -> Result<OwnerAttempt, String> {
     let Some(root) = app_state.repository_path()? else {
-        return Ok(None);
+        return Ok(OwnerAttempt::Owned(None));
     };
     if !root.is_dir() {
-        return Ok(None);
+        return Ok(OwnerAttempt::Owned(None));
     }
-    RepositoryOwnerLock::acquire(&root, app_state.process_role(), operation)
-        .map(Some)
-        .map_err(|error| match error {
-            OwnerLockError::Busy(_) => crate::repository_lock::BUSY_MESSAGE.to_owned(),
-            OwnerLockError::Io(message) => message,
-        })
+    match RepositoryOwnerLock::acquire_queued(
+        &root,
+        app_state.process_role(),
+        operation,
+        WritePriority::Background,
+        WaitPolicy::Try,
+        &CancelToken::standalone(),
+    ) {
+        Ok(lock) => Ok(OwnerAttempt::Owned(Some(Box::new(lock)))),
+        Err(OwnerLockError::InProcessBusy) => Ok(OwnerAttempt::Skipped),
+        Err(OwnerLockError::Busy(_)) => Err(repository_lock::BUSY_MESSAGE.to_owned()),
+        Err(error) => Err(error.user_message()),
+    }
 }
 
 #[cfg(test)]
@@ -799,6 +839,22 @@ mod tests {
     use std::{fs, io::Write, path::Path};
 
     use super::*;
+    use crate::{
+        app::settings::AppSettings,
+        repository_lock::{acquire_write_gate, WaitPolicy, WritePriority},
+    };
+
+    /// 构造一个指向 fixture 仓库的 AppState，供调度器取锁用例使用。
+    fn app_state_for(root: &Path, directory: &Path) -> AppState {
+        let mut settings = AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        AppState::new(
+            settings,
+            directory.join("settings.json"),
+            directory.join("logs"),
+            None,
+        )
+    }
 
     fn make_due(root: &Path, branch_id: &str) {
         crate::storage::open(root)
@@ -1649,5 +1705,58 @@ mod tests {
         state.end_manual_request(&branch_id);
 
         assert!(run_idle_verify(&root, &state, &branch_id, &history_id).is_ok());
+    }
+
+    /// 后台任务不排队：本进程的写者持有写入闸门时，本轮取锁必须得到 `Skipped`
+    /// （让位退避），而不是一次「跨进程占用」失败，分支记录也不得被写坏。
+    #[test]
+    fn the_scheduler_skips_the_round_while_an_in_process_writer_holds_the_gate() {
+        let (directory, root, _source, artwork_id, _branch_id) = fixture();
+        let app_state = app_state_for(&root, directory.path());
+
+        // 本进程的前台/交互写者占住闸门（不取跨进程锁，模拟正写到一半）。
+        // 持锁必须在另一个线程：闸门刻意不可重入，同线程再取会被断言拦下。
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder_root = root.clone();
+        let holder = std::thread::spawn(move || {
+            let guard = acquire_write_gate(
+                &holder_root,
+                WritePriority::Interactive,
+                WaitPolicy::Try,
+                &CancelToken::standalone(),
+            )
+            .unwrap();
+            acquired_tx.send(()).unwrap();
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+            drop(guard);
+        });
+        acquired_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("持有闸门的线程未启动");
+
+        assert!(
+            matches!(
+                acquire_owner(&app_state, "backup:automatic"),
+                Ok(OwnerAttempt::Skipped)
+            ),
+            "进程内写者占位时后台必须跳过，而不是等锁或报错"
+        );
+
+        // 跳过不等于失败：分支记录保持干净，退避也不推进。
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.consecutive_backup_failures, 0);
+        assert!(branch.last_error.is_none());
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        // 闸门空闲后后台重新可以取锁。
+        match acquire_owner(&app_state, "backup:automatic") {
+            Ok(OwnerAttempt::Owned(Some(_))) => {}
+            other => panic!("闸门空闲后后台应能取锁（is_ok={}）", other.is_ok()),
+        }
     }
 }

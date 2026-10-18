@@ -157,6 +157,12 @@ impl BackupState {
         self.foreground_waiting() > 0 || self.any_manual_pending()
     }
 
+    /// 应用是否已进入退出流程。供**还未登记任务**的等待者（写入闸门排队）判断
+    /// 是否应当提前结束等待：此时没有属于自己的任务令牌可读。
+    pub(crate) fn shutting_down(&self) -> bool {
+        self.inner.shutting_down.load(Ordering::SeqCst)
+    }
+
     /// 请求正在运行的后台任务让位；前台任务不受影响，仍只能由 `request_cancel`
     /// 取消。返回是否实际发出了取消请求。
     pub(crate) fn cancel_background(&self) -> Result<bool, String> {
@@ -300,10 +306,24 @@ impl BackupState {
     ) -> Result<T, ExclusiveRunError<E>> {
         let mut waiting = self.begin_foreground_wait();
         let _ = self.cancel_background();
+        self.run_foreground_after_wait(branch_id, &mut waiting, operation)
+    }
+
+    /// 调用方已经登记过前台等待（`begin_foreground_wait` + `cancel_background`）
+    /// 时的入口。
+    ///
+    /// `OperationCoordinator::run_foreground` 必须在取写入闸门**之前**让位，否则
+    /// 闸门一失败就走不到让位；因此它自己登记，再从这里进入，避免重复计数。
+    pub(crate) fn run_foreground_after_wait<T, E>(
+        &self,
+        branch_id: Option<&str>,
+        waiting: &mut ForegroundWait,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, ExclusiveRunError<E>> {
         self.run_exclusive_typed_inner(
             branch_id,
             BackupTaskKind::UserOperation,
-            Some(&mut waiting),
+            Some(waiting),
             operation,
         )
     }

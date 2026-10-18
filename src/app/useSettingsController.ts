@@ -48,6 +48,29 @@ export const EMPTY_REPOSITORY_STATUS: RepositoryStatus = {
 
 type Notify = (message: string | null) => void;
 
+/**
+ * 启动时的清理队列重放：best-effort 的维护动作，不决定「仓库能不能显示」。
+ *
+ * 重放本身是写命令（要取仓库写锁），自动备份刚启动时经常正好持锁；因此它作为
+ * 独立异步步骤运行，失败只留一条诊断日志，等下一次启动或用户手动重试。
+ */
+async function replayCleanupQueue(): Promise<void> {
+  try {
+    // 先走只读命令：队列为空是启动时的常态，此时完全不必去抢写锁。
+    const pending = await appApi.listPendingFileCleanup();
+    if (pending.length === 0) return;
+    const report = await appApi.retryFileCleanup([]);
+    if (report.failures.length > 0) {
+      diagnosticsLog(
+        "info",
+        `startup cleanup replay left ${report.failures.length} file(s) pending`,
+      );
+    }
+  } catch (error) {
+    diagnosticsLog("info", `startup cleanup replay skipped: ${errorMessage(error)}`);
+  }
+}
+
 export interface SettingsController {
   snapshot: SettingsSnapshot | null;
   draft: AppSettings | null;
@@ -89,29 +112,26 @@ export function useSettingsController(notify: Notify): SettingsController {
 
   const load = useCallback(async () => {
     setBusy(true);
+    let repositoryReady = false;
     try {
       const [nextSnapshot, nextRepository] = await Promise.all([
         appApi.getSettings(),
         appApi.getRepositoryStatus(),
       ]);
-      const cleanupReport = nextRepository.ready
-        ? await appApi.retryFileCleanup([])
-        : null;
+      // 先把已取到的快照与仓库状态回填：后续任何失败都不该让界面停在
+      // EMPTY_REPOSITORY_STATUS 上显示「仓库不可用」。
       setSnapshot(nextSnapshot);
       setDraft(nextSnapshot.settings);
       setRepository(nextRepository);
-      notify(
-        nextSnapshot.warning
-        ?? nextRepository.error
-        ?? (cleanupReport && cleanupReport.failures.length > 0
-          ? `有 ${cleanupReport.failures.length} 个历史遗留文件仍无法清理，将在下次启动时重试。`
-          : null),
-      );
+      repositoryReady = nextRepository.ready;
+      notify(nextSnapshot.warning ?? nextRepository.error ?? null);
     } catch (error) {
       notify(errorMessage(error));
     } finally {
       setBusy(false);
     }
+    // 维护性重放放在状态回填之后，且不参与 settingsBusy。
+    if (repositoryReady) void replayCleanupQueue();
   }, [notify]);
 
   useEffect(() => {

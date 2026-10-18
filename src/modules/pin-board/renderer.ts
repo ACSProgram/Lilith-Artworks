@@ -6,6 +6,7 @@ import type {
   PinBoardEditableImage,
   PinBoardImage,
   PinBoardView,
+  SavePinBoardResult,
 } from "./types";
 import {
   DEFAULT_VIEWPORT,
@@ -51,6 +52,21 @@ import {
   textureUploadLayout,
   type PinBoardTextureBudgets,
 } from "./texturePolicy";
+
+/** 结算遇到 `repository_busy` 时的重试间隔。 */
+const FINALIZE_BUSY_RETRY_DELAY_MS = 300;
+
+/**
+ * 结算失败是否是「仓库正在写入」。
+ *
+ * 素材板命令仍以字符串错误拒绝，因此同时接受结构化 `code` 与两种用户文案
+ * （同进程排队超时 / 另一个进程写入）。
+ */
+function isRepositoryBusy(error: unknown): boolean {
+  if ((error as { code?: unknown } | null)?.code === "repository_busy") return true;
+  const message = errorMessage(error);
+  return message.includes("仓库正在写入") || message.includes("另一个进程写入");
+}
 
 type GpuState = {
   canvas: HTMLCanvasElement;
@@ -1305,7 +1321,7 @@ export class PinBoardRenderer {
           );
           return false;
         }
-        return pinBoardApi.finalizePinBoard(this.boardId, this.revision)
+        return this.finalizeWithBusyRetry()
           .then((result) => {
             this.revision = result.revision;
             this.finalized = true;
@@ -1329,6 +1345,23 @@ export class PinBoardRenderer {
       });
     this.finalizePromise = task;
     return task;
+  }
+
+  /**
+   * 提交结算。退出与切仓库时自动备份可能正持仓库写锁：后端会让结算插队并等待
+   * 最多 10 秒，残留的 `repository_busy` 再重试一次，仍失败才上报。
+   */
+  private finalizeWithBusyRetry(): Promise<SavePinBoardResult> {
+    return pinBoardApi.finalizePinBoard(this.boardId, this.revision)
+      .catch(async (error: unknown) => {
+        if (!isRepositoryBusy(error)) throw error;
+        diagnosticsLog(
+          "info",
+          `pin-board finalize busy, retrying once: boardId=${this.boardId}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, FINALIZE_BUSY_RETRY_DELAY_MS));
+        return pinBoardApi.finalizePinBoard(this.boardId, this.revision);
+      });
   }
 
   private stateKey(): string {

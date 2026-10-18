@@ -125,6 +125,45 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Repository writes inside one process no longer refuse each other. Every write
+  command now queues on a per-repository in-process write gate before taking the
+  cross-process owner lock: `Shutdown` (pin-board settlement) overtakes
+  `Foreground` (restore, compact, checkpoint, full backup, publish, scrub,
+  repository switch) overtakes `Interactive` (normal writes, pin-board writes,
+  cleanup replay), while `Background` (automatic backup, idle verify) only tries
+  and yields without queuing (the scheduler records that as `Skipped`, not a
+  branch failure). The cross-process boundary is unchanged: another process
+  holding the owner lock is still refused immediately with the existing
+  "仓库正在被另一个进程写入；不支持同一仓库的多进程写入" message. A
+  same-process loser now waits (bounded and cancellable) instead of reporting
+  that foreign-writer message: interactive writes try first, request background
+  yield only on real contention, then queue up to 10 s; foreground commands
+  register the foreground wait and request background yield *before* taking the
+  gate (yielding only after the lock had already been refused was the 0.2 -> 0.3
+  regression) and get a 60 s cap; pin-board settlement uses `Shutdown` with a 10 s
+  cap. An in-process wait that does time out still reports `repository_busy`
+  (retryable) but with the text "仓库正在写入，请稍后重试", and a queued wait
+  cancelled by shutdown maps to `operation_cancelled`. The gate is released only
+  after the SQLite owner lock in `RepositoryOwnerLock::drop`, keeps its zero-wait
+  `acquire` for `probe` and headless, and its idle entry is retired under the
+  registry lock so a writer that fetched it just before can never hold a removed
+  gate alongside a newly created one.
+- Startup no longer loses the repository state to a busy cleanup replay.
+  `useSettingsController.load` backfills the settings snapshot and repository
+  status as soon as both reads return, then runs the cleanup-queue replay as an
+  independent best-effort step (`void replayCleanupQueue()`): it first lists the
+  queue with the read-only command and returns immediately when it is empty (the
+  normal case), and a refused replay only writes an info diagnostic instead of
+  notifying or blocking the interface. `settingsBusy` now covers only the two
+  reads. Previously the write command ran inside `load`, so a same-process
+  `repository_busy` made `load` throw and left the window on
+  `EMPTY_REPOSITORY_STATUS` showing the repository as unavailable.
+- Pin-board settlement survives an automatic backup holding the repository.
+  `finalize_pin_board` runs through the `Shutdown`-priority entry (10 s cap, well
+  inside the native 15 s force-quit fallback), and the renderer retries a
+  settlement that is still `repository_busy` once after 300 ms before reporting a
+  warning, so closing the window or switching boards during a backup settles the
+  board instead of failing it.
 - Crash residue in the per-artwork staging directory is now reported and
   classified correctly. Backups, restores and checkpoints write their snapshot
   and delta staging files as `NamedTempFile` under

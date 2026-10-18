@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { viewportBounds, type Viewport } from "./geometry";
 import { PinBoardRenderer } from "./renderer";
+import { pinBoardApi } from "./api";
 import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
 import type { PinBoardImage } from "./types";
 import {
@@ -508,11 +509,66 @@ describe("pin-board renderer autosave", () => {
   });
 });
 
+type FinalizeTestRenderer = {
+  finalize: () => Promise<boolean>;
+  revision: string;
+  finalized: boolean;
+  onError: ReturnType<typeof vi.fn>;
+};
+
+function finalizeRenderer(): FinalizeTestRenderer {
+  return rendererWith({
+    loaded: true,
+    finalized: false,
+    finalizePromise: null,
+    boardId: 7,
+    revision: "r1",
+    // 保存已经在正常路径里测过；这里只关心结算的 busy 重试。
+    save: () => Promise.resolve(true),
+    onError: vi.fn(),
+  }) as unknown as FinalizeTestRenderer;
+}
+
+describe("pin-board renderer finalize", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("retries the settlement once when the repository is busy", async () => {
+    const busy = Object.assign(new Error("仓库正在写入，请稍后重试"), {
+      code: "repository_busy",
+    });
+    const finalizePinBoard = vi.spyOn(pinBoardApi, "finalizePinBoard")
+      .mockRejectedValueOnce(busy)
+      .mockResolvedValueOnce({ revision: "r2" });
+    const renderer = finalizeRenderer();
+
+    await expect(renderer.finalize()).resolves.toBe(true);
+
+    expect(finalizePinBoard).toHaveBeenCalledTimes(2);
+    expect(renderer.revision).toBe("r2");
+    expect(renderer.finalized).toBe(true);
+    expect(renderer.onError).not.toHaveBeenCalled();
+  });
+
+  it("reports a non-busy settlement failure without retrying", async () => {
+    const finalizePinBoard = vi
+      .spyOn(pinBoardApi, "finalizePinBoard")
+      .mockRejectedValue(new Error("画板已被其他窗口修改"));
+    const renderer = finalizeRenderer();
+
+    await expect(renderer.finalize()).resolves.toBe(false);
+
+    expect(finalizePinBoard).toHaveBeenCalledOnce();
+    expect(renderer.finalized).toBe(false);
+    expect(renderer.onError).toHaveBeenCalledOnce();
+  });
+});
+
 type SelectionTestRenderer = {
   selectedIds: Set<number>;
   selectAll: () => void;
 };
-
 describe("pin-board renderer select-all", () => {
   const quad: PinBoardImage["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
 

@@ -43,9 +43,10 @@
 - 普通浏览（列表、加载、纹理读取、导出 PNG 到剪贴板）经 `OperationCoordinator::run_read`
   走共享读租约；各读命令附带标签（如 `read_pin_board_texture board=.. image=.. dim=..`），使
   `repository read took N ms` 慢读告警能归因到具体命令；
-- 保存、结算、粘贴、导入、画板增删改与回收站操作经 `run_repository_write` 走仓库 lease +
-  仓库操作锁。`pin_board` 命令在 `app/command_registry.rs` 直接注册，不经 `app/workflows.rs`，因此仍不持有
-  `BackupState` 运行锁；
+- 保存、粘贴、导入、画板增删改与回收站操作经 `run_repository_write` 走仓库 lease + 仓库操作锁；
+  结算（`finalize_pin_board`）改走 `run_repository_write_shutdown`，以 Shutdown 优先级插入进程内
+  写入闸门最前、等待上限 10 秒，前端在结算遇 `repository_busy` 时重试一次。`pin_board` 命令在
+  `app/command_registry.rs` 直接注册，不经 `app/workflows.rs`，因此仍不持有 `BackupState` 运行锁；
 - 灾备、scrub、仓库完整性操作持仓库操作锁期间，画板写入会被阻塞（读取仍可继续）。
 
 ## 存储布局

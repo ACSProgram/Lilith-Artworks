@@ -1,6 +1,6 @@
 # 当前任务交接
 
-更新时间：2026-10-18
+更新时间：2026-10-19
 
 本文件只记录**当前状况**：当前批次状态、当前基线，以及未完成事项的指针。历史增量（已完成批次、
 已通过的人工验收、被替代的计划）一律在 `archive/`，不在本文件累积；未完成事项只写 `todo.md`。
@@ -37,6 +37,12 @@
   按需读取的 ChunkFile v1/v2 版本标签（`get_history_node_format`，只读文件头，不改 schema）。
   仍保持 repository schema v4，不新增持久表。最近一次备份结果的持久化已记入 alpha3 阶段 7 的
   v5 迁移计划（`repository_backup_runs`）。
+- **同仓库写入排队修复已实现（待维护者验收）**：同进程写操作改在按优先级排队的进程内写入闸门内
+  串行（Shutdown > Foreground > Interactive > Background，跨进程 owner lock 仍零等待拒绝）；
+  启动先回填仓库状态再 best-effort 重放清理队列；退出结算走 Shutdown 优先级并在渲染器侧重试
+  一次。计划与实施记录见 `archive/repository-write-lock-plan-2026-10-18.md`；原 `todo.md` 的
+  对应条目已随修复删除。人工验收（复现原始场景、备份中保存/退出、真跨进程拒绝）与
+  `stress_concurrency` I/J 复跑仍未进行。
 - 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
   阶段 7–9。
 

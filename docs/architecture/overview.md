@@ -106,19 +106,24 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 `app/command_runtime/` 是 GUI、headless 与未来维护入口共用的执行底座：
 
 - `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_foreground_read`、
-  `run_background`，以及素材板专用的 `run_repository_write` 与设置保存专用的
-  `run_repository_switch`。固定锁序为「跨进程仓库 owner lock → 共享运行锁（写 / 前台 / 后台）→
-  仓库 lease → 仓库操作锁 → SQLite 事务」；只读入口只取共享 lease。`run_repository_write`
-  保持素材板既有语义，不取共享运行锁。`run_foreground_read` 供全库校验与画板 DDS 检查使用：
-  它取得前台运行锁与仓库操作锁保证扫描期间本进程不写入，但只**探测** owner lock，不持有它，
-  避免只读长任务变成跨进程写者。
-- 跨进程 owner lock 由 GUI、headless 与维护入口共用：每次写操作在运行分类锁之前取锁，冲突立即
-  返回 `repository_busy`，操作结束释放。拒绝不区分持锁者是否在同一进程——自动备份或空闲校验
-  持锁期间，前台的写命令与长命令同样立即被拒，不排队、也不请求后台让位（详见
-  `docs/modules/library.md` 的仓库命令进入规则）。锁仍是仓库根目录下专用 SQLite 库的
-  `BEGIN IMMEDIATE`，由内核在句柄关闭（含强杀）时释放；同目录的 owner 元数据（PID、启动时间、
-  版本、角色、操作、心跳）只用于诊断，取得锁即覆盖上一次的 stale 记录，不按 PID 回收。锁库、
-  锁日志与 owner 元数据不参与作品数据库发现、灾备复制或未引用文件判定。
+  `run_background`，以及素材板专用的 `run_repository_write` / `run_repository_write_shutdown`
+  与设置保存专用的 `run_repository_switch`。固定锁序为「**进程内写入闸门（排队）** → 跨进程仓库
+  owner lock（零等待）→ 共享运行锁（写 / 前台 / 后台）→ 仓库 lease → 仓库操作锁 → SQLite
+  事务」；只读入口只取共享 lease，不取 owner lock。`run_repository_write` 保持素材板既有语义，
+  不取共享运行锁；退出结算走 `run_repository_write_shutdown`。`run_foreground_read` 供全库校验与
+  画板 DDS 检查使用：它取得前台运行锁与仓库操作锁保证扫描期间本进程不写入，但只**探测** owner
+  lock，不持有它，避免只读长任务变成跨进程写者。
+- 进程内写入闸门（`repository_lock::acquire_write_gate`）把同一进程、同一仓库的写者按
+  Shutdown > Foreground > Interactive > Background 串行，等待有上限且可取消，后台优先级只
+  `try`、拿不到即让位。跨进程 owner lock 由 GUI、headless 与维护入口共用：每次写操作在取运行
+  分类锁之前取锁（headless 与只读 `probe` 仍用零等待、不排队的 `acquire`），冲突立即返回
+  `repository_busy`，操作结束释放。跨进程拒绝不区分持锁者是否在同一进程，所以**另一个进程**持锁
+  时，本进程即使闸门空闲也立即被拒；但**同进程**的第二个写者已在闸门里排队，不会再互相冒充
+  「另一个进程」——进程内排队超时或与本进程写者竞争失败会返回 `repository_busy`，文案为
+  「仓库正在写入，请稍后重试」（详见 `docs/modules/library.md` 的仓库命令进入规则）。锁仍是仓库
+  根目录下专用 SQLite 库的 `BEGIN IMMEDIATE`，由内核在句柄关闭（含强杀）时释放；同目录的 owner
+  元数据（PID、启动时间、版本、角色、操作、心跳）只用于诊断，取得锁即覆盖上一次的 stale 记录，
+  不按 PID 回收。锁库、锁日志与 owner 元数据不参与作品数据库发现、灾备复制或未引用文件判定。
 - `CommandContext` 携带 `OperationId`、`OperationDomain`、当前运行分类、`CancelToken` 与仓库 key；
   use-case 只能通过它取得已加锁的 `RepositorySession`，不再自行读取设置或拼锁。
 - typed `CommandError` 携带稳定 `code`、`kind`、用户文案、`retryable` 与 operation id。Tauri 适配器

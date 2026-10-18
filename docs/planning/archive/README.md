@@ -68,3 +68,12 @@
   小选区水印警告与 `stress_concurrency` J5 的并发断言口径；三阶段均已实施并复验，逐条结果并入
   `../user/stress-test-report.md`，检查点分层的验证口径并入 `docs/guides/validation.md`，本批次的
   实施与归档记录见 `handoff-log-2026-10-18.md`。
+- `repository-write-lock-plan-2026-10-18.md`：同仓库写入排队（消除同进程 owner lock 冲突）的
+  独立计划与实施记录。含三个用户可见症状（偶发「另一个进程写入」提示、那次启动界面停在仓库
+  不可用、退出时 `pin-board finalize failed`）的同一根因分析、「锁的两层/取锁点/启动顺序」的
+  现状盘点，以及进程内写入闸门（Shutdown > Foreground > Interactive > Background，等待有上限
+  且可取消）的设计、优先级与让位表。已实施完毕并补入两处实施期修正（`Gate::acquire` 入口复查
+  `retired` 关闭「僵尸闸门」窗口、`OwnerAttempt` 装箱与 `#[must_use]`）；有效契约并入
+  `docs/architecture/overview.md`、`docs/modules/library.md` 与 `docs/modules/history-and-backup.md`，
+  行为变化见 `../CHANGELOG.md` 的 `## Unreleased`；维护者人工验收（复现原始场景、备份中保存/
+  退出、真跨进程拒绝）待进行。
