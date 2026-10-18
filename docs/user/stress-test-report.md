@@ -386,7 +386,8 @@ C 组五档合计约 172 分钟；不含 `manual` 的四档约 50 分钟；整�
 
 八组轻量分组（cancel / crash / cleanup / damage / pin_board / authenticity / concurrency /
 input，合计约 30 秒）已进 Windows CI，随每次提交自动运行；其余分组（`stress_large` /
-`stress_scale` / `stress_bench`）只在发布前手动运行。
+`stress_scale` / `stress_bench`）只在发布前手动运行。`stress_baseline` 是 0.3 阶段 0 的
+一次性基线采集，需要维护者临时准备的仓库副本，不属于发布流程，也不作为长期测试标准。
 
 ```text
 # 构建无界面入口（不进发布产物）

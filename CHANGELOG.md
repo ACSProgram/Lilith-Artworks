@@ -11,6 +11,21 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Added
+
+- A new `stress_baseline` group (stage 0 of the 0.3 plan) records the 0.2
+  baseline for lock wait, task duration, cancel latency, deep-chain restore,
+  scheduling scan, cleanup query and backup I/O. Its real-repository scenarios
+  run only when `LILITH_BASELINE_REPO` points at a temporary repository copy
+  and skip themselves otherwise, so plain `cargo test` and CI are unaffected.
+  That copy is temporary external material that is dropped once the 0.3 plan
+  lands: the group creates no baseline file, sets no threshold, and is not a
+  long-term test standard. The headless entry gains a read-only
+  `scheduler-scan` probe, and the test gate now measures cancel latency (an
+  upper bound limited by its 5 ms poll interval) and stamps the build profile
+  into each record. No product behavior changes. Results are summarized in
+  `docs/planning/0.3-baseline-2026-10-18.md`.
+
 ### Changed
 
 - `main` is frozen as the 0.2 release line and `dev` is the 0.3 development

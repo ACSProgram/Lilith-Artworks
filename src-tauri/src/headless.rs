@@ -204,6 +204,7 @@ fn usage() -> String {
          \x20 cleanup              重放待清理文件队列\n\
          \x20 scan-unreferenced    扫描未引用文件（只报告）\n\
          \x20 cleanup-unreferenced 确认清理未引用文件（--ids）\n\
+         \x20 scheduler-scan       只读探针：调度器候选扫描成本\n\
          \x20 repository-backup    整仓灾备\n\
          \x20 enter-publication    进入发布状态（固化最终成品）\n\
          \x20 publish              认证签名发布（C2PA + TrustMark）\n\
@@ -670,6 +671,7 @@ fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
         "cleanup" => cleanup_queue(options),
         "scan-unreferenced" => scan_unreferenced(options, interlock),
         "cleanup-unreferenced" => cleanup_unreferenced(options),
+        "scheduler-scan" => scheduler_scan(options),
         "repository-backup" => repository_backup(options, interlock),
         "enter-publication" => enter_publication(options),
         "publish" => publish(options),
@@ -1068,6 +1070,24 @@ fn verify(options: &Options) -> Result<Value, String> {
     // （UUID / 仓库相对路径 / SHA-256 全表）。重开可用即以此为准。
     library::open_existing(&options.repository)?;
     Ok(Value::Null)
+}
+
+/// 只读探针：调度器候选扫描的成本（`history::list_scheduled`，按 `b.id` 全量列举）。
+///
+/// 它与任何取消/进度检查点无关，也不写 `last_attempt_ms`，与 `list_pending_file_cleanup`
+/// 同属「共享读租约、不取运行锁」的只读查询。用途是给 0.3 阶段 5「deadline 优先的候选
+/// 生成」留一个重构前的可比基线。GUI 的调度线程调用的是同一个 `history::list_scheduled`，
+/// 但它还在仓库操作锁内顺带写入跳过原因，因此这里的 `scanMs` 只对应**查询本身**的成本，
+/// 不含 GUI 那一轮的锁与写库开销。
+fn scheduler_scan(options: &Options) -> Result<Value, String> {
+    let app_state = options.app_state();
+    let started = Instant::now();
+    let branches = app_state
+        .with_repository_read_labeled("scheduler-scan", |root| history::list_scheduled(root))?;
+    Ok(json!({
+        "branchCount": branches.len(),
+        "scanMs": started.elapsed().as_millis(),
+    }))
 }
 
 fn cleanup_queue(options: &Options) -> Result<Value, String> {

@@ -36,14 +36,15 @@
 
 ## 压力测试：便宜的分组进 CI，昂贵的仍只在发布前运行
 
-`src-tauri/tests/` 下的十一组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
+`src-tauri/tests/` 下的十二组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
 `stress_large` 大文件端到端与大文件中断、`stress_scale` 规模与灾备与参数边界、`stress_cleanup`
 崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
 `stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏与画板 DDS 损坏）、
 `stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读、
 写哨兵持有期间全库校验的明确拒绝）、
-`stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准）都以**真实可执行文件**驱动，
-只通过命令行、stdin 与磁盘事实断言。
+`stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准、`stress_baseline` 0.3
+阶段 0 基线——锁等待 / 任务耗时 / 取消延迟 / 深链恢复 / 调度扫描 / 清理查询 / 灾备 I/O）都以
+**真实可执行文件**驱动，只通过命令行、stdin 与磁盘事实断言。
 
 - **由 `headless` feature 门控**：所有 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]`
   开头，不带该 feature 时它们编译为空目标。因此 `cargo test`（包括裸跑）既不会构建无头二进制、
@@ -59,17 +60,25 @@
 - **按成本分层**：**八组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
   `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
   `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
-  **`stress_large`（数十分钟到两小时，视档位）、`stress_scale`（约 1 分钟）与 `stress_bench` 仍只在发布前手动运行**
-  ——前两组依赖大量磁盘与时间，基准的数值需要人工解读（见其文件头与本节的环境变量）。
+  **`stress_large`（数十分钟到两小时，视档位）、`stress_scale`（约 1 分钟）、`stress_bench`
+  与 `stress_baseline` 仍只在发布前手动运行**
+  ——前两组依赖大量磁盘与时间，后两组是性能基准（`stress_baseline` 还需一份临时仓库副本），
+  数值需要人工解读（见其文件头与本节的环境变量）。
+- **`stress_baseline` 的真实仓库场景是一次性采集，不是长期门槛**：`LILITH_BASELINE_REPO`
+  指向的副本由维护者临时准备（外部目录，随 0.3 计划落实后撤除）。该组不生成基线文件、不设
+  阈值、不进 CI；长期回归对照用它的合成场景（深链恢复、取消延迟）与 `stress_bench`，不要在
+  日常改动或后续批次里把它当默认测试标准。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`cargo fmt --check`、`cargo check`、
   `cargo test --lib`、`git diff --check`。CI 已覆盖的八组不必在本地反复跑；**其余分组不要顺手
   运行**——即使到了收尾、整理、提交前的阶段也一样。
 - **昂贵分组的耗时与磁盘是设计属性而不是卡住**：测试以真实落盘路径执行，覆盖「逻辑文件大小 ×
   单次改动量」的四象限；`stress_large` 的 `large` 及以上档位单次运行常以十分钟计，峰值磁盘占用
   可达数 GiB，`extreme` 档（4 GiB 文件、每次改 1 GiB）接近十几 GiB，`manual` 档（8 GiB 文件、
-每次改 2 GiB）约 25–32 GiB、单次约两小时。十一组 + C 组五个档位整轮实测约 3 小时（一个 16
-逻辑核 / 32 GiB 内存的桌面机，空闲磁盘 ≥ 77 GB；2026-10-17 实测，自该轮起 C7 随五个档位并行
-运行、与其余场景争用磁盘，是耗时较此前约 95 分钟上升的主因）——新增的两组只加秒级开销。
+  每次改 2 GiB）约 25–32 GiB、单次约两小时。十一组（`stress_baseline` 之前的口径）+ C 组五个
+  档位整轮实测约 3 小时（一个 16 逻辑核 / 32 GiB 内存的桌面机，空闲磁盘 ≥ 77 GB；2026-10-17
+  实测，自该轮起 C7 随五个档位并行运行、与其余场景争用磁盘，是耗时较此前约 95 分钟上升的主因）
+  ——新增的两组只加秒级开销；`stress_baseline` 另计约 7 分钟（其中整仓灾备 ≈4 分钟、全库校验
+  约 3 分钟，需真实仓库副本）。
 - **昂贵的分组只在准备发布、需要产出或更新 `docs/user/stress-test-report.md` 的实测数据时运行**，
   并由维护者显式发起；需要跑时先确认档位与磁盘预算。
 - **大文件档按磁盘预算并发执行**：`stress_large` 的场景通过 `scenario_slot` 按「预计峰值磁盘」
@@ -122,10 +131,19 @@ LILITH_STRESS_PERF_STRICT=1 cargo test --features headless --test stress_bench -
 
 # 7. 认证大图（16K 源图）：只在 extreme 及以上档位运行，否则 G1/G2 明确跳过
 LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authenticity
+
+# 8. 阶段 0 基线（一次性采集，需临时仓库副本；只做读与「不写源仓库」的整仓灾备，用后还原副本）
+$env:LILITH_BASELINE_REPO='D:\temp\Artworks'
+cargo test --features headless --test stress_baseline -- --test-threads=1 --nocapture
 ```
 
 可调环境变量：
 
+- `LILITH_BASELINE_REPO`：`stress_baseline` 的真实仓库副本路径（如 `D:\temp\Artworks`）。
+  **未设置时该组的真实仓库场景明确跳过**（不是失败），因此裸 `cargo test` 与 CI 不受影响。
+  该副本是**外部临时资料**，只服务阶段 0 的一次性采集，0.3 计划落实后撤除，不要把它当长期
+  测试夹具。运行会在仓库同级的 `baseline-out` 下建输出目录并在结束时删除，唯一残留是写命令
+  取得哨兵时创建的 `.lilith-write-lock.sqlite3`——采集后请用采集前的副本还原仓库。
 - `LILITH_STRESS_TIERS`：档位（`default`/`large`/`heavy`/`extreme`/`manual`），默认 `default`。
 - `LILITH_STRESS_BIN`：被测可执行文件，建议指向发布档。
 - `LILITH_STRESS_DISK_BUDGET`：磁盘峰值上限（接受字节数或 `KiB/MiB/GiB/TiB` 后缀，默认 24 GiB）。
@@ -154,7 +172,8 @@ LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authent
   `stress_damage` / `stress_pin_board` / `stress_authenticity` / `stress_concurrency` /
   `stress_input`）。
   把便宜分组前置到 CI 是为了让日常改动也有回归保护：它们此前只在发布前手动跑，问题会在
-  「准备发布」时集中爆发。`stress_large` / `stress_scale` / `stress_bench` 不进 CI。
+  「准备发布」时集中爆发。`stress_large` / `stress_scale` / `stress_bench` /
+  `stress_baseline` 不进 CI。
 - `release.yml`：推送 `v*` tag 时运行，含同样的审计，Rust 侧为 `cargo fmt --check` +
   `cargo test --lib`（不含压力测试——发布前的候选版验收另有一套完整重跑，见本文与
   `docs/user/stress-test-report.md`）。

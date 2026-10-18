@@ -279,6 +279,9 @@ pub struct Spawn<'a> {
     args: Vec<String>,
     gate: bool,
     timeout: Duration,
+    /// 覆盖 `--workspace`（作用域根）。缺省用临时工作区的根；真实仓库基线需要把仓库放在
+    /// 一个**已存在**的目录之下（`--repository` 必须位于 `--workspace` 之内）。
+    scope: Option<PathBuf>,
 }
 
 /// 启动一个无头子命令（`--headless <command> [options]`）。
@@ -289,6 +292,7 @@ pub fn headless<'a>(workspace: &'a Workspace, command: &str) -> Spawn<'a> {
         args: Vec::new(),
         gate: false,
         timeout: DEFAULT_TIMEOUT,
+        scope: None,
     }
 }
 
@@ -301,6 +305,14 @@ impl<'a> Spawn<'a> {
 
     pub fn repository(self, path: &Path) -> Self {
         self.arg("repository", path.to_string_lossy())
+    }
+
+    /// 覆盖 `--workspace`（作用域根）。用于真实仓库基线：作用域根必须是仓库目录的**已存在**
+    /// 祖先，因此由调用方指定一个真实目录，而不是临时工作区。`--marker`/`--result` 与进程
+    /// 工作目录仍留在临时工作区内，与 `--workspace` 无关。
+    pub fn scope(mut self, path: &Path) -> Self {
+        self.scope = Some(path.to_owned());
+        self
     }
 
     /// 打开逐检查点闸门：每个取消检查点阻塞等待本进程的一行判定。
@@ -328,7 +340,7 @@ impl<'a> Spawn<'a> {
             .arg("--headless")
             .arg(&self.command)
             .arg("--workspace")
-            .arg(self.workspace.root())
+            .arg(self.scope.as_deref().unwrap_or(self.workspace.root()))
             .arg("--marker")
             .arg(&marker)
             .arg("--result")
@@ -363,6 +375,7 @@ impl<'a> Spawn<'a> {
             consumed: 0,
             checkpoints: Vec::new(),
             cancelled: false,
+            cancel_instant: None,
         }
     }
 
@@ -394,6 +407,13 @@ pub struct Running {
     consumed: usize,
     checkpoints: Vec<Checkpoint>,
     cancelled: bool,
+    /// 首次把 `cancel` 写给子进程的时刻。用于度量**取消延迟**：从发出取消到进程退出
+    /// 的时间，即操作观察到取消并收尾所需的时间。只有带闸门（`--cancel-on-stdin`）
+    /// 才有意义——无闸门时进程不会在检查点取消。
+    ///
+    /// 精度受驱动循环的轮询间隔（[`POLL_INTERVAL`]，5 ms）限制：进程退出是在下一次轮询
+    /// 才被观察到，因此实测值一律是**上界**，比真实收尾时间多出 0–5 ms。
+    cancel_instant: Option<Instant>,
 }
 
 impl Running {
@@ -410,6 +430,10 @@ impl Running {
                 }
                 if self.gate {
                     self.answer(cancel);
+                    // 取消已交给子进程：此刻起计时，直到进程退出，得到取消延迟。
+                    if cancel && self.cancel_instant.is_none() {
+                        self.cancel_instant = Some(Instant::now());
+                    }
                 }
             }
             match self.child.try_wait() {
@@ -436,6 +460,8 @@ impl Running {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .unwrap_or(Value::Null);
         let stderr = fs::read_to_string(&self.stderr_path).unwrap_or_default();
+        // 取消延迟：进程此刻已退出，因此它是「发出取消 → 收尾完成」的实测值。
+        let cancel_latency = self.cancel_instant.map(|instant| instant.elapsed());
         Outcome {
             exit_code: status.code().unwrap_or(-1),
             timed_out,
@@ -444,6 +470,7 @@ impl Running {
             checkpoints: self.checkpoints,
             elapsed: started.elapsed(),
             stderr: truncate(stderr, STDERR_LIMIT),
+            cancel_latency,
         }
     }
 
@@ -575,6 +602,9 @@ pub struct Outcome {
     pub checkpoints: Vec<Checkpoint>,
     pub elapsed: Duration,
     pub stderr: String,
+    /// 从发出取消到进程退出（收尾完成）的实测耗时。只有带闸门的取消场景才有值；
+    /// 其余情形为 `None`。受 5 ms 轮询间隔限制，它是**上界**（见 `Running::cancel_instant`）。
+    pub cancel_latency: Option<Duration>,
 }
 
 impl Outcome {
@@ -1474,6 +1504,43 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<String>) {
             }
         }
     }
+}
+
+/// 递归统计目录下所有普通文件的字节数之和。用于真实仓库基线的「仓库 / 灾备占用」
+/// 口径——`tree_usage` 面向临时工作区，会连工作区里的其它内容一起遍历。
+pub fn directory_bytes(root: &Path) -> u64 {
+    directory_bytes_excluding(root, |_| false)
+}
+
+/// 与 [`directory_bytes`] 相同，但 `skip` 返回 true 的条目**连同其子树**都不计入。
+///
+/// 用途：仓库根下的 `.lilith-write-lock.sqlite3*` 是写命令取得哨兵时创建的跨进程锁库，
+/// 与仓库数据无关；断言「源仓库字节数前后不变」时必须排除它，否则第一次写命令就会让
+/// 前后对照失真。
+pub fn directory_bytes_excluding(root: &Path, skip: impl Fn(&Path) -> bool + Copy) -> u64 {
+    fn walk(directory: &Path, skip: impl Fn(&Path) -> bool + Copy, total: &mut u64) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if skip(&path) {
+                continue;
+            }
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => walk(&path, skip, total),
+                Ok(kind) if kind.is_file() => {
+                    *total += fs::metadata(&path)
+                        .map(|metadata| metadata.len())
+                        .unwrap_or(0);
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut total = 0;
+    walk(root, skip, &mut total);
+    total
 }
 
 /// 目录内条目的名字（不递归），已排序。缺失的目录返回空表。
