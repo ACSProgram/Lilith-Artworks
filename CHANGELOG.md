@@ -13,6 +13,17 @@ decision, so an untagged version is transitional.
 
 ### Added
 
+- The 0.3 stage 1 command runtime: `CommandContext`, `OperationCoordinator`,
+  typed `CommandError` (stable `code`, `kind`, `retryable`, operation id),
+  `CancelToken`, and the frozen `AppEvent` v1 envelope with
+  `operationStarted`, `operationProgress`, `operationFinished`,
+  `repositoryChanged` and `cleanupQueueChanged`. Commands now run through
+  GUI/headless shareable use-cases; Tauri keeps returning string errors so
+  user-facing text is unchanged, while structured fields go to events and
+  logs, and `invokeCommand` reconstructs known structured errors as `Error`
+  objects without altering string rejections.
+- A shared `src/shared/appEvents.ts` contract for the v1 event channel. Stage 3
+  will add the subscription provider on top of it.
 - A new `stress_baseline` group (stage 0 of the 0.3 plan) records the 0.2
   baseline for lock wait, task duration, cancel latency, deep-chain restore,
   scheduling scan, cleanup query and backup I/O. Its real-repository scenarios
@@ -28,6 +39,21 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- Library, History/Backup, Authenticity, Cleanup, Settings and Pin-board
+  repository entries now go through `OperationCoordinator` and one shared
+  use-case per operation. The lock order is fixed as shared runtime lock
+  (write/foreground/background) → repository lease → repository operation
+  lock → SQLite transaction. Pin-board writes keep their existing semantics
+  via `run_repository_write`: lease plus repository operation lock, no shared
+  runtime lock. Headless is now a context assembler over the same use-cases
+  and keeps its marker/cancel-checkpoint format.
+- Every Tauri command is registered from one domain-grouped table in
+  `app/command_registry.rs`, so `lib.rs` no longer carries the command list;
+  adapters stay limited to DTO parsing, picker authorization and error
+  mapping, and final-artifact materialization plus publish orchestration moved
+  out of the authenticity adapter into `authenticity/artifact.rs`. Long
+  history operations log their target with the operation id so the line can be
+  correlated with the coordinator's start/finish entries.
 - `main` is frozen as the 0.2 release line and `dev` is the 0.3 development
   line. Windows CI now also runs on pushes to `dev`, and the release
   metadata check maps versions to repository schemas (`0.2.x` → v4,

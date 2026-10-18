@@ -16,7 +16,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
-        Mutex, OnceLock,
+        Arc, Mutex, OnceLock,
     },
     time::Instant,
 };
@@ -25,10 +25,16 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::{
-    app::AppState,
+    app::{
+        command_runtime::{
+            CancelToken, CommandContext, CommandError, NoopEventSink, OperationCoordinator,
+            OperationDomain, OperationObserver,
+        },
+        usecases, AppState,
+    },
     authenticity::{self, AuthenticityState, PathAuthorization},
-    backup::{self, restore, worker, BackupState, BackupTaskKind},
-    cleanup, history, library, pin_board, repository_lock, storage,
+    backup::BackupState,
+    library, repository_lock,
 };
 
 const EXIT_OK: i32 = 0;
@@ -99,6 +105,7 @@ pub fn run(args: &[String]) -> i32 {
     // 登记为进程级单例：`history::commit` 的标记点（headless-only）据此取得闸门。
     let interlock = INTERLOCK.get_or_init(|| interlock);
     interlock.stage(&format!("started command={}", options.command));
+    let runtime = HeadlessRuntime::new(&options, interlock);
 
     // 跨进程仓库哨兵锁：会写仓库的命令独占，第二个进程拿到明确错误，而不是与前者
     // 在业务层竞态。锁在进程退出（含崩溃）时由操作系统释放，不会残留。取锁失败与
@@ -106,7 +113,7 @@ pub fn run(args: &[String]) -> i32 {
     let outcome =
         match repository_lock::RepositoryGuard::acquire(&options.repository, &options.command) {
             Ok(guard) => {
-                let outcome = dispatch(&options, interlock);
+                let outcome = dispatch(&options, &runtime);
                 drop(guard);
                 outcome
             }
@@ -263,7 +270,7 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 39] = [
+        const KNOWN: [&str; 40] = [
             "workspace",
             "repository",
             "models",
@@ -286,6 +293,7 @@ impl Options {
             "board",
             "revision",
             "paths",
+            "ids",
             "artifact",
             "certificate",
             "key",
@@ -323,7 +331,7 @@ impl Options {
                 .strip_prefix("--")
                 .ok_or_else(|| format!("无法识别的参数：{argument}"))?
                 .to_owned();
-            if key != "ids" && !KNOWN.contains(&key.as_str()) {
+            if !KNOWN.contains(&key.as_str()) {
                 return Err(format!("未知选项：{argument}"));
             }
             let value = args
@@ -646,60 +654,104 @@ impl Interlock {
     }
 }
 
-fn dispatch(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    match options.command.as_str() {
-        "init-repository" => init_repository(options),
-        "create-artwork" => create_artwork(options),
-        "create-group" => create_group(options),
-        "move-node" => move_node(options),
-        "trash-node" => trash_node(options),
-        "empty-trash" => empty_trash(options),
-        "list-tree" => list_tree(options),
-        "search" => search(options),
-        "create-branch" => create_branch(options),
-        "delete-branch" => delete_branch(options),
-        "list-history" => list_history(options),
-        "create-board" => create_board(options),
-        "import-board-images" => import_board_images(options),
-        "scrub-board-dds" => scrub_board_dds(options, interlock),
-        "commit" => commit(options, interlock),
-        "restore" => restore_node(options, interlock),
-        "compact" => compact_node(options, interlock),
-        "checkpoint" => checkpoint(options, interlock),
-        "scrub" => scrub(options, interlock),
-        "verify" => verify(options),
-        "cleanup" => cleanup_queue(options),
-        "scan-unreferenced" => scan_unreferenced(options, interlock),
-        "cleanup-unreferenced" => cleanup_unreferenced(options),
-        "scheduler-scan" => scheduler_scan(options),
-        "repository-backup" => repository_backup(options, interlock),
-        "enter-publication" => enter_publication(options),
-        "publish" => publish(options),
-        "cancel-publication" => cancel_publication(options),
-        "decode-authenticity" => decode_authenticity(options),
-        other => Err(format!("未知子命令：{other}")),
+/// 无头入口的 context 装配：与 GUI 共用 `OperationCoordinator` 与 use-case，
+/// 只把 Tauri 事件出口换成 no-op，并把进度写回 marker 闸门。
+struct HeadlessRuntime {
+    coordinator: OperationCoordinator,
+    cancel: CancelToken,
+}
+
+impl HeadlessRuntime {
+    fn new(options: &Options, interlock: &'static Interlock) -> Self {
+        let coordinator = OperationCoordinator::new(
+            options.app_state(),
+            options.backup_state(),
+            Arc::new(NoopEventSink),
+        )
+        .with_observer(Arc::new(HeadlessObserver { interlock }));
+        let cancel = CancelToken::with_source(move || interlock.checkpoint());
+        Self {
+            coordinator,
+            cancel,
+        }
+    }
+
+    fn run<T>(
+        &self,
+        domain: OperationDomain,
+        operation: impl FnOnce(&CommandContext) -> Result<T, CommandError>,
+    ) -> Result<T, CommandError> {
+        self.coordinator
+            .execute_with(domain, self.cancel.clone(), operation)
     }
 }
 
-fn init_repository(options: &Options) -> Result<Value, String> {
-    library::initialize(&options.repository)?;
+struct HeadlessObserver {
+    interlock: &'static Interlock,
+}
+
+impl OperationObserver for HeadlessObserver {
+    fn progress(&self, label: &str, current: u64, total: u64) {
+        self.interlock.stage(&format!("{label} {current}/{total}"));
+    }
+}
+
+fn dispatch(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, String> {
+    let outcome = match options.command.as_str() {
+        "init-repository" => init_repository(options),
+        "create-artwork" => create_artwork(options, runtime),
+        "create-group" => create_group(options, runtime),
+        "move-node" => move_node(options, runtime),
+        "trash-node" => trash_node(options, runtime),
+        "empty-trash" => empty_trash(runtime),
+        "list-tree" => list_tree(runtime),
+        "search" => search(options, runtime),
+        "create-branch" => create_branch(options, runtime),
+        "delete-branch" => delete_branch(options, runtime),
+        "list-history" => list_history(options, runtime),
+        "create-board" => create_board(options, runtime),
+        "import-board-images" => import_board_images(options, runtime),
+        "scrub-board-dds" => scrub_board_dds(runtime),
+        "commit" => commit(options, runtime),
+        "restore" => restore_node(options, runtime),
+        "compact" => compact_node(options, runtime),
+        "checkpoint" => checkpoint(options, runtime),
+        "scrub" => scrub(runtime),
+        "verify" => verify(options),
+        "cleanup" => cleanup_queue(options, runtime),
+        "scan-unreferenced" => scan_unreferenced(runtime),
+        "cleanup-unreferenced" => cleanup_unreferenced(options, runtime),
+        "scheduler-scan" => scheduler_scan(runtime),
+        "repository-backup" => repository_backup(options, runtime),
+        "enter-publication" => enter_publication(options, runtime),
+        "publish" => publish(options, runtime),
+        "cancel-publication" => cancel_publication(options, runtime),
+        "decode-authenticity" => decode_authenticity(options, runtime),
+        other => Err(CommandError::invalid_input(format!("未知子命令：{other}"))),
+    };
+    outcome.map_err(|error: CommandError| error.message)
+}
+
+fn init_repository(options: &Options) -> Result<Value, CommandError> {
+    library::initialize(&options.repository).map_err(CommandError::from)?;
     Ok(Value::Null)
 }
 
-fn create_artwork(options: &Options) -> Result<Value, String> {
-    let title = options.require("title")?;
-    let branch_title = options.require("branch-title")?;
-    let source = options.path_within("source", "分支工作文件")?;
-    let app_state = options.app_state();
-    let quick_default = app_state.automatic_backup_quick_default();
-    let created = app_state.with_ready_repository(|root| {
-        library::create_artwork(
-            root,
+fn create_artwork(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let title = options.require("title").map_err(CommandError::from)?;
+    let branch_title = options
+        .require("branch-title")
+        .map_err(CommandError::from)?;
+    let source = options
+        .path_within("source", "分支工作文件")
+        .map_err(CommandError::from)?;
+    let created = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::create_artwork_created(
+            context,
             options.value("parent"),
             title,
             branch_title,
             &source,
-            quick_default,
         )
     })?;
     Ok(json!({
@@ -708,11 +760,14 @@ fn create_artwork(options: &Options) -> Result<Value, String> {
     }))
 }
 
-fn create_group(options: &Options) -> Result<Value, String> {
-    let title = options.require("title")?;
-    let app_state = options.app_state();
-    let tree = app_state.with_ready_repository(|root| {
-        library::create_group(root, options.value("parent"), title)
+fn create_group(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let title = options.require("title").map_err(CommandError::from)?;
+    let tree = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::create_group(
+            context,
+            options.value("parent").map(str::to_owned),
+            title.to_owned(),
+        )
     })?;
     Ok(json!({
         "groupCount": tree.group_count,
@@ -720,15 +775,15 @@ fn create_group(options: &Options) -> Result<Value, String> {
     }))
 }
 
-fn move_node(options: &Options) -> Result<Value, String> {
+fn move_node(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     let ids = options.id_list();
     if ids.is_empty() {
-        return Err("move-node 需要 --ids".into());
+        return Err(CommandError::invalid_input("move-node 需要 --ids"));
     }
     let index = match options.value("index") {
-        Some(value) => value
-            .parse::<u32>()
-            .map_err(|_| format!("--index 必须是整数，收到 {value:?}"))?,
+        Some(value) => value.parse::<u32>().map_err(|_| {
+            CommandError::invalid_input(format!("--index 必须是整数，收到 {value:?}"))
+        })?,
         None => 0,
     };
     let request = library::MoveLibraryNodesRequest {
@@ -736,44 +791,43 @@ fn move_node(options: &Options) -> Result<Value, String> {
         parent_id: options.value("parent").map(str::to_owned),
         index,
     };
-    let app_state = options.app_state();
-    let tree = app_state.with_ready_repository(|root| library::move_nodes(root, request))?;
+    let tree = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::move_nodes(context, request)
+    })?;
     Ok(json!({
         "groupCount": tree.group_count,
         "artworkCount": tree.artwork_count,
     }))
 }
 
-fn trash_node(options: &Options) -> Result<Value, String> {
+fn trash_node(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     let ids = options.id_list();
     if ids.is_empty() {
-        return Err("trash-node 需要 --ids".into());
+        return Err(CommandError::invalid_input("trash-node 需要 --ids"));
     }
-    let app_state = options.app_state();
-    let tree = app_state.with_ready_repository(|root| library::trash_nodes(root, &ids))?;
+    let tree = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::trash_nodes(context, ids)
+    })?;
     Ok(json!({
         "groupCount": tree.group_count,
         "artworkCount": tree.artwork_count,
     }))
 }
 
-fn empty_trash(options: &Options) -> Result<Value, String> {
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| {
-            let cleanup_ids = library::empty_trash(root)?;
-            cleanup::run(root, &cleanup_ids)
-        })
+fn empty_trash(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let report = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::empty_trash(context)
     })?;
-    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+    serde_json::to_value(&report)
+        .map_err(|error| CommandError::internal(format!("无法序列化清理结果：{error}")))
 }
 
-fn list_tree(options: &Options) -> Result<Value, String> {
-    let app_state = options.app_state();
-    let tree = app_state.with_ready_repository(|root| library::list_tree(root))?;
-    let mut value =
-        serde_json::to_value(&tree).map_err(|error| format!("无法序列化作品树：{error}"))?;
+fn list_tree(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let tree = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::list_tree(context)
+    })?;
+    let mut value = serde_json::to_value(&tree)
+        .map_err(|error| CommandError::internal(format!("无法序列化作品树：{error}")))?;
     if let Some(object) = value.as_object_mut() {
         object.insert("nodeCount".into(), json!(count_tree_nodes(&tree.nodes)));
     }
@@ -788,10 +842,11 @@ fn count_tree_nodes(nodes: &[library::LibraryNode]) -> usize {
         .sum()
 }
 
-fn search(options: &Options) -> Result<Value, String> {
-    let query = options.require("query")?;
-    let app_state = options.app_state();
-    let results = app_state.with_ready_repository(|root| library::search(root, query))?;
+fn search(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let query = options.require("query").map_err(CommandError::from)?;
+    let results = runtime.run(OperationDomain::Library, |context| {
+        usecases::library::search(context, query.to_owned())
+    })?;
     let matches = results
         .iter()
         .map(|result| json!({ "id": result.id, "kind": result.kind, "title": result.title }))
@@ -799,51 +854,40 @@ fn search(options: &Options) -> Result<Value, String> {
     Ok(json!({ "count": results.len(), "results": matches }))
 }
 
-fn create_branch(options: &Options) -> Result<Value, String> {
-    let artwork_id = options.require("artwork")?;
-    let from_history_id = options.require("history")?;
-    let title = options.require("branch-title")?;
-    let source = options.path_within("source", "分支工作文件")?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    // 与 `fork_artwork_branch` 一致：先固化 fork 起点的检查点，再建分支。
-    // 全局"默认检查方式"只在创建时落成分支初始值。
-    let quick_default = app_state.automatic_backup_quick_default();
-    let branch_id = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| {
-            backup::ensure_checkpoint(root, from_history_id)?;
-            history::create_branch(
-                root,
-                artwork_id,
-                from_history_id,
-                title,
-                &source,
-                quick_default,
-            )
-        })
+fn create_branch(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let artwork_id = options.require("artwork").map_err(CommandError::from)?;
+    let from_history_id = options.require("history").map_err(CommandError::from)?;
+    let title = options
+        .require("branch-title")
+        .map_err(CommandError::from)?;
+    let source = options
+        .path_within("source", "分支工作文件")
+        .map_err(CommandError::from)?;
+    let branch_id = runtime.run(OperationDomain::History, |context| {
+        usecases::history::create_branch_created(
+            context,
+            artwork_id,
+            from_history_id,
+            title,
+            &source,
+        )
     })?;
     Ok(json!({ "branchId": branch_id }))
 }
 
-fn delete_branch(options: &Options) -> Result<Value, String> {
-    let branch_id = options.require("branch")?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let deletion = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| {
-            let deletion = history::delete_branch(root, branch_id)?;
-            // 已无引用的历史文件已在删除事务内入队，提交成功后单遍重放。
-            cleanup::replay(root, &deletion.cleanup_ids);
-            Ok(deletion)
-        })
+fn delete_branch(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let branch_id = options.require("branch").map_err(CommandError::from)?;
+    let history = runtime.run(OperationDomain::History, |context| {
+        usecases::history::delete_branch(context, branch_id)
     })?;
-    Ok(json!({ "artworkId": deletion.artwork_id }))
+    Ok(json!({ "artworkId": history.artwork_id }))
 }
 
-fn list_history(options: &Options) -> Result<Value, String> {
-    let artwork_id = options.require("artwork")?;
-    let app_state = options.app_state();
-    let history = app_state.with_ready_repository(|root| history::list(root, artwork_id))?;
+fn list_history(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let artwork_id = options.require("artwork").map_err(CommandError::from)?;
+    let history = runtime.run(OperationDomain::History, |context| {
+        usecases::history::list(context, artwork_id)
+    })?;
     Ok(json!({
         "branchCount": history.branches.len(),
         "nodeCount": history.nodes.len(),
@@ -852,46 +896,48 @@ fn list_history(options: &Options) -> Result<Value, String> {
 
 /// 创建画板。与 GUI 的 `create_pin_board` 走同一领域函数（`repository::create_board`），
 /// 只多返回一个修订号供后续导入做并发校验——GUI 侧修订号由前端在加载画板时取得。
-fn create_board(options: &Options) -> Result<Value, String> {
-    let artwork_id = options.require("artwork")?;
-    let name = options.require("title")?;
-    let app_state = options.app_state();
-    app_state.with_ready_repository(|root| {
-        let mut connection = storage::open(root)?;
-        let summary = pin_board::repository::create_board(&mut connection, artwork_id, name)?;
-        let summary =
-            serde_json::to_value(&summary).map_err(|error| format!("无法序列化画板：{error}"))?;
-        let board_id = summary["boardId"]
-            .as_i64()
-            .ok_or("画板创建结果缺少 boardId")?;
-        let context = pin_board::repository::open_board_context(&connection, root, board_id)?;
-        Ok(json!({
-            "boardId": board_id,
-            "revision": context.revision,
-            "name": context.name,
-        }))
-    })
+fn create_board(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let artwork_id = options.require("artwork").map_err(CommandError::from)?;
+    let name = options.require("title").map_err(CommandError::from)?;
+    let (summary, board) = runtime.run(OperationDomain::PinBoard, |context| {
+        usecases::pin_board::create_board_context(context, artwork_id, name)
+    })?;
+    Ok(json!({
+        "boardId": summary.board_id,
+        "revision": board.revision,
+        "name": board.name,
+    }))
 }
 
 /// 按路径导入画板图片。与 GUI 的 `import_pin_board_images` 走同一领域函数
 /// （`repository::import_images`）。布局参数（中心与间距）取固定默认值——无头进程
 /// 不驱动界面，图片摆放位置不影响 DDS 落盘与完整性检查。
-fn import_board_images(options: &Options) -> Result<Value, String> {
+fn import_board_images(
+    options: &Options,
+    runtime: &HeadlessRuntime,
+) -> Result<Value, CommandError> {
     let board_id = options
-        .require("board")?
+        .require("board")
+        .map_err(CommandError::from)?
         .parse::<i64>()
-        .map_err(|_| format!("--board 必须是整数，收到 {:?}", options.value("board")))?;
-    let revision = options.require("revision")?;
-    let paths = options.path_list("paths", "画板导入源图")?;
+        .map_err(|_| {
+            CommandError::invalid_input(format!(
+                "--board 必须是整数，收到 {:?}",
+                options.value("board")
+            ))
+        })?;
+    let revision = options.require("revision").map_err(CommandError::from)?;
+    let paths = options
+        .path_list("paths", "画板导入源图")
+        .map_err(CommandError::from)?;
     if paths.is_empty() {
-        return Err("import-board-images 需要 --paths".into());
+        return Err(CommandError::invalid_input(
+            "import-board-images 需要 --paths",
+        ));
     }
-    let app_state = options.app_state();
-    let (view, image_ids) = app_state.with_ready_repository(|root| {
-        let mut connection = storage::open(root)?;
-        pin_board::repository::import_images(
-            &mut connection,
-            root,
+    let (view, image_ids) = runtime.run(OperationDomain::PinBoard, |context| {
+        usecases::pin_board::import_images(
+            context,
             board_id,
             &paths,
             0.0,
@@ -901,8 +947,8 @@ fn import_board_images(options: &Options) -> Result<Value, String> {
             |_current, _total| {},
         )
     })?;
-    let view =
-        serde_json::to_value(&view).map_err(|error| format!("无法序列化画板视图：{error}"))?;
+    let view = serde_json::to_value(&view)
+        .map_err(|error| CommandError::internal(format!("无法序列化画板视图：{error}")))?;
     let revision = view
         .get("revision")
         .and_then(Value::as_str)
@@ -922,17 +968,9 @@ fn import_board_images(options: &Options) -> Result<Value, String> {
 /// 双向检查画板 DDS：记录 → 文件（缺失/损坏）与文件 → 记录（孤儿）。缺失与损坏
 /// **报告不失败**——命令照常成功返回，计数交给调用方判断。走 GUI 完整性检查第三段
 /// 的同一领域函数 `pin_board::scrub::scrub_board_dds`，逐条响应取消。
-fn scrub_board_dds(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_foreground(None, || {
-        app_state.with_ready_repository(|root| {
-            pin_board::scrub::scrub_board_dds(
-                root,
-                || interlock.checkpoint(),
-                |current, total| interlock.stage(&format!("画板 DDS 完整性检查 {current}/{total}")),
-            )
-        })
+fn scrub_board_dds(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let report = runtime.run(OperationDomain::Maintenance, |context| {
+        usecases::pin_board::scrub_board_dds(context)
     })?;
     Ok(json!({
         "images": report.images,
@@ -942,31 +980,13 @@ fn scrub_board_dds(options: &Options, interlock: &Interlock) -> Result<Value, St
     }))
 }
 
-fn commit(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let branch_id = options.require("branch")?;
+fn commit(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let branch_id = options.require("branch").map_err(CommandError::from)?;
     let note = options.value("note").unwrap_or_default();
     let commit_kind = options.value("commit-kind").unwrap_or("manual");
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    // 与 `run_branch_backup` 一致：手动提交走 `run_logged` + `UserOperation`，失败时
-    // 记录分支错误摘要。无头进程不启动调度器，因此没有手动优先与唤醒步骤。
-    let result = state.run_logged(
-        "manual backup",
-        &format!("branch_id={branch_id}, note_chars={}", note.chars().count()),
-        Some(branch_id),
-        BackupTaskKind::UserOperation,
-        || {
-            app_state.with_ready_repository(|root| {
-                let result = worker::run_backup(root, branch_id, note, commit_kind, || {
-                    interlock.checkpoint()
-                });
-                if let Err(error) = result.as_ref() {
-                    history::mark_error(root, branch_id, &error.to_string());
-                }
-                result.map_err(|error| error.to_string())
-            })
-        },
-    )?;
+    let result = runtime.run(OperationDomain::Backup, |context| {
+        usecases::backup::commit(context, branch_id, note, commit_kind, false)
+    })?;
     Ok(json!({
         "created": result.created,
         "unchanged": result.unchanged,
@@ -974,90 +994,41 @@ fn commit(options: &Options, interlock: &Interlock) -> Result<Value, String> {
     }))
 }
 
-fn restore_node(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let history_id = options.require("history")?;
-    let output = options.path_within("output", "恢复输出")?;
+fn restore_node(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let history_id = options.require("history").map_err(CommandError::from)?;
+    let output = options
+        .path_within("output", "恢复输出")
+        .map_err(CommandError::from)?;
     let output = output.to_string_lossy().into_owned();
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let path = state.run_logged_foreground(
-        "restore",
-        &format!("history_id={history_id}, output={output}"),
-        None,
-        || {
-            app_state.with_ready_repository(|root| {
-                restore::restore(
-                    root,
-                    history_id,
-                    &output,
-                    || interlock.checkpoint(),
-                    |label, _current, _total| interlock.stage(label),
-                )
-            })
-        },
-    )?;
+    let path = runtime.run(OperationDomain::Backup, |context| {
+        usecases::backup::restore(context, history_id, &output)
+    })?;
     Ok(json!({ "outputPath": path }))
 }
 
-fn compact_node(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let history_id = options.require("history")?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    state.run_logged_foreground("compact", &format!("history_id={history_id}"), None, || {
-        app_state.with_ready_repository(|root| {
-            restore::compact_node(
-                root,
-                history_id,
-                || interlock.checkpoint(),
-                |label, _current, _total| interlock.stage(label),
-            )
-        })
+fn compact_node(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let history_id = options.require("history").map_err(CommandError::from)?;
+    runtime.run(OperationDomain::Backup, |context| {
+        usecases::backup::compact(context, history_id)
     })?;
     Ok(Value::Null)
 }
 
-fn checkpoint(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let history_id = options.require("history")?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    state.run_logged_foreground(
-        "checkpoint",
-        &format!("history_id={history_id}"),
-        None,
-        || {
-            app_state.with_ready_repository(|root| {
-                restore::ensure_checkpoint_with_progress(
-                    root,
-                    history_id,
-                    || interlock.checkpoint(),
-                    |label, _current, _total| interlock.stage(label),
-                )
-            })
-        },
-    )?;
+fn checkpoint(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let history_id = options.require("history").map_err(CommandError::from)?;
+    runtime.run(OperationDomain::Backup, |context| {
+        usecases::backup::set_checkpoint(context, history_id, true)
+    })?;
     Ok(Value::Null)
 }
 
-fn scrub(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let app_state = options.app_state();
-    let state = options.backup_state();
+fn scrub(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     // 与 `scrub_repository_integrity` 的两段一致：先历史链逐块校验，再认证受控文件
     // （最终成品与认证仓库副本的摘要、C2PA 声明核对）。无认证记录的仓库第二段为 0/0。
-    let (nodes, final_artifacts, certification_records) = state.run_foreground(None, || {
-        app_state.with_ready_repository(|root| {
-            let nodes = restore::scrub_history(
-                root,
-                || interlock.checkpoint(),
-                |current, total| interlock.stage(&format!("全库扫描 {current}/{total}")),
-            )?;
-            let (final_artifacts, certification_records) = authenticity::scrub_controlled_files(
-                root,
-                || interlock.checkpoint(),
-                |current, total| interlock.stage(&format!("认证受控文件检查 {current}/{total}")),
-            )?;
-            Ok((nodes, final_artifacts, certification_records))
-        })
-    })?;
+    let (nodes, final_artifacts, certification_records) = runtime
+        .run(OperationDomain::Maintenance, |context| {
+            usecases::backup::scrub_history_and_controlled(context)
+        })?;
     Ok(json!({
         "historyNodes": nodes,
         "finalArtifacts": final_artifacts,
@@ -1065,10 +1036,10 @@ fn scrub(options: &Options, interlock: &Interlock) -> Result<Value, String> {
     }))
 }
 
-fn verify(options: &Options) -> Result<Value, String> {
+fn verify(options: &Options) -> Result<Value, CommandError> {
     // `open_existing` = 迁移到当前版本 + `integrity_check` + 外键检查 + 语义校验
     // （UUID / 仓库相对路径 / SHA-256 全表）。重开可用即以此为准。
-    library::open_existing(&options.repository)?;
+    library::open_existing(&options.repository).map_err(CommandError::from)?;
     Ok(Value::Null)
 }
 
@@ -1076,43 +1047,32 @@ fn verify(options: &Options) -> Result<Value, String> {
 ///
 /// 它与任何取消/进度检查点无关，也不写 `last_attempt_ms`，与 `list_pending_file_cleanup`
 /// 同属「共享读租约、不取运行锁」的只读查询。用途是给 0.3 阶段 5「deadline 优先的候选
-/// 生成」留一个重构前的可比基线。GUI 的调度线程调用的是同一个 `history::list_scheduled`，
-/// 但它还在仓库操作锁内顺带写入跳过原因，因此这里的 `scanMs` 只对应**查询本身**的成本，
-/// 不含 GUI 那一轮的锁与写库开销。
-fn scheduler_scan(options: &Options) -> Result<Value, String> {
-    let app_state = options.app_state();
+/// 生成」留一个重构前的可比基线。
+fn scheduler_scan(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     let started = Instant::now();
-    let branches = app_state
-        .with_repository_read_labeled("scheduler-scan", |root| history::list_scheduled(root))?;
+    let branches = runtime.run(OperationDomain::Backup, |context| {
+        usecases::backup::list_scheduled(context)
+    })?;
     Ok(json!({
         "branchCount": branches.len(),
         "scanMs": started.elapsed().as_millis(),
     }))
 }
 
-fn cleanup_queue(options: &Options) -> Result<Value, String> {
+fn cleanup_queue(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     let ids = options.id_list();
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| cleanup::run(root, &ids))
+    let report = runtime.run(OperationDomain::Cleanup, |context| {
+        usecases::cleanup::retry_pending(context, &ids)
     })?;
-    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+    serde_json::to_value(&report)
+        .map_err(|error| CommandError::internal(format!("无法序列化清理结果：{error}")))
 }
 
 /// 扫描未引用文件（崩溃孤儿、手工复制或历史迁移遗留）。只报告、不删除——与 GUI 的
 /// `scan_repository_unreferenced` 走同一领域函数；确认清理由 `cleanup-unreferenced` 完成。
-fn scan_unreferenced(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let candidates = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| {
-            cleanup::scan_unreferenced(
-                root,
-                || interlock.checkpoint(),
-                |current, total| interlock.stage(&format!("扫描未引用文件 {current}/{total}")),
-            )
-        })
+fn scan_unreferenced(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let candidates = runtime.run(OperationDomain::Cleanup, |context| {
+        usecases::cleanup::scan_unreferenced(context)
     })?;
     let values = candidates
         .iter()
@@ -1128,95 +1088,106 @@ fn scan_unreferenced(options: &Options, interlock: &Interlock) -> Result<Value, 
 }
 
 /// 确认清理扫描候选（`--ids` 为仓库相对路径）。入队后单遍重放，幂等。
-fn cleanup_unreferenced(options: &Options) -> Result<Value, String> {
+fn cleanup_unreferenced(
+    options: &Options,
+    runtime: &HeadlessRuntime,
+) -> Result<Value, CommandError> {
     let paths = options.id_list();
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_exclusive(None, BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| cleanup::cleanup_unreferenced(root, &paths))
+    let report = runtime.run(OperationDomain::Cleanup, |context| {
+        usecases::cleanup::cleanup_unreferenced(context, &paths)
     })?;
-    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+    serde_json::to_value(&report)
+        .map_err(|error| CommandError::internal(format!("无法序列化清理结果：{error}")))
 }
 
-fn repository_backup(options: &Options, interlock: &Interlock) -> Result<Value, String> {
-    let destination = options.path_within("destination", "备份保存目录")?;
+fn repository_backup(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let destination = options
+        .path_within("destination", "备份保存目录")
+        .map_err(CommandError::from)?;
     authenticity::ensure_dialog_authorized(
         &options.authorization_scope(),
         &destination,
         "备份保存目录",
     )
-    .map_err(|error| error.to_string())?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_foreground(None, || {
-        app_state.with_ready_repository(|root| {
-            backup::create_repository_backup(
-                root,
-                &destination,
-                || interlock.checkpoint(),
-                |label, _current, _total| interlock.stage(label),
-            )
-        })
+    .map_err(|error| CommandError::from_legacy(error.to_string()))?;
+    let report = runtime.run(OperationDomain::Maintenance, |context| {
+        usecases::backup::create_repository_backup(context, &destination)
     })?;
-    serde_json::to_value(&report).map_err(|error| format!("无法序列化备份结果：{error}"))
+    serde_json::to_value(&report)
+        .map_err(|error| CommandError::internal(format!("无法序列化备份结果：{error}")))
 }
 
 /// 进入发布状态。与 GUI 的 `enter_branch_publication` 走同一批领域调用：
 /// `branch_head` → `backup::ensure_checkpoint` → `store_final_artifact` →
 /// `get_publication`，在同一把运行锁下执行。最终成品路径经无头作用域授权，与其它
 /// 命令一致地只允许工作区之内的路径。
-fn enter_publication(options: &Options) -> Result<Value, String> {
-    let branch_id = options.require("branch")?;
-    let artifact = options.path_within("artifact", "最终成品")?;
+fn enter_publication(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let branch_id = options.require("branch").map_err(CommandError::from)?;
+    let artifact = options
+        .path_within("artifact", "最终成品")
+        .map_err(CommandError::from)?;
     authenticity::ensure_dialog_authorized(&options.authorization_scope(), &artifact, "最终成品")
-        .map_err(|error| error.to_string())?;
-    let artifact_value = artifact.to_string_lossy().into_owned();
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let authenticity_state = options.authenticity_state();
-    let models_ready = authenticity_state.model_files_ready();
-    let model_info = authenticity_state.model_info();
-    let publication = state.run_foreground(Some(branch_id), || {
-        app_state.with_ready_repository(|root| {
-            let (_, history_id) = authenticity::branch_head(root, branch_id)?;
-            backup::ensure_checkpoint(root, &history_id)?;
-            authenticity::store_final_artifact(root, branch_id, &history_id, &artifact_value)?;
-            authenticity::get_publication(root, branch_id, models_ready, model_info)
-        })
+        .map_err(|error| CommandError::from_legacy(error.to_string()))?;
+    let request = authenticity::EnterPublicationRequest {
+        branch_id: branch_id.to_owned(),
+        artifact_path: artifact.to_string_lossy().into_owned(),
+    };
+    let state = options.authenticity_state();
+    let publication = runtime.run(OperationDomain::Authenticity, |context| {
+        usecases::authenticity::enter_publication(context, &state, request)
     })?;
-    serde_json::to_value(&publication).map_err(|error| format!("无法序列化发布状态：{error}"))
+    serde_json::to_value(&publication)
+        .map_err(|error| CommandError::internal(format!("无法序列化发布状态：{error}")))
 }
 
 /// 认证签名发布。与 GUI 的 `publish_branch_artifact` 走同一领域函数
 /// `authenticity::publish_artifact`（渲染 → TrustMark 编码 → JPEG 编码 → C2PA 签名），
 /// 在同一把运行锁与认证操作锁下执行。取消检查点在流水线内部（headless-only 门控），
 /// 因此 `--cancel-on-stdin` 的闸门能精确命中渲染 / 编码 / 签名三个阶段。
-fn publish(options: &Options) -> Result<Value, String> {
-    let branch_id = options.require("branch")?;
-    let output = options.path_within("output", "发布输出路径")?;
-    let certificate = options.path_within("certificate", "证书链")?;
-    let key_path = options.path_within("key", "私钥")?;
+fn publish(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let branch_id = options.require("branch").map_err(CommandError::from)?;
+    let output = options
+        .path_within("output", "发布输出路径")
+        .map_err(CommandError::from)?;
+    let certificate = options
+        .path_within("certificate", "证书链")
+        .map_err(CommandError::from)?;
+    let key_path = options
+        .path_within("key", "私钥")
+        .map_err(CommandError::from)?;
     let scope = options.authorization_scope();
     authenticity::ensure_dialog_authorized(&scope, &output, "发布输出路径")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| CommandError::from_legacy(error.to_string()))?;
     authenticity::ensure_dialog_authorized(&scope, &certificate, "证书链")
-        .map_err(|error| error.to_string())?;
-    let private_key =
-        std::fs::read_to_string(&key_path).map_err(|error| format!("无法读取私钥：{error}"))?;
+        .map_err(|error| CommandError::from_legacy(error.to_string()))?;
+    let private_key = std::fs::read_to_string(&key_path)
+        .map_err(|error| CommandError::from_legacy(format!("无法读取私钥：{error}")))?;
     let config = authenticity::CertificationConfig {
         branch_id: branch_id.to_owned(),
-        title: options.require("title")?.to_owned(),
-        creator: options.require("creator")?.to_owned(),
+        title: options
+            .require("title")
+            .map_err(CommandError::from)?
+            .to_owned(),
+        creator: options
+            .require("creator")
+            .map_err(CommandError::from)?
+            .to_owned(),
         rights_statement: options.value("rights").unwrap_or_default().to_owned(),
         authentication_content: options.value("content").unwrap_or_default().to_owned(),
-        trustmark_enabled: options.flag("trustmark")?,
+        trustmark_enabled: options.flag("trustmark").map_err(CommandError::from)?,
         certificate_path: certificate.to_string_lossy().into_owned(),
         signing_algorithm: options.value("algorithm").unwrap_or("es256").to_owned(),
         timestamp_url: options.value("timestamp-url").map(str::to_owned),
-        jpeg_quality: options.number::<u8>("jpeg-quality")?.unwrap_or(90),
+        jpeg_quality: options
+            .number::<u8>("jpeg-quality")
+            .map_err(CommandError::from)?
+            .unwrap_or(90),
         background_color: options.value("background").unwrap_or("#FFFFFF").to_owned(),
-        watermark_strength: options.number::<f32>("strength")?.unwrap_or(1.0),
-        additional_regions: options.regions("regions")?,
+        watermark_strength: options
+            .number::<f32>("strength")
+            .map_err(CommandError::from)?
+            .unwrap_or(1.0),
+        additional_regions: options.regions("regions").map_err(CommandError::from)?,
         updated_ms: 0,
     };
     let request = authenticity::PublishBranchRequest {
@@ -1227,53 +1198,51 @@ fn publish(options: &Options) -> Result<Value, String> {
         watermark_id: options.value("watermark-id").map(str::to_owned),
         preview_cache_token: options.value("preview-cache-token").map(str::to_owned),
     };
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let authenticity_state = options.authenticity_state();
-    let operation = authenticity_state
-        .begin_operation("认证签名发布")
-        .map_err(|error| error.to_string())?;
-    let result = state.run_foreground(Some(branch_id), || {
-        app_state.with_ready_repository(|root| {
-            authenticity::publish_artifact(root, &authenticity_state, &operation, request)
-                .map_err(|error| error.to_string())
-        })
+    let state = options.authenticity_state();
+    let result = runtime.run(OperationDomain::Authenticity, |context| {
+        usecases::authenticity::publish(context, &state, request)
     })?;
-    serde_json::to_value(&result).map_err(|error| format!("无法序列化发布结果：{error}"))
+    serde_json::to_value(&result)
+        .map_err(|error| CommandError::internal(format!("无法序列化发布结果：{error}")))
 }
 
 /// 取消发布并回收仓库内副本。与 GUI 的 `cancel_branch_publication` 走同一批调用：
 /// `remove_artifact` 在事务内登记待清理项，提交后单遍 `cleanup::run`。首次导出的
 /// JPG 是用户产物，不在回收范围（与 GUI 语义一致）。
-fn cancel_publication(options: &Options) -> Result<Value, String> {
-    let branch_id = options.require("branch")?;
-    let app_state = options.app_state();
-    let state = options.backup_state();
-    let report = state.run_exclusive(Some(branch_id), BackupTaskKind::UserOperation, || {
-        app_state.with_ready_repository(|root| {
-            let cleanup_ids = authenticity::remove_artifact(root, branch_id)?;
-            cleanup::run(root, &cleanup_ids)
-        })
+fn cancel_publication(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let branch_id = options.require("branch").map_err(CommandError::from)?;
+    let report = runtime.run(OperationDomain::Authenticity, |context| {
+        usecases::authenticity::cancel_publication(context, branch_id)
     })?;
-    serde_json::to_value(&report).map_err(|error| format!("无法序列化清理结果：{error}"))
+    serde_json::to_value(&report)
+        .map_err(|error| CommandError::internal(format!("无法序列化清理结果：{error}")))
 }
 
 /// 回读认证。与 GUI 的 `decode_authenticity` 走同一领域函数 `authenticity::decode`：
 /// C2PA 声明 + TrustMark 绑定 + 全库候选匹配。只读，走共享读租约。
-fn decode_authenticity(options: &Options) -> Result<Value, String> {
-    let input = options.path_within("input", "待识别图片")?;
+fn decode_authenticity(
+    options: &Options,
+    runtime: &HeadlessRuntime,
+) -> Result<Value, CommandError> {
+    let input = options
+        .path_within("input", "待识别图片")
+        .map_err(CommandError::from)?;
     authenticity::ensure_dialog_authorized(&options.authorization_scope(), &input, "待识别图片")
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| CommandError::from_legacy(error.to_string()))?;
     let request = authenticity::DecodeRequest {
         input_path: input.to_string_lossy().into_owned(),
-        region: options.regions("region")?.into_iter().next(),
+        region: options
+            .regions("region")
+            .map_err(CommandError::from)?
+            .into_iter()
+            .next(),
     };
-    let app_state = options.app_state();
-    let authenticity_state = options.authenticity_state();
-    let result = app_state.with_repository_read(|root| {
-        authenticity::decode(root, &authenticity_state, request).map_err(|error| error.to_string())
+    let state = options.authenticity_state();
+    let result = runtime.run(OperationDomain::Authenticity, |context| {
+        usecases::authenticity::decode(context, &state, request)
     })?;
-    serde_json::to_value(&result).map_err(|error| format!("无法序列化识别结果：{error}"))
+    serde_json::to_value(&result)
+        .map_err(|error| CommandError::internal(format!("无法序列化识别结果：{error}")))
 }
 
 /// 进程自身的峰值工作集。Windows 用 `GetProcessMemoryInfo`；其它平台返回 `None`，

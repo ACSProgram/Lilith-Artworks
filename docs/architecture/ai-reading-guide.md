@@ -28,14 +28,17 @@
   `ConfirmView` 上置 `slideToConfirm: true`，走 `src/shared/SlideToConfirm.tsx` 的滑动确认，
   不要另写拖拽、长按或二段式点击控件；测试里驱动该控件用 `src/shared/slideToConfirmTesting.ts`。
   共享控件清单见 `docs/architecture/overview.md`。
-- 原生跨领域 Tauri 流程在 `src-tauri/src/app/workflows.rs` 编排；领域模块只暴露单领域服务。
+- Tauri 命令是薄适配器：仓库入口统一经 `src-tauri/src/app/command_runtime/` 的
+  `OperationCoordinator` 与 `CommandContext`，业务入口放在 `src-tauri/src/app/usecases/`，
+  GUI 与 headless 共享；跨领域流程仍由 `src-tauri/src/app/workflows.rs` 的适配器编排。
+  领域模块只暴露单领域服务。
 - History、Library、Authenticity、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费，
   页面组件不直接调用命令。
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。
-- `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `with_repository_read`，
-  变更走 `with_ready_repository`。画板通过公开的 repository 函数持久化画板/图片/历史，
+- `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `run_read`，
+  变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
   DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。
 - `authenticity` 通过公开的 history/backup 能力建立检查点，不导入 library 内部。
 - 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经 `repository.rs`。

@@ -9,13 +9,18 @@
 - 发布/识别流水线：`src-tauri/src/authenticity/pipeline.rs`。
 - C2PA 和 TrustMark 实现：`src-tauri/src/authenticity/c2pa.rs`、`trustmark.rs`。
 - 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`。
-- 强制发布检查点和共享运行锁：`src-tauri/src/app/workflows.rs` 调用公开 `backup::ensure_checkpoint` 后进入认证服务；认证模块不导入 backup 或读取 `chunk_file.rs`。
+- 最终成品固化与发布编排：`src-tauri/src/authenticity/artifact.rs`
+  （`store_final_artifact`、`publish_artifact`）。
+- 强制发布检查点和共享运行锁：`src-tauri/src/app/usecases/authenticity.rs` 调用公开
+  `backup::ensure_checkpoint` 后进入认证服务；跨领域的进入/取消/发布命令适配器在
+  `src-tauri/src/app/workflows.rs`，单领域预览与识别适配器在
+  `src-tauri/src/authenticity/commands.rs`；认证模块不导入 backup 或读取 `chunk_file.rs`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
 ## 发布状态
 
-分支必须先有一个 head 才能进入发布状态。用户选择最终成品后，应用工作流在统一备份运行锁内完成以下步骤：
+分支必须先有一个 head 才能进入发布状态。用户选择最终成品后，发布 use-case（`src-tauri/src/app/usecases/authenticity.rs`）在统一备份运行锁内完成以下步骤：
 
 1. 把当前 head 物化并标记为强制检查点。
 2. 流式复制最终成品到临时文件，同步并计算 SHA-256；正式发布前先在 `pending_file_cleanup` 登记带哈希的仓库文件意图。

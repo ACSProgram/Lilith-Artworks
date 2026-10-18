@@ -14,10 +14,11 @@ use tauri::{AppHandle, Manager, PhysicalPosition, PhysicalSize, State};
 use tempfile::NamedTempFile;
 
 use super::diagnostics::{self, DiagnosticsState};
-use crate::backup::{BackupState, BackupTaskKind};
+use super::{command_runtime::OperationDomain, usecases, OperationCoordinator};
+use crate::backup::BackupState;
 use crate::{history, library, storage};
 
-const CURRENT_SETTINGS_VERSION: u32 = 2;
+pub(crate) const CURRENT_SETTINGS_VERSION: u32 = 2;
 
 /// 主窗口允许的最小物理尺寸，与 `tauri.conf.json` 的 `minWidth` / `minHeight` 一致。
 /// 加载设置时用它夹紧越界值，捕获窗口几何时用它判断一次捕获是否可信。
@@ -41,11 +42,11 @@ const READ_HOLD_WARN_MS: u128 = 1_500;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub(crate) struct AppSettings {
-    version: u32,
-    repository_path: String,
+    pub(crate) version: u32,
+    pub(crate) repository_path: String,
     theme: String,
     close_to_tray: bool,
-    pause_automatic_backups: bool,
+    pub(crate) pause_automatic_backups: bool,
     automatic_backup_check_mode: String,
     window: WindowSettings,
     content: ContentSettings,
@@ -242,18 +243,31 @@ impl AppState {
         &self,
         operation: impl FnOnce(&Path) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_ready_repository_typed(operation)
+    }
+
+    /// [`Self::with_ready_repository`] 的 typed 版本：锁与仓库校验失败经 `E: From<String>`
+    /// 转成调用方的错误类型，业务闭包保留自己的 typed error。`OperationCoordinator` 用它
+    /// 维持固定锁序（运行分类 → 仓库 lease → 仓库操作锁）。
+    pub(crate) fn with_ready_repository_typed<T, E: From<String>>(
+        &self,
+        operation: impl FnOnce(&Path) -> Result<T, E>,
+    ) -> Result<T, E> {
         let wait_started = std::time::Instant::now();
-        let _lease = self.repository_lease.read().map_err(|_| "仓库租约已损坏")?;
+        let _lease = self
+            .repository_lease
+            .read()
+            .map_err(|_| E::from("仓库租约已损坏".to_owned()))?;
         let _operation = self
             .repository_operation
             .lock()
-            .map_err(|_| "仓库操作锁已损坏")?;
+            .map_err(|_| E::from("仓库操作锁已损坏".to_owned()))?;
         // 只在真的等待时才记录：用于判断前端卡死是否伴随仓库锁争用。
         let waited_ms = wait_started.elapsed().as_millis();
         if waited_ms > LOCK_WAIT_WARN_MS {
             log::warn!("[slow] repository mutation lock waited {waited_ms} ms");
         }
-        let root = self.ready_repository_path()?;
+        let root = self.ready_repository_path().map_err(E::from)?;
         let held_started = std::time::Instant::now();
         let result = operation(&root);
         let held_ms = held_started.elapsed().as_millis();
@@ -269,6 +283,7 @@ impl AppState {
     /// refresh, history read or settings snapshot still answers while a long
     /// backup, restore or compaction is running. SQLite's WAL keeps each read
     /// consistent while a write transaction commits.
+    #[allow(dead_code)]
     pub(crate) fn with_repository_read<T>(
         &self,
         operation: impl FnOnce(&Path) -> Result<T, String>,
@@ -281,11 +296,21 @@ impl AppState {
     /// 用途：把「读操作自身耗时过长」归因到具体命令。素材板卡死期间曾观察到
     /// `repository read took 3000+ ms`，但无从判断是纹理读取、树刷新还是别处；
     /// 调用点传入 `read_pin_board_texture board=.. image=..` 这类标签即可定位。
+    #[allow(dead_code)]
     pub(crate) fn with_repository_read_labeled<T>(
         &self,
         label: &str,
         operation: impl FnOnce(&Path) -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_repository_read_labeled_typed(label, operation)
+    }
+
+    /// [`Self::with_repository_read_labeled`] 的 typed 版本。
+    pub(crate) fn with_repository_read_labeled_typed<T, E: From<String>>(
+        &self,
+        label: &str,
+        operation: impl FnOnce(&Path) -> Result<T, E>,
+    ) -> Result<T, E> {
         // 空标签不打印括号，避免日志里出现无意义的 `()`。
         let suffix = if label.is_empty() {
             String::new()
@@ -293,12 +318,15 @@ impl AppState {
             format!(" [{label}]")
         };
         let wait_started = std::time::Instant::now();
-        let _lease = self.repository_lease.read().map_err(|_| "仓库租约已损坏")?;
+        let _lease = self
+            .repository_lease
+            .read()
+            .map_err(|_| E::from("仓库租约已损坏".to_owned()))?;
         let waited_ms = wait_started.elapsed().as_millis();
         if waited_ms > LOCK_WAIT_WARN_MS {
             log::warn!("[slow] repository read lease waited {waited_ms} ms{suffix}");
         }
-        let root = self.ready_repository_path()?;
+        let root = self.ready_repository_path().map_err(E::from)?;
         let ran_started = std::time::Instant::now();
         let result = operation(&root);
         let ran_ms = ran_started.elapsed().as_millis();
@@ -308,22 +336,46 @@ impl AppState {
         result
     }
 
+    #[allow(dead_code)]
     fn with_repository_switch<T>(
         &self,
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.with_repository_switch_typed(operation)
+    }
+
+    /// [`Self::with_repository_switch`] 的 typed 版本。设置保存需要在同一临界区里
+    /// 替换仓库路径并写设置；协调器先取得运行分类锁，再进入这里取写租约。
+    pub(crate) fn with_repository_switch_typed<T, E: From<String>>(
+        &self,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, E> {
         let _lease = self
             .repository_lease
             .write()
-            .map_err(|_| "仓库租约已损坏")?;
+            .map_err(|_| E::from("仓库租约已损坏".to_owned()))?;
         let _operation = self
             .repository_operation
             .lock()
-            .map_err(|_| "仓库操作锁已损坏")?;
+            .map_err(|_| E::from("仓库操作锁已损坏".to_owned()))?;
         operation()
     }
 
-    fn set_validated_repository(&self, root: Option<PathBuf>) -> Result<(), String> {
+    pub(crate) fn replace_settings(&self, settings: AppSettings) -> Result<(), String> {
+        *self.settings.write().map_err(|_| "设置状态已损坏")? = settings;
+        Ok(())
+    }
+
+    pub(crate) fn settings_path(&self) -> &Path {
+        &self.settings_path
+    }
+
+    pub(crate) fn clear_warning(&self) -> Result<(), String> {
+        *self.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
+        Ok(())
+    }
+
+    pub(crate) fn set_validated_repository(&self, root: Option<PathBuf>) -> Result<(), String> {
         *self
             .validated_repository
             .lock()
@@ -400,11 +452,11 @@ impl AppState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsSnapshot {
-    settings: AppSettings,
-    settings_path: String,
-    log_directory: String,
-    warning: Option<String>,
-    automatic_backup_file_count: Option<usize>,
+    pub(crate) settings: AppSettings,
+    pub(crate) settings_path: String,
+    pub(crate) log_directory: String,
+    pub(crate) warning: Option<String>,
+    pub(crate) automatic_backup_file_count: Option<usize>,
 }
 
 /// 旧版本设置迁移。
@@ -548,12 +600,15 @@ pub(crate) fn load_settings(path: &Path) -> (AppSettings, Option<String>) {
 
 #[tauri::command]
 pub(crate) async fn get_app_settings(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
 ) -> Result<SettingsSnapshot, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || snapshot(&state))
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Settings, |context| {
+            usecases::settings::snapshot_for_command(context)
+        })
         .await
-        .map_err(|error| format!("设置读取任务异常结束：{error}"))?
+        .map_err(String::from)
 }
 
 #[tauri::command]
@@ -645,56 +700,23 @@ fn open_existing_directory(path: &Path, label: &str) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub(crate) fn save_app_settings(
+pub(crate) async fn save_app_settings(
     app: AppHandle,
-    state: State<'_, AppState>,
-    backup_state: State<'_, BackupState>,
+    coordinator: State<'_, OperationCoordinator>,
     settings: AppSettings,
 ) -> Result<SettingsSnapshot, String> {
-    validate_settings(&settings)?;
-    if settings.version != CURRENT_SETTINGS_VERSION {
-        return Err("设置版本不受支持".into());
-    }
-    let paused = settings.pause_automatic_backups;
-    let repository_changed = state
-        .repository_path()?
-        .map(|path| path.to_string_lossy().into_owned())
-        != Some(settings.repository_path.trim().to_owned());
-    let save = || {
-        state.with_repository_switch(|| {
-            let current_repository = state.repository_path()?;
-            let prepared_repository = prepare_repository(
-                current_repository.as_deref(),
-                settings.repository_path.trim(),
-            )?;
-            write_json_atomic(&state.settings_path, &settings)?;
-            *state.settings.write().map_err(|_| "设置状态已损坏")? = settings;
-            *state.warning.write().map_err(|_| "设置警告状态已损坏")? = None;
-            state.set_validated_repository(prepared_repository)?;
-            log::info!(
-                "settings saved: repository_changed={repository_changed}, repository_path={}",
-                state
-                    .repository_path()?
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_default()
-            );
-            snapshot(state.inner())
+    let coordinator = coordinator.inner().clone();
+    let next = coordinator
+        .spawn(OperationDomain::Settings, move |context| {
+            usecases::settings::save(context, settings)
         })
-    };
-    // 切换仓库是前台长命令：登记前台等待并请求后台任务让位。普通设置保存持有
-    // 运行锁的时间极短，不必打断正在运行的自动备份。
-    let next = if repository_changed {
-        backup_state.run_foreground(None, save)?
-    } else {
-        backup_state.run_exclusive(None, BackupTaskKind::UserOperation, save)?
-    };
-    backup_state.set_automatic_scheduling(!paused);
-    backup_state.wake_scheduler();
+        .await
+        .map_err(String::from)?;
     crate::refresh_tray_backup_menu(&app)?;
     Ok(next)
 }
 
-fn prepare_repository(
+pub(crate) fn prepare_repository(
     current_repository: Option<&Path>,
     requested: &str,
 ) -> Result<Option<PathBuf>, String> {
@@ -889,7 +911,7 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
     write_json_atomic(&state.settings_path, &settings)
 }
 
-fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
+pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
     let automatic_backup_file_count = state
         .ready_repository_path()
         .ok()
@@ -907,7 +929,7 @@ fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
     })
 }
 
-fn validate_settings(settings: &AppSettings) -> Result<(), String> {
+pub(crate) fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     if !matches!(settings.theme.as_str(), "system" | "light" | "dark") {
         return Err("主题设置无效".into());
     }
@@ -965,7 +987,7 @@ fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     Ok(())
 }
 
-fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
+pub(crate) fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<(), String> {
     let parent = path.parent().ok_or("设置文件路径无效")?;
     fs::create_dir_all(parent).map_err(|error| format!("无法创建设置目录：{error}"))?;
     let mut temporary =

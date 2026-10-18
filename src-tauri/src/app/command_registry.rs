@@ -1,0 +1,100 @@
+//! 命令注册表。
+//!
+//! Tauri 的 `generate_handler!` 需要在编译期拿到完整的函数列表，因此注册表只能是
+//! 一张集中的表：这里按领域分组列出全部命令，`lib.rs` 只把 [`handler`] 交给
+//! `invoke_handler`，不再承载命令清单。新增命令时在对应领域的段落里追加，并按
+//! `docs/architecture/overview.md` 的命令入口说明核对一遍。
+
+use tauri::{ipc::Invoke, Wry};
+
+/// 全部 Tauri 命令的处理器。桌面端固定用 Wry（带窗口的命令参数只能绑定该运行时）。
+pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static {
+    tauri::generate_handler![
+        // 生命周期与诊断
+        crate::confirm_app_shutdown,
+        crate::app::diagnostics::get_diagnostics_status,
+        crate::app::diagnostics::set_diagnostics_enabled,
+        crate::app::diagnostics::log_frontend_diagnostics,
+        crate::app::diagnostics::diagnostics_pong,
+        // 设置与文件清理
+        crate::app::settings::get_app_settings,
+        crate::app::settings::save_app_settings,
+        crate::app::settings::open_log_directory,
+        crate::app::settings::open_legal_directory,
+        crate::app::settings::open_settings_directory,
+        crate::app::settings::reveal_path_in_folder,
+        crate::app::cleanup_commands::list_pending_file_cleanup,
+        crate::app::cleanup_commands::retry_pending_file_cleanup,
+        crate::app::cleanup_commands::scan_repository_unreferenced,
+        crate::app::cleanup_commands::cleanup_repository_unreferenced,
+        // 应用编排：仓库维护
+        crate::app::workflows::acknowledge_backup_disable_notices,
+        crate::app::workflows::get_backup_disable_notice_target,
+        crate::app::workflows::scrub_repository_integrity,
+        crate::app::workflows::create_repository_backup,
+        // Library
+        crate::library::get_repository_status,
+        crate::library::list_library_tree,
+        crate::library::search_library,
+        crate::library::create_library_group,
+        crate::app::workflows::create_library_artwork,
+        crate::library::rename_library_node,
+        crate::library::trash_library_nodes,
+        crate::library::list_library_trash,
+        crate::library::restore_library_trash,
+        crate::app::workflows::permanently_delete_library_trash,
+        crate::app::workflows::empty_library_trash,
+        crate::library::move_library_nodes,
+        // History / Backup
+        crate::history::get_artwork_history,
+        crate::app::workflows::fork_artwork_branch,
+        crate::app::workflows::update_artwork_branch,
+        crate::history::rename_history_node,
+        crate::app::workflows::delete_artwork_branch,
+        crate::backup::run_branch_backup,
+        crate::backup::restore_history_node,
+        crate::backup::compact_history_node,
+        crate::backup::delete_history_subtree,
+        crate::backup::set_history_checkpoint,
+        crate::backup::reverify_branch_history,
+        crate::backup::get_backup_runtime_status,
+        crate::backup::cancel_backup_operation,
+        // Authenticity
+        crate::app::workflows::enter_branch_publication,
+        crate::authenticity::get_branch_publication,
+        crate::app::workflows::cancel_branch_publication,
+        crate::app::workflows::publish_branch_artifact,
+        crate::authenticity::decode_authenticity,
+        crate::authenticity::search_certification_records,
+        crate::authenticity::preview_authenticity_image,
+        crate::authenticity::preview_branch_artifact,
+        crate::authenticity::preview_branch_artifact_output,
+        crate::authenticity::cancel_authenticity_operation,
+        crate::authenticity::preview_certification_record,
+        crate::authenticity::export_certification_record,
+        crate::authenticity::estimate_authenticity_output_size,
+        crate::authenticity::preview_authenticity_tile,
+        crate::authenticity::stage_authenticity_input,
+        crate::app::workflows::delete_certification_record,
+        // Pin-board
+        crate::pin_board::list_pin_boards,
+        crate::pin_board::list_pin_board_trash,
+        crate::pin_board::create_pin_board,
+        crate::pin_board::rename_pin_board,
+        crate::pin_board::trash_pin_board,
+        crate::pin_board::restore_pin_board,
+        crate::pin_board::reorder_pin_boards,
+        crate::pin_board::delete_pin_board_permanently,
+        crate::pin_board::empty_pin_board_trash,
+        crate::pin_board::load_pin_board,
+        crate::pin_board::save_pin_board,
+        crate::pin_board::finalize_pin_board,
+        crate::pin_board::paste_pin_board_images,
+        crate::pin_board::import_pin_board_images,
+        crate::pin_board::import_pin_board_clipboard_image,
+        crate::pin_board::export_pin_board_images,
+        crate::pin_board::read_pin_board_image_png,
+        crate::pin_board::read_pin_board_texture,
+        crate::pin_board::read_pin_board_clipboard_paths,
+    ]
+}

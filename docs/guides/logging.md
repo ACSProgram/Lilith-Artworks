@@ -46,6 +46,12 @@
 ## 格式约定
 
 - 消息用 `key=value` 字段，字段名稳定、可解析（如 `boardId=`、`gpuSeq=`、`elapsedMs=`）。
+- 命令执行由 `OperationCoordinator` 统一记录 `operation started: id=…, domain=…, repo=…` 与
+  `operation finished/failed: id=…, domain=…, outcome=…, elapsed_ms=…, code=…, kind=…`；
+  进度只在 `debug` 档记录，正常使用不产生噪声。
+- 需要归因到具体实体的长任务在 use-case 里另记一行目标标识（如
+  `history restore target: history_id=…, operation_id=…`），用 `operation_id` 与协调器的开始/结束
+  行串起来；不要为同一件事再写一遍耗时日志。
 - 带上可关联的标识（会话、画板、图片、设备序号），便于把多行串成一次流程。
 - 单行、无换行，不打印整个对象。
 - 不写隐私内容；路径仅用于诊断，且只在诊断相关日志中出现。

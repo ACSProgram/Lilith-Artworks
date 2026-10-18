@@ -149,11 +149,23 @@ impl BackupState {
     ///
     /// 与 `run_exclusive` 的差别只有这两步，都不阻塞、不排队：登记让调度器在取得
     /// 运行锁后复查并让位，取消请求让正在运行的后台任务尽快退出。
+    #[allow(dead_code)]
     pub(crate) fn run_foreground<T>(
         &self,
         branch_id: Option<&str>,
         operation: impl FnOnce() -> Result<T, String>,
     ) -> Result<T, String> {
+        self.run_foreground_typed(branch_id, operation)
+            .map_err(|error| error.to_string())
+    }
+
+    /// [`Self::run_foreground`] 的 typed 版本，供 `OperationCoordinator` 保留
+    /// `CommandError` 的 code/kind 而不在中途退化成字符串。
+    pub(crate) fn run_foreground_typed<T, E>(
+        &self,
+        branch_id: Option<&str>,
+        operation: impl FnOnce() -> Result<T, E>,
+    ) -> Result<T, ExclusiveRunError<E>> {
         let mut waiting = self.begin_foreground_wait();
         let _ = self.cancel_background();
         self.run_exclusive_typed_inner(
@@ -162,9 +174,9 @@ impl BackupState {
             Some(&mut waiting),
             operation,
         )
-        .map_err(|error| error.to_string())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn run_exclusive<T>(
         &self,
         branch_id: Option<&str>,
@@ -173,55 +185,6 @@ impl BackupState {
     ) -> Result<T, String> {
         self.run_exclusive_typed(branch_id, kind, operation)
             .map_err(|error| error.to_string())
-    }
-
-    /// Runs a long operation under the exclusive lock and records its duration
-    /// and outcome. Every repository-heavy command goes through this so a slow
-    /// or failing materialization is always attributable in the log.
-    pub(crate) fn run_logged<T>(
-        &self,
-        name: &str,
-        detail: &str,
-        branch_id: Option<&str>,
-        kind: BackupTaskKind,
-        operation: impl FnOnce() -> Result<T, String>,
-    ) -> Result<T, String> {
-        self.logged(name, detail, || {
-            self.run_exclusive(branch_id, kind, operation)
-        })
-    }
-
-    /// 前台长命令版本的 `run_logged`：登记前台等待并请求后台任务让位。
-    pub(crate) fn run_logged_foreground<T>(
-        &self,
-        name: &str,
-        detail: &str,
-        branch_id: Option<&str>,
-        operation: impl FnOnce() -> Result<T, String>,
-    ) -> Result<T, String> {
-        self.logged(name, detail, || self.run_foreground(branch_id, operation))
-    }
-
-    fn logged<T>(
-        &self,
-        name: &str,
-        detail: &str,
-        operation: impl FnOnce() -> Result<T, String>,
-    ) -> Result<T, String> {
-        let started = std::time::Instant::now();
-        log::info!("{name} started: {detail}");
-        let result = operation();
-        match &result {
-            Ok(_) => log::info!(
-                "{name} finished: {detail}, elapsed_ms={}",
-                started.elapsed().as_millis()
-            ),
-            Err(error) => log::warn!(
-                "{name} failed: {detail}, elapsed_ms={}, error={error}",
-                started.elapsed().as_millis()
-            ),
-        }
-        result
     }
 
     pub(crate) fn run_exclusive_typed<T, E>(

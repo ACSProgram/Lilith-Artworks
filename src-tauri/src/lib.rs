@@ -291,17 +291,21 @@ pub fn run() {
                 .app_log_dir()
                 .map_err(|error| format!("无法定位应用日志目录：{error}"))?;
             let (settings, warning) = app::load_settings(&settings_path);
-            application.manage(app::AppState::new(
-                settings,
-                settings_path,
-                log_directory,
-                warning,
-            ));
+            let app_state = app::AppState::new(settings, settings_path, log_directory, warning);
+            application.manage(app_state.clone());
             // 诊断模式下由原生端线程看护 WebView 主线程，冻结期间仍能留下证据。
             app::diagnostics::start_webview_watchdog(application.handle().clone());
             let backup_state = backup::BackupState::default();
             backup_state.start_scheduler(application.handle().clone())?;
-            application.manage(backup_state);
+            application.manage(backup_state.clone());
+            let event_sink = std::sync::Arc::new(app::command_runtime::TauriEventSink::new(
+                application.handle().clone(),
+            ));
+            application.manage(app::OperationCoordinator::new(
+                app_state,
+                backup_state,
+                event_sink,
+            ));
             let resource_dir = application.path().resource_dir()?;
             // 只认随包资源目录。曾经保留一条 `CARGO_MANIFEST_DIR` 的编译期回退路径，
             // 那条路径会把开发机目录写进发布产物，也让「模型是否被替换」的判断多一个
@@ -366,87 +370,7 @@ pub fn run() {
             }
             _ => {}
         })
-        .invoke_handler(tauri::generate_handler![
-            confirm_app_shutdown,
-            app::diagnostics::get_diagnostics_status,
-            app::diagnostics::set_diagnostics_enabled,
-            app::diagnostics::log_frontend_diagnostics,
-            app::diagnostics::diagnostics_pong,
-            app::settings::get_app_settings,
-            app::settings::save_app_settings,
-            app::settings::open_log_directory,
-            app::settings::open_legal_directory,
-            app::settings::open_settings_directory,
-            app::settings::reveal_path_in_folder,
-            app::cleanup_commands::list_pending_file_cleanup,
-            app::cleanup_commands::retry_pending_file_cleanup,
-            app::cleanup_commands::scan_repository_unreferenced,
-            app::cleanup_commands::cleanup_repository_unreferenced,
-            app::workflows::acknowledge_backup_disable_notices,
-            app::workflows::get_backup_disable_notice_target,
-            app::workflows::scrub_repository_integrity,
-            app::workflows::create_repository_backup,
-            library::get_repository_status,
-            library::list_library_tree,
-            library::search_library,
-            library::create_library_group,
-            app::workflows::create_library_artwork,
-            library::rename_library_node,
-            library::trash_library_nodes,
-            library::list_library_trash,
-            library::restore_library_trash,
-            app::workflows::permanently_delete_library_trash,
-            app::workflows::empty_library_trash,
-            library::move_library_nodes,
-            history::get_artwork_history,
-            app::workflows::fork_artwork_branch,
-            app::workflows::update_artwork_branch,
-            history::rename_history_node,
-            app::workflows::delete_artwork_branch,
-            backup::run_branch_backup,
-            backup::restore_history_node,
-            backup::compact_history_node,
-            backup::delete_history_subtree,
-            backup::set_history_checkpoint,
-            backup::reverify_branch_history,
-            backup::get_backup_runtime_status,
-            backup::cancel_backup_operation,
-            app::workflows::enter_branch_publication,
-            authenticity::get_branch_publication,
-            app::workflows::cancel_branch_publication,
-            app::workflows::publish_branch_artifact,
-            authenticity::decode_authenticity,
-            authenticity::search_certification_records,
-            authenticity::preview_authenticity_image,
-            authenticity::preview_branch_artifact,
-            authenticity::preview_branch_artifact_output,
-            authenticity::cancel_authenticity_operation,
-            authenticity::preview_certification_record,
-            authenticity::export_certification_record,
-            authenticity::estimate_authenticity_output_size,
-            authenticity::preview_authenticity_tile,
-            authenticity::stage_authenticity_input,
-            app::workflows::delete_certification_record,
-            pin_board::list_pin_boards,
-            pin_board::list_pin_board_trash,
-            pin_board::create_pin_board,
-            pin_board::rename_pin_board,
-            pin_board::trash_pin_board,
-            pin_board::restore_pin_board,
-            pin_board::reorder_pin_boards,
-            pin_board::delete_pin_board_permanently,
-            pin_board::empty_pin_board_trash,
-            pin_board::load_pin_board,
-            pin_board::save_pin_board,
-            pin_board::finalize_pin_board,
-            pin_board::paste_pin_board_images,
-            pin_board::import_pin_board_images,
-            pin_board::import_pin_board_clipboard_image,
-            pin_board::export_pin_board_images,
-            pin_board::read_pin_board_image_png,
-            pin_board::read_pin_board_texture,
-            pin_board::read_pin_board_clipboard_paths,
-        ])
+        .invoke_handler(app::command_registry::handler())
         .run(tauri::generate_context!())
         .expect("error while running Lilith Artworks");
 }

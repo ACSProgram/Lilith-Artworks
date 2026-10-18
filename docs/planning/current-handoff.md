@@ -21,9 +21,18 @@
   `stress_baseline` 组、headless 只读探针 `scheduler-scan`、闸门取消计时与 `Spawn::scope`），
   在临时仓库副本 `D:\temp\Artworks` 上采集 release 档数值；数据见
   `0.3-baseline-2026-10-18.md`（采集后已用采集前的副本还原仓库）。
-- **下一步**：从阶段 1（CommandContext、typed error、`CancelToken`、`OperationCoordinator`
-  与 `AppEvent` v1 信封）开始实施。alpha1 / alpha2 是开发批次，是否打 alpha 标签由维护者决定。
-- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1–9（均尚未实施）。
+- **阶段 1 已实现并提交**：新增 `app/command_runtime/`（`CommandContext`、
+  typed `CommandError`、`CancelToken`、`OperationCoordinator`、`AppEvent` v1 信封）与
+  `app/usecases/`；Library、History/Backup、Authenticity、Cleanup、Settings、Pin-board 的仓库
+  入口已统一经 coordinator，命令名/DTO/用户文案不变；headless 改为 context 装配器并共享同一批
+  use-case；命令注册集中在 `app/command_registry.rs`，最终成品的固化与发布编排移入
+  `authenticity/artifact.rs`。画板写命令保持「仓库 lease + 仓库操作锁、不取共享运行锁」。
+  `cargo check`（含 `headless` feature）、`cargo test --lib`、`npx tsc --noEmit`、`npm test`、
+  `cargo fmt --check` 已通过；GUI 人工验收与压力测试**未做**。
+- **下一步**：由维护者验收阶段 1 的产品行为；随后进入阶段 2（`SettingsService`、统一 owner lock、
+  关闭结算诊断接入、`AppRuntimeProvider`）。alpha1 / alpha2 是开发批次，是否打 alpha 标签由
+  维护者决定。
+- 未完成事项全部在 `todo.md`：0.3 前的补强候选与 0.3 计划的阶段 1（待验收）–9。
 
 ## 当前基线
 

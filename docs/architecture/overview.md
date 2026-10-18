@@ -17,7 +17,10 @@ src/modules/pin-board    按 Artwork 的素材板画布、图片导入导出与�
 src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 
 src-tauri/src/app/                     配置、窗口和应用生命周期
-src-tauri/src/app/workflows.rs         跨领域 Tauri 命令与共享运行锁编排
+src-tauri/src/app/command_runtime/     CommandContext、typed error、CancelToken、AppEvent v1 与 OperationCoordinator
+src-tauri/src/app/usecases/            GUI 与 headless 共享的业务入口
+src-tauri/src/app/workflows.rs         跨领域 Tauri 命令适配器
+src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领域分组）
 src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
@@ -32,7 +35,7 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图。History、Library 和 Authenticity 分别由 `useHistoryController.ts`、`useLibraryController.ts` 和 `useAuthenticityController.ts` 独占各自 `api.ts`；素材板保留 Lilith Client 的直连结构，由 `PinBoardModule.tsx` 与 `renderer.ts` 直接消费 `pin-board/api.ts`，不额外插入控制器层。控制器与素材板页面组件只保留视图选择、弹窗和渲染状态，统一处理读取、mutation 回填、busy 状态和请求代次；工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
-Rust 的 Tauri 命令按调用方向分层：单领域读写留在 `library`、`history`、`backup`、`authenticity` 和 `pin_board`；需要组合 checkpoint、调度唤醒、清理队列、仓库 lease 或共享 `BackupState` 运行锁的 create Artwork、永久清理、创建分支、分支更新/删除、整仓灾备、进入/取消发布和认证发布由 `app/workflows.rs` 编排。`pin_board` 命令直接在 `lib.rs` 注册，不经应用工作流：浏览走共享读租约，变更走仓库操作锁。前端命令名和 DTO 不因内部所有权变化而改变。
+Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权、装配 `CommandContext`，然后调用 `app/usecases/` 中 GUI 与 headless 共享的业务入口。所有仓库入口都经 `OperationCoordinator` 统一取锁、取消、进度、耗时日志与事件；需要组合 checkpoint、调度唤醒、清理队列或发布流程的跨领域用例写在 `app/usecases/` 里，`app/workflows.rs` 只保留这些命令的 Tauri 适配函数。`pin_board` 命令直接在 `app/command_registry.rs` 注册，写命令走 `run_repository_write`（仓库 lease + 仓库操作锁，不取共享 `BackupState` 运行锁），浏览走共享读租约。前端命令名和 DTO 不因内部所有权变化而改变。
 
 开发/验证期另有一个**无界面命令行入口**（`--headless`，由 `headless` feature 门控、**不进发布产物**）：它与 Tauri 命令层并列，是同一批领域函数的另一个适配器，只做参数解析、锁与状态装配、领域调用，不含业务判断。它只供发布前的压力测试以**独立进程**调用真实可执行文件，不创建窗口、不建托盘、不加载 webview、不经过 IPC，因此发布版的产品行为零变化。定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，面向使用者的结论见 `docs/user/stress-test-report.md`。
 
@@ -83,6 +86,28 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 窗口几何在退出时由原生端捕获写回 `settings.json`，捕获只在窗口处于正常状态时进行：最小化时 `GetWindowRect` 返回的是任务栏图标矩形（实测约 237×39、坐标 -32000），最大化时是铺满屏幕的矩形，二者都不是用户摆放的几何，写进去会让下次启动的尺寸校验失败。尺寸必须落在主窗口允许范围（与 `tauri.conf.json` 的 `minWidth`/`minHeight` 一致的 760×560 起、16384 以内）才被采信，坐标还必须与当前某块显示器重叠出足以看见窗口的范围。加载时对越界字段就地修正（窗口尺寸夹紧到允许范围）而不整份回落默认，避免单字段异常连带清空仓库路径与其它偏好；恢复位置时若保存的坐标已不落在任何当前显示器上则改为居中，避免窗口开到已断开的显示器上而看起来像没有启动。
 
 设置保存使用共享运行锁：首次配置或切换到新路径时允许显式初始化；路径未改变时只验证现有数据库，缺失时拒绝静默重建；随后才原子替换 `settings.json`、唤醒调度器并刷新托盘菜单。所有仓库命令还持有 `AppState` 的仓库 lease，设置切换必须等待活动 lease 结束。前端在保存新路径前先结算素材板（`preparePinBoardRuntimeChange`，失败即中止切换并保留旧仓库）再卸载旧工作区，并以仓库路径作为工作区组件身份，因此克隆仓库即使包含相同实体 UUID 也不会复用旧选择或请求状态。
+
+## 命令执行底座（0.3 阶段 1）
+
+`app/command_runtime/` 是 GUI、headless 与未来维护入口共用的执行底座：
+
+- `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_background`，
+  以及素材板专用的 `run_repository_write` 与设置保存专用的 `run_repository_switch`。固定锁序为
+  「共享运行锁（写 / 前台 / 后台）→ 仓库 lease → 仓库操作锁 → SQLite 事务」；只读入口只取
+  共享 lease。`run_repository_write` 保持素材板既有语义，不取共享运行锁。
+- `CommandContext` 携带 `OperationId`、`OperationDomain`、当前运行分类、`CancelToken` 与仓库 key；
+  use-case 只能通过它取得已加锁的 `RepositorySession`，不再自行读取设置或拼锁。
+- typed `CommandError` 携带稳定 `code`、`kind`、用户文案、`retryable` 与 operation id。Tauri 适配器
+  仍把错误归一为字符串（保持 0.2 的 `invoke` 失败形态与文案）；结构化字段进入事件和日志。前端
+  `invokeCommand` 识别结构化错误对象时重建为带可选字段的 `Error`，字符串错误原样保留。
+- `AppEvent` v1 信封字段（repository key、operation id、domain、phase、current/total、
+  cancellable、completion revision）与首批事件（`operationStarted` / `operationProgress` /
+  `operationFinished` / `repositoryChanged` / `cleanupQueueChanged`）已冻结；阶段 3 只补订阅与
+  轮询降级，不重定义事件。进度事件按阶段变化、完成或 100 ms 间隔节流，headless 的 marker
+  观察者不节流。
+- 命令注册表集中在 `app/command_registry.rs` 的 `handler()` 中按领域分组列出全部命令，`lib.rs`
+  只把它交给 `invoke_handler`；Tauri 的 `generate_handler!` 需要编译期函数列表，因此这里是一张
+  静态表，不是运行时注册。
 
 ## 日志与诊断
 
@@ -176,7 +201,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 普通数据库连接只使用 SQLite `READ_WRITE` 打开现有 `lilith-artworks.sqlite3`，不得带 `CREATE`。仓库目录和新 schema 创建只从 Library 显式初始化入口进入。`AppState` 缓存当前路径已通过完整校验的事实：首次访问、启动状态读取和设置保存执行 SQLite 完整性、外键、实体 UUID、受控相对路径、持久化 SHA-256 与 schema 版本检查，之后所有前台命令和后台调度统一执行轻量 format/version 检查。数据库被外部删除、清空或替换为其他格式/不受支持版本时会清除缓存并报告仓库不可用，不创建占位数据库。
 
-提交、完整创建分支、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存共享 `BackupState` 运行锁。跨领域入口由 `app/workflows.rs` 获取该锁和仓库 lease 后调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。共享运行状态公开当前任务类型（自动备份 / 空闲链路校验 / 用户操作）：前台长命令在取得锁前登记前台等待并请求后台任务让位，调度器据此让位，并在仓库空闲时对分支 head 做链路完整性校验。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本、画板 DDS 及 C2PA 声明；同一取消命令可以中断节点之间的扫描。素材板命令不经过 `app/workflows.rs`，因此不持有共享运行锁：浏览走共享读租约，变更只持有仓库操作锁，长灾备或扫描运行期间的画板写入会等待操作锁释放。
+提交、完整创建分支、历史删除/精简、进入/取消发布、认证发布、Artwork 永久删除、清理重试、仓库完整性扫描、整仓灾备和仓库设置保存经 `OperationCoordinator` 取共享 `BackupState` 运行锁与仓库 lease，再调用各领域公开服务；前端 busy 状态只负责交互反馈，不承担并发正确性。共享运行状态公开当前任务类型（自动备份 / 空闲链路校验 / 用户操作）：前台长命令在取得锁前登记前台等待并请求后台任务让位，调度器据此让位，并在仓库空闲时对分支 head 做链路完整性校验。设置页的仓库完整性操作逐节点物化历史链，并校验最终成品、认证副本、画板 DDS 及 C2PA 声明；同一取消命令可以中断节点之间的扫描。素材板命令走 `run_repository_write`，因此不持有共享运行锁：浏览走共享读租约，变更只持有仓库 lease + 仓库操作锁，长灾备或扫描运行期间的画板写入会等待操作锁释放。
 
 整仓灾备核心归 `backup/repository_backup.rs` 所有，但由 `app/workflows.rs` 同时取得共享运行锁和仓库 lease 后调用。它先 checkpoint WAL，再复制仓库内普通文件；副本通过 Library 公开打开校验、History/Backup scrub 和 Authenticity 受控文件 scrub 后生成逐文件 SHA-256 清单，最后以同卷目录重命名发布。前端只能提交文件选择器授权的目标父目录；临时 bundle 在失败或取消时清理，成功 bundle 内的 `repository/` 可作为新仓库打开。该流程不复制仓库外的分支工作文件。
 

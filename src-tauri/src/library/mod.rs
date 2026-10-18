@@ -4,6 +4,8 @@ mod schema;
 
 use tauri::State;
 
+#[cfg(feature = "headless")]
+pub(crate) use model::CreatedArtwork;
 /// 无头 `list-tree` 子命令需要递归遍历节点统计总数；产品命令与单元测试都不经这里引用，
 /// 因此只在无头构建下再导出，否则 `cargo test` 会报未使用导入。
 #[cfg(feature = "headless")]
@@ -12,157 +14,141 @@ pub(crate) use model::{
     CreateArtworkRequest, LibrarySearchResult, LibraryTrashEntry, LibraryTree,
     MoveLibraryNodesRequest, RepositoryStatus,
 };
-/// 不带列表返回的创建入口：单元测试与无头入口需要拿到新建的 artwork/branch 标识，
-/// 与产品命令使用的 [`create_artwork_and_list`] 共用同一实现。
+/// 不带列表返回的创建入口：无头入口与 GUI use-case 共用同一实现。
 #[cfg(any(test, feature = "headless"))]
 pub(crate) use repository::create_artwork;
+/// GUI 与 headless 共享的 use-case 入口。命令适配器只保留 Tauri 类型与错误映射。
 pub(crate) use repository::{
-    check_existing, create_artwork_and_list, empty_trash, initialize, open_existing,
-    permanently_delete_trash,
+    check_existing, create_artwork_and_list, create_group, database_path, empty_trash, initialize,
+    list_trash, list_tree, move_nodes, open_existing, permanently_delete_trash, rename_node,
+    restore_trash, search, trash_nodes,
 };
-/// 规模压力测试（无头入口）需要的树操作入口；产品命令走模块内的 `repository::` 直调，
-/// 单元测试也不引用这些名字，因此只在无头构建下再导出——放宽到 `test` 会让
-/// `cargo test` 得到一份没人使用的再导出。
-#[cfg(feature = "headless")]
-pub(crate) use repository::{create_group, list_tree, move_nodes, search, trash_nodes};
 #[cfg(test)]
 pub(crate) use schema::take_integrity_check_count;
 
-use crate::app::AppState;
+use crate::{app::command_runtime::OperationDomain, app::usecases, app::OperationCoordinator};
 
 #[tauri::command]
 pub(crate) async fn get_repository_status(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
 ) -> Result<RepositoryStatus, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let Some(root) = state.repository_path()? else {
-            return Ok(RepositoryStatus {
-                configured: false,
-                ready: false,
-                root_path: String::new(),
-                database_path: String::new(),
-                error: None,
-            });
-        };
-        let database = repository::database_path(&root);
-        match state.ready_repository_path() {
-            Ok(ready_root) => Ok(RepositoryStatus {
-                configured: true,
-                ready: true,
-                root_path: ready_root.to_string_lossy().into_owned(),
-                database_path: database.to_string_lossy().into_owned(),
-                error: None,
-            }),
-            Err(error) => Ok(RepositoryStatus {
-                configured: true,
-                ready: false,
-                root_path: root.to_string_lossy().into_owned(),
-                database_path: database.to_string_lossy().into_owned(),
-                error: Some(error),
-            }),
-        }
-    })
-    .await
-    .map_err(|error| format!("仓库状态检查任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Repository, |context| {
+            usecases::library::repository_status(context)
+        })
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
-pub(crate) async fn list_library_tree(state: State<'_, AppState>) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.with_repository_read(repository::list_tree))
+pub(crate) async fn list_library_tree(
+    coordinator: State<'_, OperationCoordinator>,
+) -> Result<LibraryTree, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, |context| {
+            usecases::library::list_tree(context)
+        })
         .await
-        .map_err(|error| format!("作品树读取任务异常结束：{error}"))?
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn search_library(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     query: String,
 ) -> Result<Vec<LibrarySearchResult>, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_repository_read(|root| repository::search(root, &query))
-    })
-    .await
-    .map_err(|error| format!("作品搜索任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::search(context, query)
+        })
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn create_library_group(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     parent_id: Option<String>,
     title: String,
 ) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_ready_repository(|root| {
-            repository::create_group(root, parent_id.as_deref(), &title)
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::create_group(context, parent_id, title)
         })
-    })
-    .await
-    .map_err(|error| format!("创建分组任务异常结束：{error}"))?
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn rename_library_node(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     id: String,
     title: String,
 ) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_ready_repository(|root| repository::rename_node(root, &id, &title))
-    })
-    .await
-    .map_err(|error| format!("重命名任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::rename_node(context, id, title)
+        })
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn trash_library_nodes(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     ids: Vec<String>,
 ) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_ready_repository(|root| repository::trash_nodes(root, &ids))
-    })
-    .await
-    .map_err(|error| format!("移到回收站任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::trash_nodes(context, ids)
+        })
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn list_library_trash(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
 ) -> Result<Vec<LibraryTrashEntry>, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || state.with_repository_read(repository::list_trash))
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, |context| {
+            usecases::library::list_trash(context)
+        })
         .await
-        .map_err(|error| format!("回收站读取任务异常结束：{error}"))?
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn restore_library_trash(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     id: String,
 ) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_ready_repository(|root| repository::restore_trash(root, &id))
-    })
-    .await
-    .map_err(|error| format!("回收站恢复任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::restore_trash(context, id)
+        })
+        .await
+        .map_err(String::from)
 }
 
 #[tauri::command]
 pub(crate) async fn move_library_nodes(
-    state: State<'_, AppState>,
+    coordinator: State<'_, OperationCoordinator>,
     request: MoveLibraryNodesRequest,
 ) -> Result<LibraryTree, String> {
-    let state = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        state.with_ready_repository(|root| repository::move_nodes(root, request))
-    })
-    .await
-    .map_err(|error| format!("移动节点任务异常结束：{error}"))?
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Library, move |context| {
+            usecases::library::move_nodes(context, request)
+        })
+        .await
+        .map_err(String::from)
 }

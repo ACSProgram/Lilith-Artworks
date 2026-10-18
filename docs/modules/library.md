@@ -10,7 +10,8 @@
 - 多选与树计算：`src/modules/library/tree.ts`
 - 前端命令和类型：`src/modules/library/api.ts`、`types.ts`；`api.ts` 只由 controller 消费
 - Rust 单领域命令边界：`src-tauri/src/library/mod.rs`
-- 创建 Artwork、永久删除和清空回收站的跨领域编排：`src-tauri/src/app/workflows.rs`
+- 创建 Artwork、永久删除和清空回收站的业务入口：`src-tauri/src/app/usecases/library.rs`；
+  Tauri 适配器在 `src-tauri/src/app/workflows.rs`，与 headless 共享同一 use-case。
 - 仓库格式与 schema：`src-tauri/src/library/schema.rs`
 - 仓库定位、Library 查询与事务：`src-tauri/src/library/repository.rs`
 

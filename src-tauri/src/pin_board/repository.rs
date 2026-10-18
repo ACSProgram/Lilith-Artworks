@@ -24,7 +24,7 @@ pub(crate) const MAX_BOARDS_PER_ARTWORK: usize = 64;
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PinBoardSummary {
-    board_id: i64,
+    pub(crate) board_id: i64,
     artwork_id: String,
     artwork_title: String,
     name: String,
