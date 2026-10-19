@@ -91,6 +91,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     theme: "system",
     closeToTray: true,
     pauseAutomaticBackups: false,
+    idleIntegrityCheckEnabled: false,
     automaticBackupCheckMode: "quick",
     chunkFileFormatV2: true,
     window: {
@@ -117,6 +118,7 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
   logDirectory: "C:\\settings\\logs",
   warning: null,
   automaticBackupFileCount: 1,
+  idleIntegrityPendingCount: 0,
 });
 
 const tree = (title: string, sourcePath: string, backupDisableNoticeCount = 0): LibraryTree => ({

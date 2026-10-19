@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -10,8 +10,8 @@ use crate::{cleanup, storage};
 
 use super::{
     ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,
-    CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode, HistoryRecord, IdleVerifyTarget,
-    ScheduledBranch,
+    CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode, HistoryRecord, ScheduledBranch,
+    VerifyNodeTarget,
 };
 
 pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, String> {
@@ -35,15 +35,11 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                     b.backup_disable_notice_pending,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
                     (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id),
-                    b.backup_quick_enabled,
-                    (SELECT node.verify_error FROM history_nodes node
-                      WHERE node.id = b.head_history_id),
-                    (SELECT node.verified_ms FROM history_nodes node
-                      WHERE node.id = b.head_history_id)
+                    b.backup_quick_enabled
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
-    let branches = branch_statement
+    let mut branches = branch_statement
         .query_map([artwork_id], |row| {
             Ok(ArtworkBranch {
                 id: row.get(0)?,
@@ -62,14 +58,24 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 final_artifact_locked: row.get::<_, bool>(13)?,
                 published_count: row.get(14)?,
                 backup_quick_enabled: row.get::<_, i64>(15)? != 0,
-                verify_error: row.get(16)?,
-                verified_ms: row.get(17)?,
+                verify_error: None,
+                verified_ms: None,
             })
         })
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
     drop(branch_statement);
+
+    // 分支的校验状态由整条历史链派生：任一节点失败即失败；全部节点都有
+    // verified_ms 时取最旧的通过时间，任一节点未验证则为 NULL。
+    let verification = node_verification_states(&connection, artwork_id)?;
+    for branch in &mut branches {
+        let (verify_error, verified_ms) =
+            derive_branch_verification(branch.head_history_id.as_deref(), &verification);
+        branch.verify_error = verify_error;
+        branch.verified_ms = verified_ms;
+    }
 
     let mut node_statement = connection
         .prepare(
@@ -703,15 +709,17 @@ pub(crate) fn set_snapshot(
 ) -> Result<Vec<String>, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
-    let previous: Option<String> = transaction
+    let previous: Option<(Option<String>, String)> = transaction
         .query_row(
-            "SELECT snapshot_path FROM history_nodes WHERE id = ?1",
+            "SELECT snapshot_path, artwork_id FROM history_nodes WHERE id = ?1",
             [history_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
-        .map_err(storage::database_error)?
-        .flatten();
+        .map_err(storage::database_error)?;
+    let Some((previous, artwork_id)) = previous else {
+        return Err("找不到历史节点".into());
+    };
     let changed = transaction
         .execute(
             "UPDATE history_nodes SET snapshot_path = ?2, chunk_file_size = ?3,
@@ -728,6 +736,8 @@ pub(crate) fn set_snapshot(
     if changed == 0 {
         return Err("找不到历史节点".into());
     }
+    // snapshot 替换改变了该节点的物化起点，按作品粗粒度让校验状态失效。
+    clear_artwork_verification(&transaction, &artwork_id)?;
     let mut cleanup_ids = Vec::new();
     if let Some(previous) = previous.filter(|path| path != relative_path) {
         cleanup_ids = cleanup::enqueue_released_repository_files(
@@ -759,17 +769,29 @@ pub(crate) fn rename_node(root: &Path, history_id: &str, title: &str) -> Result<
 }
 
 pub(crate) fn mark_checkpoint(root: &Path, history_id: &str) -> Result<(), String> {
-    let changed = storage::open(root)?
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let artwork_id: Option<String> = transaction
+        .query_row(
+            "SELECT artwork_id FROM history_nodes WHERE id = ?1",
+            [history_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let Some(artwork_id) = artwork_id else {
+        return Err("找不到历史节点".into());
+    };
+    transaction
         .execute(
             "UPDATE history_nodes SET is_checkpoint = 1 WHERE id = ?1",
             [history_id],
         )
         .map_err(storage::database_error)?;
-    if changed == 0 {
-        Err("找不到历史节点".into())
-    } else {
-        Ok(())
-    }
+    // 检查点改变链的物化与释放语义，与下面两个入口一样按作品粗粒度失效。
+    clear_artwork_verification(&transaction, &artwork_id)?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(())
 }
 
 /// 取消一个普通检查点，释放其 snapshot 并切回唯一子节点的反向增量。
@@ -791,16 +813,16 @@ pub(crate) fn unmark_checkpoint(
     if forced {
         return Err("分支 head、分支起点或分叉点必须保留为检查点".into());
     }
-    let value: Option<(bool, Option<String>)> = transaction
+    let value: Option<(bool, Option<String>, String)> = transaction
         .query_row(
-            "SELECT node.is_checkpoint, node.snapshot_path
+            "SELECT node.is_checkpoint, node.snapshot_path, node.artwork_id
              FROM history_nodes node WHERE node.id = ?1",
             [history_id],
-            |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?)),
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(storage::database_error)?;
-    let (marked, snapshot_path) = value.ok_or("找不到历史节点")?;
+    let (marked, snapshot_path, artwork_id) = value.ok_or("找不到历史节点")?;
     if !marked {
         return Ok(None);
     }
@@ -859,6 +881,8 @@ pub(crate) fn unmark_checkpoint(
         )?,
         None => Vec::new(),
     };
+    // 取消检查点把 snapshot 换回反向增量，按作品粗粒度失效校验状态。
+    clear_artwork_verification(&transaction, &artwork_id)?;
     transaction.commit().map_err(storage::database_error)?;
     Ok(Some(cleanup_ids))
 }
@@ -964,6 +988,8 @@ pub(crate) fn apply_compaction(
     refresh_storage_metadata(&transaction, &target.child_id)?;
     let cleanup_ids =
         cleanup::enqueue_released_repository_files(&transaction, &paths, "history_compaction")?;
+    // 改接后子节点及其后续节点都通过新的反向 delta 物化，按作品粗粒度失效。
+    clear_artwork_verification(&transaction, &target.artwork_id)?;
     transaction.commit().map_err(storage::database_error)?;
     Ok(cleanup_ids)
 }
@@ -1549,34 +1575,34 @@ pub(crate) fn load_scheduled(
         .map_err(storage::database_error)
 }
 
-/// 空闲校验的派生队列：所有未进回收站、head 非空且 head 节点尚未通过校验的分支。
+/// 派生待查集合：未进回收站的作品中，尚未校验且没有失败摘要的历史节点，最多
+/// 返回 `limit` 条。
 ///
-/// v5 起校验状态挂在节点上：新提交生成的 head 天然没有 `verified_ms`；校验失败
-/// 的节点 `verify_error` 非空并退出自动队列，直到 head 变化或用户手动重查清空。
-/// 与 [`list_scheduled`] 是两条不同查询：本查询不要求 `backup_enabled`（手动提交的
-/// 分支同样需要校验），也不排除已发布分支（其 head 是强制检查点，校验成本低）。
-pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarget>, String> {
+/// 按 `created_ms` 最旧优先——最久未读的节点正是 bit rot 风险最高的节点。失败
+/// 节点（`verify_error` 非空）退出自动队列，直到被改写或用户手动重查。批次大小
+/// 由调用方给进 SQL：待查集合在旧仓库上可能有上万条，没必要整份读进内存再截断。
+pub(crate) fn list_pending_verify_nodes(
+    root: &Path,
+    limit: usize,
+) -> Result<Vec<VerifyNodeTarget>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection
         .prepare(
-            "SELECT b.id, b.artwork_id, b.head_history_id, node.created_ms
-             FROM branches b
-             JOIN library_nodes n ON n.id = b.artwork_id
-             JOIN history_nodes node ON node.id = b.head_history_id
-             WHERE n.trashed_ms IS NULL
-               AND b.head_history_id IS NOT NULL
+            "SELECT node.id
+             FROM history_nodes node
+             JOIN library_nodes artwork ON artwork.id = node.artwork_id
+             WHERE artwork.trashed_ms IS NULL
                AND node.verified_ms IS NULL
                AND node.verify_error IS NULL
-             ORDER BY node.created_ms, b.id",
+             ORDER BY node.created_ms, node.id
+             LIMIT ?1",
         )
         .map_err(storage::database_error)?;
+    let limit = limit.min(i64::MAX as usize) as i64;
     let targets = statement
-        .query_map([], |row| {
-            Ok(IdleVerifyTarget {
-                branch_id: row.get(0)?,
-                artwork_id: row.get(1)?,
-                head_history_id: row.get(2)?,
-                head_created_ms: row.get(3)?,
+        .query_map([limit], |row| {
+            Ok(VerifyNodeTarget {
+                history_id: row.get(0)?,
             })
         })
         .map_err(storage::database_error)?
@@ -1585,97 +1611,216 @@ pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarg
     Ok(targets)
 }
 
-/// 读取单条仍待校验的候选；调度器在取得运行锁后用它复查分支是否还是队列快照。
-pub(crate) fn load_idle_verify_target(
-    root: &Path,
-    branch_id: &str,
-) -> Result<Option<IdleVerifyTarget>, String> {
+/// 与 [`list_pending_verify_nodes`] 同一口径的只读计数，供设置页展示。
+pub(crate) fn count_pending_verify_nodes(root: &Path) -> Result<usize, String> {
     storage::open(root)?
         .query_row(
-            "SELECT b.id, b.artwork_id, b.head_history_id, node.created_ms
-             FROM branches b
-             JOIN library_nodes n ON n.id = b.artwork_id
-             JOIN history_nodes node ON node.id = b.head_history_id
-             WHERE b.id = ?1 AND n.trashed_ms IS NULL
-               AND b.head_history_id IS NOT NULL
+            "SELECT COUNT(*)
+             FROM history_nodes node
+             JOIN library_nodes artwork ON artwork.id = node.artwork_id
+             WHERE artwork.trashed_ms IS NULL
                AND node.verified_ms IS NULL
                AND node.verify_error IS NULL",
-            [branch_id],
-            |row| {
-                Ok(IdleVerifyTarget {
-                    branch_id: row.get(0)?,
-                    artwork_id: row.get(1)?,
-                    head_history_id: row.get(2)?,
-                    head_created_ms: row.get(3)?,
-                })
-            },
+            [],
+            |row| row.get(0),
         )
-        .optional()
         .map_err(storage::database_error)
 }
 
-/// 记录一次成功的校验。只有分支 head 仍等于被校验的节点时才写入，避免把结果记到
-/// 校验期间已经变化的新 head 上。返回是否真正写入。
-pub(crate) fn mark_verified(
-    root: &Path,
-    branch_id: &str,
-    history_id: &str,
-    verified_ms: i64,
-) -> Result<bool, String> {
-    let changed = storage::open(root)?
-        .execute(
-            "UPDATE history_nodes SET verified_ms = ?3, verify_error = NULL
-             WHERE id = ?2 AND EXISTS(
-               SELECT 1 FROM branches WHERE id = ?1 AND head_history_id = ?2
-             )",
-            params![branch_id, history_id, verified_ms],
-        )
-        .map_err(storage::database_error)?;
-    Ok(changed > 0)
+/// 最近一次**历史内容写入**的时间（最新历史节点的 `created_ms`）。
+///
+/// 空闲完整性检查用它实现「仓库静默」防抖；校验状态自身的写入不计入，否则每批
+/// 校验都会把下一次自动检查再推后十分钟。快速检查推进的 `last_check_ms` /
+/// `last_success_ms` 也不算——它们没有产生新节点，若计入，备份间隔小于 10 分钟的
+/// 分支会让静默条件永不满足。精简、检查点与快照修复不改这个时间戳，但它们已在
+/// 前台运行锁内完成，且不会与空闲批次并发。
+pub(crate) fn latest_history_write_ms(root: &Path) -> Result<Option<i64>, String> {
+    storage::open(root)?
+        .query_row("SELECT MAX(created_ms) FROM history_nodes", [], |row| {
+            row.get(0)
+        })
+        .map_err(storage::database_error)
 }
 
-/// 记录一次失败的校验摘要；节点随之退出自动队列，直到 head 变化或用户手动重查。
-/// 与 [`mark_verified`] 相同，只有 head 未变时才写入。
-pub(crate) fn mark_verify_error(
-    root: &Path,
-    branch_id: &str,
-    history_id: &str,
-    error: &str,
-) -> Result<bool, String> {
-    let changed = storage::open(root)?
-        .execute(
-            "UPDATE history_nodes SET verify_error = ?3
-             WHERE id = ?2 AND EXISTS(
-               SELECT 1 FROM branches WHERE id = ?1 AND head_history_id = ?2
-             )",
-            params![branch_id, history_id, error],
-        )
-        .map_err(storage::database_error)?;
-    Ok(changed > 0)
-}
-
-/// 清除 head 节点的校验失败摘要，使分支重新进入派生队列（"重新校验此分支"）。
-pub(crate) fn clear_verify_error(root: &Path, branch_id: &str) -> Result<(), String> {
+/// 分支 head 到根节点的整条历史链，按 `created_ms` 从旧到新排序。
+pub(crate) fn branch_chain_ids(root: &Path, branch_id: &str) -> Result<Vec<String>, String> {
     let connection = storage::open(root)?;
-    let changed = connection
+    let mut statement = connection
+        .prepare(
+            "WITH RECURSIVE ancestors(id) AS (
+               SELECT head_history_id FROM branches
+               WHERE id = ?1 AND head_history_id IS NOT NULL
+               UNION ALL
+               SELECT node.parent_id
+               FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
+               WHERE node.parent_id IS NOT NULL
+             )
+             SELECT node.id
+             FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
+             ORDER BY node.created_ms, node.id",
+        )
+        .map_err(storage::database_error)?;
+    let ids = statement
+        .query_map([branch_id], |row| row.get(0))
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    Ok(ids)
+}
+
+/// 清除整条分支链的失败摘要，使这些节点重新进入自动队列；已通过校验的状态保留。
+pub(crate) fn clear_branch_verify_errors(root: &Path, branch_id: &str) -> Result<(), String> {
+    let connection = storage::open(root)?;
+    let exists: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM branches WHERE id = ?1)",
+            [branch_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if !exists {
+        return Err("找不到分支".into());
+    }
+    connection
         .execute(
-            "UPDATE history_nodes SET verify_error = NULL
-             WHERE id = (SELECT head_history_id FROM branches WHERE id = ?1)",
+            "WITH RECURSIVE ancestors(id) AS (
+               SELECT head_history_id FROM branches
+               WHERE id = ?1 AND head_history_id IS NOT NULL
+               UNION ALL
+               SELECT node.parent_id
+               FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
+               WHERE node.parent_id IS NOT NULL
+             )
+             UPDATE history_nodes SET verify_error = NULL
+             WHERE id IN (SELECT id FROM ancestors)",
             [branch_id],
         )
         .map_err(storage::database_error)?;
+    Ok(())
+}
+
+/// 记录一个节点的校验通过；`verify_error` 同时清空。
+pub(crate) fn mark_node_verified(
+    root: &Path,
+    history_id: &str,
+    verified_ms: i64,
+) -> Result<(), String> {
+    record_node_verification(root, history_id, Some(verified_ms), None)
+}
+
+/// 记录一个节点的校验失败；失败节点退出自动队列，直到被改写或手动重查。
+pub(crate) fn mark_node_verify_error(
+    root: &Path,
+    history_id: &str,
+    error: &str,
+) -> Result<(), String> {
+    record_node_verification(root, history_id, None, Some(error))
+}
+
+/// 写入节点级校验状态。调用方都在共享运行锁内，节点不可能在校验与写回之间消失，
+/// 因此 0 行受影响只可能是 id 不属于本仓库，按错误处理而不是静默忽略。
+fn record_node_verification(
+    root: &Path,
+    history_id: &str,
+    verified_ms: Option<i64>,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let changed = storage::open(root)?
+        .execute(
+            "UPDATE history_nodes SET verified_ms = ?2, verify_error = ?3 WHERE id = ?1",
+            params![history_id, verified_ms, error],
+        )
+        .map_err(storage::database_error)?;
     if changed == 0 {
-        let exists: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM branches WHERE id = ?1)",
-                [branch_id],
-                |row| row.get(0),
-            )
-            .map_err(storage::database_error)?;
-        if !exists {
-            return Err("找不到分支".into());
+        return Err(format!("找不到历史节点 {history_id}"));
+    }
+    Ok(())
+}
+
+struct NodeVerificationState {
+    parent_id: Option<String>,
+    verify_error: Option<String>,
+    verified_ms: Option<i64>,
+}
+
+fn node_verification_states(
+    connection: &rusqlite::Connection,
+    artwork_id: &str,
+) -> Result<HashMap<String, NodeVerificationState>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id, parent_id, verify_error, verified_ms
+             FROM history_nodes WHERE artwork_id = ?1",
+        )
+        .map_err(storage::database_error)?;
+    let states = statement
+        .query_map([artwork_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                NodeVerificationState {
+                    parent_id: row.get(1)?,
+                    verify_error: row.get(2)?,
+                    verified_ms: row.get(3)?,
+                },
+            ))
+        })
+        .map_err(storage::database_error)?
+        .collect::<Result<HashMap<_, _>, _>>()
+        .map_err(storage::database_error)?;
+    Ok(states)
+}
+
+/// 从 head 沿父链派生分支的第三态：任一节点 `verify_error` 非空 = 失败；否则
+/// 全部节点都有 `verified_ms` 时取最旧的通过时间，任一节点未验证则为 NULL。
+fn derive_branch_verification(
+    head_history_id: Option<&str>,
+    nodes: &HashMap<String, NodeVerificationState>,
+) -> (Option<String>, Option<i64>) {
+    let Some(mut current) = head_history_id else {
+        return (None, None);
+    };
+    let mut error = None;
+    let mut oldest_verified: Option<i64> = None;
+    let mut all_verified = true;
+    let mut seen = false;
+    while let Some(state) = nodes.get(current) {
+        seen = true;
+        if error.is_none() && state.verify_error.is_some() {
+            error = state.verify_error.clone();
+        }
+        if let Some(verified_ms) = state.verified_ms {
+            oldest_verified = Some(match oldest_verified {
+                Some(oldest) => oldest.min(verified_ms),
+                None => verified_ms,
+            });
+        } else {
+            all_verified = false;
+        }
+        match state.parent_id.as_deref() {
+            Some(parent_id) => current = parent_id,
+            None => break,
         }
     }
+    let verified_ms = if seen && all_verified {
+        oldest_verified
+    } else {
+        None
+    };
+    (error, verified_ms)
+}
+
+/// 按作品粗粒度失效校验状态：链文件被改写后，这些节点必须重新物化校验。
+fn clear_artwork_verification(
+    transaction: &rusqlite::Transaction<'_>,
+    artwork_id: &str,
+) -> Result<(), String> {
+    transaction
+        .execute(
+            "UPDATE history_nodes SET verified_ms = NULL, verify_error = NULL
+             WHERE artwork_id = ?1",
+            [artwork_id],
+        )
+        .map_err(storage::database_error)?;
     Ok(())
 }
 

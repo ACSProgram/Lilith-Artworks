@@ -186,6 +186,36 @@ pub(crate) fn ensure_checkpoint(
     ensure_checkpoint_with_progress(root, history_id, cancel, options, |_, _, _| {})
 }
 
+/// 物化单个历史节点并校验其完整性：沿链解析、与数据库摘要比对、逐块验哈希。
+///
+/// 这是全库扫描、空闲增量批次与手动重查共用的唯一校验内核。只读，不写任何状态；
+/// 调用方负责把结果写入节点级校验列。
+pub(crate) fn verify_history_node(
+    root: &Path,
+    history_id: &str,
+    cancel: &CancelToken,
+) -> Result<(), String> {
+    ensure_not_cancelled(cancel)?;
+    // Resolving the chain already proves that every delta links to the
+    // digest recorded in the database. Streaming the result into the sink
+    // then verifies each chunk payload and the assembled file without
+    // writing any temporary snapshot.
+    let ResolvedChain {
+        layout, mut store, ..
+    } = resolve_chain(root, history_id, "正在校验历史", cancel, &|_, _, _| {})
+        .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))?;
+    ensure_not_cancelled(cancel)?;
+    let task = ChunkTask::cancel(cancel);
+    let mut reader = store.reader();
+    layout
+        .copy_original(&mut reader, &mut std::io::sink(), &task)
+        .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))
+}
+
+/// 全库扫描：逐节点物化并验证，同时刷新节点级校验状态。
+///
+/// 单个节点失败不会中止扫描——否则失败节点之后的节点永远拿不到新的校验状态。
+/// 全部分块流式读取，不写临时快照；至少一个节点失败时汇总为错误返回。
 pub(crate) fn scrub_history(
     root: &Path,
     cancel: &CancelToken,
@@ -193,23 +223,35 @@ pub(crate) fn scrub_history(
 ) -> Result<u64, String> {
     let node_ids = history::all_node_ids(root)?;
     let total = node_ids.len() as u64;
+    let mut first_error: Option<String> = None;
+    let mut failures = 0_u64;
     for (index, history_id) in node_ids.iter().enumerate() {
         ensure_not_cancelled(cancel)?;
-        // Resolving the chain already proves that every delta links to the
-        // digest recorded in the database. Streaming the result into the sink
-        // then verifies each chunk payload and the assembled file without
-        // writing any temporary snapshot.
-        let ResolvedChain {
-            layout, mut store, ..
-        } = resolve_chain(root, history_id, "正在校验历史", cancel, &|_, _, _| {})?;
-        let task = ChunkTask::cancel(cancel);
-        let mut reader = store.reader();
-        layout
-            .copy_original(&mut reader, &mut std::io::sink(), &task)
-            .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))?;
+        match verify_history_node(root, history_id, cancel) {
+            Ok(()) => {
+                let verified_ms = storage::now_ms()?;
+                history::mark_node_verified(root, history_id, verified_ms)?;
+            }
+            Err(error) => {
+                if cancel.is_cancelled() {
+                    return Err("操作已取消".into());
+                }
+                log::warn!("repository scrub failed for history node {history_id}: {error}");
+                history::mark_node_verify_error(root, history_id, &error)?;
+                failures += 1;
+                first_error.get_or_insert(error);
+            }
+        }
         progress(index as u64 + 1, total);
     }
-    Ok(total)
+    match first_error {
+        None => Ok(total),
+        Some(error) if failures == 1 => Err(error),
+        Some(error) => Err(format!(
+            "{error}（另有 {} 个历史节点校验失败）",
+            failures - 1
+        )),
+    }
 }
 
 pub(crate) fn ensure_checkpoint_with_progress(
@@ -358,9 +400,11 @@ fn resolve_chain(
 }
 
 /// 校验单个 snapshot 文件与其历史记录一致：先比对 ChunkFile 的文件摘要与数据库
-/// 记录的 `sha256`，再把全部分块流式读出以验证载荷。恢复、检查点与空闲链路校验
-/// 复用该入口；分支 head 恒持有 snapshot，因此校验 head 等价于校验这一个文件。
-pub(crate) fn validate_snapshot(
+/// 记录的 `sha256`，再把全部分块流式读出以验证载荷。
+///
+/// 只有「检查点已持有 snapshot」这条快路径用它；节点级校验内核是
+/// [`verify_history_node`]，它走完整的惰性解析路径，能覆盖 snapshot 之后的 delta。
+fn validate_snapshot(
     path: &Path,
     record: &history::HistoryRecord,
     label: &str,

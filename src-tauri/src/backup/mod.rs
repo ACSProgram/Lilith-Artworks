@@ -17,7 +17,7 @@ pub(crate) use repository_backup::{
     create_repository_backup, last_repository_backup_run, record_repository_backup_run,
     RepositoryBackupReport, RepositoryBackupRun,
 };
-pub(crate) use restore::{ensure_checkpoint, scrub_history, validate_snapshot};
+pub(crate) use restore::{ensure_checkpoint, scrub_history, verify_history_node};
 pub(crate) use runtime::{BackupState, BackupTaskKind, ExclusiveRunError};
 
 #[derive(Debug, Clone, Serialize, Default)]

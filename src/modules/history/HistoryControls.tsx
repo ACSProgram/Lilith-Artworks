@@ -76,20 +76,24 @@ export function BranchScheduleStatus({
         </div>
       </details>}
     </div>
+    {!branch.verifyError && branch.verifiedMs != null && <div className="branch-schedule verify-ok">
+      <Check aria-hidden="true" size={16} />
+      <span className="branch-schedule-summary">历史校验通过：{new Date(branch.verifiedMs).toLocaleString()}</span>
+    </div>}
     {branch.verifyError && <div className="branch-schedule verify-error">
       <AlertTriangle aria-hidden="true" size={16} />
-      <span className="branch-schedule-summary">链路校验失败</span>
+      <span className="branch-schedule-summary">历史校验失败</span>
       <details className="branch-error-details">
-        <summary className="icon-button" role="button" aria-label="查看链路校验失败详情" title="查看链路校验失败详情">
+        <summary className="icon-button" role="button" aria-label="查看历史校验失败详情" title="查看历史校验失败详情">
           <ChevronDown aria-hidden="true" size={14} />
         </summary>
         <div className="branch-error-popover">
           <header>
-            <strong>链路校验失败详情</strong>
+            <strong>历史校验失败详情</strong>
             <button
               className="icon-button"
               type="button"
-              aria-label="复制链路校验失败详情"
+              aria-label="复制历史校验失败详情"
               title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
               onClick={() => void copyText(branch.verifyError, setVerifyCopyState)}
             >
@@ -99,9 +103,7 @@ export function BranchScheduleStatus({
           <pre>{branch.verifyError}</pre>
           {verifyCopyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
           <div className="branch-verify-actions">
-            <small>{branch.verifiedMs
-              ? `最近一次校验通过：${new Date(branch.verifiedMs).toLocaleString()}。该分支已跳过自动重试，可在设置页运行“仓库完整性”扫描做全量排查。`
-              : "该分支已跳过自动重试；如需全量排查，可在设置页运行“仓库完整性”扫描。"}</small>
+            <small>自动检查不会重试失败节点；可立即重新校验此分支，或在设置页运行“仓库完整性”扫描做全量排查。</small>
             {onReverify && <button
               className="secondary-button"
               type="button"

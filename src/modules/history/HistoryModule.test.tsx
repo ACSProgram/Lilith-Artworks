@@ -293,7 +293,7 @@ describe("HistoryModule overview interactions", () => {
     const reverifyBranch = vi.fn();
     const failedBranch = {
       ...branches[0],
-      verifyError: "链路校验 snapshot 摘要与历史数据库不匹配",
+      verifyError: "历史节点 ab12 完整性校验失败：snapshot 摘要与历史数据库不匹配",
       verifiedMs: null,
     };
     controller.useHistoryController.mockReturnValue(controllerReturn({
@@ -309,8 +309,8 @@ describe("HistoryModule overview interactions", () => {
       onError={vi.fn()}
     />);
 
-    expect(screen.getByText("链路校验失败")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看链路校验失败详情" }));
+    expect(screen.getByText("历史校验失败")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看历史校验失败详情" }));
     fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
     expect(reverifyBranch).toHaveBeenCalledWith("main");
   });

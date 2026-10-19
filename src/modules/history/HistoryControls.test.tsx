@@ -242,6 +242,12 @@ describe("BranchScheduleStatus", () => {
     expect(screen.getByText(/每 10 分钟自动备份 · 快速检查/)).toBeTruthy();
   });
 
+  it("shows the oldest chain verification time when no node failed", () => {
+    render(<BranchScheduleStatus branch={{ ...branch(true), verifiedMs: Date.UTC(2026, 9, 19, 8, 0, 0) }} />);
+
+    expect(screen.getByText(/历史校验通过：/)).toBeTruthy();
+  });
+
   it("shows a chain verification failure separately and re-queues it", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -251,7 +257,7 @@ describe("BranchScheduleStatus", () => {
     const onReverify = vi.fn();
     const verifyFailedBranch = {
       ...branch(true),
-      verifyError: "链路校验 snapshot 摘要与历史数据库不匹配",
+      verifyError: "历史节点 ab12 完整性校验失败：snapshot 摘要与历史数据库不匹配",
       verifiedMs: null,
     };
 
@@ -259,11 +265,11 @@ describe("BranchScheduleStatus", () => {
 
     // 备份状态正常时仍独立显示校验失败。
     expect(screen.getByText(/每 10 分钟自动备份/)).toBeTruthy();
-    expect(screen.getByText("链路校验失败")).toBeTruthy();
+    expect(screen.getByText("历史校验失败")).toBeTruthy();
 
-    fireEvent.click(screen.getByRole("button", { name: "查看链路校验失败详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看历史校验失败详情" }));
     expect(screen.getByText(verifyFailedBranch.verifyError)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "复制链路校验失败详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "复制历史校验失败详情" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(verifyFailedBranch.verifyError));
 
     fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));

@@ -460,6 +460,42 @@ export function SettingsDialog() {
               </div>
 
               <div className="settings-section">
+                <div className="settings-section-title"><ShieldCheck aria-hidden="true" size={17} /><h3>完整性检查</h3></div>
+                <div className="settings-preference-list">
+                  <label className="settings-preference-row">
+                    <span className="settings-row-icon"><ShieldCheck aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy">
+                      <strong>空闲完整性检查</strong>
+                      <small>{draft.idleIntegrityCheckEnabled ? "已开启" : "已关闭"}
+                        {" · "}
+                        {snapshot?.idleIntegrityPendingCount == null
+                          ? "仓库不可用"
+                          : `${snapshot.idleIntegrityPendingCount} 个历史节点待校验`}
+                        {!draft.idleIntegrityCheckEnabled && " · 仅在主窗口隐藏或最小化时运行"}
+                      </small>
+                    </span>
+                    <input
+                      className="switch-input"
+                      type="checkbox"
+                      checked={draft.idleIntegrityCheckEnabled}
+                      onChange={(event) => update({ idleIntegrityCheckEnabled: event.target.checked })}
+                    />
+                  </label>
+                  <div className="settings-preference-row">
+                    <span className="settings-row-icon"><Activity aria-hidden="true" size={17} /></span>
+                    <span className="settings-row-copy is-descriptive">
+                      <strong>运行方式</strong>
+                      <small>
+                        复用仓库完整性扫描的校验内核：仓库静默 10 分钟后，每个空闲窗口最多检查一批（8 个节点或 30 秒），
+                        失败会记录到对应历史节点。托盘“暂停所有自动备份”时一并暂停；手动“重新校验此分支”与
+                        “仓库完整性”扫描不受开关影响。
+                      </small>
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="settings-section">
                 <div className="settings-section-title"><DatabaseBackup aria-hidden="true" size={17} /><h3>整仓备份</h3></div>
                 <div className="settings-preference-list settings-repository-actions">
                   <div className="settings-preference-row">

@@ -278,8 +278,8 @@ export function useHistoryController({
     }), [reload, runOperation, stopCompact]);
 
   const reverifyBranch = useCallback((branchId: string) =>
-    runOperation("verify", "正在重新校验分支链路", async () => {
-      // 命令只清空失败摘要并让分支重新入队，真正的校验由调度器在空闲时执行。
+    runOperation("verify", "正在重新校验分支历史", async () => {
+      // 前台立即执行：逐节点物化并验哈希，同时写回节点级校验状态。
       replaceHistory(await historyApi.reverifyBranch(branchId));
     }), [replaceHistory, runOperation]);
 

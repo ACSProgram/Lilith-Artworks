@@ -34,6 +34,8 @@ export interface AppSettings {
   theme: Theme;
   closeToTray: boolean;
   pauseAutomaticBackups: boolean;
+  /** 空闲完整性检查；默认关闭，仅窗口隐藏或最小化时逐批运行。 */
+  idleIntegrityCheckEnabled: boolean;
   automaticBackupCheckMode: BackupCheckMode;
   /** 新节点是否使用 ChunkFile v2；旧 v1 节点始终可读。 */
   chunkFileFormatV2: boolean;
@@ -48,6 +50,8 @@ export interface SettingsSnapshot {
   logDirectory: string;
   warning: string | null;
   automaticBackupFileCount: number | null;
+  /** 与空闲完整性检查同口径的待校验历史节点数。 */
+  idleIntegrityPendingCount: number | null;
 }
 
 export interface RepositoryStatus {

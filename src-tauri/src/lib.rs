@@ -118,6 +118,34 @@ fn show_main_window(app: &AppHandle) {
         let _ = window.show();
         let _ = window.unminimize();
         let _ = window.set_focus();
+        sync_window_idle(app);
+    }
+}
+
+/// 把主窗口当前是否隐藏/最小化同步给调度器。
+///
+/// 只在主线程的窗口事件与显示入口调用：后台调度线程只读取原子值，避免跨线程
+/// 查询窗口状态，也避免退出时与窗口事件循环互相等待。窗口拖动与焦点切换会大量
+/// 触发这些事件，因此只在状态真正变化时唤醒调度器，避免反复打断它的等待。
+fn sync_window_idle(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let idle = !window.is_visible().unwrap_or(true) || window.is_minimized().unwrap_or(false);
+        let backup = app.state::<backup::BackupState>();
+        if backup.set_window_idle(idle) {
+            backup.wake_scheduler();
+        }
+    }
+}
+
+/// 隐藏主窗口后立即把窗口状态置为「空闲」并唤醒调度器。
+///
+/// 不重新查询可见性：`hide()` 之后 `is_visible()` 未必立刻反映新状态，而这条路径
+/// 的意图是明确的。唤醒是必要的——并非所有平台在隐藏时都会发出窗口尺寸事件，
+/// 否则空闲检查要等到下一次常规轮询才看到窗口已隐藏。
+fn mark_main_window_hidden(app: &AppHandle) {
+    let backup = app.state::<backup::BackupState>();
+    if backup.set_window_idle(true) {
+        backup.wake_scheduler();
     }
 }
 
@@ -358,6 +386,7 @@ pub fn run() {
             let backup_state = backup::BackupState::default();
             backup_state.start_scheduler(application.handle().clone())?;
             application.manage(backup_state.clone());
+            sync_window_idle(application.handle());
             let event_sink = std::sync::Arc::new(app::command_runtime::TauriEventSink::new(
                 application.handle().clone(),
             ));
@@ -404,6 +433,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| match event {
+            WindowEvent::Resized(_) | WindowEvent::Focused(_) if window.label() == "main" => {
+                sync_window_idle(window.app_handle());
+            }
             WindowEvent::CloseRequested { api, .. } if window.label() == "main" => {
                 let state = window.state::<app::AppState>();
                 if state.exit_requested() {
@@ -415,17 +447,20 @@ pub fn run() {
                 if state.close_to_tray() {
                     api.prevent_close();
                     let _ = window.hide();
+                    mark_main_window_hidden(window.app_handle());
                 } else if state.begin_shutdown_handshake() {
                     log::info!("Lilith Artworks shutting down");
                     api.prevent_close();
                     // Hiding first also fires the webview visibilitychange
                     // handler, which saves open pin boards as a side effect.
                     let _ = window.hide();
+                    mark_main_window_hidden(window.app_handle());
                     begin_webview_shutdown(window.app_handle());
                 } else {
                     // A handshake is already running; just keep the window shut.
                     api.prevent_close();
                     let _ = window.hide();
+                    mark_main_window_hidden(window.app_handle());
                 }
             }
             _ => {}

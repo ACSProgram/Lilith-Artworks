@@ -165,16 +165,43 @@ pub(crate) fn delete_branch(
     })
 }
 
+/// 手动重查分支：前台立即校验整条链，而不是只清错误等空闲调度。
+///
+/// 低频率的自动节奏下，手动入口必须即时；单节点失败只写入该节点的
+/// `verify_error`，不中止后续节点，最终返回刷新后的历史让状态行展示派生结果。
 pub(crate) fn reverify_branch(
     context: &CommandContext,
     branch_id: &str,
 ) -> Result<history::ArtworkHistory, CommandError> {
-    let result = context.run_write_scoped(Some(branch_id), |session| {
-        let artwork_id = history::load_branch(session.root(), branch_id)
+    let result = context.run_foreground(Some(branch_id), |session| {
+        let root = session.root();
+        let artwork_id = history::load_branch(root, branch_id)
             .map_err(CommandError::from)?
             .artwork_id;
-        history::clear_verify_error(session.root(), branch_id).map_err(CommandError::from)?;
-        history::list(session.root(), &artwork_id).map_err(CommandError::from)
+        let chain = history::branch_chain_ids(root, branch_id).map_err(CommandError::from)?;
+        history::clear_branch_verify_errors(root, branch_id).map_err(CommandError::from)?;
+        let total = chain.len() as u64;
+        for (index, history_id) in chain.iter().enumerate() {
+            context.report_progress("正在校验分支历史", index as u64, total);
+            let outcome = backup::verify_history_node(root, history_id, context.cancel());
+            if context.is_cancelled() {
+                return Err(CommandError::cancelled("分支校验已取消"));
+            }
+            let verified_ms = storage::now_ms().map_err(CommandError::from)?;
+            match outcome {
+                Ok(()) => {
+                    history::mark_node_verified(root, history_id, verified_ms)
+                        .map_err(CommandError::from)?;
+                }
+                Err(error) => {
+                    log::warn!("branch reverify failed for history node {history_id}: {error}");
+                    history::mark_node_verify_error(root, history_id, &error)
+                        .map_err(CommandError::from)?;
+                }
+            }
+        }
+        context.report_progress("分支校验完成", total, total);
+        history::list(root, &artwork_id).map_err(CommandError::from)
     });
     context.backup_state().wake_scheduler();
     result

@@ -1,12 +1,8 @@
 use std::{
     cmp::Ordering,
-    collections::{BinaryHeap, HashSet},
+    collections::BinaryHeap,
     path::Path,
-    sync::{
-        atomic::{AtomicUsize, Ordering as AtomicOrdering},
-        Arc,
-    },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tauri::{AppHandle, Manager};
@@ -14,17 +10,14 @@ use tauri::{AppHandle, Manager};
 use crate::{
     app::AppState,
     cancel::CancelToken,
-    history::{self, IdleVerifyTarget, ScheduledBranch},
+    history::{self, ScheduledBranch},
     repository_lock::{self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority},
     storage,
 };
 
 use super::chunk_file::ChunkWriteOptions;
 
-use super::{
-    runtime::ExclusiveRunError, validate_snapshot, worker, BackupCommitResult, BackupState,
-    BackupTaskKind,
-};
+use super::{runtime::ExclusiveRunError, worker, BackupCommitResult, BackupState, BackupTaskKind};
 
 const ERROR_RETRY: Duration = Duration::from_secs(60);
 const IDLE_RECHECK: Duration = Duration::from_secs(5 * 60);
@@ -33,25 +26,26 @@ const IDLE_RECHECK: Duration = Duration::from_secs(5 * 60);
 const FOREGROUND_YIELD_BACKOFF: Duration = Duration::from_millis(200);
 /// 用户取消后台任务后的短暂退避：不把整支队列一起停 60 秒，也避免立刻重跑。
 const CANCEL_RETRY: Duration = Duration::from_secs(5);
-/// 空闲链路校验前，分支 head 至少需要静默的时长。避免刚提交就整链重读；期间又提交
-/// 会改变 head，本轮随之让位给下一次。取值 10 分钟（见 0.3 计划 §3.I 的空闲时机门控，
-/// 可由维护者调整）。
-const IDLE_VERIFY_DELAY_MS: i64 = 10 * 60 * 1000;
-/// aging（防饥饿）：每连续完成 N 次自动备份后，若已有就绪的链路校验，先让校验
-/// 跑一轮。维护者 2026-10-18 定稿为按次数、N = 4，不引入时钟规则。
+/// 空闲完整性检查前，仓库最近一次历史写入至少需要静默的时长（10 分钟）。
+/// 这是防抖而不是频率：连续提交会让窗口永不就绪，因此从 0.2 的「head 静默」
+/// 放宽为「仓库静默」。
+const IDLE_VERIFY_SILENCE_MS: i64 = 10 * 60 * 1000;
+/// 一个空闲窗口内最多推进的节点数，与时间预算先到为准。
+const IDLE_VERIFY_BATCH_NODES: usize = 8;
+const IDLE_VERIFY_BATCH_BUDGET: Duration = Duration::from_secs(30);
+/// aging（防饥饿）：每连续完成 N 次自动备份后，若已有就绪的完整性检查，先让
+/// 一批检查插队。维护者 2026-10-18 定稿为按次数、N = 4，不引入时钟规则。
 const IDLE_VERIFY_AGING_RUNS: u32 = 4;
-/// 并行只读校验上限。按 Artwork 分片，同一作品同时最多一个校验任务；写回结果
-/// 仍由共享运行锁串行化。
-const IDLE_VERIFY_WORKERS: usize = 4;
 
 pub(crate) fn run(state: BackupState, app: AppHandle) {
     let mut automatic_since_verify = 0_u32;
+    let mut idle_window = IdleWindowTracker::default();
     loop {
         if !state.wait_scheduler(Duration::ZERO) {
             break;
         }
         let app_state = app.state::<AppState>().inner().clone();
-        // 托盘"暂停所有自动备份"同时暂停空闲校验：用户意图是"别动仓库"。
+        // 托盘"暂停所有自动备份"同时暂停空闲完整性检查：用户意图是"别动仓库"。
         let paused = app.state::<AppState>().automatic_backups_paused();
         if paused {
             state.set_automatic_scheduling(false);
@@ -68,6 +62,18 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             }
             continue;
         }
+        let now = match storage::now_ms() {
+            Ok(now) => now,
+            Err(_) => {
+                if !state.wait_scheduler(ERROR_RETRY) {
+                    break;
+                }
+                continue;
+            }
+        };
+        let idle_integrity_enabled = app_state.idle_integrity_check_enabled();
+        let window_idle = idle_integrity_enabled && state.window_idle();
+        let (window_generation, window_consumed) = idle_window.observe(window_idle);
         // 候选筛选会顺带写「自动备份被跳过」的原因，因此同样按一次写操作取得
         // 跨进程 owner lock。
         let candidates_owner = match acquire_owner(&app_state, "backup:candidates") {
@@ -122,49 +128,60 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             }
         };
         drop(candidates_owner);
-        let now = match storage::now_ms() {
-            Ok(now) => now,
-            Err(_) => {
-                if !state.wait_scheduler(ERROR_RETRY) {
-                    break;
-                }
-                continue;
-            }
-        };
         // deadline 优先：候选按 due_at、上次检查时间与分支 ID 排序；失败退避已
         // 写在分支自己的 retry_at 里，因此一个分支失败不会阻塞其它到期分支。
         let (due, next_due) = select_due_branch(branches, now, &state);
-        let verify_candidates =
-            match app_state.with_repository_read(|root| history::list_idle_verify_targets(root)) {
-                Ok(targets) => targets,
+        let selection = if idle_integrity_enabled {
+            // 锁外只判断「有没有待查节点」与仓库静默时长；具体校验哪些节点由
+            // `run_verify_batch_locked` 在锁内重新读取。
+            let candidates = app_state.with_repository_read(|root| {
+                Ok((
+                    !history::list_pending_verify_nodes(root, 1)?.is_empty(),
+                    history::latest_history_write_ms(root)?,
+                ))
+            });
+            match candidates {
+                Ok((pending, latest_write_ms)) => select_idle_verify(
+                    pending,
+                    latest_write_ms,
+                    now,
+                    IdleVerifyGate {
+                        paused,
+                        window_idle,
+                        window_consumed,
+                        foreground_waiting: state.foreground_waiting(),
+                        manual_pending: state.any_manual_pending(),
+                    },
+                ),
                 Err(_) => {
                     if !state.wait_scheduler(ERROR_RETRY) {
                         break;
                     }
                     continue;
                 }
-            };
-        let selection = select_idle_verify(
-            &verify_candidates,
-            now,
-            paused,
-            state.foreground_waiting(),
-            state.any_manual_pending(),
-            IDLE_VERIFY_WORKERS,
-        );
-        let verify_ready = !selection.ready.is_empty();
+            }
+        } else {
+            IdleVerifySelection::default()
+        };
+        let verify_ready = selection.ready;
         if verify_precedes_backup(due.is_some(), verify_ready, automatic_since_verify) {
-            match run_verify_batch(&app_state, &state, &selection.ready) {
+            // 有到期备份却仍插队（aging）时，本批不再把「备份已到期」当作中途让位
+            // 条件——否则 aging 永远走不完第一批；新到达的前台与手动提交仍然让位。
+            let had_due_backup = due.is_some();
+            let outcome = run_verify_batch(&app_state, &state, had_due_backup);
+            // 一次尝试无论完成、失败还是被抢占，都消耗该空闲窗口的名额。
+            idle_window.mark_batch_attempted(window_generation);
+            match outcome {
                 Ok(()) => automatic_since_verify = 0,
                 Err(VerifyBatchError::ShuttingDown) => break,
                 Err(VerifyBatchError::Busy(error)) => {
-                    log::debug!("idle verify yielded to a repository writer: {error}");
+                    log::debug!("idle integrity check yielded to a repository writer: {error}");
                     if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
                         break;
                     }
                 }
                 Err(VerifyBatchError::Infrastructure(error)) => {
-                    log::error!("idle verify batch failed: {error}");
+                    log::error!("idle integrity batch failed: {error}");
                     if !state.wait_scheduler(ERROR_RETRY) {
                         break;
                     }
@@ -254,7 +271,8 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         }
 
         let timeout = if selection.blocked {
-            // 让位期间由唤醒信号驱动恢复（手动提交结束会唤醒），不必空转抢锁。
+            // 让位期间由唤醒信号驱动恢复（手动提交结束、窗口状态变化都会唤醒），
+            // 不必空转抢锁。
             IDLE_RECHECK
         } else {
             next_due
@@ -268,6 +286,33 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         if !state.wait_scheduler(timeout) {
             break;
         }
+    }
+}
+
+/// 空闲窗口的进程内判定：主窗口从「可见且未最小化」转为「隐藏或最小化」时
+/// 开启一个新窗口；每个窗口最多自动执行一批完整性检查。无持久化、无计时器。
+#[derive(Default)]
+struct IdleWindowTracker {
+    idle: bool,
+    generation: u64,
+    consumed: Option<u64>,
+}
+
+impl IdleWindowTracker {
+    /// 返回当前窗口代次与该代次是否已经尝试过一批。
+    fn observe(&mut self, idle: bool) -> (u64, bool) {
+        if idle && !self.idle {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.idle = idle;
+        (
+            self.generation,
+            idle && self.consumed == Some(self.generation),
+        )
+    }
+
+    fn mark_batch_attempted(&mut self, generation: u64) {
+        self.consumed = Some(generation);
     }
 }
 
@@ -345,70 +390,64 @@ fn verify_precedes_backup(due: bool, verify_ready: bool, automatic_since_verify:
     verify_ready && (!due || automatic_since_verify >= IDLE_VERIFY_AGING_RUNS)
 }
 
-/// 空闲校验的第二优先级选择结果。
+/// 空闲完整性检查的第二优先级选择结果。
 #[derive(Default)]
 struct IdleVerifySelection {
-    /// 选取到的候选：head 已静默满 `IDLE_VERIFY_DELAY_MS`，可以立即校验。
-    /// 按 Artwork 去重，最多 `limit` 条并行准备。
-    ready: Vec<IdleVerifyTarget>,
-    /// 候选中最接近可校验的时刻；已有 ready 或 `blocked` 时为 `None`。
+    /// 仓库已静默满 `IDLE_VERIFY_SILENCE_MS`，可以立即跑一批。要校验哪些节点由
+    /// `run_verify_batch_locked` 在锁内重新读取，锁外只判断「有没有」。
+    ready: bool,
+    /// 仓库最接近静默满足的时刻；已就绪或 `blocked` 时为 `None`。
     next_ready_at: Option<i64>,
-    /// 第二优先级整体让位（暂停、有前台命令等待，或存在待处理手动提交）。
+    /// 第二优先级整体让位（暂停、窗口不空闲、窗口名额已用、前台等待或手动提交）。
     blocked: bool,
 }
 
-/// 第二优先级选择：从派生队列里挑一批 head 已静默至少 `IDLE_VERIFY_DELAY_MS`
-/// 的分支，按 Artwork 去重。暂停、有前台命令等待、或存在待处理手动提交时整体
-/// 让位，返回 `blocked`。
-fn select_idle_verify(
-    candidates: &[IdleVerifyTarget],
-    now: i64,
+/// 空闲完整性检查的时机门控输入。
+#[derive(Clone, Copy)]
+struct IdleVerifyGate {
     paused: bool,
+    window_idle: bool,
+    window_consumed: bool,
     foreground_waiting: usize,
     manual_pending: bool,
-    limit: usize,
+}
+
+/// 第二优先级选择：窗口必须隐藏或最小化、本窗口尚未尝试过、仓库已静默至少
+/// `IDLE_VERIFY_SILENCE_MS`，且没有暂停、前台等待或待处理手动提交。
+fn select_idle_verify(
+    pending: bool,
+    latest_write_ms: Option<i64>,
+    now: i64,
+    gate: IdleVerifyGate,
 ) -> IdleVerifySelection {
-    if candidates.is_empty() {
+    if !pending {
         return IdleVerifySelection::default();
     }
-    if paused || foreground_waiting > 0 || manual_pending {
+    if gate.paused
+        || !gate.window_idle
+        || gate.window_consumed
+        || gate.foreground_waiting > 0
+        || gate.manual_pending
+    {
         return IdleVerifySelection {
-            ready: Vec::new(),
+            ready: false,
             next_ready_at: None,
             blocked: true,
         };
     }
-    let mut next_ready_at = None;
-    let mut ready = Vec::new();
-    let mut artworks = HashSet::new();
-    for candidate in candidates {
-        let ready_at = candidate
-            .head_created_ms
-            .saturating_add(IDLE_VERIFY_DELAY_MS);
-        if ready_at <= now {
-            // 同一 Artwork 同时只跑一个校验任务：共享该作品的仓库文件与
-            // 历史元数据，串行更可预测。
-            if ready.len() < limit && artworks.insert(candidate.artwork_id.clone()) {
-                ready.push(candidate.clone());
-            }
-        } else {
-            next_ready_at =
-                Some(next_ready_at.map_or(ready_at, |current: i64| current.min(ready_at)));
-        }
+    let ready_at = latest_write_ms.map(|written| written.saturating_add(IDLE_VERIFY_SILENCE_MS));
+    if let Some(ready_at) = ready_at.filter(|at| *at > now) {
+        return IdleVerifySelection {
+            ready: false,
+            next_ready_at: Some(ready_at),
+            blocked: false,
+        };
     }
     IdleVerifySelection {
-        next_ready_at: ready.is_empty().then_some(next_ready_at).flatten(),
-        ready,
+        ready: true,
+        next_ready_at: None,
         blocked: false,
     }
-}
-
-/// 单个链路校验的只读结论。校验失败作为 `IdleVerifyError::Failed` 返回：
-/// 它会被写入 head 节点的 `verify_error` 并使分支退出自动队列，与其他后台任务
-/// 互不影响。
-struct PreparedVerify {
-    target: IdleVerifyTarget,
-    outcome: Result<(), IdleVerifyError>,
 }
 
 #[derive(Debug)]
@@ -418,46 +457,31 @@ enum VerifyBatchError {
     Infrastructure(String),
 }
 
-impl From<String> for VerifyBatchError {
-    fn from(error: String) -> Self {
-        Self::Infrastructure(error)
-    }
-}
-
-/// 并行准备 + 串行写回一批链路校验。
+/// 在空闲窗口内执行一批节点级完整性检查。
 ///
-/// 文件校验是只读的，按 Artwork 最多并行 `IDLE_VERIFY_WORKERS` 条；写
-/// `history_nodes.verified_ms` / `verify_error` 仍经共享运行锁串行执行，不并行
-/// 写事务。
+/// 校验是只读的，但结果写入节点级校验列，因此整批持有共享运行锁与跨进程
+/// owner lock；每个节点边界都重新检查让位条件。`had_due_backup` 表示本批是
+/// aging 插队（有到期备份仍然放行），此时不再把「备份已到期」当作中途让位条件。
 fn run_verify_batch(
     app_state: &AppState,
     state: &BackupState,
-    targets: &[IdleVerifyTarget],
+    had_due_backup: bool,
 ) -> Result<(), VerifyBatchError> {
-    if targets.is_empty() {
-        return Ok(());
-    }
-    // 准备阶段只读且可能较长，因此不持有仓库租约；提交阶段先取共享运行锁，
-    // 再按固定锁序进入仓库 lease 并再次确认仓库未切换。
     let Some(prepare_root) = app_state
         .repository_path()
         .map_err(VerifyBatchError::Infrastructure)?
     else {
         return Ok(());
     };
-    // 内容级只读任务：只探测跨进程写者，不把校验变成写者。
-    if let Err(error) = repository_lock::probe(&prepare_root) {
-        return Err(VerifyBatchError::Busy(error));
+    if !prepare_root.is_dir() {
+        return Ok(());
     }
-    let prepared = prepare_verify_batch(&prepare_root, state, targets);
-    // 写回也需要跨进程 owner lock；它与上面的 `probe` 之间仍有竞态窗口，因此
-    // 这里的「被占用」与 probe 一样按让位处理，而不是记一次错误。
     let owner = match acquire_owner(app_state, "backup:idleVerify") {
         Ok(OwnerAttempt::Owned(owner)) => owner,
-        // 本进程有前台/交互写者：整批让位，本轮不写结果。
+        // 本进程有前台/交互写者：整批让位，本窗口名额照常消耗。
         Ok(OwnerAttempt::Skipped) => {
             return Err(VerifyBatchError::Busy(
-                "本进程有写入者，空闲校验已让位".to_owned(),
+                "本进程有写入者，空闲完整性检查已让位".to_owned(),
             ))
         }
         Err(error) if error == repository_lock::BUSY_MESSAGE => {
@@ -466,194 +490,129 @@ fn run_verify_batch(
         Err(error) => return Err(VerifyBatchError::Infrastructure(error)),
     };
     let result = state.run_exclusive_typed(None, BackupTaskKind::IdleVerify, || {
-        app_state
-            .with_ready_repository(|root| {
-                if root != prepare_root.as_path() {
-                    // 准备期间仓库已被切换：本轮结果不属于当前仓库，整批丢弃。
-                    return Ok(());
-                }
-                for item in &prepared {
-                    if let Err(error) = commit_idle_verify(root, item) {
-                        log::warn!(
-                            "idle verify result could not be recorded for branch {}: {error}",
-                            item.target.branch_id
-                        );
-                    }
-                }
-                Ok(())
-            })
-            .map_err(IdleVerifyError::Infrastructure)
+        app_state.with_ready_repository(|root| {
+            if root != prepare_root.as_path() {
+                // 准备期间仓库已被切换：本批不属于当前仓库，直接丢弃。
+                return Ok(());
+            }
+            run_verify_batch_locked(root, app_state, state, had_due_backup)
+        })
     });
     drop(owner);
     match result {
         Ok(()) => Ok(()),
         Err(ExclusiveRunError::ShuttingDown) => Err(VerifyBatchError::ShuttingDown),
         Err(ExclusiveRunError::State(error)) => Err(VerifyBatchError::Infrastructure(error)),
-        Err(ExclusiveRunError::Operation(IdleVerifyError::Infrastructure(error))) => {
-            Err(VerifyBatchError::Infrastructure(error))
-        }
-        // 让位/取消只影响本轮，不写结果。
-        Err(ExclusiveRunError::Operation(_)) => Ok(()),
+        Err(ExclusiveRunError::Operation(error)) => Err(VerifyBatchError::Infrastructure(error)),
     }
 }
 
-/// 并行读取并校验一批 head snapshot。线程只做文件与只读元数据工作，结果写回由
-/// 调用方在共享运行锁内串行完成。
-fn prepare_verify_batch(
+fn run_verify_batch_locked(
     root: &Path,
+    app_state: &AppState,
     state: &BackupState,
-    targets: &[IdleVerifyTarget],
-) -> Vec<PreparedVerify> {
+    had_due_backup: bool,
+) -> Result<(), String> {
+    if !verify_batch_gate_open(root, app_state, state, had_due_backup)? {
+        return Ok(());
+    }
+    // 锁内重新读取待查集合：候选选择与取锁之间可能有提交或手动重查。
+    let targets = history::list_pending_verify_nodes(root, IDLE_VERIFY_BATCH_NODES)?;
+    if targets.is_empty() {
+        return Ok(());
+    }
     let total = targets.len() as u64;
-    let completed = Arc::new(AtomicUsize::new(0));
-    state.report_progress("verify", "正在并行校验分支链路", 0, total);
-    let mut prepared = Vec::with_capacity(targets.len());
-    std::thread::scope(|scope| {
-        let mut handles = Vec::with_capacity(targets.len());
-        for target in targets {
+    let started = Instant::now();
+    let mut checked = 0_u64;
+    let mut verified = 0_u64;
+    let mut failed = 0_u64;
+    state.report_progress("verify", "正在校验历史节点", 0, total);
+    log::info!("idle integrity batch started: nodes={total}");
+    for target in &targets {
+        if !verify_batch_gate_open(root, app_state, state, had_due_backup)? {
+            log::debug!(
+                "idle integrity batch preempted at node boundary: history_id={}",
+                target.history_id
+            );
+            break;
+        }
+        let cancel = CancelToken::with_source({
             let state = state.clone();
-            let completed = completed.clone();
-            handles.push(scope.spawn(move || {
-                // 只读探针：不占用共享运行锁，取消令牌只服务「后台让位」。
-                let task =
-                    state.begin_probe_task(BackupTaskKind::IdleVerify, Some(&target.branch_id));
-                let outcome = prepare_idle_verify(root, &state, target, task.cancel_token());
-                let done = completed.fetch_add(1, AtomicOrdering::SeqCst) + 1;
-                state.report_progress("verify", "正在并行校验分支链路", done as u64, total);
-                outcome
-            }));
-        }
-        for (target, handle) in targets.iter().cloned().zip(handles) {
-            let outcome = handle.join().unwrap_or_else(|_| {
-                Err(IdleVerifyError::Infrastructure("校验线程异常结束".into()))
-            });
-            prepared.push(PreparedVerify { target, outcome });
-        }
-    });
-    prepared
-}
-
-/// 只读校验：复查候选与 head、读取 snapshot 并逐块校验，不写任何结果。
-fn prepare_idle_verify(
-    root: &Path,
-    state: &BackupState,
-    target: &IdleVerifyTarget,
-    cancel: &CancelToken,
-) -> Result<(), IdleVerifyError> {
-    // 与到期自动备份相同的让位复查：手动提交优先、前台命令优先。
-    if state.manual_pending(&target.branch_id) {
-        return Err(IdleVerifyError::Deferred);
-    }
-    if state.should_yield_background() {
-        return Err(IdleVerifyError::ForegroundWaiting);
-    }
-    if cancel.is_cancelled() {
-        return Err(IdleVerifyError::Cancelled);
-    }
-    let current = history::load_idle_verify_target(root, &target.branch_id)
-        .map_err(IdleVerifyError::Infrastructure)?
-        .ok_or(IdleVerifyError::NotPending)?;
-    if current.head_history_id != target.head_history_id {
-        // 候选选择与校验开始之间 head 已经变化：本轮不写结果，留给下一次。
-        return Err(IdleVerifyError::NotPending);
-    }
-    let record = history::load_node(root, &current.head_history_id)
-        .map_err(IdleVerifyError::Infrastructure)?;
-    let Some(relative) = record.snapshot_path.as_deref() else {
-        return Err(IdleVerifyError::Failed(
-            "分支 head 缺少 snapshot，无法校验".into(),
-        ));
-    };
-    let path = storage::resolve_path(root, relative).map_err(IdleVerifyError::Infrastructure)?;
-    let combined = CancelToken::with_source({
-        let state = state.clone();
-        let cancel = cancel.clone();
-        move || state.should_yield_background() || cancel.is_cancelled()
-    });
-    match validate_snapshot(&path, &record, "链路校验", &combined) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            if state.should_yield_background() {
-                return Err(IdleVerifyError::ForegroundWaiting);
+            move || state.should_yield_background() || state.cancelled()
+        });
+        match super::verify_history_node(root, &target.history_id, &cancel) {
+            Ok(()) => {
+                if state.should_yield_background() || state.cancelled() {
+                    log::debug!(
+                        "idle integrity batch preempted before recording: history_id={}",
+                        target.history_id
+                    );
+                    break;
+                }
+                let verified_ms = storage::now_ms()?;
+                history::mark_node_verified(root, &target.history_id, verified_ms)?;
+                verified += 1;
             }
-            if cancel.is_cancelled() {
-                return Err(IdleVerifyError::Cancelled);
+            Err(error) => {
+                if cancel.is_cancelled() || state.cancelled() {
+                    log::debug!(
+                        "idle integrity batch preempted during node: history_id={}",
+                        target.history_id
+                    );
+                    break;
+                }
+                history::mark_node_verify_error(root, &target.history_id, &error)?;
+                failed += 1;
+                log::warn!(
+                    "idle integrity check failed: history_id={}, error={error}",
+                    target.history_id
+                );
             }
-            Err(IdleVerifyError::Failed(error))
+        }
+        checked += 1;
+        state.report_progress("verify", "正在校验历史节点", checked, total);
+        if started.elapsed() >= IDLE_VERIFY_BATCH_BUDGET {
+            log::debug!("idle integrity batch reached the time budget");
+            break;
         }
     }
-}
-
-/// 在共享运行锁内写回一条校验结果。head 在准备期间变化时整条结果丢弃。
-fn commit_idle_verify(root: &Path, prepared: &PreparedVerify) -> Result<(), IdleVerifyError> {
-    let target = &prepared.target;
-    let current = history::load_idle_verify_target(root, &target.branch_id)
-        .map_err(IdleVerifyError::Infrastructure)?;
-    let Some(current) = current else {
-        return Ok(());
-    };
-    if current.head_history_id != target.head_history_id {
-        return Ok(());
-    }
-    match &prepared.outcome {
-        Ok(()) => {
-            let verified_ms = storage::now_ms().map_err(IdleVerifyError::Infrastructure)?;
-            history::mark_verified(
-                root,
-                &target.branch_id,
-                &target.head_history_id,
-                verified_ms,
-            )
-            .map_err(IdleVerifyError::Infrastructure)?;
-            log::info!(
-                "idle verify passed: branch_id={}, head={}",
-                target.branch_id,
-                target.head_history_id
-            );
-        }
-        Err(IdleVerifyError::Failed(error)) => {
-            history::mark_verify_error(root, &target.branch_id, &target.head_history_id, error)
-                .map_err(IdleVerifyError::Infrastructure)?;
-            log::warn!(
-                "idle verify failed for branch {}: {error}",
-                target.branch_id
-            );
-        }
-        Err(IdleVerifyError::NotPending)
-        | Err(IdleVerifyError::Deferred)
-        | Err(IdleVerifyError::ForegroundWaiting)
-        | Err(IdleVerifyError::Cancelled) => {}
-        Err(IdleVerifyError::Infrastructure(error)) => {
-            log::warn!(
-                "idle verify infrastructure failure for branch {}: {error}",
-                target.branch_id
-            );
-        }
-    }
+    log::info!(
+        "idle integrity batch finished: checked={checked}, verified={verified}, failed={failed}, elapsed_ms={}",
+        started.elapsed().as_millis()
+    );
     Ok(())
 }
 
-/// 单条同步校验，供单元测试使用。
-#[cfg(test)]
-fn run_idle_verify(
+/// 批次开始与每个节点边界共用的门控复查：设置仍开启、窗口仍空闲、没有前台
+/// 等待/手动提交/取消，仓库仍静默；非 aging 批次还要确认没有到期自动备份。
+fn verify_batch_gate_open(
     root: &Path,
+    app_state: &AppState,
     state: &BackupState,
-    branch_id: &str,
-    expected_head: &str,
-) -> Result<(), IdleVerifyError> {
-    let target = history::load_idle_verify_target(root, branch_id)
-        .map_err(IdleVerifyError::Infrastructure)?
-        .ok_or(IdleVerifyError::NotPending)?;
-    if target.head_history_id != expected_head {
-        return Err(IdleVerifyError::NotPending);
+    had_due_backup: bool,
+) -> Result<bool, String> {
+    if !app_state.idle_integrity_check_enabled()
+        || !state.window_idle()
+        || state.should_yield_background()
+        || state.cancelled()
+    {
+        return Ok(false);
     }
-    // 单条同步校验不登记任务，取消令牌保持独立；让位条件仍由
-    // `prepare_idle_verify` 里的 `should_yield_background` 复查。
-    let cancel = CancelToken::standalone();
-    let outcome = prepare_idle_verify(root, state, &target, &cancel);
-    let prepared = PreparedVerify { target, outcome };
-    commit_idle_verify(root, &prepared)?;
-    prepared.outcome
+    let now = storage::now_ms()?;
+    if let Some(latest) = history::latest_history_write_ms(root)? {
+        if latest.saturating_add(IDLE_VERIFY_SILENCE_MS) > now {
+            return Ok(false);
+        }
+    }
+    if !had_due_backup && automatic_backup_due(root, state, now)? {
+        return Ok(false);
+    }
+    Ok(true)
+}
+
+fn automatic_backup_due(root: &Path, state: &BackupState, now: i64) -> Result<bool, String> {
+    let branches = history::list_scheduled(root)?;
+    Ok(select_due_branch(branches, now, state).0.is_some())
 }
 
 #[derive(Debug)]
@@ -682,32 +641,6 @@ impl std::fmt::Display for AutomaticBackupError {
             Self::ForegroundWaiting => formatter.write_str("有前台命令在等待，自动备份已让位"),
             Self::Cancelled => formatter.write_str("自动备份已取消"),
             Self::Failed { error, .. } | Self::Infrastructure(error) => error.fmt(formatter),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-enum IdleVerifyError {
-    /// 分支已不再待校验（已校验、已进回收站，或 head 在候选选择后变化）。
-    NotPending,
-    /// 分支有待处理的手动提交，本轮让位，不计入失败。
-    Deferred,
-    /// 有前台命令在等待共享运行锁，本轮让位，不计入失败。
-    ForegroundWaiting,
-    Cancelled,
-    /// 校验失败（摘要已写入 head 节点的 `verify_error`）；不重试，也不影响备份。
-    Failed(String),
-    Infrastructure(String),
-}
-
-impl std::fmt::Display for IdleVerifyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NotPending => formatter.write_str("分支已不再待校验"),
-            Self::Deferred => formatter.write_str("分支有待处理的手动提交，空闲校验已让位"),
-            Self::ForegroundWaiting => formatter.write_str("有前台命令在等待，空闲校验已让位"),
-            Self::Cancelled => formatter.write_str("空闲校验已取消"),
-            Self::Failed(error) | Self::Infrastructure(error) => error.fmt(formatter),
         }
     }
 }
@@ -1294,91 +1227,127 @@ mod tests {
         assert!(branch.backup_enabled);
     }
 
-    fn verify_target(artwork_id: &str, branch_id: &str, head_created_ms: i64) -> IdleVerifyTarget {
-        IdleVerifyTarget {
-            branch_id: branch_id.into(),
-            artwork_id: artwork_id.into(),
-            head_history_id: "head".into(),
-            head_created_ms,
+    fn open_idle_gate() -> IdleVerifyGate {
+        IdleVerifyGate {
+            paused: false,
+            window_idle: true,
+            window_consumed: false,
+            foreground_waiting: 0,
+            manual_pending: false,
         }
     }
 
+    /// 待查节点数。断言用它而不是 `list_pending_verify_nodes(..).len()`：后者带批次
+    /// 上限，只用于「按最旧优先取一批」的场景。
+    fn pending_verify_count(root: &Path) -> usize {
+        history::count_pending_verify_nodes(root).unwrap()
+    }
+
     #[test]
-    fn idle_verify_selection_waits_for_the_head_to_settle() {
+    fn idle_verify_selection_waits_for_repository_silence() {
         let now = 1_000_000;
-        let fresh = verify_target("artwork-a", "fresh", now - 1_000);
-        let selection = select_idle_verify(&[fresh], now, false, 0, false, IDLE_VERIFY_WORKERS);
-        assert!(selection.ready.is_empty());
+        let selection = select_idle_verify(true, Some(now - 1_000), now, open_idle_gate());
+        assert!(!selection.ready);
         assert_eq!(
             selection.next_ready_at,
-            Some(now - 1_000 + IDLE_VERIFY_DELAY_MS)
+            Some(now - 1_000 + IDLE_VERIFY_SILENCE_MS)
         );
 
-        let settled = verify_target("artwork-a", "settled", now - IDLE_VERIFY_DELAY_MS - 1);
-        let selection = select_idle_verify(&[settled], now, false, 0, false, IDLE_VERIFY_WORKERS);
-        assert_eq!(selection.ready.len(), 1);
-        assert_eq!(selection.ready[0].branch_id, "settled");
+        let selection = select_idle_verify(
+            true,
+            Some(now - IDLE_VERIFY_SILENCE_MS - 1),
+            now,
+            open_idle_gate(),
+        );
+        assert!(selection.ready);
         assert!(selection.next_ready_at.is_none());
     }
 
     #[test]
-    fn idle_verify_selection_yields_while_busy_or_paused() {
+    fn idle_verify_selection_requires_an_unused_idle_window() {
         let now = 1_000_000;
-        let settled = verify_target("artwork-a", "settled", now - IDLE_VERIFY_DELAY_MS - 1);
-        // 暂停所有自动备份时空闲校验一并暂停。
-        let paused =
-            select_idle_verify(&[settled.clone()], now, true, 0, false, IDLE_VERIFY_WORKERS);
+        // 窗口可见、未最小化。
+        let visible = select_idle_verify(
+            true,
+            None,
+            now,
+            IdleVerifyGate {
+                window_idle: false,
+                ..open_idle_gate()
+            },
+        );
+        assert!(visible.blocked);
+        assert!(!visible.ready);
+        // 本窗口已经用掉一批。
+        let consumed = select_idle_verify(
+            true,
+            None,
+            now,
+            IdleVerifyGate {
+                window_consumed: true,
+                ..open_idle_gate()
+            },
+        );
+        assert!(consumed.blocked);
+        // 暂停所有自动备份。
+        let paused = select_idle_verify(
+            true,
+            None,
+            now,
+            IdleVerifyGate {
+                paused: true,
+                ..open_idle_gate()
+            },
+        );
         assert!(paused.blocked);
-        assert!(paused.ready.is_empty());
         // 有前台命令在等待。
         let foreground = select_idle_verify(
-            &[settled.clone()],
+            true,
+            None,
             now,
-            false,
-            1,
-            false,
-            IDLE_VERIFY_WORKERS,
+            IdleVerifyGate {
+                foreground_waiting: 1,
+                ..open_idle_gate()
+            },
         );
         assert!(foreground.blocked);
         // 存在待处理的手动提交。
-        let manual = select_idle_verify(&[settled], now, false, 0, true, IDLE_VERIFY_WORKERS);
+        let manual = select_idle_verify(
+            true,
+            None,
+            now,
+            IdleVerifyGate {
+                manual_pending: true,
+                ..open_idle_gate()
+            },
+        );
         assert!(manual.blocked);
     }
 
     #[test]
     fn idle_verify_selection_ignores_an_empty_queue() {
-        let selection = select_idle_verify(&[], 1_000, false, 0, false, IDLE_VERIFY_WORKERS);
-        assert!(selection.ready.is_empty());
+        let selection = select_idle_verify(false, None, 1_000, open_idle_gate());
+        assert!(!selection.ready);
         assert!(selection.next_ready_at.is_none());
         assert!(!selection.blocked);
     }
 
+    /// 队列顺序由 SQL 决定：最久未读（`created_ms` 最小）的节点先校验。
     #[test]
-    fn idle_verify_selection_dedupes_by_artwork_and_respects_the_worker_limit() {
-        let now = 1_000_000;
-        let settled_at = now - IDLE_VERIFY_DELAY_MS - 1;
-        let candidates = vec![
-            verify_target("artwork-a", "a-main", settled_at),
-            verify_target("artwork-a", "a-alt", settled_at),
-            verify_target("artwork-b", "b-main", settled_at),
-            verify_target("artwork-c", "c-main", settled_at),
-        ];
+    fn pending_verify_nodes_are_listed_oldest_first() {
+        let (_directory, root, source, _artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "Second");
 
-        let all = select_idle_verify(&candidates, now, false, 0, false, IDLE_VERIFY_WORKERS);
-        assert_eq!(all.ready.len(), 3);
+        let pending = history::list_pending_verify_nodes(&root, IDLE_VERIFY_BATCH_NODES).unwrap();
         assert_eq!(
-            all.ready
+            pending
                 .iter()
-                .map(|target| target.branch_id.as_str())
+                .map(|target| target.history_id.as_str())
                 .collect::<Vec<_>>(),
-            ["a-main", "b-main", "c-main"]
+            [first_id.as_str(), second_id.as_str()]
         );
-
-        // 同一 Artwork 的第二个任务不会占用并行额度。
-        let single = select_idle_verify(&candidates, now, false, 0, false, 1);
-        assert_eq!(single.ready.len(), 1);
-        assert_eq!(single.ready[0].branch_id, "a-main");
-        assert!(single.next_ready_at.is_none());
     }
 
     #[test]
@@ -1496,217 +1465,353 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_verify_probe_does_not_cancel_the_foreground_command() {
-        let state = BackupState::default();
-        // 并行只读探针 + 刚取得运行锁的前台命令：前台进站时的让位请求只取消
-        // 探针，不能让前台命令读到「已取消」。
-        let probe = state.begin_probe_task(BackupTaskKind::IdleVerify, Some("a"));
-        let user = state.begin_task(BackupTaskKind::UserOperation, None);
-
-        assert!(state.cancel_background().unwrap());
-        assert!(probe.cancel_token().is_cancelled());
-        assert!(!state.cancelled());
-        assert!(!user.cancel_token().is_cancelled());
-
-        // 运行状态反映串行任务，而不是同时存在的空闲校验探针。
-        let status = state.status().unwrap();
-        assert_eq!(status.task_kind, Some(BackupTaskKind::UserOperation));
-
-        // 探针逐个结束不得清掉前台命令已经上报的进度。
-        state.report_progress("restore", "正在恢复历史", 3, 10);
-        probe.complete();
-        let status = state.status().unwrap();
-        assert_eq!(status.task_kind, Some(BackupTaskKind::UserOperation));
-        assert_eq!(status.progress_label.as_deref(), Some("正在恢复历史"));
-
-        // 用户主动取消仍然作用于全部任务。
-        assert!(state.request_cancel().unwrap());
-        assert!(state.cancelled());
-        user.complete();
-    }
-
-    #[test]
     fn a_branch_without_head_is_not_queued_for_verification() {
         let (_directory, root, _source, _artwork_id, _branch_id) = fixture();
-        // 已建分支但尚未提交：head 为空，派生队列必须为空，避免每轮空跑。
-        assert!(history::list_idle_verify_targets(&root).unwrap().is_empty());
+        // 已建分支但尚未提交：没有任何历史节点，派生队列必须为空。
+        assert_eq!(pending_verify_count(&root), 0);
     }
 
-    #[test]
-    fn idle_verify_marks_a_healthy_head_verified_and_leaves_the_queue() {
-        let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(
-            &root,
-            &branch_id,
-            "First",
+    fn app_state_for_idle_verify(root: &Path, directory: &Path) -> AppState {
+        let mut settings = AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        settings.idle_integrity_check_enabled = true;
+        AppState::new(
+            settings,
+            directory.join("settings.json"),
+            directory.join("logs"),
+            None,
+        )
+    }
+
+    fn commit_node(root: &Path, branch_id: &str, title: &str) -> String {
+        worker::run_backup(
+            root,
+            branch_id,
+            title,
             "manual",
             &CancelToken::standalone(),
             ChunkWriteOptions::V1,
         )
         .unwrap()
         .history_id
-        .unwrap();
-        let targets = history::list_idle_verify_targets(&root).unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].head_history_id, history_id);
+        .unwrap()
+    }
 
-        run_idle_verify(&root, &BackupState::default(), &branch_id, &history_id).unwrap();
+    /// 把历史写入时间推到 20 分钟前：满足「仓库静默 10 分钟」，同时把分支间隔
+    /// 放宽到 60 分钟，避免静默本身让自动备份变成到期。
+    fn make_repository_silent(root: &Path) {
+        let old = crate::storage::now_ms().unwrap() - 20 * 60 * 1000;
+        let connection = crate::storage::open(root).unwrap();
+        connection
+            .execute("UPDATE history_nodes SET created_ms = ?1", [old])
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE branches SET last_check_ms = ?1, last_success_ms = ?1,
+                    backup_interval_minutes = 60",
+                [old],
+            )
+            .unwrap();
+    }
 
-        assert!(history::list_idle_verify_targets(&root).unwrap().is_empty());
+    fn run_idle_batch(
+        root: &Path,
+        directory: &Path,
+        state: &BackupState,
+        had_due_backup: bool,
+    ) -> Result<(), VerifyBatchError> {
+        let app_state = app_state_for_idle_verify(root, directory);
+        run_verify_batch(&app_state, state, had_due_backup)
+    }
+
+    #[test]
+    fn idle_batch_marks_healthy_nodes_verified() {
+        let (directory, root, source, artwork_id, branch_id) = fixture();
+        commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        commit_node(&root, &branch_id, "Second");
+        make_repository_silent(&root);
+        assert_eq!(pending_verify_count(&root), 2);
+        assert_eq!(history::count_pending_verify_nodes(&root).unwrap(), 2);
+
+        let state = BackupState::default();
+        state.set_window_idle(true);
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+
+        assert_eq!(pending_verify_count(&root), 0);
+        assert_eq!(history::count_pending_verify_nodes(&root).unwrap(), 0);
         let branch = history::list(&root, &artwork_id)
             .unwrap()
             .branches
             .remove(0);
         assert!(branch.verify_error.is_none());
         assert!(branch.verified_ms.is_some());
-        assert_eq!(branch.consecutive_backup_failures, 0);
-        assert!(branch.last_error.is_none());
     }
 
     #[test]
-    fn idle_verify_records_a_failure_and_retries_only_after_requeue() {
-        let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(
-            &root,
-            &branch_id,
-            "First",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap()
-        .history_id
-        .unwrap();
-        // 破坏 head snapshot 内容，摘要与数据库记录不再匹配。
-        let record = history::load_node(&root, &history_id).unwrap();
+    fn idle_batch_records_a_failure_on_the_offending_node_and_keeps_going() {
+        let (directory, root, source, artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "Second");
+        // 破坏 head snapshot：两个节点都沿这条快照物化，都会失败。
+        let record = history::load_node(&root, &second_id).unwrap();
         let path = storage::resolve_path(&root, record.snapshot_path.as_deref().unwrap()).unwrap();
         let mut bytes = fs::read(&path).unwrap();
         *bytes.last_mut().unwrap() ^= 0xff;
         fs::write(&path, bytes).unwrap();
+        make_repository_silent(&root);
 
-        let failed = run_idle_verify(&root, &BackupState::default(), &branch_id, &history_id);
-        assert!(
-            matches!(failed, Err(IdleVerifyError::Failed(_))),
-            "{failed:?}"
-        );
+        let state = BackupState::default();
+        state.set_window_idle(true);
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
 
+        // 失败不阻断批次，也不自动重试：两个节点都退出派生队列并各自记录错误。
+        assert_eq!(pending_verify_count(&root), 0);
+        let connection = crate::storage::open(&root).unwrap();
+        let mut statement = connection
+            .prepare("SELECT id, verify_error FROM history_nodes ORDER BY created_ms")
+            .unwrap();
+        let errors = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(errors.len(), 2);
+        // 只有 head 的新快照块损坏；父节点通过 delta 重建时不会读到这个坏块，
+        // 因此它仍通过校验——失败恰好定位到携带损坏内容的节点。
+        let error_for = |id: &str| {
+            errors
+                .iter()
+                .find(|(node_id, _)| node_id == id)
+                .and_then(|(_, error)| error.as_deref())
+        };
+        assert!(error_for(&first_id).is_none());
+        assert!(error_for(&second_id).is_some_and(|error| error.contains(&second_id)));
         let branch = history::list(&root, &artwork_id)
             .unwrap()
             .branches
             .remove(0);
         assert!(branch.verify_error.is_some());
         assert!(branch.verified_ms.is_none());
-        // 失败不自动重试：分支退出派生队列。
-        assert!(history::list_idle_verify_targets(&root).unwrap().is_empty());
-
-        // 用户手动重查：清空失败摘要后重新入队。
-        history::clear_verify_error(&root, &branch_id).unwrap();
-        assert_eq!(history::list_idle_verify_targets(&root).unwrap().len(), 1);
     }
 
     #[test]
-    fn a_new_head_requeues_verification_and_clears_the_previous_failure() {
-        let (_directory, root, source, artwork_id, branch_id) = fixture();
-        let first_id = worker::run_backup(
-            &root,
-            &branch_id,
-            "First",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap()
-        .history_id
-        .unwrap();
-        history::mark_verify_error(&root, &branch_id, &first_id, "链路校验失败").unwrap();
-        assert!(history::list_idle_verify_targets(&root).unwrap().is_empty());
+    fn idle_batch_yields_without_writing_while_foreground_work_waits() {
+        let (directory, root, _source, artwork_id, branch_id) = fixture();
+        commit_node(&root, &branch_id, "First");
+        make_repository_silent(&root);
+        let state = BackupState::default();
+        state.set_window_idle(true);
 
-        // 新提交产生新 head：分支重新入队，且旧失败摘要被清空。
-        fs::write(&source, b"changed content").unwrap();
-        let second_id = worker::run_backup(
-            &root,
-            &branch_id,
-            "Second",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap()
-        .history_id
-        .unwrap();
-        assert_ne!(first_id, second_id);
+        let waiting = state.begin_foreground_wait();
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+        drop(waiting);
 
-        let targets = history::list_idle_verify_targets(&root).unwrap();
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets[0].head_history_id, second_id);
+        assert_eq!(pending_verify_count(&root), 1);
         let branch = history::list(&root, &artwork_id)
             .unwrap()
             .branches
             .remove(0);
-        assert!(branch.verify_error.is_none());
-    }
-
-    #[test]
-    fn idle_verify_skips_a_head_that_changed_after_selection() {
-        let (_directory, root, _source, artwork_id, branch_id) = fixture();
-        worker::run_backup(
-            &root,
-            &branch_id,
-            "First",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap();
-
-        let result = run_idle_verify(
-            &root,
-            &BackupState::default(),
-            &branch_id,
-            "head-from-a-stale-snapshot",
-        );
-        assert!(
-            matches!(result, Err(IdleVerifyError::NotPending)),
-            "{result:?}"
-        );
-        let branch = history::list(&root, &artwork_id)
-            .unwrap()
-            .branches
-            .remove(0);
-        assert!(branch.verify_error.is_none());
         assert!(branch.verified_ms.is_none());
     }
 
     #[test]
-    fn idle_verify_yields_to_foreground_and_manual_work() {
-        let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        let history_id = worker::run_backup(
+    fn idle_batch_requires_an_enabled_setting_and_an_idle_window() {
+        let (directory, root, source, _artwork_id, branch_id) = fixture();
+        commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        commit_node(&root, &branch_id, "Second");
+        make_repository_silent(&root);
+        let state = BackupState::default();
+
+        // 窗口可见（默认）时绝不自动运行。
+        state.set_window_idle(false);
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+        assert_eq!(pending_verify_count(&root), 2);
+
+        // 窗口空闲但设置关闭时同样不运行。
+        let app_state = app_state_for(&root, directory.path());
+        state.set_window_idle(true);
+        run_verify_batch(&app_state, &state, false).unwrap();
+        assert_eq!(pending_verify_count(&root), 2);
+    }
+
+    #[test]
+    fn idle_batch_defers_to_a_due_automatic_backup_unless_aging_allows_it() {
+        let (directory, root, _source, _artwork_id, branch_id) = fixture();
+        commit_node(&root, &branch_id, "First");
+        make_repository_silent(&root);
+        make_due(&root, &branch_id);
+        let state = BackupState::default();
+        state.set_window_idle(true);
+
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+        assert_eq!(pending_verify_count(&root), 1);
+
+        // aging 插队：即使有到期备份也允许跑完一批。
+        run_idle_batch(&root, directory.path(), &state, true).unwrap();
+        assert_eq!(pending_verify_count(&root), 0);
+    }
+
+    #[test]
+    fn branch_status_derives_failure_and_oldest_verification_from_the_chain() {
+        let (_directory, root, source, artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "Second");
+
+        history::mark_node_verified(&root, &first_id, 1_000).unwrap();
+        history::mark_node_verified(&root, &second_id, 2_000).unwrap();
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.verified_ms, Some(1_000));
+        assert!(branch.verify_error.is_none());
+
+        // 链上任一节点失败 = 分支失败；失败节点同时失去 verified_ms。
+        history::mark_node_verify_error(&root, &first_id, "损坏").unwrap();
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.verify_error.as_deref(), Some("损坏"));
+        assert!(branch.verified_ms.is_none());
+    }
+
+    #[test]
+    fn chain_rewrites_requeue_every_node_of_the_artwork() {
+        let (directory, root, _source, _artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        make_repository_silent(&root);
+        let state = BackupState::default();
+        state.set_window_idle(true);
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+        assert_eq!(pending_verify_count(&root), 0);
+
+        // 建立检查点会改写链的物化语义，按作品粗粒度清空校验状态。
+        history::mark_checkpoint(&root, &first_id).unwrap();
+        assert_eq!(pending_verify_count(&root), 1);
+    }
+
+    #[test]
+    fn repository_scrub_refreshes_every_node_status() {
+        let (_directory, root, source, artwork_id, branch_id) = fixture();
+        commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        commit_node(&root, &branch_id, "Second");
+        assert_eq!(pending_verify_count(&root), 2);
+
+        let scanned =
+            crate::backup::scrub_history(&root, &CancelToken::standalone(), |_, _| {}).unwrap();
+        assert_eq!(scanned, 2);
+        assert_eq!(pending_verify_count(&root), 0);
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert!(branch.verified_ms.is_some());
+        assert!(branch.verify_error.is_none());
+    }
+
+    #[test]
+    fn repository_scrub_continues_after_a_corrupt_node() {
+        let (_directory, root, source, _artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "Second");
+        let record = history::load_node(&root, &second_id).unwrap();
+        let path = storage::resolve_path(&root, record.snapshot_path.as_deref().unwrap()).unwrap();
+        let mut bytes = fs::read(&path).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        fs::write(&path, bytes).unwrap();
+
+        let error =
+            crate::backup::scrub_history(&root, &CancelToken::standalone(), |_, _| {}).unwrap_err();
+        assert!(error.contains(&second_id), "{error}");
+
+        // 失败节点之后仍会继续扫描，并重写每个节点的状态。
+        assert_eq!(pending_verify_count(&root), 0);
+        assert!(history::load_node(&root, &first_id).is_ok());
+        let errors = crate::storage::open(&root)
+            .unwrap()
+            .prepare("SELECT id, verify_error, verified_ms FROM history_nodes")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let first = errors.iter().find(|(id, _, _)| id == &first_id).unwrap();
+        let second = errors.iter().find(|(id, _, _)| id == &second_id).unwrap();
+        assert!(first.1.is_none() && first.2.is_some());
+        assert!(second.1.is_some() && second.2.is_none());
+    }
+
+    #[test]
+    fn manual_reverify_helpers_cover_the_whole_branch_chain() {
+        let (_directory, root, source, _artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "Second");
+
+        assert_eq!(
+            history::branch_chain_ids(&root, &branch_id).unwrap(),
+            [first_id.clone(), second_id.clone()]
+        );
+
+        history::mark_node_verify_error(&root, &first_id, "旧错误").unwrap();
+        history::mark_node_verify_error(&root, &second_id, "旧错误").unwrap();
+        assert_eq!(pending_verify_count(&root), 0);
+
+        history::clear_branch_verify_errors(&root, &branch_id).unwrap();
+        assert_eq!(pending_verify_count(&root), 2);
+    }
+
+    #[test]
+    fn snapshot_creation_requeues_every_node_of_the_artwork() {
+        let (directory, root, source, _artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        commit_node(&root, &branch_id, "Second");
+        make_repository_silent(&root);
+        let state = BackupState::default();
+        state.set_window_idle(true);
+        run_idle_batch(&root, directory.path(), &state, false).unwrap();
+        assert_eq!(pending_verify_count(&root), 0);
+
+        crate::backup::ensure_checkpoint(
             &root,
-            &branch_id,
-            "First",
-            "manual",
+            &first_id,
             &CancelToken::standalone(),
             ChunkWriteOptions::V1,
         )
-        .unwrap()
-        .history_id
         .unwrap();
-        let state = BackupState::default();
+        assert_eq!(pending_verify_count(&root), 2);
+    }
 
-        let waiting = state.begin_foreground_wait();
-        let yielded = run_idle_verify(&root, &state, &branch_id, &history_id);
-        assert!(
-            matches!(yielded, Err(IdleVerifyError::ForegroundWaiting)),
-            "{yielded:?}"
-        );
-        drop(waiting);
+    #[test]
+    fn idle_window_tracker_allows_one_batch_per_idle_period() {
+        let mut tracker = IdleWindowTracker::default();
+        assert_eq!(tracker.observe(false), (0, false));
+        let (generation, consumed) = tracker.observe(true);
+        assert!(!consumed);
+        tracker.mark_batch_attempted(generation);
+        assert_eq!(tracker.observe(true), (generation, true));
 
-        state.begin_manual_request(&branch_id);
-        let deferred = run_idle_verify(&root, &state, &branch_id, &history_id);
-        assert!(matches!(deferred, Err(IdleVerifyError::Deferred)));
-        state.end_manual_request(&branch_id);
-
-        assert!(run_idle_verify(&root, &state, &branch_id, &history_id).is_ok());
+        // 窗口重新可见再隐藏才开启新窗口。
+        assert_eq!(tracker.observe(false), (generation, false));
+        let (next_generation, consumed) = tracker.observe(true);
+        assert_ne!(next_generation, generation);
+        assert!(!consumed);
     }
 
     /// 后台任务不排队：本进程的写者持有写入闸门时，本轮取锁必须得到 `Skipped`

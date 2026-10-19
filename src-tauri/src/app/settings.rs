@@ -54,6 +54,9 @@ pub(crate) struct AppSettings {
     theme: String,
     close_to_tray: bool,
     pub(crate) pause_automatic_backups: bool,
+    /// 空闲完整性检查开关。默认关闭；旧设置文件缺少该字段时同样视为关闭，
+    /// 因此不需要提升设置版本。
+    pub(crate) idle_integrity_check_enabled: bool,
     automatic_backup_check_mode: String,
     /// ChunkFile v2 写入开关。默认开启：只影响此后新写出的 snapshot/delta，
     /// 旧 v1 节点继续由 v1 reader 读取；关闭后新写入回到 v1。
@@ -72,6 +75,7 @@ impl Default for AppSettings {
             theme: "system".into(),
             close_to_tray: true,
             pause_automatic_backups: false,
+            idle_integrity_check_enabled: false,
             automatic_backup_check_mode: "quick".into(),
             chunk_file_format_v2: true,
             window: WindowSettings::default(),
@@ -512,6 +516,14 @@ impl AppState {
             .unwrap_or(false)
     }
 
+    /// 空闲完整性检查是否开启。读取失败按关闭处理：后台检查是可选能力，
+    /// 设置状态异常时不应擅自开始扫描仓库。
+    pub(crate) fn idle_integrity_check_enabled(&self) -> bool {
+        self.settings
+            .read_with(|settings| settings.idle_integrity_check_enabled)
+            .unwrap_or(false)
+    }
+
     /// 自动备份默认检查方式是否为快速。仅在设置显式选择 full 时返回 false；
     /// 设置缺失或状态损坏时保持默认的快速检查。
     pub(crate) fn automatic_backup_quick_default(&self) -> bool {
@@ -583,6 +595,8 @@ pub(crate) struct SettingsSnapshot {
     pub(crate) log_directory: String,
     pub(crate) warning: Option<String>,
     pub(crate) automatic_backup_file_count: Option<usize>,
+    /// 待校验的历史节点数（与空闲检查的派生集合同一口径）。
+    pub(crate) idle_integrity_pending_count: Option<usize>,
 }
 
 /// 旧版本设置迁移。
@@ -1057,10 +1071,15 @@ pub(crate) fn capture_window_settings(app: &AppHandle) -> Result<(), String> {
 }
 
 pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
-    let automatic_backup_file_count = state
-        .ready_repository_path()
-        .ok()
-        .and_then(|root| history::count_scheduled_files(&root).ok());
+    // 两个计数共用一次仓库就绪校验：`ready_repository_path` 每次都做一遍轻量
+    // format/version 检查，同一份快照里没必要跑两遍。
+    let repository = state.ready_repository_path().ok();
+    let automatic_backup_file_count = repository
+        .as_deref()
+        .and_then(|root| history::count_scheduled_files(root).ok());
+    let idle_integrity_pending_count = repository
+        .as_deref()
+        .and_then(|root| history::count_pending_verify_nodes(root).ok());
     Ok(SettingsSnapshot {
         settings: state.settings.read().map_err(|_| "设置状态已损坏")?,
         settings_path: state.settings_path().to_string_lossy().into_owned(),
@@ -1071,6 +1090,7 @@ pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
             .map_err(|_| "设置警告状态已损坏")?
             .clone(),
         automatic_backup_file_count,
+        idle_integrity_pending_count,
     })
 }
 

@@ -47,14 +47,33 @@ decision, so an untagged version is transitional.
   unsupported or malformed input only falls back to a placeholder.
   `get_history_node_thumbnail` serves the selected node's preview on demand
   without selecting the BLOB in graph or list reads.
+- Idle integrity checking is available as an opt-in background task. When
+  `idleIntegrityCheckEnabled` is on and the main window is hidden or minimized,
+  the scheduler verifies up to eight history nodes (or 30 seconds) per idle
+  window after ten minutes of repository silence, oldest first. It reuses the
+  full-scan per-node materialization kernel, records `verified_ms` /
+  `verify_error` per node, yields at node boundaries to foreground work, pending
+  manual commits and due automatic backups, and consumes at most one batch per
+  idle window. The settings page shows the switch, its behaviour and the pending
+  node count; the tray pause also pauses this task. Manual branch re-verification
+  now verifies the whole chain immediately in the foreground, and the full scan
+  refreshes every node's verification state while continuing past individual
+  failures.
 
 ### Changed
 
 - Cleanup, unreferenced scans, DDS scrubbing, storage accounting and reference
   inventories now read `pin_board_bitmaps`; text items have no file path and are
-  excluded by construction. Idle link verification keeps its previous behaviour
-  by storing success/failure on the checked head node until the stage 9
-  node-level verifier replaces it.
+  excluded by construction.
+- Branch verification status is derived from the entire head chain: any node's
+  `verify_error` marks the branch as failed, otherwise `verified_ms` is the
+  oldest timestamp provided every node has been verified. Compaction, checkpoint
+  changes and snapshot replacement clear `verified_ms` / `verify_error` for the
+  artwork in the same transaction, so affected nodes rejoin the pending set.
+- The full repository integrity scan now records per-node verification state, so
+  it runs as a foreground write command holding the cross-process owner lock
+  rather than through the read-only path; it keeps scanning after an individual
+  node fails and returns a summary error.
 
 ## 0.3.0-alpha.2 - 2026-10-19
 

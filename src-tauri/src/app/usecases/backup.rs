@@ -175,7 +175,9 @@ pub(crate) fn set_checkpoint(
 pub(crate) fn scrub_repository(
     context: &CommandContext,
 ) -> Result<crate::app::workflows::RepositoryScrubReport, CommandError> {
-    context.run_foreground_read(None, |session| {
+    // 扫描现在顺带刷新节点级校验状态，因此按前台写命令取得跨进程 owner lock：
+    // 只读命令不得变成写者的原则不再适用于这个入口。
+    context.run_foreground(None, |session| {
         let root = session.root();
         context.report_progress("正在检查历史文件", 0, 0);
         let history_nodes = backup::scrub_history(root, context.cancel(), |current, total| {
@@ -214,7 +216,8 @@ pub(crate) fn scrub_repository(
 pub(crate) fn scrub_history_and_controlled(
     context: &CommandContext,
 ) -> Result<(u64, u64, u64), CommandError> {
-    context.run_foreground_read(None, |session| {
+    // 与 GUI 扫描相同：历史节点状态会被刷新，因此按写命令执行。
+    context.run_foreground(None, |session| {
         let root = session.root();
         let nodes = backup::scrub_history(root, context.cancel(), |current, total| {
             context.report_progress("全库扫描", current, total)

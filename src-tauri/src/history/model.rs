@@ -28,10 +28,10 @@ pub(crate) struct ArtworkBranch {
     pub(crate) backup_disable_notice_pending: bool,
     pub(crate) final_artifact_locked: bool,
     pub(crate) published_count: u32,
-    /// head 节点的空闲链路校验失败摘要；v5 起取自 `history_nodes.verify_error`，
-    /// 成功或 head 变化时清空。
+    /// 历史链上任一节点的校验失败摘要（由 `history_nodes.verify_error` 派生）；
+    /// 节点被改写或手动重查后清空。
     pub(crate) verify_error: Option<String>,
-    /// head 节点最近一次校验通过的时间；与 `verify_error` 同源（`history_nodes.verified_ms`）。
+    /// 整条链全部通过校验时取最旧的 `verified_ms`；任一节点未验证为 NULL。
     pub(crate) verified_ms: Option<i64>,
 }
 
@@ -109,18 +109,13 @@ pub(crate) struct ScheduledBranch {
     pub(crate) retry_at_ms: Option<i64>,
 }
 
-/// 派生队列中的一条空闲校验候选：分支 head 尚未被校验过（或已变化）。
+/// 派生待查集合中的一条空闲完整性检查候选：节点尚未校验且没有失败摘要。
 ///
-/// `head_created_ms` 取自 head 节点的 `history_nodes.created_ms`，调度器据此延迟
-/// 刚提交的分支，避免刚写完就整链重读；不得改用 `last_check_ms`——快速检查的
-/// "内容未变化"会推进它但不改变 head。
+/// 队列在 SQL 中按 `created_ms` 最旧优先排序——最久未读的节点是 bit rot 风险
+/// 最高的节点。
 #[derive(Debug, Clone)]
-pub(crate) struct IdleVerifyTarget {
-    pub(crate) branch_id: String,
-    /// 用于并行校验时按 Artwork 分片：同一作品同时只跑一个校验任务。
-    pub(crate) artwork_id: String,
-    pub(crate) head_history_id: String,
-    pub(crate) head_created_ms: i64,
+pub(crate) struct VerifyNodeTarget {
+    pub(crate) history_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]

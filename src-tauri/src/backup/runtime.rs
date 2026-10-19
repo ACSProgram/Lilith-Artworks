@@ -66,11 +66,12 @@ struct Inner {
     runtime: Mutex<BackupRuntimeStatus>,
     /// 当前活跃的任务。每个任务拥有独立 OperationId 与取消令牌；
     /// `cancel_background` 只取消其中的后台任务，不会误伤前台操作。
-    ///
-    /// 列表里既有占共享运行锁的串行任务，也有空闲校验准备阶段的并行只读探针；
-    /// 取消判定只认串行任务（见 [`BackupState::cancelled`]）。
     active_tasks: Mutex<Vec<ActiveTask>>,
     shutting_down: AtomicBool,
+    /// 主窗口当前是否处于「隐藏或最小化」。由原生窗口事件在主线程更新，调度器
+    /// 只读取该原子值——避免后台线程跨线程查询窗口状态，也避免退出时与窗口
+    /// 事件循环互相等待。
+    window_idle: AtomicBool,
     /// 手动提交优先：记录有待处理手动提交请求的分支 ID，调度器据此延后
     /// 这些分支的自动备份，避免自动任务抢在手动提交之前占据共享运行锁。
     manual_pending: Mutex<HashSet<String>>,
@@ -86,9 +87,6 @@ struct ActiveTask {
     operation_id: String,
     kind: BackupTaskKind,
     branch_id: Option<String>,
-    /// 是否占用共享运行锁。空闲校验的并行准备阶段是只读探针（`false`）：它们
-    /// 的取消只表示「后台让位」，不能被前台命令当成自己的取消请求。
-    serialized: bool,
     cancel: CancelToken,
 }
 
@@ -179,32 +177,17 @@ impl BackupState {
         Ok(cancelled)
     }
 
-    /// 登记一个占用共享运行锁的串行任务。用户写命令、自动备份与校验结果写回
-    /// 都由 [`Self::run_exclusive_typed_inner`] 内部登记。
+    /// 登记一个占用共享运行锁的串行任务。用户写命令、自动备份与空闲完整性
+    /// 检查都由 [`Self::run_exclusive_typed_inner`] 内部登记。
     pub(crate) fn begin_task(
         &self,
         kind: BackupTaskKind,
         branch_id: Option<&str>,
     ) -> BackgroundTaskGuard {
-        self.register_task(kind, branch_id, true)
+        self.register_task(kind, branch_id)
     }
 
-    /// 登记一个并行只读探针（空闲校验的准备阶段）。它不占用共享运行锁，取消
-    /// 令牌只服务后台让位，不参与 [`Self::cancelled`] 的判定。
-    pub(crate) fn begin_probe_task(
-        &self,
-        kind: BackupTaskKind,
-        branch_id: Option<&str>,
-    ) -> BackgroundTaskGuard {
-        self.register_task(kind, branch_id, false)
-    }
-
-    fn register_task(
-        &self,
-        kind: BackupTaskKind,
-        branch_id: Option<&str>,
-        serialized: bool,
-    ) -> BackgroundTaskGuard {
+    fn register_task(&self, kind: BackupTaskKind, branch_id: Option<&str>) -> BackgroundTaskGuard {
         let operation_id = OperationId::new().as_str().to_owned();
         let cancel = CancelToken::standalone();
         if let Ok(mut active) = self.inner.active_tasks.lock() {
@@ -212,18 +195,18 @@ impl BackupState {
                 operation_id: operation_id.clone(),
                 kind,
                 branch_id: branch_id.map(str::to_owned),
-                serialized,
                 cancel: cancel.clone(),
             });
             self.refresh_runtime_locked(&active);
         }
         log::debug!(
-            "task started: operation_id={operation_id}, kind={kind:?}, serialized={serialized}, branch={}",
+            "task started: operation_id={operation_id}, kind={kind:?}, branch={}",
             branch_id.unwrap_or("")
         );
         BackgroundTaskGuard {
             state: self.clone(),
             operation_id,
+            #[cfg(test)]
             cancel,
             completed: false,
         }
@@ -239,8 +222,7 @@ impl BackupState {
 
     /// 按当前活跃任务重建运行状态。
     ///
-    /// 串行任务优先：它正在执行用户可见的操作，状态必须反映它而不是同时存在的
-    /// 只读探针。只有探针时保留该探针自己的进度字段；多于一个任务只暴露汇总
+    /// 同一时刻通常只有一个串行任务；测试里可能同时登记多个，此时只暴露汇总
     /// 状态，避免各线程互相覆盖进度标签。
     fn refresh_runtime_locked(&self, active: &[ActiveTask]) {
         let Ok(mut runtime) = self.inner.runtime.lock() else {
@@ -256,25 +238,13 @@ impl BackupState {
             };
             return;
         }
-        let current = active
-            .iter()
-            .find(|task| task.serialized)
-            .or_else(|| (active.len() == 1).then(|| &active[0]));
+        let current = (active.len() == 1).then(|| &active[0]);
         runtime.busy = true;
         runtime.task_kind = current
             .map(|task| task.kind)
             .or_else(|| active.first().map(|task| task.kind));
         runtime.active_branch_id = current.and_then(|task| task.branch_id.clone());
         if current.is_some() {
-            // 只清掉本函数上一轮写下的并行汇总文案，让串行任务自己的
-            // `report_progress` 接管；不要动任务已经上报的进度，否则并行的探针
-            // 逐个结束时会把前台命令的进度反复清空。
-            if runtime.operation.as_deref() == Some("background") {
-                runtime.operation = None;
-                runtime.progress_label = None;
-                runtime.progress_current = 0;
-                runtime.progress_total = 0;
-            }
             return;
         }
         runtime.operation = Some("background".into());
@@ -404,21 +374,22 @@ impl BackupState {
     }
 
     /// 当前串行任务是否已被请求取消。
-    ///
-    /// 只看占用共享运行锁的任务：并行只读探针（空闲校验准备阶段）的取消来自
-    /// `cancel_background` 的后台让位，若把它算进来，刚取得运行锁的前台命令会
-    /// 立即读到「已取消」而误伤用户自己的操作。
     pub(crate) fn cancelled(&self) -> bool {
         self.inner
             .active_tasks
             .lock()
-            .map(|active| {
-                active
-                    .iter()
-                    .filter(|task| task.serialized)
-                    .any(|task| task.cancel.is_cancelled())
-            })
+            .map(|active| active.iter().any(|task| task.cancel.is_cancelled()))
             .unwrap_or(false)
+    }
+
+    /// 主窗口是否处于隐藏或最小化。仅在窗口事件与显示入口由主线程写入；返回状态
+    /// 是否发生变化，供调用方只在真正切换时唤醒调度器。
+    pub(crate) fn set_window_idle(&self, idle: bool) -> bool {
+        self.inner.window_idle.swap(idle, Ordering::SeqCst) != idle
+    }
+
+    pub(crate) fn window_idle(&self) -> bool {
+        self.inner.window_idle.load(Ordering::SeqCst)
     }
 
     pub(crate) fn start_scheduler(&self, app: AppHandle) -> Result<(), String> {
@@ -525,19 +496,20 @@ impl Drop for ForegroundWait {
     }
 }
 
-/// 一个已登记的任务守卫。调度器用它在并行只读任务之间隔离取消令牌。
+/// 一个已登记的任务守卫：`Drop` 把任务从活跃集合移除并更新运行状态。
 ///
-/// 串行写任务由 `run_exclusive_typed_inner` 自己登记并在结束时完成；并行空闲
-/// 校验在各自线程里持有守卫，无论成功、失败还是取消，`Drop` 都会把任务从活跃
-/// 集合移除并更新运行状态。
+/// 任务由 `run_exclusive_typed_inner` 登记；单元测试也直接持有守卫模拟并发任务。
+/// 取消令牌只供测试读取，生产代码通过 [`BackupState::cancelled`] 观察整体状态。
 pub(crate) struct BackgroundTaskGuard {
     state: BackupState,
     operation_id: String,
+    #[cfg(test)]
     cancel: CancelToken,
     completed: bool,
 }
 
 impl BackgroundTaskGuard {
+    #[cfg(test)]
     pub(crate) fn cancel_token(&self) -> &CancelToken {
         &self.cancel
     }
