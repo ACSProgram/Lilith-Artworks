@@ -540,7 +540,8 @@ describe("pin-board renderer finalize", () => {
     });
     const finalizePinBoard = vi.spyOn(pinBoardApi, "finalizePinBoard")
       .mockRejectedValueOnce(busy)
-      .mockResolvedValueOnce({ revision: "r2" });
+      // 结算路径只读 revision；saved/nowStep 仅为满足 SavePinBoardResult。
+      .mockResolvedValueOnce({ saved: true, revision: "r2", nowStep: 0 });
     const renderer = finalizeRenderer();
 
     await expect(renderer.finalize()).resolves.toBe(true);

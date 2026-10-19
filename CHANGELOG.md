@@ -72,6 +72,20 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- Frontend changes (including test files) now require `npx tsc --noEmit` in the
+  lightweight verification set, alongside `npm test`. Vitest transpiles with
+  esbuild and strips types without checking them, so type-only errors in tests
+  previously surfaced only when `npm run build` ran as the tauri
+  `beforeBuildCommand`, blocking release builds. Documented in
+  `docs/guides/validation.md`.
+- `AGENTS.md` adds a decision-and-questioning rule: when a choice is
+  significantly uncertain and materially affects behavior, performance or
+  architecture, the agent asks the user first, stating each option's
+  consequences in plain language (e.g. "noticeably raises CPU/memory use of a
+  feature", "makes the architecture more complex and coupled"); clear-cut,
+  reversible choices are made directly with the reasoning stated, so thinking
+  is not offloaded to the user.
+
 - The settings dialog is split into `仓储`, `空间` and `备份` pages. The
   repository page keeps the location, integrity check and storage format; the
   space page hosts the storage dashboard and the file cleanup queue/scan; the
@@ -125,6 +139,12 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- The pin-board finalize busy-retry test compiles again. Its success-case mock
+  resolved only `{ revision: "r2" }` while `finalizePinBoard` is typed as
+  `SavePinBoardResult` (`saved`, `revision`, `nowStep`), so the first
+  `npm run build` after the write-gate batch failed at `tsc` with TS2345. The
+  mock now returns the full result shape; `npm test` had passed because vitest
+  strips types without checking them.
 - Repository writes inside one process no longer refuse each other. Every write
   command now queues on a per-repository in-process write gate before taking the
   cross-process owner lock: `Shutdown` (pin-board settlement) overtakes
