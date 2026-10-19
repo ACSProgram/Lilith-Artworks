@@ -65,6 +65,11 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- The pin-board add-text dialog is rebuilt around a live text preview, a
+  stepper-controlled font size and an embedded colour picker (saturation/value
+  area, hue slider, hex input and preset swatches) instead of the native colour
+  dialog. Layout, focus rings and dark-theme colours follow the rest of the
+  application.
 - Checkpoints keep only their snapshot. A commit or compaction whose parent is a
   checkpoint no longer writes a reverse delta: that node's snapshot is permanent,
   so no read path could ever consume the delta. The edge is registered with an
@@ -98,6 +103,11 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Pin-board text textures centre the glyph ink inside each 1.3× line box.
+  Drawing with `textBaseline = "top"` left all extra line height below the
+  glyphs, so text sat above the centre of its selection quad and its top edge
+  was clipped by the texture. Display and export share the corrected path, so
+  existing text items are recentred when their texture is rebuilt.
 - Byte progress is cumulative again. `ChunkTask::report` hands the callback the
   total logical bytes processed so far instead of the size of the step that just
   finished, so restore, checkpoint and reverse-delta bars climb towards 100%

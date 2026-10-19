@@ -10,6 +10,7 @@
 - 进程内视图恢复：`session.ts`
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - 绘制、度量与导出共用的文字布局/栅格化：`textLayout.ts`
+- 添加文字对话框与内置取色器：`PinBoardModule.tsx`、`PinBoardColorPicker.tsx`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
@@ -119,7 +120,7 @@ SQLite:
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
-- “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。导出时按逻辑长边的 2 倍（受 8192 与 64 MiB RGBA 像素预算约束）栅格化，由浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘——传的是压缩后的 PNG 而不是 RGBA，避免一次 IPC 搬运数千万个数字。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计和画板内复制；系统剪贴板复制只支持位图；
+- “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。栅格化按字形墨迹（`actualBoundingBoxAscent/Descent`）把文字块在每个 1.3 倍行盒内垂直居中，并以此定位基线——此前用 `textBaseline = "top"` 把行高余量全留在下方，文字因此整体偏上、顶部越出纹理被裁掉；显示纹理与导出共用这条绘制路径，存量条目也会按新定位重绘。对话框提供内容预览、字号步进与内置取色器（饱和度/亮度面板、色相条、十六进制输入和预设色），不再调用系统取色器。导出时按逻辑长边的 2 倍（受 8192 与 64 MiB RGBA 像素预算约束）栅格化，由浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘——传的是压缩后的 PNG 而不是 RGBA，避免一次 IPC 搬运数千万个数字。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计和画板内复制；系统剪贴板复制只支持位图；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
@@ -130,6 +131,6 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、controller 生命周期注册与进度事件），不启动 Tauri；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、取色器十六进制/HSV 换算、controller 生命周期注册与进度事件），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4→v5 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字条目与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

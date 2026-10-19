@@ -141,6 +141,38 @@ interface DrawnText {
   height: number;
 }
 
+interface TextInk {
+  ascent: number;
+  descent: number;
+}
+
+/**
+ * 取整个文本块的真实字形墨迹上下界。
+ *
+ * `measureText` 的宽度是行宽，`actualBoundingBoxAscent/Descent` 才是字形实际
+ * 画到的范围；用后者定位基线，文字块才能在行盒里真正居中，也不会因为字形
+ * 略高于 em 方框而被纹理顶边裁掉。
+ */
+function measureTextInk(
+  context: CanvasRenderingContext2D,
+  lines: string[],
+  fontSize: number,
+): TextInk {
+  let ascent = 0;
+  let descent = 0;
+  for (const line of lines) {
+    if (!line) continue;
+    const measured = context.measureText(line);
+    const lineAscent = measured.actualBoundingBoxAscent;
+    const lineDescent = measured.actualBoundingBoxDescent;
+    if (Number.isFinite(lineAscent)) ascent = Math.max(ascent, lineAscent);
+    if (Number.isFinite(lineDescent)) descent = Math.max(descent, lineDescent);
+  }
+  // 仅空白行或旧环境缺少墨迹度量时退回经验值，保证基线仍然可用。
+  if (!(ascent > 0)) return { ascent: fontSize * 0.8, descent: fontSize * 0.2 };
+  return { ascent, descent: Number.isFinite(descent) && descent > 0 ? descent : 0 };
+}
+
 /** 按请求长边把文字画到离屏 canvas；显示纹理与导出共用这一段绘制逻辑。 */
 function drawPinBoardText(item: PinBoardTextItem, maxDimension: number): DrawnText {
   const metrics = measurePinBoardText(item.text, item.fontSize);
@@ -148,13 +180,25 @@ function drawPinBoardText(item: PinBoardTextItem, maxDimension: number): DrawnTe
   const scale = Math.min(width / metrics.width, height / metrics.height);
   const { canvas, context } = createCanvas(width, height);
   context.clearRect(0, 0, width, height);
-  context.font = `${item.fontSize * scale}px ${PIN_BOARD_TEXT_FONT_FAMILY}`;
+  let fontSize = item.fontSize * scale;
+  context.font = `${fontSize}px ${PIN_BOARD_TEXT_FONT_FAMILY}`;
   context.fillStyle = item.color;
-  context.textBaseline = "top";
   context.textAlign = item.align;
+  context.textBaseline = "alphabetic";
   const x = item.align === "left" ? 0 : item.align === "right" ? width : width / 2;
+  const lineHeight = metrics.lineHeight * scale;
+  let ink = measureTextInk(context, metrics.lines, fontSize);
+  // 极端字形（组合符号、表情等）可能高于行盒；等比缩小绘制字号，避免上下裁切。
+  if (ink.ascent + ink.descent > lineHeight) {
+    fontSize *= lineHeight / (ink.ascent + ink.descent);
+    context.font = `${fontSize}px ${PIN_BOARD_TEXT_FONT_FAMILY}`;
+    ink = measureTextInk(context, metrics.lines, fontSize);
+  }
+  // 旧实现用 textBaseline = "top"，1.3 倍行高的余量全留在下方，文字因此偏上且
+  // 顶部越出纹理。这里把墨迹块在每行行盒里垂直居中，再按墨迹上界定位基线。
+  const inkOffset = (lineHeight - ink.ascent - ink.descent) / 2;
   metrics.lines.forEach((line, index) => {
-    context.fillText(line, x, index * metrics.lineHeight * scale);
+    context.fillText(line, x, index * lineHeight + inkOffset + ink.ascent);
   });
   return { canvas, context, width, height };
 }

@@ -348,22 +348,264 @@
 .pin-board-layer-swatch.bottom { transform: translateY(2px); }
 
 .pin-board-text-backdrop { z-index: 2300; }
-.pin-board-text-dialog { width: min(520px, 100%); }
-.pin-board-text-fields { display: grid; gap: 16px; }
-.pin-board-text-input { min-height: 126px; resize: vertical; }
-.pin-board-text-options { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
-.pin-board-text-color {
+.pin-board-text-dialog { width: min(560px, 100%); }
+/* 取色浮层要超出卡片下沿，不能被共享 Modal 的 overflow: hidden 裁掉。 */
+.modal.pin-board-text-dialog { overflow: visible; }
+.pin-board-text-header { display: flex; align-items: flex-start; gap: 12px; padding: 20px 18px 16px 22px; }
+.pin-board-text-header-icon {
   display: grid;
+  place-items: center;
+  width: 36px;
   height: 36px;
-  grid-template-columns: 42px minmax(0, 1fr);
+  flex: none;
+  border-radius: 10px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+.pin-board-text-heading { min-width: 0; flex: 1; padding-top: 1px; }
+.pin-board-text-heading h2 { margin: 0; font-size: 16px; line-height: 1.3; }
+.pin-board-text-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.pin-board-text-header .icon-button { margin: -2px -2px 0 0; }
+.pin-board-text-body { display: grid; gap: 16px; padding: 0 22px 20px; }
+
+.pin-board-text-preview {
+  display: grid;
+  place-items: center;
+  min-height: 88px;
+  max-height: 150px;
+  overflow: hidden;
+  padding: 16px 20px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--pin-board-bg);
+}
+.pin-board-text-preview > span {
+  display: -webkit-box;
+  max-width: 100%;
+  max-height: 2.7em;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: pre-wrap;
+}
+.pin-board-text-preview-placeholder {
+  color: color-mix(in srgb, var(--text) 40%, transparent);
+  font-size: 13px;
+}
+
+.pin-board-text-field { display: grid; min-width: 0; gap: 7px; }
+.pin-board-text-label {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--pb-text-soft);
+  font-size: 12px;
+}
+.pin-board-text-count { color: var(--pb-text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.pin-board-text-input {
+  width: 100%;
+  min-height: 116px;
+  max-height: 240px;
+  padding: 10px 12px;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--control-bg);
+  font-size: 13px;
+  line-height: 1.6;
+  outline: none;
+  resize: vertical;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.pin-board-text-input::placeholder { color: var(--muted); }
+.pin-board-text-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pin-board-text-options {
+  display: grid;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+  align-items: start;
+  gap: 16px;
+}
+.pin-board-text-size {
+  display: grid;
+  height: 38px;
+  grid-template-columns: 34px minmax(0, 1fr) 34px;
+  overflow: hidden;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  background: var(--control-bg);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.pin-board-text-size:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pin-board-text-size button {
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+}
+.pin-board-text-size button:hover:not(:disabled) { color: var(--text); background: var(--surface-subtle); }
+.pin-board-text-size button:disabled { opacity: .35; cursor: default; }
+.pin-board-text-size input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+  appearance: textfield;
+}
+.pin-board-text-size input::-webkit-outer-spin-button,
+.pin-board-text-size input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+
+.pin-board-color-field { position: relative; min-width: 0; }
+.pin-board-color-trigger {
+  display: flex;
+  width: 100%;
+  height: 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  color: var(--text);
+  background: var(--control-bg);
+  cursor: pointer;
+  transition: border-color 120ms ease, box-shadow 120ms ease;
+}
+.pin-board-color-trigger:hover { border-color: color-mix(in srgb, var(--text) 30%, var(--control-border)); }
+.pin-board-color-trigger[aria-expanded="true"],
+.pin-board-color-trigger:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pin-board-color-swatch {
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--text) 20%, transparent);
+  border-radius: 6px;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--surface) 35%, transparent);
+}
+.pin-board-color-hex { flex: 1; text-align: left; font-size: 12px; font-variant-numeric: tabular-nums; }
+.pin-board-color-trigger svg { flex: none; color: var(--muted); }
+.pin-board-color-popover {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 8px);
+  display: grid;
+  width: 272px;
+  max-height: calc(100vh - 48px);
+  gap: 12px;
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--pb-shadow-modal);
+}
+.pin-board-color-area {
+  position: relative;
+  height: 148px;
+  overflow: hidden;
+  border-radius: 8px;
+  cursor: crosshair;
+  touch-action: none;
+}
+.pin-board-color-area:focus-visible,
+.pin-board-color-hue:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pin-board-color-area-white,
+.pin-board-color-area-black { position: absolute; inset: 0; pointer-events: none; }
+.pin-board-color-area-white { background: linear-gradient(to right, #fff, rgb(255 255 255 / 0)); }
+.pin-board-color-area-black { background: linear-gradient(to top, #000, rgb(0 0 0 / 0)); }
+.pin-board-color-area-thumb {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 45%), 0 1px 4px rgb(0 0 0 / 30%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.pin-board-color-hue {
+  position: relative;
+  height: 12px;
+  border-radius: 999px;
+  background: linear-gradient(to right, #f00, #ff0 17%, #0f0 33%, #0ff 50%, #00f 67%, #f0f 83%, #f00);
+  cursor: pointer;
+  touch-action: none;
+}
+.pin-board-color-hue-thumb {
+  position: absolute;
+  top: 50%;
+  width: 16px;
+  height: 16px;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1px rgb(0 0 0 / 35%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.pin-board-color-hex-input {
+  display: flex;
+  height: 32px;
   align-items: center;
   overflow: hidden;
-  border: 1px solid var(--pb-border-strong);
-  border-radius: 5px;
-  background: var(--surface);
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  background: var(--control-bg);
+  transition: border-color 120ms ease, box-shadow 120ms ease;
 }
-.pin-board-text-color input { width: 42px; height: 36px; padding: 3px; border: 0; background: transparent; cursor: pointer; }
-.pin-board-text-color span { overflow: hidden; padding: 0 10px; color: var(--pb-text-soft); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.pin-board-color-hex-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pin-board-color-hex-input > span { padding-left: 9px; color: var(--muted); font-size: 12px; }
+.pin-board-color-hex-input input {
+  min-width: 0;
+  height: 100%;
+  flex: 1;
+  padding: 0 9px 0 2px;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+  letter-spacing: .02em;
+  outline: none;
+  text-transform: uppercase;
+}
+.pin-board-color-presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 7px; }
+.pin-board-color-preset {
+  height: 26px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--text) 18%, transparent);
+  border-radius: 6px;
+  cursor: pointer;
+}
+.pin-board-color-preset:hover { transform: translateY(-1px); }
+.pin-board-color-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.pin-board-color-preset[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent); }
+.pin-board-text-dialog .modal-footer { border-radius: 0 0 7px 7px; }
 
 /* 共享右键菜单与模态对话框（ContextMenu/Modal/PromptDialog 专用）。 */
 .modal-backdrop {

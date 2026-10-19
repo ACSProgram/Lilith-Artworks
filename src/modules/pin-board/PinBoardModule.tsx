@@ -15,6 +15,7 @@ import {
   Lock,
   LocateFixed,
   Minimize2,
+  Minus,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -70,6 +71,7 @@ import {
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
 import { usePinBoardController } from "./usePinBoardController";
+import { PinBoardColorPicker } from "./PinBoardColorPicker";
 
 /**
  * 素材板快捷键默认值，与设置页默认项保持一致。
@@ -310,7 +312,14 @@ function PinBoardTextDialog({
 }) {
   const [text, setText] = useState("");
   const [fontSize, setFontSize] = useState(initialFontSize);
+  const [sizeText, setSizeText] = useState(String(initialFontSize));
   const [color, setColor] = useState(initialColor);
+  const filled = text.trim().length > 0;
+  const setSize = (next: number) => {
+    const clamped = Math.min(240, Math.max(12, Math.round(next)));
+    setFontSize(clamped);
+    setSizeText(String(clamped));
+  };
 
   return (
     <div
@@ -330,59 +339,95 @@ function PinBoardTextDialog({
         }}
         onSubmit={(event) => {
           event.preventDefault();
-          if (text.trim()) onSubmit(text, fontSize, color);
+          if (filled) onSubmit(text, fontSize, color);
         }}
       >
-        <header className="modal-header">
-          <div>
+        <header className="pin-board-text-header">
+          <span className="pin-board-text-header-icon" aria-hidden="true">
+            <Type size={18} />
+          </span>
+          <div className="pin-board-text-heading">
             <h2 id="pin-board-text-title">添加文字</h2>
+            <p>调整内容与样式，文字会添加到当前画板</p>
           </div>
           <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭">
             <X size={17} />
           </button>
         </header>
-        <div className="modal-content pin-board-text-fields">
-          <label>
-            <span className="field-label">内容</span>
+        <div className="pin-board-text-body">
+          <div className="pin-board-text-preview" aria-hidden="true">
+            <span
+              className={filled ? undefined : "pin-board-text-preview-placeholder"}
+              style={filled
+                ? { color, fontSize: `${Math.min(34, Math.max(fontSize, 14))}px` }
+                : undefined}
+            >
+              {filled ? text : "文字预览"}
+            </span>
+          </div>
+          <label className="pin-board-text-field">
+            <span className="pin-board-text-label">
+              <span>内容</span>
+              <span className="pin-board-text-count">{text.length} / 5000</span>
+            </span>
             <textarea
-              className="dialog-input pin-board-text-input"
+              className="pin-board-text-input"
               autoFocus
               maxLength={5000}
               rows={5}
+              placeholder="输入要添加的文字，支持多行"
               value={text}
               onChange={(event) => setText(event.target.value)}
             />
           </label>
           <div className="pin-board-text-options">
-            <label>
-              <span className="field-label">字号</span>
-              <input
-                className="dialog-input"
-                type="number"
-                min={12}
-                max={240}
-                step={1}
-                value={fontSize}
-                onChange={(event) => setFontSize(Math.min(240, Math.max(12, Number(event.target.value) || 12)))}
-              />
-            </label>
-            <label>
-              <span className="field-label">颜色</span>
-              <span className="pin-board-text-color">
+            <div className="pin-board-text-field">
+              <span className="pin-board-text-label"><span>字号</span></span>
+              <div className="pin-board-text-size">
+                <button
+                  type="button"
+                  aria-label="减小字号"
+                  disabled={fontSize <= 12}
+                  onClick={() => setSize(fontSize - 1)}
+                >
+                  <Minus size={14} aria-hidden="true" />
+                </button>
                 <input
-                  type="color"
-                  value={color}
-                  onChange={(event) => setColor(event.target.value)}
-                  aria-label="文字颜色"
+                  type="number"
+                  min={12}
+                  max={240}
+                  step={1}
+                  value={sizeText}
+                  aria-label="字号"
+                  onChange={(event) => {
+                    const raw = event.target.value;
+                    setSizeText(raw);
+                    const parsed = Number(raw);
+                    if (Number.isFinite(parsed) && parsed >= 12 && parsed <= 240) {
+                      setFontSize(Math.round(parsed));
+                    }
+                  }}
+                  onBlur={() => setSize(Number(sizeText) || fontSize)}
                 />
-                <span>{color.toUpperCase()}</span>
-              </span>
-            </label>
+                <button
+                  type="button"
+                  aria-label="增大字号"
+                  disabled={fontSize >= 240}
+                  onClick={() => setSize(fontSize + 1)}
+                >
+                  <Plus size={14} aria-hidden="true" />
+                </button>
+              </div>
+            </div>
+            <div className="pin-board-text-field">
+              <span className="pin-board-text-label"><span>颜色</span></span>
+              <PinBoardColorPicker value={color} onChange={setColor} />
+            </div>
           </div>
         </div>
         <footer className="modal-footer">
           <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-          <button className="primary-button" type="submit" disabled={!text.trim()}>添加</button>
+          <button className="primary-button" type="submit" disabled={!filled}>添加</button>
         </footer>
       </form>
     </div>

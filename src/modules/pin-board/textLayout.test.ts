@@ -16,7 +16,11 @@ const context = {
   fillStyle: "",
   textBaseline: "",
   textAlign: "",
-  measureText: (line: string) => ({ width: line.length * 10 }),
+  measureText: (line: string) => ({
+    width: line.length * 10,
+    actualBoundingBoxAscent: 8,
+    actualBoundingBoxDescent: 2,
+  }),
   clearRect: vi.fn(),
   fillText,
   getImageData: (_x: number, _y: number, width: number, height: number) => ({
@@ -90,6 +94,14 @@ describe("pin-board text layout", () => {
     const raster = rasterizePinBoardText(textItem(), 400);
     expect([raster.width, raster.height]).toEqual([400, 200]);
     expect(raster.rgba.byteLength).toBe(400 * 200 * 4);
+  });
+
+  it("centers each line's ink inside its line box", () => {
+    // 宽 200、高 100 的纹理对 "ab / c"：字号 20 放大到 1.923 倍，
+    // 行高 26 → 50 px；墨迹高 10 px，上下各留 20 px，基线再上移墨迹上界 8 px。
+    rasterizePinBoardText(textItem(), 200);
+    expect(context.textBaseline).toBe("alphabetic");
+    expect(fillText.mock.calls.map((call) => call[2])).toEqual([28, 78]);
   });
 
   it("encodes the export raster as PNG bytes", async () => {
