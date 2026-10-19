@@ -111,7 +111,7 @@ CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，�
   `--test-threads=1` 后 53.7 ms / 353.0 ms）。因此：`stress_bench` 的数字**只认
   `--test-threads=1` 采集**，且只在同一机器、同一构建档内比较；跨版本谈快慢不要引用群跑墙钟。
 - **`stress_bench` 同时记录子进程 CPU 时间**：每次子进程调用在退出后、句柄关闭前读一次
-  `GetProcessTimes`（用户 + 内核），与墙钟一起写进 `target/stress-report.jsonl` 和
+  `GetProcessTimes`（用户 + 内核），与墙钟一起写进 `<target>/stress/report.jsonl` 和
   `tests/perf-baseline.json`（`场景::标签` 是墙钟，`场景::标签#cpu` 是 CPU 时间）。CPU 时间
   不含进程被剥夺的时间，因此不受调度排队影响（整机饱和时的缓存争用仍会抬高它）；但它**看不见
   磁盘等待**，所以只能回答「是不是更费 CPU」，不能替代墙钟回答「用户等了多久」，两者都要看。
@@ -136,6 +136,15 @@ CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，�
 被测对象是**带无头入口的二进制**，必须先用 `--features headless` 构建出来（该入口不进发布
 产物）。运行命令由 `headless` feature 统一开闸：它既构建无头入口，也让 `tests/stress_*.rs`
 参与 `cargo test`。
+
+**无头构建与 GUI 构建共用同一个 `src-tauri/target/`，不单独占目录，也不复制产物。**
+`headless` 是空 feature（不改变任何依赖的特性），因此开关它**只重编本仓库的 lib、bin 与引用
+lib 的测试目标，依赖的指纹不变、不会被重编**；代价只是每次在 `tauri dev` 与
+`cargo test --features headless` 之间切换时付一次本 crate 的重编译。不带该 feature 的构建里
+无头入口整体不存在，发布产物逐位不变；带该 feature 的二进制则是**超集**——不传 `--headless`
+时它就是正常 GUI 程序，因此不存在「同名文件被无头版本覆盖、拿错产物」的风险。真要隔离编译
+缓存，用 `--target-dir` 或 `CARGO_TARGET_DIR` 即可，测试产物会跟着本次 target 目录自动走
+（见下）。
 
 ```text
 # 1. 构建带无界面入口的二进制（该入口不进发布产物）
@@ -213,11 +222,35 @@ cargo test --features headless --test stress_baseline -- --test-threads=1 --noca
   P2、P4–P8 一律取 `REPEATS`（`stress_bench.rs` 的常量，当前为 3）轮最小值；新增场景请沿用
   这一口径，不要引入单轮测量的基线。
 
-结果写入 `target/stress-report.jsonl`（每场景一行 JSON）与 `target/stress-ledger.jsonl`
-（磁盘账本）；工作区位于 `target/stress-workspaces/`，正常结束后自动回收。被测子进程是单线程的
+结果写入 `<target>/stress/report.jsonl`（每场景一行 JSON）与 `<target>/stress/ledger.jsonl`
+（磁盘账本）；工作区位于 `<target>/stress/workspaces/`，正常结束后自动回收。被测子进程是单线程的
 （内容定义分块、SHA-256 与 zstd 都是单核路径），因此串行执行只会用一个核、磁盘远未跑满；
 `stress_large` 按磁盘预算准入并行正是为了在有磁盘余量的机器上吃满多核，同时避免盲目并行把
 磁盘写满。
+
+### 产物布局与清理
+
+- **唯一落点**：压力测试产物一律放在**本次构建的 target 目录**下——`<target>/stress/report.jsonl`
+  （每场景一行 JSON）、`<target>/stress/ledger.jsonl`（磁盘账本）、`<target>/stress/workspaces/`
+  （临时工作区，`TempDir` 在正常结束（含断言失败展开）时自动回收）。路径由 `stress_support`
+  从 cargo 给集成测试的 `CARGO_TARGET_TMPDIR` 反推，**不硬编码 `src-tauri/target`**，所以换
+  target 目录时产物整体跟着走。
+- **不进版本控制、可随时清掉**：`target/` 已被 gitignore，`cargo clean` 一次清掉全部测试残留；
+  强杀或 Ctrl-C 留下的 `<target>/stress/workspaces/.stress-*` 也属于可删的构建残渣。因此
+  target 下的数值只是**本次运行**的记录：要长期引用的数值必须摘录进 `docs/`（交接文档、
+  `docs/user/stress-test-report.md`），或写进随版本控制的 `tests/perf-baseline.json`。
+- **新增测试的纪律**：临时空间必须经 `stress_support::Workspace`，报告与账本必须经
+  `stress_support::record*` / `append_ledger`；不要在 `tests/` 下自建临时目录、不要直接用
+  `%TEMP%`（系统会回收它，实测出现过工作区中途消失导致场景失败），也不要在仓库其他位置新增
+  输出文件。`tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言它们没有使用系统临时目录。
+- **一次性外部资料**：`LILITH_BASELINE_REPO` 指向的仓库副本及其同级的 `baseline-out` 是外部
+  临时资料（跑完删除，副本按采集前还原），不属项目产物，也不在 target 之下。
+- **短生命周期的单元测试**：`src-tauri/src/**` 里的 `tempfile::tempdir()` 落在系统临时目录，
+  进程正常结束时自动回收，是可接受用法；**跨进程、大文件或长时间的场景必须放 target 下**，
+  不要把它们挪到 `%TEMP%`。
+- **一次性探针不留仓库**：一次性的验证程序/脚本（例如历史上仓库根出现过的 `target/probe/`
+  探针）放 `target/` 下或直接编译到系统临时目录，用完即删；仓库根与 `src-tauri/` 下不应出现
+  任何非源码文件。
 
 ## 持续集成
 

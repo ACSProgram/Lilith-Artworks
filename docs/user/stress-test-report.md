@@ -642,5 +642,5 @@ LILITH_STRESS_PROFILE=release LILITH_STRESS_BIN=target/release/lilith-artworks.e
 | `LILITH_STRESS_PROFILE` | 基线条目记到哪个构建档（`debug` / `release`）；用 debug 脚手架驱动 release 二进制时必须设 `release` |
 | `LILITH_STRESS_PERF_STRICT=1` | 与基线比对，超过倍数阈值（默认 2.5×）即失败；墙钟与 CPU 时间都比，CPU 只在基线 ≥ 50 ms 时生效 |
 
-结果写入 `target/stress-report.jsonl`（每场景一行 JSON）与 `target/stress-ledger.jsonl`
-（磁盘账本）；临时工作区位于 `target/stress-workspaces/`，正常结束后自动回收。
+结果写入 `<target>/stress/report.jsonl`（每场景一行 JSON）与 `<target>/stress/ledger.jsonl`
+（磁盘账本）；临时工作区位于 `<target>/stress/workspaces/`，正常结束后自动回收。

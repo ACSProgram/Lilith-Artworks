@@ -25,7 +25,7 @@
 //!   cargo test --features headless --test stress_baseline -- --test-threads=1 --nocapture
 //! ```
 //!
-//! 数值同时落进 `target/stress-report.jsonl`（`perf: true` 行），便于摘录进
+//! 数值同时落进 `<target>/stress/report.jsonl`（`perf: true` 行），便于摘录进
 //! `docs/planning/0.3-baseline-2026-10-18.md`。
 
 // 只在启用 `headless` feature 时编译。理由见 `tests/stress_support/mod.rs` 顶部说明。
@@ -75,7 +75,7 @@ fn build_profile() -> &'static str {
     }
 }
 
-/// 记录一条基线测量：打印（供人工核对）+ 追加到 `target/stress-report.jsonl`。
+/// 记录一条基线测量：打印（供人工核对）+ 追加到 `<target>/stress/report.jsonl`。
 ///
 /// 构建档写进 `detail`，与 `stress_bench` 把档位写进标签同一目的：同一组标签下不混档。
 fn emit(scenario: &str, label: &str, ms: f64, detail: Value) {

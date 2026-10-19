@@ -67,6 +67,50 @@ fn every_stress_target_is_gated_behind_the_headless_feature() {
     );
 }
 
+/// 压力测试目标不得自建临时空间或自行选择输出文件。
+///
+/// 全部临时空间与产物必须落在**本次构建的 target 目录**下：工作区经
+/// `stress_support::Workspace`（`<target>/stress/workspaces/`），报告与账本经
+/// `stress_support::record*` / `append_ledger`（`<target>/stress/`）。直接用系统
+/// `%TEMP%` 会与系统和其他进程争用（实测出现过工作区中途被回收），而且这些残留无法随
+/// `cargo clean` 一起清掉，会散落到仓库之外。
+///
+/// 允许的例外是测试夹具自己的确定性样本（`tests/fixtures/`）与基线脚本的一次性外部副本
+/// （`LILITH_BASELINE_REPO`），两者都在模块顶部的注释里说明。
+#[test]
+fn stress_targets_do_not_create_their_own_temp_space() {
+    const FORBIDDEN: [&str; 4] = [
+        "env::temp_dir(",
+        "tempfile::tempdir(",
+        "tempfile::tempdir_in(",
+        "tempdir_in(",
+    ];
+    let targets = stress_targets();
+    assert!(
+        !targets.is_empty(),
+        "未在 {} 找到任何 stress_*.rs 目标——本守护测试自身可能失效",
+        tests_directory().display()
+    );
+
+    let mut offenders = Vec::new();
+    for (name, path) in &targets {
+        let source = fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("无法读取 {}：{error}", path.display()));
+        for pattern in FORBIDDEN {
+            if source.contains(pattern) {
+                offenders.push(format!("{} 含 {pattern}", name));
+            }
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "以下压力测试目标自行创建了临时空间：{offenders:?}\n\
+         请改用 `stress_support::Workspace`（落在本次构建的 <target>/stress/ 下），\
+         不要使用系统临时目录或自建临时目录。"
+    );
+}
+
 /// 反向自检：守护测试必须能识别一个**确实缺少**门控的样本，否则它可能永远通过。
 ///
 /// 直接对一个临时构造的文本做判定，不写盘、不影响任何目标文件。

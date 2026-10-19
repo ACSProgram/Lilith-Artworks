@@ -70,6 +70,10 @@ decision, so an untagged version is transitional.
   now verifies the whole chain immediately in the foreground, and the full scan
   refreshes every node's verification state while continuing past individual
   failures.
+- `tests/gate_guard.rs` now also fails when a `stress_*.rs` target opens its own
+  temp space (`env::temp_dir`, `tempfile::tempdir`) instead of going through
+  `stress_support::Workspace`, so test residue cannot drift out of the build's
+  target directory again.
 
 ### Changed
 
@@ -108,6 +112,16 @@ decision, so an untagged version is transitional.
   it runs as a foreground write command holding the cross-process owner lock
   rather than through the read-only path; it keeps scanning after an individual
   node fails and returns a summary error.
+- Stress-test output is collected under the build's own target directory
+  (`<target>/stress/` holding `report.jsonl`, `ledger.jsonl` and `workspaces/`)
+  instead of loose files in `src-tauri/target/`. `stress_support` derives the path
+  from cargo's `CARGO_TARGET_TMPDIR` rather than hard-coding `src-tauri/target`, so
+  the artifacts follow whichever target directory the build uses (including
+  `--target-dir` / `CARGO_TARGET_DIR`) and disappear with the rest of the build
+  output under `cargo clean`. Unit tests that use `tempfile::tempdir()` for
+  short-lived data stay on the system temp directory by convention; only
+  cross-process, large or long-running scenarios must live under the target
+  directory.
 
 ### Fixed
 

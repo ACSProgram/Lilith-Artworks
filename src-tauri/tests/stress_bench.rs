@@ -238,7 +238,7 @@ const CPU_GATE_MIN_MS: f64 = 50.0;
 
 /// 记录一组测量，并按需更新基线或在严格模式下比对。
 ///
-/// 默认只记录（写进 `target/stress-report.jsonl` 并打印）。基线的比对**必须显式开启**
+/// 默认只记录（写进 `<target>/stress/report.jsonl` 并打印）。基线的比对**必须显式开启**
 /// （`LILITH_STRESS_PERF_STRICT=1`），因为绝对耗时依赖机器；`LILITH_STRESS_PERF_FACTOR`
 /// 控制允许的倍数（默认 2.5×）。CPU 时间同样按该倍数比对，但只在基线值
 /// ≥ [`CPU_GATE_MIN_MS`] 时参与——见该常量的说明。

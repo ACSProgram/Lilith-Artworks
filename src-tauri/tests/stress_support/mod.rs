@@ -133,12 +133,29 @@ fn probe_headless(path: &Path) {
     }
 }
 
+/// 压力测试产物的唯一落点：`<target>/stress/`——报告、磁盘账本与临时工作区都在这里。
+///
+/// 路径从 cargo 给集成测试提供的 `CARGO_TARGET_TMPDIR`（即 `<target>/tmp`）反推，因此它
+/// **总是跟着本次构建真正使用的 target 目录走**：仓库里没有任何一处再硬编码
+/// `src-tauri/target`，换 `--target-dir`/`CARGO_TARGET_DIR` 时产物自动跟着换，
+/// `cargo clean` 一次清掉全部测试残留，产物也不会散到仓库其他位置。
+///
+/// `CARGO_TARGET_TMPDIR` 只在集成测试/基准目标里由 cargo 设置，因此本模块只能被 `tests/`
+/// 下的目标以 `mod stress_support;` 引入（现状正是如此）。
+fn stress_output_directory() -> PathBuf {
+    Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .parent()
+        .expect("CARGO_TARGET_TMPDIR 必须位于 target 目录之内")
+        .join("stress")
+}
+
 /// 单一临时工作区根：仓库、工作文件、恢复输出、灾备目标与临时台账都在它之内。
 ///
-/// 工作区建在项目 `target/stress-workspaces/` 之下，而**不是** `%TEMP%`：`%TEMP%` 与
-/// 系统和其他进程共用，可能被系统清理或配额策略回收——并发运行时实测出现过「工作区子目录
-/// 在场景中途消失、`restore` 报『恢复输出目录不存在』」的偶发失败。`target/` 随项目、
-/// 已被 gitignore、与项目同盘，且不参与系统临时清理。仍然用 `TempDir` 持有，保证正常结束
+/// 工作区建在**本次构建的 target 目录**下（`<target>/stress/workspaces/`），而**不是**
+/// `%TEMP%`：`%TEMP%` 与系统和其他进程共用，可能被系统清理或配额策略回收——并发运行时
+/// 实测出现过「工作区子目录在场景中途消失、`restore` 报『恢复输出目录不存在』」的偶发
+/// 失败。落在 target 下还顺带解决了散落问题：随项目、已被 gitignore、与项目同盘、
+/// 不参与系统临时清理，且随 `cargo clean` 一并清掉。仍然用 `TempDir` 持有，保证正常结束
 /// （含断言失败展开）时自动回收。
 ///
 /// **必须由栈上的变量持有**：Rust 不为 `static` 运行析构函数，把 `TempDir` 放进
@@ -150,9 +167,7 @@ pub struct Workspace {
 
 impl Workspace {
     pub fn new() -> Self {
-        let base = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("stress-workspaces");
+        let base = stress_output_directory().join("workspaces");
         fs::create_dir_all(&base).expect("无法创建压力测试工作区根");
         let directory = tempfile::Builder::new()
             .prefix(".stress-")
@@ -1599,15 +1614,14 @@ fn walk_usage(root: &Path, directory: &Path, usage: &mut TreeUsage) {
 /// 场景账本：把一行的实测占用与预期追加到 `<workspace>/ledger.jsonl`。
 ///
 /// 工作区随场景结束被回收（`TempDir` 的析构），因此同时镜像一份到
-/// `target/stress-ledger.jsonl`——能被长期引用的是这一份，以及
-/// `target/stress-report.jsonl` 里的同一组数值。
+/// [`stress_output_directory`] 下的 `ledger.jsonl`，作为本次运行的账面记录。
+/// 两份都是**本次运行的产物**：不进版本控制，并随 `cargo clean` 一起清掉；需要长期引用的
+/// 数值要摘录进 `docs/`（与 `record` 的口径一致）。
 pub fn append_ledger(workspace: &Workspace, entry: Value) {
     let line = json!({ "at": now_ms(), "entry": entry });
     let destinations = [
         workspace.root().join("ledger.jsonl"),
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("stress-ledger.jsonl"),
+        stress_output_directory().join("ledger.jsonl"),
     ];
     let lock = LEDGER_LOCK.lock();
     for path in destinations {
@@ -1967,14 +1981,13 @@ pub fn assert_cleanup_empty(workspace: &Workspace, repository: &Path) {
 // 报告
 // ---------------------------------------------------------------------------
 
-/// 追加一行 JSON Lines 到 `target/stress-report.jsonl`，字段可直接摘录进交接文档。
+/// 追加一行 JSON Lines 到 [`stress_output_directory`] 下的 `report.jsonl`，字段可直接摘录进
+/// 交接文档。
 ///
-/// `target/` 不进版本控制，因此能长期引用的证据是摘录进
-/// `docs/planning/current-handoff.md` 的汇总。
+/// `target/` 不进版本控制、又会被 `cargo clean` 清掉，因此能长期引用的证据只有摘录进
+/// `docs/` 的汇总，以及随版本控制的 `tests/perf-baseline.json`。
 pub fn record(scenario: &str, group: &str, tier: &str, outcome: &Outcome, extra: Value) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("stress-report.jsonl");
+    let path = stress_output_directory().join("report.jsonl");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -1999,9 +2012,7 @@ pub fn record(scenario: &str, group: &str, tier: &str, outcome: &Outcome, extra:
 /// 追加一行 B 组（崩溃）报告。强杀使进程来不及写 `--result`，因此没有峰值内存等字段，
 /// 只记录强杀位置、耗时与观察到的检查点数。
 pub fn record_crash(scenario: &str, group: &str, tier: &str, outcome: &CrashOutcome, extra: Value) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("stress-report.jsonl");
+    let path = stress_output_directory().join("report.jsonl");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -2023,9 +2034,7 @@ pub fn record_crash(scenario: &str, group: &str, tier: &str, outcome: &CrashOutc
 
 /// 追加一行「明确跳过」报告：磁盘预算不足时**跳过并如实报告**，而不是中途写坏磁盘。
 pub fn record_skip(scenario: &str, group: &str, tier: &str, reason: &str) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("stress-report.jsonl");
+    let path = stress_output_directory().join("report.jsonl");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
@@ -2041,11 +2050,9 @@ pub fn record_skip(scenario: &str, group: &str, tier: &str, reason: &str) {
 }
 
 /// 追加一行「性能基准」报告：基准跨越多条命令、没有单一 `Outcome`，因此只记录场景、
-/// 标签与耗时（毫秒）。数值落进同一份 `target/stress-report.jsonl`，便于长期比对。
+/// 标签与耗时（毫秒）。数值落进同一份 `report.jsonl`，便于同一轮内比对。
 pub fn record_measurement(scenario: &str, group: &str, label: &str, ms: f64, extra: Value) {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("stress-report.jsonl");
+    let path = stress_output_directory().join("report.jsonl");
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
