@@ -11,6 +11,8 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+## 0.3.0-alpha.2 - 2026-10-19
+
 ### Added
 
 - The repository now has a read-only storage dashboard. `get_repository_storage_overview`

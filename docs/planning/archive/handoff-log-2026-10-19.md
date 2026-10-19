@@ -1,7 +1,8 @@
-# 2026-10-19 批次记录：alpha1 压力测试收尾与 CPU 时间度量
+# 2026-10-19 批次记录：alpha1 压力测试收尾、CPU 时间度量与 alpha2 收口
 
 本文件归档 2026-10-19 完成的批次：给压力测试加入**子进程 CPU 时间**度量、补跑 alpha1 的
-发布前手动压力测试、修正 `stress_large` C4 的账本口径。完成后的当前状况改看
+发布前手动压力测试、修正 `stress_large` C4 的账本口径；同日下午维护者验收 alpha2 并收口，
+修订阶段 9 计划并切分 `0.3.0-alpha.2`（见第 7 节）。完成后的当前状况改看
 `../current-handoff.md`，未完成事项看 `../todo.md`。
 
 ## 1. 背景
@@ -101,3 +102,29 @@
   要拆阶段得在产品侧加度量（本次未做）。
 - 本轮跑 `stress_baseline` 时在 `D:\temp\Artworks` 留下的 `.lilith-write-lock.sqlite3`
   已清除；副本内 4 个 2026-10-08 的 `authenticity-preview-*` 目录是副本自带内容，未动。
+
+## 7. alpha2 收口、阶段 9 计划修订与 `0.3.0-alpha.2` 切分（同日下午批次）
+
+维护者验收 alpha2 并决定进入 alpha3，本节记录收口内容。
+
+- **alpha2 验收通过并归档**：阶段 6（设置页拆「仓储 / 空间 / 备份」；仓储空间仪表盘的数据库
+  口径与磁盘口径分开呈现；磁盘扫描按需、可取消、只统计仓库目录；备份页承接自动备份与本次运行
+  的最近结果；历史节点信息栏的 ChunkFile v1/v2 版本标签，只读文件头不改 schema）与同批次的两
+  项修复——同仓库写入排队（进程内写入闸门，计划与实施记录见
+  `repository-write-lock-plan-2026-10-18.md`）与仓库根 `temp/` 超期残留自动清扫——均视为通过
+  维护者验收。行为变化见 `../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节。
+- **遗留验收记入待办**：写入闸门的人工验收（复现原始场景、备份中保存/退出、真跨进程拒绝）与
+  `stress_concurrency` I/J 复跑仍未进行，移入 `../todo.md` 的「alpha2 遗留验收」段落。
+- **阶段 9 计划改向（2026-10-19 维护者复核）**：原 2026-10-17 口径（per-branch 全链恢复校对 +
+  `branch_notices` 共享告警）废止，理由是全链恢复校对与全库扫描的逐节点物化在覆盖上完全重叠，
+  且「近期改动优先」与 bit rot 威胁模型错配（刚写入的节点刚验过哈希，最久未动的旧节点才最需
+  要查）。阶段 9 改为「空闲完整性检查」：复用 scrub 内核、手动全库扫描与空闲增量两个入口，校
+  验状态挂 `history_nodes` 的节点级列，待查集合按 `created_ms` 最旧优先；默认关闭、窗口空闲门
+  控与 `should_yield` 让位沿用 2026-10-17 口径。v5 迁移随之缩减：不建 `branch_notices`，改为
+  建 `history_nodes` 校验列并删除 `branches` 旧校验三列。修订后的口径见
+  `../0.3-architecture-algorithm-plan-2026-10-05.md` §2.4。
+- **切分 `0.3.0-alpha.2`**（未打标签的过渡版本）：五处版本字段同步；`../CHANGELOG.md` 的
+  `## Unreleased`（alpha2 功能与修复、CPU 时间度量等）落为带日期小节；
+  `tools/release/verify-metadata.mjs` 登记 `0.3.0-alpha.2` → schema v4 并验证通过；许可清单经
+  `npm run legal` 重新生成；`README.md` 与 `../guides/release-policy.md` 的版本引用同步。本批
+  次不改产品代码，`git diff --check` 干净。

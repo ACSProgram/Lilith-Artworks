@@ -8,6 +8,19 @@
 
 ## 当前批次状态
 
+2026-10-19 批次（下午）：**alpha2 收口、阶段 9 计划修订与 `0.3.0-alpha.2` 切分**。维护者验收
+alpha2 并决定进入 alpha3：阶段 6（设置页拆「仓储 / 空间 / 备份」与仓储空间仪表盘）、同仓库
+写入排队修复与超期临时目录清扫均通过验收并归档；写入闸门的人工验收与 `stress_concurrency`
+I/J 复跑仍未进行，记入 `todo.md` 的「alpha2 遗留验收」。同日复核后把计划 §2.4 的「空闲链路
+校验重构」改向为「空闲完整性检查」：复用全库扫描（`scrub_repository_integrity`）的逐节点物化
+内核做空闲增量批次，校验状态挂 `history_nodes` 节点级列，`branches` 旧校验三列随 v5 迁移删除，
+**不再建 `branch_notices` 告警表**（阶段 7 迁移范围随之缩减）；门控、让位与默认关闭口径沿用
+2026-10-17 的决定。同日切分 `0.3.0-alpha.2`（未打标签的过渡版本）：五处版本字段同步，
+`CHANGELOG.md` 的 `## Unreleased` 落为带日期小节，`verify-metadata.mjs` 登记 alpha.2 → schema v4
+并验证通过，许可清单经 `npm run legal` 重新生成，README 与发行政策的版本引用已同步。本批次
+记录见 `archive/handoff-log-2026-10-19.md` 第 7 节，阶段 9 的修订说明与取舍见
+`0.3-architecture-algorithm-plan-2026-10-05.md` §2.4。
+
 2026-10-19 批次：**alpha1 压力测试收尾与 CPU 时间度量已完成并归档**——`stress_large` 四档
 （`default`/`large`/`heavy`/`extreme`，均 8/8）、`stress_scale`（5/5）、`stress_authenticity`
 的 `extreme` 档（16K，5/5）、`stress_baseline`（2/2）与 `stress_bench`（9/9）全部通过；
@@ -26,36 +39,19 @@
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：先由维护者验收 alpha2 阶段 6（设置拆分与仓储空间仪表盘）；随后进入 alpha3
-  （原阶段 7–9，含唯一一次 v4 → v5 迁移）。`manual` 档压力测试按发布前口径另行安排。
-  批次划分、依赖与阶段口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
-- **alpha2 阶段 6 已实现（待维护者验收）**：设置页左侧导航拆为「仓储 / 空间 / 备份」；仓储页
-  只保留仓库位置、完整性检查与存储格式，空间页承接仓储仪表盘与文件清理队列/扫描，备份页承接
-  自动备份、创建备份与本次运行的最近结果。空间仪表盘由只读数据库聚合
-  `get_repository_storage_overview` 与按需、可取消的仓库目录扫描
-  `scan_repository_storage_disk` 提供，两套口径分别显示。历史「当前分支」视图的节点信息栏新增
-  按需读取的 ChunkFile v1/v2 版本标签（`get_history_node_format`，只读文件头，不改 schema）。
-  仍保持 repository schema v4，不新增持久表。最近一次备份结果的持久化已记入 alpha3 阶段 7 的
-  v5 迁移计划（`repository_backup_runs`）。
-- **同仓库写入排队修复已实现（待维护者验收）**：同进程写操作改在按优先级排队的进程内写入闸门内
-  串行（Shutdown > Foreground > Interactive > Background，跨进程 owner lock 仍零等待拒绝）；
-  启动先回填仓库状态再 best-effort 重放清理队列；退出结算走 Shutdown 优先级并在渲染器侧重试
-  一次。计划与实施记录见 `archive/repository-write-lock-plan-2026-10-18.md`；原 `todo.md` 的
-  对应条目已随修复删除。人工验收（复现原始场景、备份中保存/退出、真跨进程拒绝）与
-  `stress_concurrency` I/J 复跑仍未进行。
-- **超期临时目录清理已实现（待维护者验收）**：仓库打开成功后自动清扫仓库根 `temp/`
-  （`cleanup::sweep_repository_temp`，挂在 `prepare_repository`）：只删除超期（30 分钟宽限期）的
-  `authenticity-preview-<UUID>` 预览会话目录与 `.tmp*` `NamedTempFile` 暂存残留，保留本进程当前
-  会话与命名不符的手工条目，删除失败只记日志。`todo.md` 原 P2 条目已随实现删除；作品级
-  `artworks/<id>/temp/` 的残留仍走扫描报告→确认流程（2026-10-18 批次）。
-- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项、alpha2 阶段 6 的验收项、0.3 前的
-  补强候选，以及阶段 7–9。
+- **下一步**：进入 alpha3（原阶段 7–9：画板条目多态、节点缩略图、空闲完整性检查），共用唯一
+  一次 v4 → v5 迁移，从阶段 7 开始；批次划分、依赖与阶段口径见
+  `0.3-architecture-algorithm-plan-2026-10-05.md`。`manual` 档压力测试按发布前口径另行安排。
+- alpha2 的实现记录（阶段 6 的设置拆分与仪表盘、写入闸门、临时目录清扫）已随验收归档，见
+  `archive/handoff-log-2026-10-19.md` 第 7 节与 `archive/repository-write-lock-plan-2026-10-18.md`；
+  行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节。
+- 未完成事项全部在 `todo.md`：alpha2 遗留验收项、0.3 前的补强候选，以及阶段 7–9。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 已切 `0.3.0-alpha.1`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
+- 版本：`dev` 已切 `0.3.0-alpha.2`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
   schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
   `docs/guides/release-policy.md` 单独决定。
 - repository schema v4；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。

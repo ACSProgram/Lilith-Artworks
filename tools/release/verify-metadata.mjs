@@ -58,6 +58,7 @@ const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1]
 const schemaByVersion = new Map([
   ["0.2.0", "4"],
   ["0.3.0-alpha.1", "4"],
+  ["0.3.0-alpha.2", "4"],
 ]);
 const expectedSchema = schemaByVersion.get(expected);
 if (!expectedSchema) {

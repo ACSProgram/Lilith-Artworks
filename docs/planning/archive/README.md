@@ -75,8 +75,9 @@
   且可取消）的设计、优先级与让位表。已实施完毕并补入两处实施期修正（`Gate::acquire` 入口复查
   `retired` 关闭「僵尸闸门」窗口、`OwnerAttempt` 装箱与 `#[must_use]`）；有效契约并入
   `docs/architecture/overview.md`、`docs/modules/library.md` 与 `docs/modules/history-and-backup.md`，
-  行为变化见 `../CHANGELOG.md` 的 `## Unreleased`；维护者人工验收（复现原始场景、备份中保存/
-  退出、真跨进程拒绝）待进行。
+  行为变化见 `../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节；维护者已于 2026-10-19 验收该修复（见
+  `handoff-log-2026-10-19.md` 第 7 节），人工验收场景与 `stress_concurrency` I/J 复跑仍记于
+  `../todo.md`。
 - `handoff-log-2026-10-19.md`：alpha1 压力测试收尾与 CPU 时间度量的批次记录——测试侧新增子进程
   CPU 时间（`GetProcessTimes` + 周期计数，双记墙钟、`#cpu` 基线键、50 ms 门槛、
   `LILITH_STRESS_PROFILE`、基线 `machine` 字段，零新 crate），release 档补跑四档大文件
@@ -84,4 +85,8 @@
   修正，P2/P8 的单轮采样改为三轮取最小以消除严格门的噪声误报，以及 `manual` 档改为只在正式
   发布前运行的维护者口径。有效契约并入
   `docs/guides/validation.md`、`docs/guides/release-policy.md` 与
-  `../user/stress-test-report.md`；当前批次状态改看 `../current-handoff.md`。
+  `../user/stress-test-report.md`；同日稍后追加 **alpha2 收口**——维护者验收阶段 6、同仓库写
+  入排队修复与超期临时目录清扫，遗留的人工验收与 `stress_concurrency` I/J 复跑移入
+  `../todo.md`；阶段 9 计划由「per-branch 全链校验 + `branch_notices`」改向为「空闲完整性检查
+  （复用 scrub 内核的空闲增量）」；同日切分 `0.3.0-alpha.2`（未打标签）。当前批次状态改看
+  `../current-handoff.md`。
