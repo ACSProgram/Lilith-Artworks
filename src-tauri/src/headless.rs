@@ -1005,7 +1005,8 @@ fn scrub_board_dds(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
         usecases::pin_board::scrub_board_dds(context)
     })?;
     Ok(json!({
-        "images": report.images,
+        // 契约键沿用 `images`；领域报告的 `bitmaps` 只统计有位图载荷的条目。
+        "images": report.bitmaps,
         "missing": report.missing,
         "corrupt": report.corrupt,
         "orphans": report.orphans,
