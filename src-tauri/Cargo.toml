@@ -57,6 +57,17 @@ codegen-units = 1
 lto = "thin"
 strip = true
 
+# `tauri dev` 默认使用本档。opt-level 0 会让依赖里的 C 代码（zstd、SQLite）与
+# 纯 Rust 编解码全部不优化，提交/恢复/素材板解码比 release 慢一个数量级。
+# 依赖整体提到 2、本 crate 取 1、调试信息只留行号表：热点路径接近 release，
+# 增量编译不受影响（无 LTO、codegen-units 不变），链接因调试信息瘦身更快。
+[profile.dev]
+opt-level = 1
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+opt-level = 2
+
 [target.'cfg(windows)'.dependencies]
 # `Win32_System_WindowsProgramming` 只为压力测试里的 CPU 周期计数
 # （`QueryProcessCycleTime`）开启：Windows 的 CPU 时间按 15.625 ms 的时钟中断记账，
