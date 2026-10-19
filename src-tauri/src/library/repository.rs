@@ -1163,6 +1163,72 @@ mod tests {
         assert!(path_error.contains("仓库存储路径无效"), "{path_error}");
     }
 
+    /// 检查点父节点名下的边按设计登记空路径（`delta_path = ''`），表示该边没有
+    /// 反向增量可读。空串不是路径，打开仓库时不能被当成非法相对路径拒绝。
+    #[test]
+    fn opening_repository_accepts_a_blank_edge_delta_path() {
+        let fixture = Fixture::new();
+        let connection = open(&fixture.root).unwrap();
+        let root_id = storage::new_id();
+        let head_id = storage::new_id();
+        let digest = "A".repeat(64);
+        let artwork_directory = format!("artworks/{}", fixture.artwork.artwork_id);
+        let nodes = [
+            (
+                root_id.clone(),
+                None,
+                format!("{artwork_directory}/snapshots/{root_id}.lbc"),
+            ),
+            (
+                head_id.clone(),
+                Some(root_id.clone()),
+                format!("{artwork_directory}/snapshots/{head_id}.lbc"),
+            ),
+        ];
+        for (id, parent_id, snapshot_path) in &nodes {
+            connection
+                .execute(
+                    "INSERT INTO history_nodes
+                     (id, artwork_id, created_on_branch_id, parent_id, title, note, commit_kind,
+                      is_checkpoint, created_ms, logical_size, chunk_file_size, sha256, chunk_count,
+                      snapshot_path, delta_path)
+                     VALUES (?1, ?2, ?3, ?4, '节点', '', 'manual', 1, 0, 10, 20, ?5, 1, ?6, NULL)",
+                    params![
+                        id,
+                        fixture.artwork.artwork_id,
+                        fixture.artwork.branch_id,
+                        parent_id,
+                        digest,
+                        snapshot_path
+                    ],
+                )
+                .unwrap();
+        }
+        connection
+            .execute(
+                "INSERT INTO history_edges (child_history_id, parent_history_id, delta_path, delta_size)
+                 VALUES (?1, ?2, '', 0)",
+                params![head_id, root_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        open_existing(&fixture.root).unwrap();
+
+        // 跳过空串不等于放过越界路径：边上的真实非法路径仍要被拒绝。
+        let connection = open(&fixture.root).unwrap();
+        connection
+            .execute(
+                "UPDATE history_edges SET delta_path = '../outside.lbd' WHERE child_history_id = ?1",
+                params![head_id],
+            )
+            .unwrap();
+        drop(connection);
+
+        let error = open_existing(&fixture.root).unwrap_err();
+        assert!(error.contains("history_edges.delta_path 无效"), "{error}");
+    }
+
     #[test]
     fn opening_repository_rejects_a_crafted_branch_source_path() {
         let fixture = Fixture::new();

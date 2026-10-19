@@ -441,13 +441,19 @@ pub(super) fn validate_repository_semantics(
     }
     drop(ids);
 
+    // 空串在这些列上是「没有文件」的记账值，不是待校验的路径：检查点父节点名下的
+    // 边按设计登记 `delta_path = ''`（取消检查点时重建），兼容列 `delta_path` 也
+    // 可能在节点持有 snapshot 时被清空。按路径校验会把这类合法仓库挡在门外。
+    // `snapshot_path` 没有这种记账语义（读取侧把非 NULL 一律当作可用快照），所以仍
+    // 要求它非 NULL，不放过空串。
     let mut paths = connection
         .prepare(
             "SELECT 'history_nodes.snapshot_path', snapshot_path FROM history_nodes
                WHERE snapshot_path IS NOT NULL
              UNION ALL SELECT 'history_nodes.delta_path', delta_path FROM history_nodes
-               WHERE delta_path IS NOT NULL
+               WHERE delta_path IS NOT NULL AND TRIM(delta_path) <> ''
              UNION ALL SELECT 'history_edges.delta_path', delta_path FROM history_edges
+               WHERE TRIM(delta_path) <> ''
              UNION ALL SELECT 'final_artifacts.source_path', source_path FROM final_artifacts
              UNION ALL SELECT 'certification_records.stored_path', stored_path
                FROM certification_records

@@ -48,7 +48,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
-**检查点只留 snapshot**：检查点的 snapshot 只有显式取消才释放，所以它是该节点的永久表示，子边不需要、也不会生成反向增量。提交与精简在父节点是检查点时跳过增量写入，只登记一条空边（`delta_path = ''`、`delta_size = 0`）保持「每个非根节点都有边记录」的图不变式；取消检查点时再按需重建这条增量（见下文）。判定条件是「父节点 `is_checkpoint = 1` 且持有 snapshot」，不是「父节点有 snapshot」——head 的 snapshot 会在下一次提交时释放，那时子边增量就是父节点的唯一表示，必须照常写入。绑定在其它分支 head 上、只被暂时保留的 snapshot 也属于后者。
+**检查点只留 snapshot**：检查点的 snapshot 只有显式取消才释放，所以它是该节点的永久表示，子边不需要、也不会生成反向增量。提交与精简在父节点是检查点时跳过增量写入，只登记一条空边（`delta_path = ''`、`delta_size = 0`）保持「每个非根节点都有边记录」的图不变式；取消检查点时再按需重建这条增量（见下文）。空串在读取侧一律按「没有增量」处理：`load_node` 归一为 `None`，打开仓库的受控路径校验也跳过它，不把这条合法记账当成非法相对路径。判定条件是「父节点 `is_checkpoint = 1` 且持有 snapshot」，不是「父节点有 snapshot」——head 的 snapshot 会在下一次提交时释放，那时子边增量就是父节点的唯一表示，必须照常写入。绑定在其它分支 head 上、只被暂时保留的 snapshot 也属于后者。
 
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内先一次收集契约层提供的完整引用清单，再逐路径判定当前图是否仍引用它（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 

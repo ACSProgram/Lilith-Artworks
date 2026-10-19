@@ -130,6 +130,15 @@ decision, so an untagged version is transitional.
 - `history::load_node` no longer returns an empty delta path as `Some("")`; a
   checkpoint edge without a delta is reported as `None`, and chain resolution
   rejects an empty path with the node id instead of opening the repository root.
+- Opening a repository no longer rejects the blank edge paths the cleanup flow
+  leaves behind. A checkpoint's child edge records `delta_path = ''` to mean "no
+  reverse delta", but the read-side path validation treated every row as a real
+  relative path and refused to open the repository with
+  `history_edges.delta_path 无效：仓库存储路径无效` right after a cleanup run.
+  Blank entries in `history_edges.delta_path` and in the compatible
+  `history_nodes.delta_path` column are now skipped as "no file", matching the
+  reference inventory and `load_node`. `snapshot_path` keeps its non-null
+  requirement, since readers treat any non-null value as a usable snapshot.
 - The stress suite's commit crash/cancel points line up with the current
   cancellation boundaries again. Adding the thumbnail-extraction boundary
   shifted every later checkpoint by one, so `stress_crash` B1/B4 and
