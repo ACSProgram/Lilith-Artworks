@@ -782,7 +782,7 @@ describe("App repository switching", () => {
     await waitFor(() => expect(appApi.retryFileCleanup).toHaveBeenCalledWith(["cleanup-external"]));
   });
 
-  it("scans unreferenced files and cleans the confirmed candidates", async () => {
+  it("scans junk files and cleans the confirmed candidates", async () => {
     const repositoryPath = "C:\\repositories\\A";
     appApi.getSettings.mockResolvedValue(settings(repositoryPath));
     appApi.getRepositoryStatus.mockResolvedValue({
@@ -795,7 +795,7 @@ describe("App repository switching", () => {
     libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
     appApi.scanRepositoryUnreferenced.mockResolvedValue([
       { path: "artworks/artwork-1/snapshots/orphan.lbc", byteSize: 2048, reason: "历史快照未被引用" },
-      { path: "artworks/artwork-1/deltas/a-to-b.lbd", byteSize: 1024, reason: "历史增量未被引用" },
+      { path: "artworks/artwork-1/deltas/a-to-b.lbd", byteSize: 1024, reason: "检查点已持有快照，冗余增量" },
     ]);
     appApi.cleanupRepositoryUnreferenced.mockResolvedValue({ cleanedCount: 2, pendingCount: 0, failures: [] });
 
@@ -805,9 +805,10 @@ describe("App repository switching", () => {
     fireEvent.click(await screen.findByRole("button", { name: "空间" }));
     fireEvent.click(await screen.findByRole("button", { name: "开始扫描" }));
 
-    expect(await screen.findByText("发现 2 个未引用文件")).toBeTruthy();
+    expect(await screen.findByText("发现 2 个可清理文件")).toBeTruthy();
     expect(screen.getByText("artworks/artwork-1/snapshots/orphan.lbc")).toBeTruthy();
     expect(screen.getByText("历史快照未被引用 · 2.00 KiB")).toBeTruthy();
+    expect(screen.getByText("检查点已持有快照，冗余增量 · 1.00 KiB")).toBeTruthy();
 
     fireEvent.click(screen.getByRole("button", { name: "清理这些文件" }));
     fireEvent.click(await screen.findByRole("button", { name: "清理 2 个文件" }));
@@ -816,7 +817,7 @@ describe("App repository switching", () => {
       "artworks/artwork-1/snapshots/orphan.lbc",
       "artworks/artwork-1/deltas/a-to-b.lbd",
     ]));
-    expect(await screen.findByText("已清理 2 个未引用文件。")).toBeTruthy();
+    expect(await screen.findByText("已清理 2 个垃圾文件。")).toBeTruthy();
   });
 
   it("settles the open pin board before releasing the previous repository", async () => {

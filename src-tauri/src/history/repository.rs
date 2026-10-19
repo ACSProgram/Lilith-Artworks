@@ -331,6 +331,31 @@ pub(crate) fn node_storage_path(root: &Path, history_id: &str) -> Result<Option<
         .flatten())
 }
 
+/// 节点是否以检查点 snapshot 作为**永久表示**。
+///
+/// 检查点的 snapshot 只有显式取消才会释放，因此子边的反向增量不会被任何读取
+/// 路径消费（物化从这份 snapshot 起步），提交与精简都不必写它；取消检查点时再
+/// 按需重建。分支 head 的 snapshot 会在下一次提交时释放，不属于这一类——那时
+/// 子边增量就是节点的唯一表示，必须照常写入。
+pub(crate) fn checkpoint_snapshot_holder(root: &Path, history_id: &str) -> Result<bool, String> {
+    checkpoint_snapshot_holder_in(&storage::open(root)?, history_id)
+}
+
+/// 同一判定的事务内版本：提交在事务里读它，与登记空边在同一可见性下。
+fn checkpoint_snapshot_holder_in(
+    connection: &rusqlite::Connection,
+    history_id: &str,
+) -> Result<bool, String> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM history_nodes
+                            WHERE id = ?1 AND is_checkpoint = 1 AND snapshot_path IS NOT NULL)",
+            [history_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)
+}
+
 /// Load one node's derived thumbnail. The graph/list queries never select the
 /// BLOB, so previews are fetched only when the inspector asks for them.
 pub(crate) fn load_thumbnail(
@@ -364,6 +389,10 @@ pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
+/// 读取单个历史节点。
+///
+/// `delta_path` 为 `None` 表示该节点没有可用的反向增量：检查点父节点名下的边
+/// 只登记空路径（它永远不会被读取，取消检查点时才重建），根节点则可能完全没有边。
 fn load_node_from(
     connection: &rusqlite::Connection,
     history_id: &str,
@@ -371,7 +400,7 @@ fn load_node_from(
     connection
         .query_row(
             "SELECT node.id, node.artwork_id, node.parent_id, node.sha256, node.snapshot_path,
-                    COALESCE(edge.delta_path, node.delta_path)
+                    NULLIF(TRIM(COALESCE(edge.delta_path, node.delta_path)), '')
              FROM history_nodes node
              LEFT JOIN history_edges edge ON edge.child_history_id = node.id
              WHERE node.id = ?1",
@@ -528,16 +557,30 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<Strin
             ],
         )
         .map_err(storage::database_error)?;
-    if let (Some(parent_id), Some(delta_path), Some(delta_size)) =
-        (commit.parent_id, commit.delta_path, commit.delta_size)
-    {
-        transaction.execute(
-            "INSERT INTO history_edges (child_history_id, parent_history_id, delta_path, delta_size)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![commit.id, parent_id, delta_path, i64::try_from(delta_size).map_err(|_| "delta 文件大小超出范围")?]
-        ).map_err(storage::database_error)?;
-    } else if commit.parent_id.is_some() {
-        return Err("非根历史节点缺少反向 delta".into());
+    if let Some(parent_id) = commit.parent_id {
+        // 检查点父节点以 snapshot 作永久表示，子边增量不会被读取；此时登记一条
+        // 空边，保持「每个非根节点都有边记录」的图不变式，取消检查点时再填回
+        // 真实路径。其余情况下缺少增量就意味着父节点失去唯一表示，必须拒绝。
+        let parent_holds_checkpoint = checkpoint_snapshot_holder_in(&transaction, parent_id)?;
+        match (commit.delta_path, commit.delta_size) {
+            (Some(delta_path), Some(delta_size)) => {
+                transaction.execute(
+                    "INSERT INTO history_edges (child_history_id, parent_history_id, delta_path, delta_size)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![commit.id, parent_id, delta_path, i64::try_from(delta_size).map_err(|_| "delta 文件大小超出范围")?]
+                ).map_err(storage::database_error)?;
+            }
+            (None, None) if parent_holds_checkpoint => {
+                transaction
+                    .execute(
+                        "INSERT INTO history_edges (child_history_id, parent_history_id, delta_path, delta_size)
+                         VALUES (?1, ?2, '', 0)",
+                        params![commit.id, parent_id],
+                    )
+                    .map_err(storage::database_error)?;
+            }
+            _ => return Err("非根历史节点缺少反向 delta".into()),
+        }
     }
     transaction
         .execute(
@@ -794,7 +837,104 @@ pub(crate) fn mark_checkpoint(root: &Path, history_id: &str) -> Result<(), Strin
     Ok(())
 }
 
+/// 取消检查点前需要的信息：唯一子节点与子边反向增量的现状。
+pub(crate) struct CheckpointReleasePlan {
+    pub(crate) child_id: String,
+    /// 子边已有的反向增量（仓库内相对路径、字节数）；为空表示必须现场重建。
+    pub(crate) existing_delta: Option<(String, u64)>,
+}
+
+/// 只读：判断一个检查点能否取消，以及取消前是否必须重建反向增量。
+///
+/// 返回 `Ok(None)` 表示该节点本就不是检查点（无操作）。不能取消的情况与
+/// [`unmark_checkpoint`] 完全一致：分支 head、分支起点与分叉点必须保留检查点，
+/// 该检查点是恢复祖先历史所需的唯一 snapshot 时也不能取消。
+pub(crate) fn plan_checkpoint_release(
+    root: &Path,
+    history_id: &str,
+) -> Result<Option<CheckpointReleasePlan>, String> {
+    let connection = storage::open(root)?;
+    ensure_checkpoint_releasable(&connection, history_id)?;
+    let value: Option<(bool, Option<String>)> = connection
+        .query_row(
+            "SELECT node.is_checkpoint, node.snapshot_path
+             FROM history_nodes node WHERE node.id = ?1",
+            [history_id],
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let (marked, _snapshot) = value.ok_or("找不到历史节点")?;
+    if !marked {
+        return Ok(None);
+    }
+    let child: Option<(String, String, i64)> = connection
+        .query_row(
+            "SELECT child.id, edge.delta_path, edge.delta_size
+             FROM history_nodes child
+             JOIN history_edges edge ON edge.child_history_id = child.id
+             WHERE child.parent_id = ?1",
+            [history_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let Some((child_id, delta_path, delta_size)) = child else {
+        return Err("取消检查点时找不到唯一子节点的反向增量".into());
+    };
+    // 记录里的路径可能已经被垃圾扫描删掉（那时边上的路径还没有清空），以磁盘为准：
+    // 文件不在就按「需要重建」处理。
+    let delta_path = delta_path.trim().to_owned();
+    let present = !delta_path.is_empty()
+        && storage::resolve_path(root, &delta_path)
+            .map(|path| path.is_file())
+            .unwrap_or(false);
+    Ok(Some(CheckpointReleasePlan {
+        child_id,
+        existing_delta: present
+            .then(|| (delta_path, u64::try_from(delta_size).unwrap_or_default())),
+    }))
+}
+
+/// 检查点能否取消的共用判定：被分支或分叉钉住的检查点必须保留，且取消后仍然
+/// 要有可用的后代 snapshot，否则这个节点从此无法物化。
+fn ensure_checkpoint_releasable(
+    connection: &rusqlite::Connection,
+    history_id: &str,
+) -> Result<(), String> {
+    let forced: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM branches WHERE head_history_id = ?1 OR created_from_history_id = ?1)
+                OR (SELECT COUNT(*) FROM history_nodes WHERE parent_id = ?1) > 1",
+            [history_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if forced {
+        return Err("分支 head、分支起点或分叉点必须保留为检查点".into());
+    }
+    let alternative: bool = connection
+        .query_row(
+            "WITH RECURSIVE descendants(id) AS (
+               SELECT id FROM history_nodes WHERE parent_id = ?1
+               UNION ALL SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
+             ) SELECT EXISTS(SELECT 1 FROM history_nodes WHERE id IN (SELECT id FROM descendants) AND snapshot_path IS NOT NULL)",
+            [history_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if !alternative {
+        return Err("该检查点是恢复祖先历史所需的唯一 snapshot，不能取消".into());
+    }
+    Ok(())
+}
+
 /// 取消一个普通检查点，释放其 snapshot 并切回唯一子节点的反向增量。
+///
+/// `rebuilt_delta` 是调用方在事务外现场重建的增量（仓库内相对路径与字节数）。
+/// 提交路径不再为检查点父节点写增量，所以取消时子边通常是空的，必须由
+/// `backup::restore::build_reverse_delta` 重新算出一条再进事务；子边已经持有
+/// 增量（旧仓库）时传 `None`，直接沿用。
 ///
 /// 返回 `Ok(None)` 表示该节点本就不是检查点（无操作）；返回 `Ok(Some(ids))`
 /// 表示已释放，被释放的 snapshot 在同一事务内入队 `pending_file_cleanup`
@@ -802,17 +942,11 @@ pub(crate) fn mark_checkpoint(root: &Path, history_id: &str) -> Result<(), Strin
 pub(crate) fn unmark_checkpoint(
     root: &Path,
     history_id: &str,
+    rebuilt_delta: Option<(&str, u64)>,
 ) -> Result<Option<Vec<String>>, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
-    let forced: bool = transaction.query_row(
-        "SELECT EXISTS(SELECT 1 FROM branches WHERE head_history_id = ?1 OR created_from_history_id = ?1)
-                OR (SELECT COUNT(*) FROM history_nodes WHERE parent_id = ?1) > 1",
-        [history_id], |row| row.get(0)
-    ).map_err(storage::database_error)?;
-    if forced {
-        return Err("分支 head、分支起点或分叉点必须保留为检查点".into());
-    }
+    ensure_checkpoint_releasable(&transaction, history_id)?;
     let value: Option<(bool, Option<String>, String)> = transaction
         .query_row(
             "SELECT node.is_checkpoint, node.snapshot_path, node.artwork_id
@@ -826,28 +960,50 @@ pub(crate) fn unmark_checkpoint(
     if !marked {
         return Ok(None);
     }
-    let child_delta_available: bool = transaction
+    let child: Option<(String, String)> = transaction
         .query_row(
-            "SELECT EXISTS(SELECT 1
+            "SELECT child.id, edge.delta_path
              FROM history_nodes child
              JOIN history_edges edge ON edge.child_history_id = child.id
-             WHERE child.parent_id = ?1)",
+             WHERE child.parent_id = ?1",
             [history_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(storage::database_error)?;
-    let alternative: bool = transaction.query_row(
-        "WITH RECURSIVE descendants(id) AS (
-           SELECT id FROM history_nodes WHERE parent_id = ?1
-           UNION ALL SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-         ) SELECT EXISTS(SELECT 1 FROM history_nodes WHERE id IN (SELECT id FROM descendants) AND snapshot_path IS NOT NULL)",
-        [history_id], |row| row.get(0)
-    ).map_err(storage::database_error)?;
-    if !alternative {
-        return Err("该检查点是恢复祖先历史所需的唯一 snapshot，不能取消".into());
-    }
-    if !child_delta_available {
+    let Some((child_id, edge_delta_path)) = child else {
         return Err("取消检查点时找不到唯一子节点的反向增量".into());
+    };
+    let mut cleanup_ids = Vec::new();
+    match rebuilt_delta {
+        Some((relative, size)) => {
+            transaction
+                .execute(
+                    "UPDATE history_edges SET delta_path = ?2, delta_size = ?3
+                     WHERE child_history_id = ?1",
+                    params![
+                        child_id,
+                        relative,
+                        i64::try_from(size).map_err(|_| "增量大小超出范围")?
+                    ],
+                )
+                .map_err(storage::database_error)?;
+            // 旧路径不再被这条边引用：磁盘上若还留着另一个名字的旧增量，交给清理
+            // 账本。同名路径必须排除——重建就落在同一个文件名上，入队会在提交后把
+            // 刚写出的增量删掉；路径为空或文件已不存在时也不会入队。
+            let previous = edge_delta_path.trim();
+            if !previous.is_empty() && previous != relative {
+                cleanup_ids.extend(cleanup::enqueue_released_repository_files(
+                    &transaction,
+                    std::slice::from_ref(&edge_delta_path),
+                    "history_checkpoint_delta_replaced",
+                )?);
+            }
+        }
+        None if edge_delta_path.trim().is_empty() => {
+            return Err("取消检查点时找不到唯一子节点的反向增量".into());
+        }
+        None => {}
     }
     transaction
         .execute(
@@ -862,7 +1018,7 @@ pub(crate) fn unmark_checkpoint(
         )
         .map_err(storage::database_error)?;
     // The released snapshot is replaced by the child edge reverse delta, which
-    // the same statement above already recorded on this node.
+    // the statements above already recorded on this node.
     let stored: Option<String> = transaction
         .query_row(
             "SELECT delta_path FROM history_nodes WHERE id = ?1",
@@ -873,14 +1029,13 @@ pub(crate) fn unmark_checkpoint(
     if stored.is_none() {
         return Err("取消检查点后无法登记增量存储".into());
     }
-    let cleanup_ids = match snapshot_path {
-        Some(relative) => cleanup::enqueue_released_repository_files(
+    if let Some(relative) = snapshot_path {
+        cleanup_ids.extend(cleanup::enqueue_released_repository_files(
             &transaction,
             &[relative],
             "history_checkpoint_release",
-        )?,
-        None => Vec::new(),
-    };
+        )?);
+    }
     // 取消检查点把 snapshot 换回反向增量，按作品粗粒度失效校验状态。
     clear_artwork_verification(&transaction, &artwork_id)?;
     transaction.commit().map_err(storage::database_error)?;
@@ -2425,6 +2580,72 @@ mod tests {
         let error = delete_subtree(&fixture.root, "cut", &fixture.main_branch_id).unwrap_err();
 
         assert!(error.contains("数据库操作失败"), "{error}");
+    }
+
+    /// 只有检查点父节点可以在没有反向增量时提交；其余情况必须拒绝——那条增量
+    /// 是父节点释放 snapshot 之后的唯一表示。
+    #[test]
+    fn only_a_checkpoint_parent_may_commit_without_a_reverse_delta() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        mark_checkpoint(&fixture.root, "root").unwrap();
+
+        commit(
+            &fixture.root,
+            HistoryCommit {
+                id: "child-a",
+                branch_id: &fixture.main_branch_id,
+                parent_id: Some("root"),
+                title: "child-a",
+                note: "",
+                commit_kind: "manual",
+                created_ms: 2,
+                logical_size: 1,
+                chunk_file_size: 1,
+                sha256: &format!("{:064X}", 2),
+                chunk_count: 1,
+                snapshot_path: "artworks/child-a.snapshot",
+                delta_path: None,
+                delta_size: None,
+                thumbnail: None,
+                thumbnail_version: None,
+            },
+        )
+        .unwrap();
+        let edge: (String, i64) = storage::open(&fixture.root)
+            .unwrap()
+            .query_row(
+                "SELECT delta_path, delta_size FROM history_edges WHERE child_history_id = 'child-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(edge, (String::new(), 0), "检查点父节点的边应留空");
+        assert!(checkpoint_snapshot_holder(&fixture.root, "root").unwrap());
+
+        let rejected = commit(
+            &fixture.root,
+            HistoryCommit {
+                id: "child-b",
+                branch_id: &fixture.main_branch_id,
+                parent_id: Some("child-a"),
+                title: "child-b",
+                note: "",
+                commit_kind: "manual",
+                created_ms: 3,
+                logical_size: 1,
+                chunk_file_size: 1,
+                sha256: &format!("{:064X}", 3),
+                chunk_count: 1,
+                snapshot_path: "artworks/child-b.snapshot",
+                delta_path: None,
+                delta_size: None,
+                thumbnail: None,
+                thumbnail_version: None,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(rejected, "非根历史节点缺少反向 delta");
     }
 
     #[test]

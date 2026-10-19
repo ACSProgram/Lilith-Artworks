@@ -342,8 +342,8 @@ export function SettingsDialog() {
                   <div className="settings-preference-row">
                     <span className="settings-row-icon"><SearchCheck aria-hidden="true" size={17} /></span>
                     <span className="settings-row-copy is-descriptive">
-                      <strong>未引用文件扫描</strong>
-                      <small>查找未被任何记录引用的历史快照、增量与画板图片；只报告不删除，确认后才清理。</small>
+                      <strong>垃圾文件扫描</strong>
+                      <small>扫描仓库里可回收的冗余文件；只报告不删除，确认后才清理。</small>
                     </span>
                     <button
                       className="secondary-button"
@@ -408,7 +408,7 @@ export function SettingsDialog() {
                 {scanCandidates && (
                   <div className="cleanup-scan-result" role="status">
                     <header>
-                      <strong>{scanCandidates.length > 0 ? `发现 ${scanCandidates.length} 个未引用文件` : "没有发现未引用文件"}</strong>
+                      <strong>{scanCandidates.length > 0 ? `发现 ${scanCandidates.length} 个可清理文件` : "没有发现可清理的文件"}</strong>
                       <div>
                         <button className="text-button" type="button" onClick={() => setScanCandidates(null)}>关闭</button>
                         {scanCandidates.length > 0 && (
@@ -774,9 +774,9 @@ export function SettingsDialog() {
           view={{
             icon: <Trash2 size={20} />,
             eyebrow: "不可撤销",
-            title: "清理未引用文件",
-            subject: `${scanCandidates.length} 个未被引用的文件`,
-            description: "这些历史快照、增量或画板图片没有被任何记录引用，删除后无法恢复。",
+            title: "清理垃圾文件",
+            subject: `${scanCandidates.length} 个可清理的文件`,
+            description: "这些文件删除后无法恢复；检查点冗余增量会在取消该检查点时重建。",
             detail: "清理前会再次复查引用与文件摘要；内容已变化或重新被引用的文件会被保留。",
             action: `清理 ${scanCandidates.length} 个文件`,
             danger: true,

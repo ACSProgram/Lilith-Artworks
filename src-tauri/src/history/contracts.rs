@@ -4,12 +4,24 @@ use rusqlite::Connection;
 
 use crate::{
     contracts::{
-        ManagedFile, ManagedFileOwner, ReferenceInventory, ScanCandidateFile, ValidationOutcome,
+        ManagedFile, ManagedFileOwner, RedundantFile, ReferenceInventory, ScanCandidateFile,
+        ValidationOutcome,
     },
     storage,
 };
 
 /// 历史 snapshot / delta 的引用清单。
+///
+/// 口径是「当前存储模型真正会读的文件」，而不是「数据库里还写着路径的文件」：
+///
+/// - 节点持有 snapshot 时，它的物化起点就是这份 snapshot，边上的反向增量永远不会
+///   被读取；只有**检查点**的 snapshot 是永久保留的（head 的 snapshot 会在下一次
+///   提交时释放，那条边增量随后仍要用），所以只有检查点父节点的边增量不进清单。
+/// - `history_nodes.delta_path` 是兼容列：节点已有 snapshot 时它只是遗留记账，
+///   不再代表任何读取路径。
+///
+/// 被排除的路径由 [`Self::redundant_targets`] 按「已多余」给出原因，垃圾扫描因此
+/// 能报出并清理它们；取消检查点时会按需重建反向增量。
 pub(crate) struct HistoryReferenceInventory;
 
 impl ReferenceInventory for HistoryReferenceInventory {
@@ -19,11 +31,14 @@ impl ReferenceInventory for HistoryReferenceInventory {
                 "SELECT snapshot_path, 0 FROM history_nodes
                    WHERE snapshot_path IS NOT NULL AND TRIM(snapshot_path) <> ''
                  UNION ALL
-                 SELECT delta_path, 1 FROM history_nodes
-                   WHERE delta_path IS NOT NULL AND TRIM(delta_path) <> ''
+                 SELECT node.delta_path, 1 FROM history_nodes node
+                   WHERE node.delta_path IS NOT NULL AND TRIM(node.delta_path) <> ''
+                     AND node.snapshot_path IS NULL
                  UNION ALL
-                 SELECT delta_path, 2 FROM history_edges
-                   WHERE TRIM(delta_path) <> ''",
+                 SELECT edge.delta_path, 2 FROM history_edges edge
+                   JOIN history_nodes parent ON parent.id = edge.parent_history_id
+                   WHERE TRIM(edge.delta_path) <> ''
+                     AND NOT (parent.is_checkpoint = 1 AND parent.snapshot_path IS NOT NULL)",
             )
             .map_err(storage::database_error)?;
         let rows = statement
@@ -57,10 +72,14 @@ impl ReferenceInventory for HistoryReferenceInventory {
                 "SELECT EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1)"
             }
             ManagedFileOwner::HistoryNodeDelta => {
-                "SELECT EXISTS(SELECT 1 FROM history_nodes WHERE delta_path = ?1)"
+                "SELECT EXISTS(SELECT 1 FROM history_nodes node
+                                WHERE node.delta_path = ?1 AND node.snapshot_path IS NULL)"
             }
             ManagedFileOwner::HistoryEdgeDelta => {
-                "SELECT EXISTS(SELECT 1 FROM history_edges WHERE delta_path = ?1)"
+                "SELECT EXISTS(SELECT 1 FROM history_edges edge
+                                 JOIN history_nodes parent ON parent.id = edge.parent_history_id
+                                WHERE edge.delta_path = ?1
+                                  AND NOT (parent.is_checkpoint = 1 AND parent.snapshot_path IS NOT NULL))"
             }
             owner => return Ok(ValidationOutcome::OwnerMismatch(owner)),
         };
@@ -100,6 +119,67 @@ impl ReferenceInventory for HistoryReferenceInventory {
             "备份或恢复中断后残留的临时文件",
             files,
         )
+    }
+
+    fn redundant_targets(&self, connection: &Connection) -> Result<Vec<RedundantFile>, String> {
+        // 0 = 检查点父节点名下的子边增量；1 = 已持有 snapshot 的节点上那列兼容 `delta_path`。
+        let mut statement = connection
+            .prepare(
+                "SELECT edge.delta_path, 0 FROM history_edges edge
+                   JOIN history_nodes parent ON parent.id = edge.parent_history_id
+                  WHERE TRIM(edge.delta_path) <> ''
+                    AND parent.is_checkpoint = 1 AND parent.snapshot_path IS NOT NULL
+                 UNION
+                 SELECT node.delta_path, 1 FROM history_nodes node
+                  WHERE node.delta_path IS NOT NULL AND TRIM(node.delta_path) <> ''
+                    AND node.snapshot_path IS NOT NULL
+                 ORDER BY 2",
+            )
+            .map_err(storage::database_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(storage::database_error)?;
+        let mut files = Vec::new();
+        for row in rows {
+            let (path, kind) = row.map_err(storage::database_error)?;
+            files.push(RedundantFile {
+                path,
+                reason: if kind == 0 {
+                    "检查点已持有快照，冗余增量"
+                } else {
+                    "节点已持有快照，遗留增量记录"
+                },
+            });
+        }
+        Ok(files)
+    }
+
+    fn forget_deleted(&self, connection: &Connection, paths: &[String]) -> Result<(), String> {
+        for path in paths {
+            // 只清两类多余记录：父节点仍持有检查点 snapshot 的边（取消检查点时
+            // 会重新登记），以及节点持有 snapshot 时那列兼容 `delta_path`。
+            // 仍在使用的引用（父节点没有 snapshot）一律不动。
+            connection
+                .execute(
+                    "UPDATE history_edges SET delta_path = '', delta_size = 0
+                      WHERE delta_path = ?1
+                        AND parent_history_id IN
+                            (SELECT id FROM history_nodes
+                              WHERE is_checkpoint = 1 AND snapshot_path IS NOT NULL)",
+                    [path],
+                )
+                .map_err(storage::database_error)?;
+            connection
+                .execute(
+                    "UPDATE history_nodes SET delta_path = NULL
+                      WHERE delta_path = ?1 AND snapshot_path IS NOT NULL",
+                    [path],
+                )
+                .map_err(storage::database_error)?;
+        }
+        Ok(())
     }
 }
 

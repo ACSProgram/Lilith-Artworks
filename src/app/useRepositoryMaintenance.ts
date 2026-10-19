@@ -29,7 +29,7 @@ export type SettingsOperation =
  * 设置页长任务在后端上报的运行域。
  *
  * 运行状态的 `operation` 是 `OperationDomain` 的序列化值而不是命令名：完整性扫描、
- * 整仓备份与磁盘扫描都属 `maintenance`，未引用扫描属 `cleanup`。据此只认设置页
+ * 整仓备份与磁盘扫描都属 `maintenance`，垃圾文件扫描属 `cleanup`。据此只认设置页
  * 自己的任务，发布（`authenticity`）、素材板（`pinBoard`）等前台任务与后台调度
  * 任务（`taskKind` 不是 `userOperation`、`operation` 为 `background`）都不会把
  * 进度串到这个弹窗。
@@ -70,7 +70,7 @@ export interface RepositoryMaintenance {
 type Notify = (message: string | null) => void;
 
 /**
- * 仓库维护流程（完整性扫描、整仓备份、未引用文件扫描与待清理队列）的前端编排。
+ * 仓库维护流程（完整性扫描、整仓备份、垃圾文件扫描与待清理队列）的前端编排。
  * 长任务进度经 `RuntimeProgressProvider` 轮询；命令返回的最终状态仍是权威。
  */
 export function useRepositoryMaintenance(
@@ -352,8 +352,8 @@ export function useRepositoryMaintenance(
       setScanCandidates(candidates);
       notify(
         candidates.length > 0
-          ? `未引用文件扫描完成：发现 ${candidates.length} 个可清理文件，请确认后清理。`
-          : "未引用文件扫描完成：没有发现可清理的未引用文件。",
+          ? `垃圾文件扫描完成：发现 ${candidates.length} 个可清理文件，请确认后清理。`
+          : "垃圾文件扫描完成：没有发现可清理的文件。",
       );
     } catch (error) {
       notify(errorMessage(error));
@@ -375,7 +375,7 @@ export function useRepositoryMaintenance(
       if (report.failures.length > 0) {
         notify(`已清理 ${report.cleanedCount} 个文件，${report.failures.length} 个文件未能删除，已加入待清理队列可重试。`);
       } else {
-        notify(`已清理 ${report.cleanedCount} 个未引用文件。`);
+        notify(`已清理 ${report.cleanedCount} 个垃圾文件。`);
       }
     } catch (error) {
       notify(errorMessage(error));
@@ -407,7 +407,7 @@ export function useRepositoryMaintenance(
         progressLabel: settingsOperation === "repository-backup"
           ? "正在准备创建备份"
           : settingsOperation === "unreferenced-scan"
-            ? "正在准备未引用文件扫描"
+            ? "正在准备垃圾文件扫描"
             : settingsOperation === "storage-scan"
               ? "正在准备磁盘占用扫描"
               : "正在准备完整性检查",

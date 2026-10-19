@@ -64,6 +64,18 @@ pub(crate) struct ScanCandidateFile {
     pub(crate) reason: &'static str,
 }
 
+/// 一条仍被记录指向、但当前存储模型已经不需要的受管理文件。
+///
+/// 与 [`ManagedFile`] 相反：它**不进**引用清单（因此可以被清理），扫描时用领域
+/// 自己的话说明为什么多余，而不是笼统报成「未被引用」。典型例子是父节点已经持有
+/// 检查点 snapshot 之后残留的子边反向增量——物化从父节点自己的 snapshot 起步，
+/// 这条增量永远不会被读取，取消检查点时会按需重建。
+#[derive(Debug, Clone)]
+pub(crate) struct RedundantFile {
+    pub(crate) path: String,
+    pub(crate) reason: &'static str,
+}
+
 /// 一个领域对受管理文件清单与文件布局的公开视图。
 ///
 /// 阶段 5 按计划冻结 `collect_targets` / `validate_target` 的签名：前者已用于
@@ -86,6 +98,23 @@ pub(crate) trait ReferenceInventory: Send + Sync {
         _artwork_directory: &Path,
         _files: &mut Vec<ScanCandidateFile>,
     ) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// 领域内**已经多余**的受管理文件：记录还在，但当前存储模型不会再读它。
+    ///
+    /// 这些路径不得同时出现在 [`Self::collect_targets`] 里，否则清理前的引用复查
+    /// 会把它们保留下来；扫描据此给出比「未被引用」更准确的原因。
+    fn redundant_targets(&self, _connection: &Connection) -> Result<Vec<RedundantFile>, String> {
+        Ok(Vec::new())
+    }
+
+    /// 即将删除的路径在领域记录里失去意义时，清掉指向它的那条记录。
+    ///
+    /// 实现必须自带「这条记录确实多余」的判定（例如父节点仍持有检查点 snapshot），
+    /// **不得**仅因为调用方传入路径就清除一条仍在使用的引用：清理只负责删除文件，
+    /// 记录是否还有读者由领域决定。默认实现不做任何事。
+    fn forget_deleted(&self, _connection: &Connection, _paths: &[String]) -> Result<(), String> {
         Ok(())
     }
 }
@@ -147,6 +176,32 @@ impl ReferenceInventories {
     ) -> Result<(), String> {
         for inventory in &self.inventories {
             inventory.scan_candidates(artwork_directory, files)?;
+        }
+        Ok(())
+    }
+
+    /// 汇总各领域的「仍被记录指向但已多余」路径，同一路径保留首次出现的原因。
+    pub(crate) fn collect_redundant(
+        &self,
+        connection: &Connection,
+    ) -> Result<HashMap<String, &'static str>, String> {
+        let mut redundant = HashMap::new();
+        for inventory in &self.inventories {
+            for file in inventory.redundant_targets(connection)? {
+                redundant.entry(file.path).or_insert(file.reason);
+            }
+        }
+        Ok(redundant)
+    }
+
+    /// 通知各领域：这些路径即将被删除，指向它们的多余记录应当清掉。
+    pub(crate) fn forget_deleted(
+        &self,
+        connection: &Connection,
+        paths: &[String],
+    ) -> Result<(), String> {
+        for inventory in &self.inventories {
+            inventory.forget_deleted(connection, paths)?;
         }
         Ok(())
     }

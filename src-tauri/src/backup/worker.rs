@@ -281,7 +281,15 @@ pub(crate) fn run_backup(
     let mut delta_final = None;
     let mut delta_relative = None;
     let mut delta_size = None;
-    if let Some(previous) = head.as_ref() {
+    // 检查点父节点以 snapshot 作永久表示：子边增量不会被任何读取路径消费，
+    // 因此不为它生成文件（取消检查点时由 `restore::build_reverse_delta` 重建）。
+    // head 的 snapshot 会在本次提交中被释放，那条增量随后仍是父节点的唯一表示，
+    // 所以只有「父是检查点」才跳过——这是释放判定的镜像，不能写成「父有 snapshot」。
+    let parent_holds_checkpoint = match head.as_ref() {
+        Some(previous) => history::checkpoint_snapshot_holder(root, &previous.id)?,
+        None => false,
+    };
+    if let Some(previous) = head.as_ref().filter(|_| !parent_holds_checkpoint) {
         let previous_snapshot = previous
             .snapshot_path
             .as_deref()
@@ -720,6 +728,188 @@ mod tests {
             super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
                 .unwrap(),
             2
+        );
+    }
+
+    /// 检查点父节点不写反向增量；取消检查点时按需重建，重建后父节点仍可恢复。
+    #[test]
+    fn checkpoint_parent_skips_the_reverse_delta_and_cancel_rebuilds_it() {
+        let (directory, root, source, artwork_id, branch_id) = create_fixture();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let checkpoint_id = first.history_id.unwrap();
+        super::super::restore::ensure_checkpoint(
+            &root,
+            &checkpoint_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let head_id = second.history_id.unwrap();
+
+        // 首次提交是根节点，没有增量；第二次的父节点是检查点，同样不写。目录里
+        // 应当一个增量文件都没有。
+        let deltas = fs::read_dir(history::artwork_directory(&root, &artwork_id).join("deltas"))
+            .map(|entries| entries.count())
+            .unwrap_or(0);
+        assert_eq!(deltas, 0, "检查点父节点不应产生反向增量");
+        assert!(history::load_node(&root, &head_id)
+            .unwrap()
+            .delta_path
+            .is_none());
+
+        // 取消检查点：先在事务外重建增量，再把 snapshot 换掉。
+        let plan = history::plan_checkpoint_release(&root, &checkpoint_id)
+            .unwrap()
+            .expect("节点应为检查点");
+        assert!(plan.existing_delta.is_none(), "检查点不应已有增量");
+        let (delta_relative, delta_size) = super::super::restore::build_reverse_delta(
+            &root,
+            &plan.child_id,
+            &checkpoint_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert!(delta_size > 0);
+        history::unmark_checkpoint(
+            &root,
+            &checkpoint_id,
+            Some((delta_relative.as_str(), delta_size)),
+        )
+        .unwrap()
+        .expect("检查点应被取消");
+
+        let released = history::load_node(&root, &checkpoint_id).unwrap();
+        assert!(released.snapshot_path.is_none(), "snapshot 应已释放");
+        assert_eq!(
+            released.delta_path.as_deref(),
+            Some(delta_relative.as_str())
+        );
+        // 两条历史都必须还能逐字节恢复。
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &checkpoint_id),
+            vec![b'A'; 96 * 1024]
+        );
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &head_id),
+            vec![b'B'; 96 * 1024]
+        );
+        // 全库校验走的是同一条链，也必须通过。
+        assert_eq!(
+            super::super::restore::scrub_history(&root, &CancelToken::standalone(), |_, _| {})
+                .unwrap(),
+            2
+        );
+    }
+
+    /// 旧仓库可能留下「边仍记着增量路径、磁盘上的文件已经不在了」的记账。取消
+    /// 检查点会按同一个文件名重建增量，这条刚写出的增量绝不能被当作旧增量入队清理。
+    #[test]
+    fn cancel_rebuild_keeps_the_delta_it_just_wrote() {
+        let (directory, root, source, artwork_id, branch_id) = create_fixture();
+        let first = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let checkpoint_id = first.history_id.unwrap();
+        super::super::restore::ensure_checkpoint(
+            &root,
+            &checkpoint_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        let second = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let head_id = second.history_id.unwrap();
+
+        // 模拟旧仓库的陈旧记账：边仍写着增量路径，但文件已不在磁盘上。
+        let stale = history::artwork_directory(&root, &artwork_id)
+            .join("deltas")
+            .join(format!("{head_id}-to-{checkpoint_id}.lbd"));
+        let stale_relative = storage::relative_path(&root, &stale).unwrap();
+        assert!(!stale.exists());
+        storage::open(&root)
+            .unwrap()
+            .execute(
+                "UPDATE history_edges SET delta_path = ?2, delta_size = 7
+                  WHERE child_history_id = ?1",
+                [head_id.as_str(), stale_relative.as_str()],
+            )
+            .unwrap();
+
+        let plan = history::plan_checkpoint_release(&root, &checkpoint_id)
+            .unwrap()
+            .expect("节点应为检查点");
+        assert!(plan.existing_delta.is_none(), "文件缺失时必须重建");
+        let (delta_relative, delta_size) = super::super::restore::build_reverse_delta(
+            &root,
+            &plan.child_id,
+            &checkpoint_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(delta_relative, stale_relative, "重建落回同名路径");
+        history::unmark_checkpoint(
+            &root,
+            &checkpoint_id,
+            Some((delta_relative.as_str(), delta_size)),
+        )
+        .unwrap()
+        .expect("检查点应被取消");
+
+        // 刚重建的增量必须还在，且边指向它，两条历史都能逐字节恢复。
+        assert!(stale.is_file(), "重建出的增量被误当作旧增量入队清理");
+        assert_eq!(
+            history::load_node(&root, &checkpoint_id)
+                .unwrap()
+                .delta_path
+                .as_deref(),
+            Some(delta_relative.as_str())
+        );
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &checkpoint_id),
+            vec![b'A'; 96 * 1024]
+        );
+        assert_eq!(
+            restore_and_read(&root, directory.path(), &head_id),
+            vec![b'B'; 96 * 1024]
         );
     }
 

@@ -13,5 +13,5 @@ pub(crate) use backup::{
 };
 pub(crate) use reference::{
     install_reference_inventories, reference_inventories, ManagedFile, ManagedFileOwner,
-    ReferenceInventories, ReferenceInventory, ScanCandidateFile, ValidationOutcome,
+    RedundantFile, ReferenceInventories, ReferenceInventory, ScanCandidateFile, ValidationOutcome,
 };

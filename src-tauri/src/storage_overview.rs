@@ -734,11 +734,15 @@ fn load_branches(connection: &Connection) -> Result<Vec<BranchInfo>, String> {
 
 fn load_history_nodes(connection: &Connection) -> Result<Vec<HistoryInfo>, String> {
     note_query();
+    // 只回显节点当前的存储表示：节点持有 snapshot 时兼容列 `delta_path` 只是遗留
+    // 记账，按空处理；其余情况把空字符串归一为 NULL，与 `node_storage_path` 口径一致。
     let mut statement = connection
         .prepare(
             "SELECT id, artwork_id, created_on_branch_id, title,
                     is_checkpoint, created_ms, logical_size, chunk_file_size,
-                    chunk_count, snapshot_path, delta_path
+                    chunk_count, snapshot_path,
+                    CASE WHEN snapshot_path IS NOT NULL THEN NULL
+                         ELSE NULLIF(TRIM(delta_path), '') END
                FROM history_nodes",
         )
         .map_err(storage::database_error)?;

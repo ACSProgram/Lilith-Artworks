@@ -13,6 +13,9 @@ decision, so an untagged version is transitional.
 
 ### Added
 
+- Reference inventories can report files that records still point at but the
+  storage model no longer reads (`redundant_targets`), so the junk scan can name
+  the reason instead of calling every candidate unreferenced.
 - Pin-board items are now polymorphic (`pin_board_items` plus per-kind payload
   tables) instead of images only. A text item is the first non-bitmap kind:
   `create_pin_board_text` stores text, font, size, colour, alignment and the
@@ -62,6 +65,24 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- Checkpoints keep only their snapshot. A commit or compaction whose parent is a
+  checkpoint no longer writes a reverse delta: that node's snapshot is permanent,
+  so no read path could ever consume the delta. The edge is registered with an
+  empty path and the delta is rebuilt on demand when the checkpoint is cancelled.
+  The skip condition mirrors the snapshot-release rule (a checkpoint that holds a
+  snapshot), so a parent that only keeps its snapshot because it is another
+  branch's head still gets its delta.
+- Cancelling a checkpoint rebuilds the child-to-parent reverse delta outside the
+  transaction when the edge has none, then swaps the snapshot in a single
+  transaction; the new delta is removed if that transaction fails. The rebuild
+  reuses the edge's own file name, so a stale edge path is only queued for
+  cleanup when it names a different file. Repositories that already hold the
+  delta keep using it unchanged.
+- The settings cleanup entry is a junk scan now: one pass reports checkpoint
+  deltas, unreferenced files, pin-board leftovers and interrupted temp files. The
+  history reference inventory only protects deltas a read path can reach, so
+  checkpoint deltas can actually be collected instead of being counted as
+  referenced forever.
 - Cleanup, unreferenced scans, DDS scrubbing, storage accounting and reference
   inventories now read `pin_board_bitmaps`; text items have no file path and are
   excluded by construction.
@@ -77,6 +98,13 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Checkpoint deltas and stale `history_nodes.delta_path` entries were invisible to
+  the scan because the reference inventory counted every recorded path, including
+  deltas that no read path can reach. They are now reported as redundant files and
+  can be cleaned.
+- `history::load_node` no longer returns an empty delta path as `Some("")`; a
+  checkpoint edge without a delta is reported as `None`, and chain resolution
+  rejects an empty path with the node id instead of opening the repository root.
 - The stress suite's commit crash/cancel points line up with the current
   cancellation boundaries again. Adding the thumbnail-extraction boundary
   shifted every later checkpoint by one, so `stress_crash` B1/B4 and

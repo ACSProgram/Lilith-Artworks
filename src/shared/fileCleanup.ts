@@ -36,7 +36,7 @@ export function isExternalCleanupEntry(entry: PendingCleanupEntry): boolean {
   return entry.pathKind === "external_file";
 }
 
-/** 未引用文件扫描候选；与后端 `cleanup::ScanCandidate` 对齐，只报告不删除。 */
+/** 垃圾文件扫描候选；与后端 `cleanup::ScanCandidate` 对齐，只报告不删除。 */
 export interface UnreferencedScanCandidate {
   path: string;
   byteSize: number;
@@ -54,13 +54,14 @@ const CLEANUP_REASON_LABELS: Record<string, string> = {
   history_branch_deletion: "删除分支",
   history_subtree_deletion: "删除历史子树",
   history_checkpoint_release: "取消检查点",
+  history_checkpoint_delta_replaced: "取消检查点替换增量",
   history_commit_release: "提交释放旧快照",
   history_snapshot_replaced: "修复快照替换",
   history_compaction: "精简历史",
   permanent_artwork_deletion: "永久删除作品",
   cancel_branch_publication: "取消发布",
   publish_certification: "认证导出",
-  unreferenced_scan: "未引用文件扫描",
+  unreferenced_scan: "垃圾文件扫描",
 };
 
 export function cleanupReasonLabel(reason: string): string {

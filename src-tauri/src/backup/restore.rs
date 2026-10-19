@@ -96,70 +96,35 @@ pub(crate) fn compact_node(
     progress: impl Fn(&str, u64, u64),
 ) -> Result<(), String> {
     let target = history::compaction_target(root, history_id)?;
-    let parent_resolved = resolve_chain(
-        root,
-        &target.parent_id,
-        "正在回溯保留节点",
-        cancel,
-        &|label, current, total| progress(label, current, total),
-    )?;
-    let child_layout = resolve_chain(
-        root,
-        &target.child_id,
-        "正在回溯精简节点",
-        cancel,
-        &|label, current, total| progress(label, current, total),
-    )?
-    .layout;
-    ensure_not_cancelled(cancel)?;
-
-    let artwork_directory = history::artwork_directory(root, &target.artwork_id);
-    let delta_directory = artwork_directory.join("deltas");
-    fs::create_dir_all(&delta_directory)
-        .map_err(|error| format!("无法创建精简 delta 目录：{error}"))?;
-    let delta_name = format!("{}-to-{}.lbd", target.child_id, target.parent_id);
-    let delta_final = delta_directory.join(delta_name);
-    let delta_relative = storage::relative_path(root, &delta_final)?;
-    let mut delta_temp = NamedTempFile::new_in(artwork_directory.join("temp"))
-        .map_err(|error| format!("无法创建精简 delta：{error}"))?;
-    let ResolvedChain {
-        layout: parent_layout,
-        mut store,
-        ..
-    } = parent_resolved;
-    let logical_size = parent_layout.logical_size();
-    {
-        let delta_progress = |bytes| progress("正在重建精简 delta", bytes, logical_size);
-        let task = ChunkTask::new(cancel, Some(&delta_progress));
-        let mut reader = store.reader();
-        child_layout
-            .create_reverse_delta(
-                &parent_layout,
-                &mut reader,
-                delta_temp.as_file_mut(),
-                options,
-                &task,
-            )
-            .map_err(|error| format!("无法重建精简 delta：{error}"))?;
-    }
-    delta_temp
-        .as_file()
-        .sync_all()
-        .map_err(|error| format!("无法同步精简 delta：{error}"))?;
-    ensure_not_cancelled(cancel)?;
-    let delta_size = delta_temp
-        .as_file()
-        .metadata()
-        .map_err(|error| format!("无法读取精简 delta 大小：{error}"))?
-        .len();
-    delta_temp
-        .persist_noclobber(&delta_final)
-        .map_err(|error| format!("无法发布精简 delta：{}", error.error))?;
+    // 父节点是检查点时它的 snapshot 永久保留，改接后的子边增量不会被任何读取
+    // 路径消费：只改接图，不写文件（与提交路径同一口径）。
+    let parent_holds_checkpoint = history::checkpoint_snapshot_holder(root, &target.parent_id)?;
+    let delta = if parent_holds_checkpoint {
+        None
+    } else {
+        Some(write_reverse_delta(
+            root,
+            &target.child_id,
+            &target.parent_id,
+            "正在回溯保留节点",
+            "正在回溯精简节点",
+            cancel,
+            options,
+            &progress,
+        )?)
+    };
+    let (delta_relative, delta_size) = delta
+        .as_ref()
+        .map_or(("", 0_u64), |(relative, size)| (relative.as_str(), *size));
     progress("正在改接历史链", 1, 1);
-    let cleanup_ids = match history::apply_compaction(root, &target, &delta_relative, delta_size) {
+    let cleanup_ids = match history::apply_compaction(root, &target, delta_relative, delta_size) {
         Ok(ids) => ids,
         Err(error) => {
-            let _ = fs::remove_file(&delta_final);
+            if !delta_relative.is_empty() {
+                if let Ok(path) = storage::resolve_path(root, delta_relative) {
+                    let _ = fs::remove_file(path);
+                }
+            }
             return Err(error);
         }
     };
@@ -175,6 +140,107 @@ pub(crate) fn compact_node(
     // 失败只留队列可重试，不改变精简的成功语义。
     cleanup::replay(root, &cleanup_ids);
     Ok(())
+}
+
+/// 从 `child_id` 的物化结果重建父节点 `parent_id` 的反向增量。
+///
+/// 写入 `deltas/<child>-to-<parent>.lbd` 并返回仓库内相对路径与字节数。调用方
+/// 负责在随后的数据库事务失败时删除它；事务成功后它由子边引用。取消检查点用它
+/// 把「只有 snapshot 的检查点」换回「只有反向增量的普通节点」。
+pub(crate) fn build_reverse_delta(
+    root: &Path,
+    child_id: &str,
+    parent_id: &str,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
+    progress: impl Fn(&str, u64, u64),
+) -> Result<(String, u64), String> {
+    write_reverse_delta(
+        root,
+        child_id,
+        parent_id,
+        "正在回溯父节点",
+        "正在回溯子节点",
+        cancel,
+        options,
+        &progress,
+    )
+}
+
+/// 重建反向增量的共用内核：两边都按各自的链物化，只有子节点贡献块索引，
+/// 载荷字节直接从父节点的物化结果里读，不在磁盘上写任何中间 snapshot。
+fn write_reverse_delta(
+    root: &Path,
+    child_id: &str,
+    parent_id: &str,
+    parent_label: &str,
+    child_label: &str,
+    cancel: &CancelToken,
+    options: ChunkWriteOptions,
+    progress: &impl Fn(&str, u64, u64),
+) -> Result<(String, u64), String> {
+    let ResolvedChain {
+        layout: parent_layout,
+        mut store,
+        ..
+    } = resolve_chain(
+        root,
+        parent_id,
+        parent_label,
+        cancel,
+        &|label, current, total| progress(label, current, total),
+    )?;
+    let child_layout = resolve_chain(
+        root,
+        child_id,
+        child_label,
+        cancel,
+        &|label, current, total| progress(label, current, total),
+    )?
+    .layout;
+    ensure_not_cancelled(cancel)?;
+
+    // 父节点的作品目录就是增量目录的归属：两边同属一条历史链，必然同作品。
+    let artwork_directory =
+        history::artwork_directory(root, &history::load_node(root, parent_id)?.artwork_id);
+    let delta_directory = artwork_directory.join("deltas");
+    fs::create_dir_all(&delta_directory).map_err(|error| format!("无法创建增量目录：{error}"))?;
+    let delta_final = delta_directory.join(format!("{child_id}-to-{parent_id}.lbd"));
+    let delta_relative = storage::relative_path(root, &delta_final)?;
+    let mut delta_temp = NamedTempFile::new_in(artwork_directory.join("temp"))
+        .map_err(|error| format!("无法创建增量临时文件：{error}"))?;
+    let logical_size = parent_layout.logical_size();
+    {
+        let delta_progress = |bytes| progress("正在重建反向增量", bytes, logical_size);
+        let task = ChunkTask::new(cancel, Some(&delta_progress));
+        let mut reader = store.reader();
+        child_layout
+            .create_reverse_delta(
+                &parent_layout,
+                &mut reader,
+                delta_temp.as_file_mut(),
+                options,
+                &task,
+            )
+            .map_err(|error| format!("无法重建反向增量：{error}"))?;
+    }
+    delta_temp
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("无法同步增量：{error}"))?;
+    ensure_not_cancelled(cancel)?;
+    let delta_size = delta_temp
+        .as_file()
+        .metadata()
+        .map_err(|error| format!("无法读取增量大小：{error}"))?
+        .len();
+    // 同名文件只可能是上一次中断的重建或待清理的遗留（边此刻没有指向它），
+    // 图是唯一事实，先移除再发布。
+    let _ = fs::remove_file(&delta_final);
+    delta_temp
+        .persist_noclobber(&delta_final)
+        .map_err(|error| format!("无法发布增量：{}", error.error))?;
+    Ok((delta_relative, delta_size))
 }
 
 pub(crate) fn ensure_checkpoint(
@@ -373,7 +439,11 @@ fn resolve_chain(
     let mut steps = 1_u64;
     for (index, node) in chain.iter().take(chain.len().saturating_sub(1)).enumerate() {
         ensure_not_cancelled(cancel)?;
-        let delta_path = node.delta_path.as_deref().ok_or("恢复链缺少反向 delta")?;
+        let delta_path = node
+            .delta_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .ok_or_else(|| format!("历史节点 {} 缺少指向父节点的反向增量", node.id))?;
         let mut delta_file = File::open(storage::resolve_path(root, delta_path)?)
             .map_err(|error| format!("无法打开恢复链 delta：{error}"))?;
         let delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory, &task)

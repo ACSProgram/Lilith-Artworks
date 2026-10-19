@@ -7,7 +7,7 @@ use crate::{
     },
     authenticity, backup, cleanup,
     contracts::BackupVerificationMode,
-    history, pin_board,
+    history, pin_board, storage,
 };
 
 pub(crate) fn commit(
@@ -160,15 +160,54 @@ pub(crate) fn set_checkpoint(
             )
             .map_err(CommandError::from);
         }
-        // 取消检查点释放的 snapshot 已在事务内入队，提交成功后单遍重放。
-        if let Some(cleanup_ids) =
-            history::unmark_checkpoint(session.root(), history_id).map_err(CommandError::from)?
-        {
-            context.report_progress("正在释放检查点并恢复增量统计", 0, 1);
-            cleanup::replay(session.root(), &cleanup_ids);
-            context.report_progress("检查点已取消", 1, 1);
+        // 取消检查点：提交路径不再为检查点父节点写反向增量，所以这里先在事务外
+        // 按需重建（子边已持有增量的旧仓库直接沿用），再在一个事务里换掉 snapshot。
+        let Some(plan) = history::plan_checkpoint_release(session.root(), history_id)
+            .map_err(CommandError::from)?
+        else {
+            return Ok(());
+        };
+        let mut rebuilt: Option<(String, u64)> = None;
+        if plan.existing_delta.is_none() {
+            context.report_progress("正在重建检查点增量", 0, 0);
+            rebuilt = Some(
+                backup::restore::build_reverse_delta(
+                    session.root(),
+                    &plan.child_id,
+                    history_id,
+                    context.cancel(),
+                    context.chunk_write_options(),
+                    |label, current, total| context.report_progress(label, current, total),
+                )
+                .map_err(CommandError::from)?,
+            );
         }
-        Ok(())
+        // 取消检查点释放的 snapshot 已在事务内入队，提交成功后单遍重放。
+        let result = history::unmark_checkpoint(
+            session.root(),
+            history_id,
+            rebuilt
+                .as_ref()
+                .map(|(relative, size)| (relative.as_str(), *size)),
+        );
+        match result {
+            Ok(Some(cleanup_ids)) => {
+                context.report_progress("正在释放检查点并恢复增量统计", 0, 1);
+                cleanup::replay(session.root(), &cleanup_ids);
+                context.report_progress("检查点已取消", 1, 1);
+                Ok(())
+            }
+            Ok(None) => Ok(()),
+            Err(error) => {
+                // 事务没有成功，刚写出的增量没有任何记录指向它。
+                if let Some((relative, _)) = rebuilt {
+                    if let Ok(path) = storage::resolve_path(session.root(), &relative) {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
+                Err(CommandError::from(error))
+            }
+        }
     })
 }
 

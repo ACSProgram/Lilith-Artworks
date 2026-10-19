@@ -24,7 +24,7 @@ const EXTERNAL_FILE: &str = "external_file";
 /// （anti-join 每批最多用 `CLEANUP_BATCH_SIZE` 个占位符）。
 const CLEANUP_BATCH_SIZE: usize = 512;
 
-/// 未引用文件扫描的宽限期：修改时间晚于 `now - 30 分钟` 的文件视为可能仍属于
+/// 垃圾文件扫描的宽限期：修改时间晚于 `now - 30 分钟` 的文件视为可能仍属于
 /// 进行中的提交、精简或检查点发布，扫描跳过它们。取值明显大于空闲链路校验的
 /// 10 分钟延迟，给长操作留出余量。
 pub(crate) const SCAN_GRACE_MS: i64 = 30 * 60 * 1000;
@@ -52,7 +52,7 @@ pub(crate) struct CleanupReport {
     pub(crate) failures: Vec<CleanupFailure>,
 }
 
-/// 一条未引用文件扫描候选。扫描只报告、不删除；用户在设置页确认后经
+/// 一条垃圾文件扫描候选。扫描只报告、不删除；用户在设置页确认后经
 /// `cleanup_unreferenced` 批量入队并单遍重放。
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -159,6 +159,11 @@ pub(crate) fn enqueue_released_repository_files(
     let mut ids = Vec::new();
     for path in paths {
         let normalized = path.trim();
+        // 空路径不是文件：检查点父节点名下的边以空路径登记（增量按需重建），
+        // 删除或精简这类节点时不要把它当成待清理条目。
+        if normalized.is_empty() {
+            continue;
+        }
         if !seen.insert(normalized) {
             continue;
         }
@@ -669,8 +674,13 @@ fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {
 }
 
 /// 扫描 `artworks/*/` 下由各领域 provider 声明的受管理文件（历史 snapshot/delta
-/// 与画板 DDS 等未引用崩溃孤儿、手工复制或历史迁移遗留），作为清理账本的发现
-/// 机制。只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
+/// 与画板 DDS 等），作为**垃圾文件扫描**的发现机制。候选有两类：
+///
+/// - 未被任何记录引用的崩溃孤儿、手工复制或历史迁移遗留；
+/// - 仍被记录指向、但当前存储模型已经不需要的文件（如检查点已持有 snapshot 后
+///   残留的反向增量），由各领域经 `redundant_targets` 报告。
+///
+/// 只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
 ///
 /// 护栏：只考虑 provider 报告的命名模式与目录；只报告修改时间早于宽限期
 /// （`SCAN_GRACE_MS`）的文件，避免与进行中的提交、精简、检查点发布或画板写入
@@ -686,6 +696,10 @@ pub(crate) fn scan_unreferenced(
     let referenced = reference_inventories()
         .collect_paths(&connection)
         .map_err(|error| format!("无法读取仓库引用清单：{error}"))?;
+    // 已多余但仍留在数据库里的路径：扫描用领域给出的具体原因，而不是「未被引用」。
+    let redundant = reference_inventories()
+        .collect_redundant(&connection)
+        .map_err(|error| format!("无法读取仓库遗留文件清单：{error}"))?;
     let mut files = Vec::new();
     collect_scan_files(root, &mut files)?;
     files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -694,7 +708,7 @@ pub(crate) fn scan_unreferenced(
     let mut candidates = Vec::new();
     for (index, file) in files.into_iter().enumerate() {
         if cancelled() {
-            return Err("未引用文件扫描已取消".into());
+            return Err("垃圾文件扫描已取消".into());
         }
         let metadata = match fs::metadata(&file.path) {
             Ok(metadata) => metadata,
@@ -714,9 +728,11 @@ pub(crate) fn scan_unreferenced(
         let relative = storage::relative_path(root, &file.path)?;
         if !referenced.contains_key(&relative) {
             candidates.push(ScanCandidate {
-                path: relative,
+                path: relative.clone(),
                 byte_size: metadata.len(),
-                reason: file.reason.to_owned(),
+                reason: redundant
+                    .get(&relative)
+                    .map_or_else(|| file.reason.to_owned(), |reason| (*reason).to_owned()),
             });
         }
         progress(index as u64 + 1, total);
@@ -741,6 +757,13 @@ pub(crate) fn cleanup_unreferenced_cancellable(
 ) -> Result<CleanupReport, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
+    // 候选里可能包含「记录还在、但已经多余」的文件（检查点冗余增量、兼容列遗留）。
+    // 先让领域清掉指向它们的记录，再入队删除：否则会留下指向已删文件的悬空引用，
+    // 取消检查点时还会误判「增量仍然可用」。领域实现自带多余判定，仍在使用的
+    // 引用不会被清除。
+    reference_inventories()
+        .forget_deleted(&transaction, paths)
+        .map_err(|error| format!("无法清除已删除文件的记录：{error}"))?;
     let mut cleanup_ids = Vec::new();
     for path in paths {
         let absolute = safe_repository_path(root, path)?;
@@ -1644,5 +1667,132 @@ mod tests {
         );
         assert!(output.is_file());
         assert_eq!(report.pending_count, 1);
+    }
+
+    /// 检查点父节点名下的边以空路径登记；删除或精简这类节点时，空路径不能变成
+    /// 一条「待清理路径为空」的错误。
+    #[test]
+    fn released_files_skip_empty_paths() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let mut connection = storage::open(&root).unwrap();
+        let transaction = connection.transaction().unwrap();
+        let ids =
+            enqueue_released_repository_files(&transaction, &[String::new(), "   ".into()], "test")
+                .unwrap();
+        transaction.commit().unwrap();
+        assert!(ids.is_empty());
+    }
+
+    const SCAN_ROOT_ID: &str = "11111111-1111-4111-8111-111111111111";
+    const SCAN_CHILD_ID: &str = "22222222-2222-4222-8222-222222222222";
+
+    /// 造一条两节点的历史：根节点的 snapshot 是否永久保留由 `checkpoint` 决定，
+    /// 子节点始终带一条边增量——模拟检查点建立之前就写好增量的旧仓库。
+    fn history_scan_repository(checkpoint: bool) -> (tempfile::TempDir, PathBuf, String) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.psd");
+        fs::write(&source, b"artwork").unwrap();
+        crate::library::initialize(&root).unwrap();
+        let artwork =
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
+        let artwork_directory = root.join("artworks").join(&artwork.artwork_id);
+        fs::create_dir_all(artwork_directory.join("snapshots")).unwrap();
+        fs::create_dir_all(artwork_directory.join("deltas")).unwrap();
+
+        let base = format!("artworks/{}", artwork.artwork_id);
+        let root_snapshot = format!("{base}/snapshots/{SCAN_ROOT_ID}.lbc");
+        let child_snapshot = format!("{base}/snapshots/{SCAN_CHILD_ID}.lbc");
+        let delta = format!("{base}/deltas/{SCAN_CHILD_ID}-to-{SCAN_ROOT_ID}.lbd");
+        for relative in [&root_snapshot, &child_snapshot, &delta] {
+            fs::write(root.join(relative), b"payload").unwrap();
+        }
+        let commit_node = |id: &str, parent: Option<&str>, snapshot: &str, delta: Option<&str>| {
+            crate::history::commit(
+                &root,
+                crate::history::HistoryCommit {
+                    id,
+                    branch_id: &artwork.branch_id,
+                    parent_id: parent,
+                    title: id,
+                    note: "",
+                    commit_kind: "manual",
+                    created_ms: 1,
+                    logical_size: 7,
+                    chunk_file_size: 7,
+                    sha256: &format!("{:064X}", 1),
+                    chunk_count: 1,
+                    snapshot_path: snapshot,
+                    delta_path: delta,
+                    delta_size: delta.map(|_| 7),
+                    thumbnail: None,
+                    thumbnail_version: None,
+                },
+            )
+            .unwrap()
+        };
+        commit_node(SCAN_ROOT_ID, None, &root_snapshot, None);
+        if checkpoint {
+            crate::history::mark_checkpoint(&root, SCAN_ROOT_ID).unwrap();
+        }
+        let cleanup_ids = commit_node(
+            SCAN_CHILD_ID,
+            Some(SCAN_ROOT_ID),
+            &child_snapshot,
+            Some(&delta),
+        );
+        replay(&root, &cleanup_ids);
+
+        // 扫描有 30 分钟宽限期：把文件时间回拨到宽限期之外。
+        let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for relative in [&root_snapshot, &child_snapshot, &delta] {
+            let path = root.join(relative);
+            if path.is_file() {
+                fs::File::options()
+                    .write(true)
+                    .open(&path)
+                    .unwrap()
+                    .set_modified(two_hours_ago)
+                    .unwrap();
+            }
+        }
+        (directory, root, delta)
+    }
+
+    /// 检查点已持有 snapshot 时，子边增量没有任何读取路径，垃圾扫描必须报出来；
+    /// 父节点没有 snapshot 时同一份增量仍是唯一表示，扫描不得报告。
+    #[test]
+    fn scan_reports_a_checkpoint_delta_and_keeps_a_live_one() {
+        let (_live_directory, live_root, live_delta) = history_scan_repository(false);
+        let live = scan_unreferenced(&live_root, || false, |_, _| {}).unwrap();
+        assert!(live.is_empty(), "仍在使用的增量不应被报告：{live:?}");
+        assert!(live_root.join(&live_delta).is_file());
+
+        let (_directory, root, delta) = history_scan_repository(true);
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        assert_eq!(candidates.len(), 1, "{candidates:?}");
+        assert_eq!(candidates[0].path, delta);
+        assert_eq!(candidates[0].reason, "检查点已持有快照，冗余增量");
+
+        // 确认清理：文件删除的同时边上的记录必须清空，否则会留下指向已删文件的
+        // 悬空引用，取消检查点时会误判「增量仍然可用」。
+        let report = cleanup_unreferenced(&root, &[delta.clone()]).unwrap();
+        assert_eq!(report.cleaned_count, 1, "{report:?}");
+        assert!(!root.join(&delta).exists());
+        let edge: (String, i64) = storage::open(&root)
+            .unwrap()
+            .query_row(
+                "SELECT delta_path, delta_size FROM history_edges WHERE child_history_id = ?1",
+                [SCAN_CHILD_ID],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(edge, (String::new(), 0));
+        let plan = crate::history::plan_checkpoint_release(&root, SCAN_ROOT_ID)
+            .unwrap()
+            .expect("仍是检查点");
+        assert!(plan.existing_delta.is_none(), "清理后必须按需重建增量");
     }
 }

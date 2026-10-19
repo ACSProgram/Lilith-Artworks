@@ -26,11 +26,11 @@ pub(crate) fn scan_unreferenced(
     context: &CommandContext,
 ) -> Result<Vec<cleanup::ScanCandidate>, CommandError> {
     context.run_write(|session| {
-        context.report_progress("正在扫描未引用文件", 0, 0);
+        context.report_progress("正在扫描垃圾文件", 0, 0);
         cleanup::scan_unreferenced(
             session.root(),
             || context.is_cancelled(),
-            |current, total| context.report_progress("正在扫描未引用文件", current, total),
+            |current, total| context.report_progress("正在扫描垃圾文件", current, total),
         )
         .map_err(CommandError::from)
     })

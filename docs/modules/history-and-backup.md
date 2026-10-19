@@ -27,14 +27,14 @@
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/preview/`：历史节点派生缩略图。只读工作文件、按格式分派（`.clip` 内嵌 SQLite、`.psd`/`.psb`、直接位图），任何失败只让该节点没有预览，不改提交结果；不参与 ChunkFile、摘要、scrub 与恢复。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
-- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与未引用扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
+- `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与垃圾文件扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
 
 `backup` 通过 `history` 切换分支 head，不直接操作作品树；`history` 不读取 ChunkFile；C2PA 与 TrustMark 实现彼此独立，只由认证流水线编排。
 
 ## ChunkFile
 
-`backup/chunk_file/` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`，按职责拆为：`mod.rs`（结果类型、错误分类、`FormatVersion`/`ChunkWriteOptions`/`ChunkingConfig`、`ChunkDigest`/`ChunkRecord`、`ChunkTask` 与格式常量）、`format.rs`（头与块记录的读写、长度与能力校验）、`store.rs`（虚拟偏移段与 reader 游标）、`chunking.rs`（CDC 与容器对齐分块）、`snapshot.rs`（快照写入/打开/物化）、`delta.rs`（反向增量、payload 落盘与链解析）、`tests.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。
+`backup/chunk_file/` 完整迁移自 LilithClient `backup_agent/chunk_file.rs`，按职责拆为：`mod.rs`（结果类型、错误分类、`FormatVersion`/`ChunkWriteOptions`/`ChunkingConfig`、`ChunkDigest`/`ChunkRecord`、`ChunkTask` 与格式常量）、`format.rs`（头与块记录的读写、长度与能力校验）、`store.rs`（虚拟偏移段与 reader 游标）、`chunking.rs`（CDC 与容器对齐分块）、`snapshot.rs`（快照写入/打开/物化）、`delta.rs`（反向增量、payload 落盘与链解析）、`tests.rs`。snapshot 使用内容定义分块，默认 min/avg/max 为 2 KiB / 16 KiB / 64 KiB，整文件与块摘要均为 SHA-256。delta 是从当前子 snapshot 还原父节点的反向增量，并使用 zstd level 6 包装。反向增量只在父节点没有永久 snapshot 时写入：父节点是检查点（或检查点已持有 snapshot）时提交不生成它，取消该检查点时才重建。
 
 ChunkFile v1 的字节布局保持只读兼容：76 B snapshot 头、116 B delta 头、36 B 块记录。v2 默认用于**新写出的节点**（设置项 `chunkFileFormatV2`，默认开启，设置页可关闭后回退到 v1），头部为 80 B snapshot / 120 B delta，显式记录 `version/chunker/hash/codec/adapter`，块记录扩为 44 B（`stored_len/logical_len/codec/recipe/flags`）。reader 按文件头分派，因此同一仓库可长期混存 v1/v2；关闭开关只影响此后新生成的 snapshot/delta，不重写既有文件、不做仓库级迁移。无头入口另以 `--chunk-format v1|v2` 在**进程级**覆盖该开关（缺省跟随设置默认值），供 `stress_format` M4 在同一仓库内构造 v1/v2 混存历史；该选项只影响本进程新写入的节点，既有文件与读取路径不受影响。v2 快照对内容相同的块写 `stored_len=0` 的引用而不是重复 payload（tile 级去重），打开时按先出现的同摘要块解析引用；delta 仍只用外层 zstd 包装，不做逐块转码。块长度校验按布局分派：`min_size` 只约束 CDC 布局，容器对齐产生的结构单元（24 B 文件头、56 B `Exta` 头）只受 `max_size` 约束，超出时才交给 CDC 切分。成功提交、检查点与精简的日志都会记录本次写入的 `format`/`chunking`，便于解释仓库内的版本分布。
 
@@ -48,13 +48,19 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
+**检查点只留 snapshot**：检查点的 snapshot 只有显式取消才释放，所以它是该节点的永久表示，子边不需要、也不会生成反向增量。提交与精简在父节点是检查点时跳过增量写入，只登记一条空边（`delta_path = ''`、`delta_size = 0`）保持「每个非根节点都有边记录」的图不变式；取消检查点时再按需重建这条增量（见下文）。判定条件是「父节点 `is_checkpoint = 1` 且持有 snapshot」，不是「父节点有 snapshot」——head 的 snapshot 会在下一次提交时释放，那时子边增量就是父节点的唯一表示，必须照常写入。绑定在其它分支 head 上、只被暂时保留的 snapshot 也属于后者。
+
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内先一次收集契约层提供的完整引用清单，再逐路径判定当前图是否仍引用它（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 
-清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。未引用文件扫描补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里），以及作品 `temp/` 下崩溃残留的 `.tmp*` 暂存文件（备份、恢复与检查点在发布前写下的 `NamedTempFile`，从不进入引用清单，正常路径由 `Drop` 删除）。它只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**。设置页确认后 `cleanup::cleanup_unreferenced` 逐条登记当前 SHA-256，再由带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
+清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。**垃圾文件扫描**补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里），以及作品 `temp/` 下崩溃残留的 `.tmp*` 暂存文件（备份、恢复与检查点在发布前写下的 `NamedTempFile`，从不进入引用清单，正常路径由 `Drop` 删除）。
 
-设置页「空间」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供未引用文件扫描按钮（复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
+扫描的候选有两类：一类是**未被引用**的文件（崩溃孤儿、手工复制与历史迁移遗留）；另一类是**仍被记录指向但当前存储模型已经不需要**的文件，由 `ReferenceInventory::redundant_targets` 报告——目前只有历史领域的两种：检查点已持有 snapshot 后残留的子边反向增量，以及节点已有 snapshot 时兼容列 `history_nodes.delta_path` 的遗留记账。历史引用清单因此按「真正会读的文件」计算：只有父节点既不是检查点（或检查点但没有 snapshot）时，边增量才进清单；节点持有 snapshot 时其兼容列不再进清单。这两类路径因此不再被引用复查保护，确认清理后会真正删除。
 
-仓库根 `temp/` 不进入引用清单，因此走一条更直接的自动清扫：仓库打开成功后（`prepare_repository`）执行 `cleanup::sweep_repository_temp`，只删除两类名字——超期（同一 30 分钟宽限期）的 `authenticity-preview-<UUID>` 预览缓存会话目录（`authenticity::pipeline` 每进程一个，丢失只让下一次预览重算）与 `.tmp` 前缀的 `NamedTempFile` 暂存残留（恢复链解析在进程被强杀或断电时留下的孤儿）——本进程当前会话目录一律保留，命名不符的手工条目一律不动；只碰顶层、不跟随符号链接，删除失败只记日志，不阻断打开。作品级 `artworks/<artwork>/temp/` 的 `.tmp*` 残留不在此列，仍走未引用文件扫描的报告→确认流程。
+扫描只报告修改时间早于 30 分钟宽限期、且不在一次性 `collect_paths` 引用集合中的文件，**只报告不删除**；冗余文件用领域给出的具体原因（例如「检查点已持有快照，冗余增量」）而不是笼统的「未被引用」。设置页确认后 `cleanup::cleanup_unreferenced` 先让领域清掉指向冗余文件的多余记录（`ReferenceInventory::forget_deleted`，实现自带「确实多余」判定，仍在使用的引用不动），再逐条登记当前 SHA-256，并交给带取消令牌的批量重放删除：引用表是一次性 `TEMP` 表，每 512 条提交一次，重复确认幂等；候选在确认前重新被引用时条目留队可重试。扫描入口仍只经 GUI 进程内暴露；画板 DDS 的「记录 → 文件」缺失/损坏检查属完整性扫描，另见 `docs/modules/pin-board.md`。
+
+设置页「空间」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供**垃圾文件扫描**按钮（一次扫描覆盖上面两类候选，复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。清理检查点冗余增量是破坏性但可重建的动作：取消该检查点时按需重建增量，没有取消过的检查点不受影响。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
+
+仓库根 `temp/` 不进入引用清单，因此走一条更直接的自动清扫：仓库打开成功后（`prepare_repository`）执行 `cleanup::sweep_repository_temp`，只删除两类名字——超期（同一 30 分钟宽限期）的 `authenticity-preview-<UUID>` 预览缓存会话目录（`authenticity::pipeline` 每进程一个，丢失只让下一次预览重算）与 `.tmp` 前缀的 `NamedTempFile` 暂存残留（恢复链解析在进程被强杀或断电时留下的孤儿）——本进程当前会话目录一律保留，命名不符的手工条目一律不动；只碰顶层、不跟随符号链接，删除失败只记日志，不阻断打开。作品级 `artworks/<artwork>/temp/` 的 `.tmp*` 残留不在此列，仍走垃圾文件扫描的报告→确认流程。
 
 **空 id 不再等于「处理全部」**：`retry_pending_file_cleanup` 传空 id 时只重放**仓库内条目**（`repository_file` / `repository_directory`），`external_file` 条目一律跳过。外部条目保存的是仓库之外的绝对路径，删除它等于一条任意路径删除，唯一门槛只是攻击者需要知道目标文件的 SHA-256；若它随启动自动重放，被投毒的仓库就等于自带一条「自动、无确认的删除任意文件」原语。因此外部条目改为在队列里**逐条显式确认**：列表直接展示完整路径、所属作品与期望 SHA-256，点击「确认删除…」后由滑动确认控件（`ConfirmDialog` 的 `slideToConfirm`）承担最终动作，确认后以**显式 id** 调用同一命令执行；「全部重试」按钮在只剩外部条目时禁用，并注明它只重放仓库内条目。既有的「摘要不匹配即不删」约束不变（`cleanup::remove_external_file` 仍只在 SHA-256 相等时删除）。首次启动时应用仍会自动重放一次仓库内条目，队列中的残留仓库内条目即上次未清干净的文件。
 
@@ -73,7 +79,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 ## 存储大小语义
 
-`history_nodes.chunk_file_size` 记录"重建该节点需要读取的字节数"：节点拥有 snapshot 时为 snapshot 文件大小（由发布它的调用方写入），否则为指向其唯一子节点的边 delta 大小；多个子节点时取最小 delta（分支起点通常持有 snapshot，不会走到该分支）。`history_nodes.delta_path` 兼容列与该语义保持一致，仅在没有边（分支根）时被 `load_node_from` 读取。写路径统一由 `refresh_storage_metadata` 从图推导：提交释放父 snapshot、取消检查点、精简改接后都会重算，精简后刷新的是被移除节点的父节点（新 delta 的受益方）与子节点。
+`history_nodes.chunk_file_size` 记录"重建该节点需要读取的字节数"：节点拥有 snapshot 时为 snapshot 文件大小（由发布它的调用方写入），否则为指向其唯一子节点的边 delta 大小；多个子节点时取最小 delta（分支起点通常持有 snapshot，不会走到该分支）。`history_nodes.delta_path` 兼容列与该语义保持一致，只在没有边（分支根）时被 `load_node_from` 读取；节点持有 snapshot 时这一列只是遗留记账，不进引用清单。检查点父节点名下的边以空路径登记（`delta_path = ''`、`delta_size = 0`），`load_node_from` 把空路径归一为 `None`，因此该节点「没有可用增量」而不指向任何文件。写路径统一由 `refresh_storage_metadata` 从图推导：提交释放父 snapshot、取消检查点、精简改接后都会重算，精简后刷新的是被移除节点的父节点（新 delta 的受益方）与子节点。
 
 ## 仓储空间状态
 
@@ -101,9 +107,9 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 ## 提交与恢复
 
-提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件（回滚路径上文件本就未被数据库引用，直接删失败只留泄漏、不留不一致，由清理扫描兜底）。提交释放的父 snapshot（父节点不再是 head 或检查点、且无其它分支引用时）在同一事务内入队 `pending_file_cleanup`（原因 `history_commit_release`），提交成功后由 worker 单遍重放删除；删除失败只留队列可重试，不影响已成功的提交结果。head 校验失败触发 snapshot 修复时，被替换的旧文件同样由登记事务入队（原因 `history_snapshot_replaced`）。工作文件与 head 的 SHA-256 相同时，worker 仍会打开受控 snapshot、核对数据库摘要并逐块验证内容；文件缺失、格式损坏、块损坏或摘要不匹配时，使用本次已经生成的 snapshot 以新路径发布并更新原 head 节点，验证通过后才把任务记为内容未变化。有效 snapshot 不重写，修复也不创建新历史节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
+提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件（回滚路径上文件本就未被数据库引用，直接删失败只留泄漏、不留不一致，由清理扫描兜底）。父节点是检查点时 worker 不生成反向增量，事务只为这条边登记空路径（原因见「检查点只留 snapshot」）；其余情况下缺少增量会让父节点失去唯一表示，提交直接拒绝。提交释放的父 snapshot（父节点不再是 head 或检查点、且无其它分支引用时）在同一事务内入队 `pending_file_cleanup`（原因 `history_commit_release`），提交成功后由 worker 单遍重放删除；删除失败只留队列可重试，不影响已成功的提交结果。head 校验失败触发 snapshot 修复时，被替换的旧文件同样由登记事务入队（原因 `history_snapshot_replaced`）。工作文件与 head 的 SHA-256 相同时，worker 仍会打开受控 snapshot、核对数据库摘要并逐块验证内容；文件缺失、格式损坏、块损坏或摘要不匹配时，使用本次已经生成的 snapshot 以新路径发布并更新原 head 节点，验证通过后才把任务记为内容未变化。有效 snapshot 不重写，修复也不创建新历史节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
-恢复从目标节点向下寻找最近可用 snapshot，再沿父链逐条 `resolve` 反向 delta（惰性，不产生中间 snapshot 文件），最后一次性把结果流式导出为临时文件并禁止覆盖；链起点与每步结果都会与数据库摘要比对，导出时逐块验哈希并核对整文件摘要。`history::materialization_chain` 用一次递归 CTE 同时选出最近 snapshot、父链节点与每步使用的 delta 路径，不再按节点逐条查库；目标自身持有 snapshot 时仍直接返回该节点。恢复、精简和检查点共用同一条惰性解析路径：精简只物化被移除节点的父链，子链只取块索引，然后从父链的虚拟存储中按需读取变化的块重建反向 delta，改接事务内把被移除节点与旧边占用的文件入队 `pending_file_cleanup`（原因 `history_compaction`）；检查点把解析结果一次性写成 snapshot 文件并 `sync_all` 后发布，建立、取消或替换检查点释放的旧 snapshot 在同一事务内入队（原因 `history_checkpoint_release` / `history_snapshot_replaced`）；全库 scrub 走同一条链但把结果流入 sink，只校验不写临时文件，并刷新节点级校验状态。上述入队均由调用方在提交成功后单遍重放，删除失败只留队列可重试。所有长操作经 `OperationCoordinator` 记录开始、结束、耗时与 typed 错误字段（`code`/`kind`/`retryable`/operation id）。
+恢复从目标节点向下寻找最近可用 snapshot，再沿父链逐条 `resolve` 反向 delta（惰性，不产生中间 snapshot 文件），最后一次性把结果流式导出为临时文件并禁止覆盖；链起点与每步结果都会与数据库摘要比对，导出时逐块验哈希并核对整文件摘要。`history::materialization_chain` 用一次递归 CTE 同时选出最近 snapshot、父链节点与每步使用的 delta 路径，不再按节点逐条查库；目标自身持有 snapshot 时仍直接返回该节点。恢复、精简和检查点共用同一条惰性解析路径：精简只物化被移除节点的父链，子链只取块索引，然后从父链的虚拟存储中按需读取变化的块重建反向 delta，改接事务内把被移除节点与旧边占用的文件入队 `pending_file_cleanup`（原因 `history_compaction`）；检查点把解析结果一次性写成 snapshot 文件并 `sync_all` 后发布；取消普通检查点时先在事务外重建「唯一子节点到该节点」的反向增量（`restore::build_reverse_delta`，复用同一物化内核），再在一个事务里把边换成真实路径、清掉 `snapshot_path`；建立、取消或替换检查点释放的旧 snapshot 在同一事务内入队（原因 `history_checkpoint_release` / `history_snapshot_replaced`）；全库 scrub 走同一条链但把结果流入 sink，只校验不写临时文件，并刷新节点级校验状态。上述入队均由调用方在提交成功后单遍重放，删除失败只留队列可重试。所有长操作经 `OperationCoordinator` 记录开始、结束、耗时与 typed 错误字段（`code`/`kind`/`retryable`/operation id）。
 
 仓储页提供可取消的全库完整性扫描。扫描在共享运行锁、跨进程 owner lock 和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配；它同时重写各节点的 `verified_ms` / `verify_error`，单节点失败不中止其余节点，最终以汇总错误返回。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
 
@@ -168,7 +174,7 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 「删除分支」与「删除节点与后续历史」同为不可逆操作，两者的确认弹窗只有一道，其最终动作都由共享滑动确认控件承担；需要两道确认的只有上面精简里含重要节点的那种情况。
 
-检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta，并把 UI 的当前存储路径/大小统计切回该 delta，被释放的 snapshot 在同一事务内入队 `pending_file_cleanup`，提交成功后重放删除。分支 head、分支起点、分叉点和已进入发布状态的节点是强制检查点，不能取消。
+检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta——提交路径不再为检查点父节点预写它，所以这里按需重建（旧仓库已有增量时直接沿用），重建成功后把边换成真实路径、清掉 `snapshot_path`，并把 UI 的当前存储路径/大小统计切回该 delta；被释放的 snapshot 与换边后不再被引用的旧增量都在同一事务内复查引用后入队 `pending_file_cleanup`（原因 `history_checkpoint_release` / `history_checkpoint_delta_replaced`），由提交成功后单遍重放删除。分支 head、分支起点、分叉点和已进入发布状态的节点是强制检查点，不能取消。
 
 全局设置和分支设置使用开关表达自动备份状态。托盘菜单会根据持久化状态动态显示“暂停所有自动备份”或“继续所有自动备份”；分支设置自动保存并显示未保存、保存中、已保存和保存失败状态。分支设置的自动备份开关旁提供“快速检查”开关，直接决定该分支自动备份是否使用快速检查，分支状态行按它显示检查方式；新建 Artwork 与新建分支按全局默认检查方式写入初始值。未选择工作文件或自动备份关闭时置灰。历史页顶部只保留一份工作文件路径，在当前分支名称下以较大字号显示，并通过紧邻的文件修改按钮重新选择；同一行还提供“打开所在文件夹”按钮（在系统文件管理器中定位工作文件，Windows 上会选中该文件）和“清除工作文件路径”按钮，后者把路径写回空字符串。`update_artwork_branch` 在同一事务内更新路径与其它分支设置，路径继续复用普通文件、绝对路径、仓库外和同 Artwork 分支唯一校验，选择取消或保存失败时保留旧路径。未选择工作文件时自动备份开关置灰、间隔输入禁用，保存结果始终是关闭；此时"修改工作文件"图标按钮替换为醒目的"选择文件"主按钮。设置草稿逐字段合并服务端更新，开关写入携带用户读取到的持久化基线；过期请求可以继续保存名称或间隔，但不能重新启用已由调度器自动关闭的备份。自动备份因连续失败被关闭后，作品库左侧持续显示警告，只有“知道了”或手动重新启用才清除通知。
 
