@@ -594,6 +594,49 @@ mod tests {
     }
 
     #[test]
+    fn refresh_extracts_a_thumbnail_from_the_stored_node() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.png");
+        let image =
+            image::RgbaImage::from_fn(800, 400, |x, y| image::Rgba([x as u8, y as u8, 120, 255]));
+        image.save(&source).unwrap();
+        library::initialize(&root).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
+        let commit = run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let history_id = commit.history_id.unwrap();
+
+        // Simulate a node stored before the thumbnail feature: the work file is
+        // irrelevant, the refresh must read the node's own materialized content.
+        history::store_thumbnail(&root, &history_id, &[], 0).unwrap();
+        std::fs::remove_file(&source).unwrap();
+        assert!(history::load_thumbnail(&root, &history_id)
+            .unwrap()
+            .is_none());
+
+        let thumbnail = super::super::restore::extract_node_thumbnail(
+            &root,
+            &history_id,
+            &CancelToken::standalone(),
+            |_, _, _| {},
+        )
+        .unwrap()
+        .expect("the stored node still contains the image");
+        assert_eq!(thumbnail.version, crate::preview::THUMBNAIL_VERSION);
+        let decoded = image::load_from_memory(&thumbnail.bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (512, 256));
+    }
+
+    #[test]
     fn quick_check_tracks_source_metadata_baseline() {
         let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
 

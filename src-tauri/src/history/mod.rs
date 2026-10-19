@@ -22,5 +22,6 @@ pub(crate) use repository::{
     mark_automatic_backup_error, mark_automatic_backup_skipped, mark_checkpoint, mark_error,
     mark_node_verified, mark_node_verify_error, mark_unchanged, materialization_chain,
     next_backup_disable_notice_target, node_storage_path, plan_checkpoint_release,
-    record_source_metadata, rename_node, set_snapshot, unmark_checkpoint, update_branch,
+    record_source_metadata, rename_node, set_snapshot, store_thumbnail, unmark_checkpoint,
+    update_branch,
 };

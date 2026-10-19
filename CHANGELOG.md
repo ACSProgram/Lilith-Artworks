@@ -50,6 +50,14 @@ decision, so an untagged version is transitional.
   unsupported or malformed input only falls back to a placeholder.
   `get_history_node_thumbnail` serves the selected node's preview on demand
   without selecting the BLOB in graph or list reads.
+- A node preview can be re-extracted from the inspector. The refresh button sits
+  next to "无可用预览" and over an existing preview (so a cached thumbnail can be
+  replaced); `refresh_history_node_thumbnail` materializes the selected node's
+  own stored content into `temp/`, runs the same format dispatch and writes the
+  result back to `thumbnail` / `thumbnail_version`. It never reads the current
+  work file, so old nodes keep a preview that matches their stored version; the
+  command is a foreground write, verifies chunks while materializing, and leaves
+  the repository untouched when extraction fails.
 - Idle integrity checking is available as an opt-in background task. When
   `idleIntegrityCheckEnabled` is on and the main window is hidden or minimized,
   the scheduler verifies up to eight history nodes (or 30 seconds) per idle
@@ -103,6 +111,15 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- PSD previews are no longer dropped or blurry for large canvases. The parser
+  used to reject any document over the 64 MP shared decode budget before it read
+  the embedded thumbnail, so an 84 MP file with a valid 1033/1036 resource showed
+  "无可用预览". The header now always reaches the resource section, and a
+  thumbnail whose longest edge is under 256 px is treated as too soft: the merged
+  composite is streamed and sampled into the 512 px target instead, with the
+  embedded resource kept as the fallback when the composite is unavailable. The
+  composite budget is 256 MP because sampling is row-based, so memory stays tied
+  to the 512 px output rather than the source canvas.
 - Pin-board text textures centre the glyph ink inside each 1.3× line box.
   Drawing with `textBaseline = "top"` left all extra line height below the
   glyphs, so text sat above the centre of its selection quad and its top edge

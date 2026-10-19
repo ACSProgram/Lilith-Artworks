@@ -9,12 +9,18 @@ use image::{DynamicImage, GrayImage, RgbImage};
 
 use crate::cancel::CancelToken;
 
-use super::{checked_pixels, decode_bytes, MAX_EDGE};
+use super::{checked_pixels, decode_bytes, MAX_EDGE, MAX_SOURCE_EDGE};
 
 const MAX_RESOURCE_BYTES: u64 = 64 * 1024 * 1024;
 const THUMBNAIL_RESOURCE_PS4: u16 = 1033;
 const THUMBNAIL_RESOURCE_PS5: u16 = 1036;
 const THUMBNAIL_HEADER_BYTES: usize = 28;
+/// Embedded thumbnails below this long edge are visibly soft in the 512 px
+/// inspector; the merged composite is decoded instead when the budget allows.
+const MIN_EMBEDDED_EDGE: u32 = 256;
+/// The composite is sampled row by row into target-sized planes, so the memory
+/// cost stays tiny; the pixel budget only bounds CPU time on pathological files.
+const MAX_COMPOSITE_PIXELS: u64 = 256_000_000;
 
 struct Header {
     version: u16,
@@ -25,9 +31,10 @@ struct Header {
     color_mode: u16,
 }
 
-/// Extract the merged preview. The embedded thumbnail resource (PS 4.0/5.0) is
-/// preferred; when absent, the composite image data section is decoded directly
-/// without touching layers.
+/// Extract the merged preview. A sufficiently large embedded thumbnail
+/// (PS 4.0/5.0) is preferred; tiny resources fall back to the composite so large
+/// canvases are not shown from a 160 px bitmap. When the composite cannot be
+/// decoded the embedded resource still acts as the fallback.
 pub(super) fn extract(path: &Path, cancel: &CancelToken) -> Option<DynamicImage> {
     let file = File::open(path).ok()?;
     let mut reader = BufReader::new(file);
@@ -42,34 +49,44 @@ pub(super) fn extract(path: &Path, cancel: &CancelToken) -> Option<DynamicImage>
         .ok()?;
 
     let resources_len = read_u32(&mut reader)?;
-    if u64::from(resources_len) <= MAX_RESOURCE_BYTES {
+    let embedded = if u64::from(resources_len) <= MAX_RESOURCE_BYTES {
         let mut resources = vec![0_u8; resources_len as usize];
         reader.read_exact(&mut resources).ok()?;
-        if let Some(image) = thumbnail_from_resources(&resources) {
-            return Some(image);
-        }
+        thumbnail_from_resources(&resources)
     } else {
         reader
             .seek(SeekFrom::Current(i64::from(resources_len)))
             .ok()?;
-    }
+        None
+    };
     if cancel.observed() {
         return None;
+    }
+    if embedded
+        .as_ref()
+        .is_some_and(|image| image.width().max(image.height()) >= MIN_EMBEDDED_EDGE)
+    {
+        return embedded;
     }
 
     // Layer and mask information: not needed for the merged composite. PSB
     // stores its length as 8 bytes, PSD as 4.
-    let layer_mask_len = if header.version == 2 {
-        read_u64(&mut reader)?
-    } else {
-        u64::from(read_u32(&mut reader)?)
-    };
-    reader
-        .seek(SeekFrom::Current(i64::try_from(layer_mask_len).ok()?))
-        .ok()?;
-
-    let compression = read_u16(&mut reader)?;
-    decode_composite(&mut reader, &header, compression, cancel)
+    let composite = (|| {
+        let layer_mask_len = if header.version == 2 {
+            read_u64(&mut reader)?
+        } else {
+            u64::from(read_u32(&mut reader)?)
+        };
+        reader
+            .seek(SeekFrom::Current(i64::try_from(layer_mask_len).ok()?))
+            .ok()?;
+        let compression = read_u16(&mut reader)?;
+        decode_composite(&mut reader, &header, compression, cancel)
+    })();
+    if cancel.observed() {
+        return None;
+    }
+    composite.or(embedded)
 }
 
 fn read_header(reader: &mut impl Read) -> Option<Header> {
@@ -90,7 +107,12 @@ fn read_header(reader: &mut impl Read) -> Option<Header> {
     let width = be_u32(&bytes, 18);
     let depth = be_u16(&bytes, 22);
     let color_mode = be_u16(&bytes, 24);
-    checked_pixels(width, height)?;
+    if width == 0 || height == 0 {
+        return None;
+    }
+    // The canvas budget is enforced only when the composite is actually
+    // decoded: large documents commonly carry a small 1033/1036 thumbnail
+    // resource, and rejecting the header would discard an affordable preview.
     Some(Header {
         version,
         channels,
@@ -200,6 +222,7 @@ fn decode_composite(
     compression: u16,
     cancel: &CancelToken,
 ) -> Option<DynamicImage> {
+    checked_composite_pixels(header.width, header.height)?;
     if !matches!(header.depth, 8 | 16) {
         return None;
     }
@@ -336,6 +359,14 @@ fn decode_composite(
         target_width,
         target_height,
     )
+}
+
+fn checked_composite_pixels(width: u32, height: u32) -> Option<u64> {
+    if width == 0 || height == 0 || width > MAX_SOURCE_EDGE || height > MAX_SOURCE_EDGE {
+        return None;
+    }
+    let pixels = u64::from(width).checked_mul(u64::from(height))?;
+    (pixels <= MAX_COMPOSITE_PIXELS).then_some(pixels)
 }
 
 fn target_dimensions(width: u32, height: u32) -> (u32, u32) {
@@ -519,8 +550,34 @@ mod tests {
         bytes
     }
 
+    fn jpeg_thumbnail(width: u32, height: u32) -> Vec<u8> {
+        let jpeg = {
+            let image = RgbImage::from_fn(width, height, |x, y| image::Rgb([x as u8, y as u8, 90]));
+            let mut bytes = Vec::new();
+            image
+                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
+                .unwrap();
+            bytes
+        };
+        let mut thumbnail = Vec::new();
+        thumbnail.extend_from_slice(&1_u32.to_be_bytes());
+        thumbnail.extend_from_slice(&width.to_be_bytes());
+        thumbnail.extend_from_slice(&height.to_be_bytes());
+        thumbnail.extend_from_slice(&(width * 3).to_be_bytes());
+        thumbnail.extend_from_slice(&((28 + jpeg.len()) as u32).to_be_bytes());
+        thumbnail.extend_from_slice(&(jpeg.len() as u32).to_be_bytes());
+        thumbnail.extend_from_slice(&24_u16.to_be_bytes());
+        thumbnail.extend_from_slice(&1_u16.to_be_bytes());
+        thumbnail.extend_from_slice(&jpeg);
+        thumbnail
+    }
+
     fn psd(resources: &[u8], image_data: &[u8]) -> Vec<u8> {
-        let mut bytes = header(3, 2, 3, 8, 3);
+        psd_with_size(3, 2, resources, image_data)
+    }
+
+    fn psd_with_size(width: u32, height: u32, resources: &[u8], image_data: &[u8]) -> Vec<u8> {
+        let mut bytes = header(width, height, 3, 8, 3);
         bytes.extend_from_slice(&0_u32.to_be_bytes());
         bytes.extend_from_slice(&(resources.len() as u32).to_be_bytes());
         bytes.extend_from_slice(resources);
@@ -603,32 +660,39 @@ mod tests {
     }
 
     #[test]
-    fn embedded_thumbnail_resource_wins_over_composite() {
-        let jpeg = {
-            let image = RgbImage::from_fn(40, 20, |x, y| image::Rgb([x as u8, y as u8, 120]));
-            let mut bytes = Vec::new();
-            image
-                .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Jpeg)
-                .unwrap();
-            bytes
-        };
-        let mut thumbnail = Vec::new();
-        thumbnail.extend_from_slice(&1_u32.to_be_bytes());
-        thumbnail.extend_from_slice(&40_u32.to_be_bytes());
-        thumbnail.extend_from_slice(&20_u32.to_be_bytes());
-        thumbnail.extend_from_slice(&120_u32.to_be_bytes());
-        thumbnail.extend_from_slice(&((28 + jpeg.len()) as u32).to_be_bytes());
-        thumbnail.extend_from_slice(&(jpeg.len() as u32).to_be_bytes());
-        thumbnail.extend_from_slice(&24_u16.to_be_bytes());
-        thumbnail.extend_from_slice(&1_u16.to_be_bytes());
-        thumbnail.extend_from_slice(&jpeg);
-
-        let resources = resource(THUMBNAIL_RESOURCE_PS5, &thumbnail);
-        // The composite intentionally says nothing useful; the resource must be
-        // used before image data is even read.
+    fn a_large_embedded_thumbnail_wins_over_the_composite() {
+        let resources = resource(THUMBNAIL_RESOURCE_PS5, &jpeg_thumbnail(300, 150));
         let (_directory, path) = write_psd("resource.psd", &psd(&resources, &planar_rgb()));
         let image = extract(&path, &CancelToken::standalone()).unwrap();
-        assert_eq!(image.dimensions(), (40, 20));
+        assert_eq!(image.dimensions(), (300, 150));
+    }
+
+    #[test]
+    fn a_tiny_embedded_thumbnail_falls_back_to_the_composite() {
+        let resources = resource(THUMBNAIL_RESOURCE_PS5, &jpeg_thumbnail(40, 20));
+        let (_directory, path) = write_psd("soft-resource.psd", &psd(&resources, &planar_rgb()));
+        let image = extract(&path, &CancelToken::standalone())
+            .unwrap()
+            .to_rgb8();
+        assert_eq!(image.dimensions(), (3, 2));
+    }
+
+    #[test]
+    fn an_oversized_canvas_uses_its_embedded_thumbnail() {
+        // 400 MP: beyond the composite budget, so the embedded resource is the
+        // only affordable path even though it is small.
+        let resources = resource(THUMBNAIL_RESOURCE_PS5, &jpeg_thumbnail(64, 32));
+        let bytes = psd_with_size(20_000, 20_000, &resources, &[]);
+        let (_directory, path) = write_psd("large.psd", &bytes);
+        let image = extract(&path, &CancelToken::standalone()).unwrap();
+        assert_eq!(image.dimensions(), (64, 32));
+    }
+
+    #[test]
+    fn an_oversized_canvas_without_an_embedded_thumbnail_stays_without_preview() {
+        let bytes = psd_with_size(20_000, 20_000, &[], &planar_rgb());
+        let (_directory, path) = write_psd("large-composite.psd", &bytes);
+        assert!(extract(&path, &CancelToken::standalone()).is_none());
     }
 
     #[test]
@@ -646,7 +710,8 @@ mod tests {
         thumbnail.extend_from_slice(&[255, 0, 0, 0, 0, 255, 9, 9]);
 
         let resources = resource(THUMBNAIL_RESOURCE_PS4, &thumbnail);
-        let (_directory, path) = write_psd("ps4.psd", &psd(&resources, &planar_rgb()));
+        // No composite: the raw resource is the only preview available.
+        let (_directory, path) = write_psd("ps4.psd", &psd(&resources, &[]));
         let image = extract(&path, &CancelToken::standalone())
             .unwrap()
             .to_rgb8();

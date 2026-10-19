@@ -5,7 +5,7 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::{cancel::CancelToken, cleanup, history, storage};
+use crate::{cancel::CancelToken, cleanup, history, preview, storage};
 
 use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore, ChunkTask, ChunkWriteOptions};
 
@@ -141,6 +141,51 @@ pub(crate) fn compact_node(
     // 失败只留队列可重试，不改变精简的成功语义。
     cleanup::replay(root, &cleanup_ids);
     Ok(())
+}
+
+/// Re-extract a node's derived preview from that node's stored content.
+///
+/// The current work file may have moved on, so the refresh path materializes the
+/// requested node into the repository temp directory and lets `preview` read it.
+/// Nothing is written back to the graph here; the caller persists the returned
+/// payload and any extraction failure simply yields `None`.
+pub(crate) fn extract_node_thumbnail(
+    root: &Path,
+    history_id: &str,
+    cancel: &CancelToken,
+    progress: impl Fn(&str, u64, u64),
+) -> Result<Option<preview::Thumbnail>, String> {
+    ensure_not_cancelled(cancel)?;
+    let ResolvedChain {
+        layout, mut store, ..
+    } = resolve_chain(root, history_id, "正在计算历史节点", cancel, &progress)?;
+    ensure_not_cancelled(cancel)?;
+    // Use the repository-level temp directory: a crash leaves only a `.tmp*`
+    // scratch file, which the startup sweep removes once it is stale.
+    let temp_directory = root.join("temp");
+    fs::create_dir_all(&temp_directory)
+        .map_err(|error| format!("无法创建缩略图临时目录：{error}"))?;
+    let mut materialized = NamedTempFile::new_in(&temp_directory)
+        .map_err(|error| format!("无法创建缩略图临时文件：{error}"))?;
+    let logical_size = layout.logical_size();
+    progress("正在准备节点内容", 0, logical_size);
+    {
+        let export_progress = |processed| progress("正在准备节点内容", processed, logical_size);
+        let task = ChunkTask::new(cancel, Some(&export_progress));
+        let mut reader = store.reader();
+        layout
+            .copy_original(&mut reader, materialized.as_file_mut(), &task)
+            .map_err(|error| format!("无法读取历史节点内容：{error}"))?;
+    }
+    materialized
+        .as_file()
+        .sync_all()
+        .map_err(|error| format!("无法同步缩略图临时文件：{error}"))?;
+    ensure_not_cancelled(cancel)?;
+    progress("正在提取缩略图", 0, 1);
+    let thumbnail = preview::extract(materialized.path(), cancel);
+    progress("缩略图提取完成", 1, 1);
+    Ok(thumbnail)
 }
 
 /// 从 `child_id` 的物化结果重建父节点 `parent_id` 的反向增量。

@@ -214,6 +214,14 @@ export function useHistoryController({
     }
   }, [invalidateReads, refreshRuntime, reportError, runBusy]);
 
+  const refreshNodeThumbnail = useCallback(async (historyId: string): Promise<string | null> => {
+    let value: string | null = null;
+    const succeeded = await runOperation("thumbnail", "正在重新提取缩略图", async () => {
+      value = await historyApi.refreshNodeThumbnail(historyId);
+    });
+    return succeeded ? value : null;
+  }, [runOperation]);
+
   const saveBranch = useCallback(async (request: UpdateBranchBackupRequest) => {
     invalidateReads();
     onErrorRef.current(null);
@@ -348,6 +356,7 @@ export function useHistoryController({
     renameNode,
     readNodeFormat,
     readNodeThumbnail,
+    refreshNodeThumbnail,
     cancelOperation,
   };
 }

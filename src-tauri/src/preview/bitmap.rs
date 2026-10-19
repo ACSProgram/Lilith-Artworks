@@ -6,7 +6,7 @@ use crate::cancel::CancelToken;
 
 use super::decode_path;
 
-/// Decode a plain raster work file (png/jpg/webp/tiff/bmp/gif). Other formats
+/// Decode a plain raster source file (png/jpg/webp/tiff/bmp/gif). Other formats
 /// are handled by their container extractors and are rejected here so a
 /// misdetected layered file never reaches the generic decoder.
 pub(super) fn extract(path: &Path, head: &[u8], cancel: &CancelToken) -> Option<DynamicImage> {

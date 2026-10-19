@@ -52,6 +52,40 @@ pub(crate) fn thumbnail(
     })
 }
 
+/// 重新从节点自身已存储的内容抽取缩略图。
+///
+/// 工作文件在节点创建后可能已经变化，因此这里物化该节点再抽取，而不是重读当前
+/// 工作文件；成功时写回缩略图列并返回 data URL，抽取不到内容时仍返回 `None`。
+pub(crate) fn refresh_thumbnail(
+    context: &CommandContext,
+    history_id: &str,
+) -> Result<Option<String>, CommandError> {
+    context.run_foreground(None, |session| {
+        let root = session.root();
+        let thumbnail = backup::extract_node_thumbnail(
+            root,
+            history_id,
+            context.cancel(),
+            |label, current, total| context.report_progress(label, current, total),
+        )
+        .map_err(CommandError::from)?;
+        let Some(thumbnail) = thumbnail else {
+            log::info!("history thumbnail refresh produced no preview: history_id={history_id}");
+            return Ok(None);
+        };
+        history::store_thumbnail(root, history_id, &thumbnail.bytes, thumbnail.version)
+            .map_err(CommandError::from)?;
+        log::info!(
+            "history thumbnail refreshed: history_id={history_id}, bytes={}",
+            thumbnail.bytes.len()
+        );
+        Ok(Some(format!(
+            "data:image/webp;base64,{}",
+            STANDARD.encode(&thumbnail.bytes)
+        )))
+    })
+}
+
 pub(crate) fn rename_node(
     context: &CommandContext,
     request: history::RenameHistoryNodeRequest,

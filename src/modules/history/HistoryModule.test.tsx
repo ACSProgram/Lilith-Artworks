@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { HistoryModule } from "./HistoryModule";
@@ -122,6 +122,7 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     renameNode: vi.fn(),
     readNodeFormat: vi.fn().mockResolvedValue("v2"),
     readNodeThumbnail: vi.fn().mockResolvedValue(null),
+    refreshNodeThumbnail: vi.fn().mockResolvedValue(null),
     cancelOperation: vi.fn(),
     ...overrides,
   };
@@ -359,6 +360,7 @@ describe("HistoryModule node inspector", () => {
 
     const image = await screen.findByRole("img", { name: "Main head 的缩略图" });
     expect(image.getAttribute("src")).toBe("data:image/webp;base64,cHJldmlldw==");
+    expect(screen.getByRole("button", { name: "重新获取缩略图" })).toBeTruthy();
     expect(readNodeThumbnail).toHaveBeenCalledWith("main-head");
   });
 
@@ -375,5 +377,63 @@ describe("HistoryModule node inspector", () => {
     fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
 
     expect(await screen.findByText("无可用预览")).toBeTruthy();
+  });
+
+  it("re-extracts a missing thumbnail from the refresh button", async () => {
+    const refreshNodeThumbnail = vi.fn().mockResolvedValue("data:image/webp;base64,cmVmcmVzaA==");
+    controller.useHistoryController.mockReturnValue(controllerReturn({ refreshNodeThumbnail }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    fireEvent.click(await screen.findByRole("button", { name: "重新获取缩略图" }));
+
+    const image = await screen.findByRole("img", { name: "Main head 的缩略图" });
+    expect(image.getAttribute("src")).toBe("data:image/webp;base64,cmVmcmVzaA==");
+    expect(refreshNodeThumbnail).toHaveBeenCalledWith("main-head");
+  });
+
+  it("keeps the new preview when a refresh lands after the selection moved on", async () => {
+    let finishRefresh: ((value: string | null) => void) | undefined;
+    const refreshNodeThumbnail = vi.fn().mockImplementation(() => new Promise<string | null>((resolve) => {
+      finishRefresh = resolve;
+    }));
+    const readNodeThumbnail = vi.fn().mockImplementation((id: string) => Promise.resolve(
+      id === "middle" ? "data:image/webp;base64,bWlkZGxl" : null,
+    ));
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail, refreshNodeThumbnail }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Middle/ }));
+    const middleImage = await screen.findByRole("img", { name: "Middle 的缩略图" });
+    expect(middleImage.getAttribute("src")).toBe("data:image/webp;base64,bWlkZGxl");
+
+    fireEvent.click(screen.getByRole("button", { name: "重新获取缩略图" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+    await screen.findByText("无可用预览");
+
+    await act(async () => { finishRefresh?.("data:image/webp;base64,c3RhbGU="); });
+
+    // The stale refresh belongs to "Middle"; the inspector must stay on the
+    // node the user actually selected instead of showing its loading fallback.
+    expect(screen.queryByText("读取预览…")).toBeNull();
+    expect(screen.queryByRole("img", { name: "Middle 的缩略图" })).toBeNull();
+    expect(screen.getByText("无可用预览")).toBeTruthy();
   });
 });

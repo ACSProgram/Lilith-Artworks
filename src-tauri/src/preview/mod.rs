@@ -1,9 +1,11 @@
 //! Derived history-node thumbnails.
 //!
-//! Extraction runs while the commit worker already has the work file open. It
-//! is strictly optional: any unsupported or malformed input yields `None`, and
-//! the commit proceeds without a preview. Container detection and structural
-//! navigation are shared with the chunk writer through `format::container`.
+//! Extraction is strictly optional and never fails the caller: any unsupported
+//! or malformed input yields `None`, and the caller records no preview. It has
+//! two entry points: the commit worker passes the work file it already has
+//! open, and the manual refresh passes a file materialized from the node's own
+//! stored content. Container detection and structural navigation are shared
+//! with the chunk writer through `format::container`.
 
 use std::{
     fs::File,
@@ -39,7 +41,7 @@ pub(crate) struct Thumbnail {
     pub(crate) version: i64,
 }
 
-/// Extract a bounded preview from a work file. Never fails the commit.
+/// Extract a bounded preview from a source file. Never fails the caller.
 pub(crate) fn extract(path: &Path, cancel: &CancelToken) -> Option<Thumbnail> {
     if cancel.observed() {
         return None;
@@ -114,7 +116,7 @@ pub(super) fn decode_bytes(bytes: &[u8]) -> Option<DynamicImage> {
     reader.decode().ok()
 }
 
-/// Decode a raster work file from disk under the same budget. The file is
+/// Decode a raster source file from disk under the same budget. The file is
 /// reopened after the dimension probe for the same reason as `decode_bytes`.
 pub(super) fn decode_path(path: &Path) -> Option<DynamicImage> {
     let probe = ImageReader::open(path).ok()?.with_guessed_format().ok()?;

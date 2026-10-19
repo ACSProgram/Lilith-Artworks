@@ -29,7 +29,7 @@ src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/A
 src-tauri/src/history/                 分支、历史节点、创建分支、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备与调度
 src-tauri/src/format/                  `.clip`/`.psd` 容器探测与结构单元定位（分块与缩略图共用）
-src-tauri/src/preview/                 历史节点派生缩略图：按工作文件格式抽取，失败只跳过预览
+src-tauri/src/preview/                 历史节点派生缩略图：按来源文件格式抽取，失败只跳过预览
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
 src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
 src-tauri/src/contracts/               中立契约：引用清单与灾备完整性 provider

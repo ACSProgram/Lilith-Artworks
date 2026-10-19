@@ -40,7 +40,7 @@
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。
-- `preview` 只读工作文件、返回派生缩略图，不写仓库文件也不进 ChunkFile；任何失败只让该节点没有预览。
+- `preview` 只读传入的文件、返回派生缩略图，不写仓库文件也不进 ChunkFile；提交时来源是工作文件，手动刷新时由 backup 把节点内容物化到 `temp/` 再交给它；任何失败只让该节点没有预览。
 - `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `run_read`，
   变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
   DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。

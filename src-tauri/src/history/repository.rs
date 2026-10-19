@@ -376,6 +376,28 @@ pub(crate) fn load_thumbnail(
     }))
 }
 
+/// Write a derived thumbnail back to an existing node. Only the preview columns
+/// change; the graph, digest and verification state are untouched. Zero affected
+/// rows means the id does not belong to this repository, which callers run under
+/// the shared run lock and treat as an error rather than a silent no-op.
+pub(crate) fn store_thumbnail(
+    root: &Path,
+    history_id: &str,
+    bytes: &[u8],
+    version: i64,
+) -> Result<(), String> {
+    let changed = storage::open(root)?
+        .execute(
+            "UPDATE history_nodes SET thumbnail = ?2, thumbnail_version = ?3 WHERE id = ?1",
+            params![history_id, bytes, version],
+        )
+        .map_err(storage::database_error)?;
+    if changed == 0 {
+        return Err(format!("找不到历史节点 {history_id}"));
+    }
+    Ok(())
+}
+
 pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection

@@ -1,6 +1,6 @@
 import {
   Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
-  ListCollapse, Pencil, Play, Trash2, X,
+  ListCollapse, Pencil, Play, RefreshCw, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
@@ -44,7 +44,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
     restoreNode, compactNodes, deleteBranch, reverifyBranch, deleteSubtree, setCheckpoint,
-    forkBranch, renameNode, readNodeFormat, readNodeThumbnail, cancelOperation,
+    forkBranch, renameNode, readNodeFormat, readNodeThumbnail, refreshNodeThumbnail,
+    cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodeFormat, setNodeFormat] = useState<{
@@ -155,6 +156,20 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       cancelled = true;
     };
   }, [readNodeThumbnail, selectedNode, view]);
+
+  const refreshThumbnail = (node: HistoryNode) => {
+    const previous = nodeThumbnail?.nodeId === node.id ? nodeThumbnail.value : null;
+    setNodeThumbnail({ nodeId: node.id, value: previous, loading: true });
+    void refreshNodeThumbnail(node.id).then((value) => {
+      // A refresh that extracts nothing must not hide a preview that is still
+      // stored; the backend only replaces the row when extraction succeeds.
+      // Selecting another node hands the state to the read effect, so a result
+      // that arrives after the selection moved on must not overwrite it.
+      setNodeThumbnail((current) => current?.nodeId === node.id
+        ? { nodeId: node.id, value: value ?? previous, loading: false }
+        : current);
+    });
+  };
 
   const roots = useMemo(() => buildHistoryTree(history?.nodes ?? []), [history?.nodes]);
   const branchLine = useMemo(() => selectedBranch && history
@@ -397,9 +412,33 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
           <div className="history-preview">
             {nodeThumbnail?.nodeId === selectedNode.id
               ? nodeThumbnail.value
-                ? <img src={nodeThumbnail.value} alt={`${selectedNode.title} 的缩略图`} />
-                : <span className="history-preview-empty">{nodeThumbnail.loading ? "读取预览…" : "无可用预览"}</span>
-              : <span className="history-preview-empty">读取预览…</span>}
+                ? <>
+                  <img src={nodeThumbnail.value} alt={`${selectedNode.title} 的缩略图`} />
+                  <button
+                    className="icon-button history-preview-refresh history-preview-refresh-overlay"
+                    type="button"
+                    title="重新获取缩略图"
+                    aria-label="重新获取缩略图"
+                    disabled={busy || runtime.busy || nodeThumbnail.loading}
+                    onClick={() => refreshThumbnail(selectedNode)}
+                  ><RefreshCw className={nodeThumbnail.loading ? "spin" : undefined} size={13} /></button>
+                </>
+                : <span className="history-preview-empty">
+                  {nodeThumbnail.loading
+                    ? <><LoaderCircle className="spin" size={12} />读取预览…</>
+                    : <>
+                      <span>无可用预览</span>
+                      <button
+                        className="icon-button history-preview-refresh"
+                        type="button"
+                        title="重新获取缩略图"
+                        aria-label="重新获取缩略图"
+                        disabled={busy || runtime.busy}
+                        onClick={() => refreshThumbnail(selectedNode)}
+                      ><RefreshCw size={13} /></button>
+                    </>}
+                </span>
+              : <span className="history-preview-empty"><LoaderCircle className="spin" size={12} />读取预览…</span>}
           </div>
           <dl>
             <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
