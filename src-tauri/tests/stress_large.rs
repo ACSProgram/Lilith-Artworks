@@ -386,10 +386,14 @@ fn baseline_peak(scenario: &Scenario) -> u64 {
 /// 把一次场景的磁盘账本写进 `ledger.jsonl`，并断言实测增量不超过预期加容差。返回
 /// `(实测增量, 预期增量, 容差)`，供调用方写进可长期引用的报告。
 ///
-/// 预期增量 = 场景新增的实体文件（snapshot + delta）与工作文件新增写入的区域之和；实测
-/// 增量是工作区「文件长度之和，稀疏工作文件按已写入区域计」的差值。上界比对是一条
-/// 「存储放大是否失控」的回归断言：泄漏的中间 snapshot、未回收的临时文件与游离实体都会
-/// 让实测超出预期。
+/// 预期增量 = 场景新增的实体文件与工作文件新增写入的区域之和。实测增量是工作区
+/// 「文件长度之和，稀疏工作文件按已写入区域计」的差值。上界比对是一条「存储放大是否
+/// 失控」的回归断言：泄漏的中间 snapshot、未回收的临时文件与游离实体都会让实测超出预期。
+///
+/// 注意「新增的实体文件」要**按增长量计**：v1 快照固定为「逻辑大小 + 每块开销」，head 换快照
+/// 时体积不变，所以旧口径只算 delta 与工作文件区域就够了；v2 快照跟随新增的不同内容增长，
+/// 换 head 时会实打实地变大，不把这段增长计入预期就会把正常增长误判成泄漏（2026-10-19 的
+/// `heavy` 档就是这样失败的：实测多出的 12.8 MB 正好等于快照增长）。
 fn record_ledger(
     scenario: &Scenario,
     name: &str,
@@ -693,10 +697,12 @@ fn c4_large_file_chain_volume_stays_bounded() {
     };
     let tier = tier();
 
-    // 基线提交：此后仓库已经持有 head 的 snapshot，账本只需再计增量与新增触及的区域。
+    // 基线提交：此后仓库已经持有 head 的 snapshot，账本只需再计增量、新增触及的区域，
+    // 以及 head 换快照时的**快照增长**（v2 快照跟随新增的不同内容变大）。
     scenario.commit("baseline");
     let before = scenario.allocated();
     let regions_before = scenario.region_bytes();
+    let snapshots_before = tree_usage(&scenario.workspace).snapshots;
 
     let mut run = CommitRun::new();
     let mut last = None;
@@ -711,6 +717,7 @@ fn c4_large_file_chain_volume_stays_bounded() {
     let usage = tree_usage(&scenario.workspace);
     let changed = scenario.change_bytes * scenario.rounds() as u64;
     let region_growth = scenario.region_bytes() - regions_before;
+    let snapshot_growth = usage.snapshots.saturating_sub(snapshots_before);
 
     // head 恒持有 snapshot；v2 对稀疏夹具里的全零区去重并压缩，因此快照不大于逻辑大小，
     // 而且必须确实小于它——这才是「去重与压缩真的生效」的证据。
@@ -731,9 +738,10 @@ fn c4_large_file_chain_volume_stays_bounded() {
         "C4 large file chain volume",
         before,
         scenario.allocated(),
-        usage.deltas + region_growth,
+        usage.deltas + region_growth + snapshot_growth,
         json!({
             "snapshotBytes": usage.snapshots,
+            "snapshotGrowthBytes": snapshot_growth,
             "deltaBytes": usage.deltas,
             "changedBytes": changed,
             "regionGrowthBytes": region_growth,

@@ -8,6 +8,13 @@
 //! 固定开销；这也是产品在被调用时实际付出的成本。小文件让固定开销可见，所以同时记录总
 //! 耗时与摊薄值，回归看的是**同一档位下的相对变化**，不是绝对值。
 //!
+//! **每条测量都同时记墙钟与 CPU 时间**（用户 + 内核）。墙钟是用户感知的成本，含等磁盘与
+//! 被调度剥夺；CPU 时间是算力成本，不含被剥夺的时间，因此 `cargo test` 并行跑多个场景时
+//! 几乎不变——2026-10-18 的实测里同一基准的并行墙钟是单线程的 2.3–4.1 倍，而 CPU 时间不受
+//! 这一项影响。两者分工与取舍见 [`Measure`] 与 [`CPU_GATE_MIN_MS`]：CPU 时间看不见磁盘
+//! 等待，短操作又会被 Windows 15.625 ms 的记账粒度量化，所以它只回答「是不是更费 CPU」，
+//! 不替代墙钟。
+//!
 //! - **P1 节点链**：96 KiB 工作文件上建 [`CHAIN_NODES`] 个节点的链，测每次提交的摊薄耗时
 //!   与「恢复最早节点」（穿越整条反向增量链）的每步耗时；顺带逐位校验恢复内容。
 //!   P1B 在同一组里用 4 MiB 工作文件建 [`SEGMENT_NODES`] 个节点，让每条 snapshot/delta
@@ -25,7 +32,8 @@
 //!   1 个主分支 + [`SCHEDULER_FORKS_PER_ARTWORK`] 个分叉下的候选扫描成本。
 //! - **P8 大规模孤儿清理**：[`ORPHAN_FILES`] 个无记录画板 DDS 的扫描与确认清理。
 //!
-//! P4–P8 各测 [`REPEATS`] 轮取最小值，削弱调度抖动；这是**相对基线**能用的前提。
+//! P1B、P2 与 P4–P8 各测 [`REPEATS`] 轮：墙钟取最小值（削弱调度抖动），CPU 时间取均值
+//! （单轮只有几十毫秒，逐轮值会被 15.6 ms 的记账粒度量化）。这是**相对基线**能用的前提。
 //!
 //! **断言只设灾难性上界**（数量级失控），避免把环境噪声变成 flaky；真正的回归门是
 //! `LILITH_STRESS_PERF_STRICT=1` 与 `tests/perf-baseline.json` 的比对（见 [`emit`]）。
@@ -34,6 +42,9 @@
 //! 运行：`cargo test --features headless --test stress_bench -- --nocapture`
 //! 更新基线：`LILITH_STRESS_PERF_UPDATE=1 cargo test --features headless --test stress_bench -- --test-threads=1`
 //! 回归门：`LILITH_STRESS_PERF_STRICT=1 cargo test --features headless --test stress_bench -- --test-threads=1`
+//!
+//! 用 `LILITH_STRESS_BIN` 指向 release 二进制时，必须同时设 `LILITH_STRESS_PROFILE=release`，
+//! 否则数字会被记进（并比对到）debug 档；基线文件顶层的 `machine` 字段记录采集它的机器。
 //!
 //! 基线与严格比对都在 `--test-threads=1`（单线程）下采集与比对，避免三个基准互相争抢 CPU
 //! 带来的抖动；只记录数值时是否单线程无所谓。
@@ -46,7 +57,7 @@ mod stress_support;
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
-    sync::Mutex,
+    sync::{Mutex, OnceLock},
     time::{Duration, Instant, SystemTime},
 };
 
@@ -114,13 +125,24 @@ fn baseline_path() -> PathBuf {
         .join("perf-baseline.json")
 }
 
-/// 基准按构建档分开记录：debug 与 release 的绝对耗时差一个数量级，混在一起没有意义。
+/// 基准按**被测二进制**的构建档分开记录：debug 与 release 的绝对耗时差一个数量级，
+/// 混在一起没有意义。
+///
+/// 测试脚手架自身的构建档与被测二进制可以不同（文档里的标准做法就是「debug 脚手架 +
+/// `LILITH_STRESS_BIN` 指向 release 二进制」），因此 `cfg!(debug_assertions)` 只在未显式
+/// 指定时兜底；指向别的构建档时必须设 `LILITH_STRESS_PROFILE`，否则数字会记到错误的档位上。
 fn profile_name() -> &'static str {
-    if cfg!(debug_assertions) {
-        "debug"
-    } else {
-        "release"
-    }
+    static NAME: OnceLock<String> = OnceLock::new();
+    NAME.get_or_init(|| match std::env::var("LILITH_STRESS_PROFILE") {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_owned(),
+        _ => if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+        .to_owned(),
+    })
+    .as_str()
 }
 
 fn env_flag(name: &str) -> bool {
@@ -137,22 +159,117 @@ fn read_baseline() -> Value {
         .unwrap_or_else(|| Value::Object(Map::new()))
 }
 
+/// 一条性能测量：墙钟与 CPU 时间**都记**，两者分工不同。
+///
+/// - **墙钟**是用户感知的成本（含等磁盘、含被调度剥夺），跨机器、跨负载都不可比；
+/// - **CPU 时间**（用户 + 内核）是算力成本，不含进程被剥夺的时间，因此 `cargo test` 并行
+///   跑多个场景时几乎不变——这正是墙钟做不到的（同一基准并行采集被拉长 2.3–4.1 倍）。
+///
+/// 但 CPU 时间**看不见磁盘等待**，而本项目提交/恢复/灾备都是落盘路径，所以它只能回答
+/// 「是不是更费 CPU」，不能回答「用户等了多久」。基线里两者各占一个键：
+/// `scenario::label` 是墙钟，`scenario::label#cpu` 是 CPU 时间。
+struct Measure {
+    label: &'static str,
+    wall_ms: f64,
+    cpu_ms: Option<f64>,
+}
+
+/// 一次测量的样本：墙钟 +（可选的）CPU 时间。派生值（每张图、每步、每节点）用
+/// [`Self::scale`] 同时摊薄两者。
+#[derive(Clone, Copy)]
+struct Sample {
+    wall_ms: f64,
+    cpu_ms: Option<f64>,
+}
+
+impl Sample {
+    /// 只有墙钟的样本：产品自报的分阶段耗时（渲染 / 编码 / 签名）与派生的吞吐量。
+    fn wall(wall_ms: f64) -> Self {
+        Self {
+            wall_ms,
+            cpu_ms: None,
+        }
+    }
+
+    /// 一次子进程调用的样本：墙钟由调用方计时，CPU 记账来自 [`Outcome::cpu`]。
+    fn of(wall: Duration, outcome: &Outcome) -> Self {
+        Self::from_cpu(wall, outcome.cpu)
+    }
+
+    /// 同 [`Self::of`]，但 CPU 记账是多个子进程累加的结果（多进程场景）。
+    fn from_cpu(wall: Duration, cpu: CpuTime) -> Self {
+        Self {
+            wall_ms: millis(wall),
+            cpu_ms: cpu.measured.then(|| cpu.total_ms()),
+        }
+    }
+
+    /// 按分母摊薄（每张图片、每个节点）。
+    fn scale(self, divisor: f64) -> Self {
+        Self {
+            wall_ms: self.wall_ms / divisor,
+            cpu_ms: self.cpu_ms.map(|cpu| cpu / divisor),
+        }
+    }
+
+    fn measure(self, label: &'static str) -> Measure {
+        Measure {
+            label,
+            wall_ms: self.wall_ms,
+            cpu_ms: self.cpu_ms,
+        }
+    }
+
+    fn wall_measure(self, label: &'static str) -> Measure {
+        Measure {
+            label,
+            wall_ms: self.wall_ms,
+            cpu_ms: None,
+        }
+    }
+}
+
+/// CPU 时间进基线比对的最小长度。
+///
+/// Windows 的 CPU 时间按时钟中断记账，实测粒度 15.625 ms：比它短的操作会被量化成
+/// `0 / 15.6 / 31.3` 这样的跳变，单是量化误差就能吃掉 2.5× 的阈值。因此短操作只记
+/// CPU 时间（供人工看趋势）、不参与严格比对，墙钟仍照常比对。
+const CPU_GATE_MIN_MS: f64 = 50.0;
+
 /// 记录一组测量，并按需更新基线或在严格模式下比对。
 ///
 /// 默认只记录（写进 `target/stress-report.jsonl` 并打印）。基线的比对**必须显式开启**
 /// （`LILITH_STRESS_PERF_STRICT=1`），因为绝对耗时依赖机器；`LILITH_STRESS_PERF_FACTOR`
-/// 控制允许的倍数（默认 2.5×）。
-fn emit(scenario: &str, measurements: &[(&str, f64)], extra: Value) {
+/// 控制允许的倍数（默认 2.5×）。CPU 时间同样按该倍数比对，但只在基线值
+/// ≥ [`CPU_GATE_MIN_MS`] 时参与——见该常量的说明。
+fn emit(scenario: &str, measurements: &[Measure], extra: Value) {
     let profile = profile_name();
-    for (label, ms) in measurements {
+    for measure in measurements {
         record_measurement(
             scenario,
             "P",
-            &format!("{profile} {label}"),
-            *ms,
+            &format!("{profile} {}", measure.label),
+            measure.wall_ms,
             extra.clone(),
         );
-        println!("[perf] {scenario} :: {label} = {ms:.1} ms ({profile})");
+        println!(
+            "[perf] {scenario} :: {} = {:.1} ms wall ({profile})",
+            measure.label, measure.wall_ms
+        );
+        let Some(cpu_ms) = measure.cpu_ms else {
+            continue;
+        };
+        record_measurement(
+            scenario,
+            "P",
+            &format!("{profile} {} (CPU)", measure.label),
+            cpu_ms,
+            extra.clone(),
+        );
+        println!(
+            "[perf] {scenario} :: {} = {:.1} ms cpu ({profile})",
+            measure.label, cpu_ms
+        );
     }
 
     if env_flag("LILITH_STRESS_PERF_UPDATE") {
@@ -169,25 +286,73 @@ fn emit(scenario: &str, measurements: &[(&str, f64)], extra: Value) {
         .unwrap_or(2.5);
     let baseline = read_baseline();
     let table = baseline.get(profile).and_then(Value::as_object);
-    for (label, ms) in measurements {
-        let key = format!("{scenario}::{label}");
-        let Some(base) = table
-            .and_then(|table| table.get(&key))
-            .and_then(Value::as_f64)
-        else {
-            eprintln!("[perf] {key} 无基线，跳过比对（用 LILITH_STRESS_PERF_UPDATE=1 生成）");
-            continue;
-        };
-        assert!(
-            *ms <= base * factor,
-            "性能回归：{scenario} :: {label} 实测 {ms:.1} ms，基线 {base:.1} ms，\
-             阈值 {:.1} ms（{factor}×）。若确为环境差异，请核对后更新基线。",
-            base * factor
+    for measure in measurements {
+        compare(
+            table
+                .and_then(|table| table.get(&baseline_key(scenario, measure.label)))
+                .and_then(Value::as_f64),
+            factor,
+            scenario,
+            measure.label,
+            measure.wall_ms,
+            "墙钟",
         );
+        if let Some(cpu_ms) = measure.cpu_ms {
+            let key = cpu_key(scenario, measure.label);
+            let base = table
+                .and_then(|table| table.get(&key))
+                .and_then(Value::as_f64);
+            match base {
+                Some(base) if base >= CPU_GATE_MIN_MS => compare(
+                    Some(base),
+                    factor,
+                    scenario,
+                    measure.label,
+                    cpu_ms,
+                    "CPU 时间",
+                ),
+                Some(_) => eprintln!(
+                    "[perf] {key} 基线低于 {CPU_GATE_MIN_MS} ms，量化误差过大，只记录不比对"
+                ),
+                None => {
+                    eprintln!(
+                        "[perf] {key} 无基线，跳过比对（用 LILITH_STRESS_PERF_UPDATE=1 生成）"
+                    )
+                }
+            }
+        }
     }
 }
 
-fn update_baseline(scenario: &str, profile: &str, measurements: &[(&str, f64)]) {
+fn baseline_key(scenario: &str, label: &str) -> String {
+    format!("{scenario}::{label}")
+}
+
+fn cpu_key(scenario: &str, label: &str) -> String {
+    format!("{scenario}::{label}#cpu")
+}
+
+fn compare(base: Option<f64>, factor: f64, scenario: &str, label: &str, ms: f64, unit: &str) {
+    let Some(base) = base else {
+        eprintln!(
+            "[perf] {} 无基线，跳过比对（用 LILITH_STRESS_PERF_UPDATE=1 生成）",
+            baseline_key(scenario, label)
+        );
+        return;
+    };
+    assert!(
+        ms <= base * factor,
+        "性能回归：{scenario} :: {label} 的{unit}实测 {ms:.1} ms，基线 {base:.1} ms，\
+         阈值 {:.1} ms（{factor}×）。若确为环境差异，请核对后更新基线。",
+        base * factor
+    );
+}
+
+/// 把本次测量写进基线的对应构建档。
+///
+/// 只写 `profile` 指向的那张表，顶层其它键（`note` 与 `machine`）原样保留：`machine` 记录
+/// 采集基线的机器型号，由维护者维护——换机器重采时手动改它，而不是让脚本每天改写。
+fn update_baseline(scenario: &str, profile: &str, measurements: &[Measure]) {
     let _guard = BASELINE_LOCK
         .lock()
         .unwrap_or_else(|error| error.into_inner());
@@ -200,8 +365,10 @@ fn update_baseline(scenario: &str, profile: &str, measurements: &[(&str, f64)]) 
             "note".to_owned(),
             json!(
                 "由 stress_bench 在 LILITH_STRESS_PERF_UPDATE=1 下生成；\
-                 供 LILITH_STRESS_PERF_STRICT=1 比对。绝对耗时依赖机器与构建档，\
-                 跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR。"
+                 供 LILITH_STRESS_PERF_STRICT=1 比对。键 `场景::标签` 是墙钟、\
+                 `场景::标签#cpu` 是子进程 CPU 时间（用户 + 内核，多线程阶段会大于墙钟）。\
+                 绝对耗时依赖机器与构建档，跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR；\
+                 CPU 时间只在基线 ≥ 50 ms 时参与比对（Windows 的 CPU 记账粒度 15.625 ms）。"
             ),
         );
     }
@@ -212,8 +379,14 @@ fn update_baseline(scenario: &str, profile: &str, measurements: &[(&str, f64)]) 
         .get_mut(profile)
         .and_then(Value::as_object_mut)
         .expect("基线 profile 必须是对象");
-    for (label, ms) in measurements {
-        table.insert(format!("{scenario}::{label}"), json!(round1(*ms)));
+    for measure in measurements {
+        table.insert(
+            baseline_key(scenario, measure.label),
+            json!(round1(measure.wall_ms)),
+        );
+        if let Some(cpu_ms) = measure.cpu_ms {
+            table.insert(cpu_key(scenario, measure.label), json!(round1(cpu_ms)));
+        }
     }
     let text = serde_json::to_string_pretty(&root).expect("无法序列化性能基线");
     fs::write(baseline_path(), format!("{text}\n")).expect("无法写入性能基线");
@@ -236,31 +409,35 @@ fn millis(duration: Duration) -> f64 {
 fn p1_node_chain_commit_and_restore_baseline() {
     let fixture = ArtworkFixture::new();
 
-    // 建链：每个节点一次提交（每次一个独立进程）。
+    // 建链：每个节点一次提交（每次一个独立进程）。CPU 记账按全部子进程累加后摊薄，
+    // 这样量级是秒级，不会被 15.6 ms 的记账粒度吃掉。
     let started = Instant::now();
     let mut nodes = Vec::with_capacity(CHAIN_NODES);
+    let mut build_cpu = CpuTime::default();
     for index in 0..CHAIN_NODES {
-        let id = fixture.commit(
+        let (id, cpu) = fixture.commit_timed(
             NODE_FILE_BYTES + index * 8,
             1_000 + index as u64,
             "chain node",
         );
+        build_cpu.merge(&cpu);
         nodes.push(id);
     }
     let build = started.elapsed();
-    let per_commit = millis(build) / CHAIN_NODES as f64;
+    let per_commit = Sample::from_cpu(build, build_cpu).scale(CHAIN_NODES as f64);
 
     // 恢复最早节点：要穿越 CHAIN_NODES-1 步反向增量才能还原。
     let oldest = fixture.workspace.out("p1-oldest.bin");
     let restore_started = Instant::now();
-    fixture
+    let restored_oldest = fixture
         .command("restore")
         .arg("history", &nodes[0])
         .arg("output", oldest.to_string_lossy())
-        .finish()
-        .expect_ok();
+        .finish();
     let restore_oldest = restore_started.elapsed();
-    let per_step = millis(restore_oldest) / (CHAIN_NODES - 1) as f64;
+    restored_oldest.expect_ok();
+    let oldest_sample = Sample::of(restore_oldest, &restored_oldest);
+    let per_step = oldest_sample.scale((CHAIN_NODES - 1) as f64);
 
     // 顺带校验正确性：恢复产物必须与最早提交时的期望内容逐位一致。
     assert_eq!(
@@ -272,35 +449,39 @@ fn p1_node_chain_commit_and_restore_baseline() {
     // head 恢复：直接读 snapshot，是相反的一端。
     let head = fixture.workspace.out("p1-head.bin");
     let head_started = Instant::now();
-    fixture
+    let restored_head = fixture
         .command("restore")
         .arg("history", nodes.last().expect("链上至少一个节点"))
         .arg("output", head.to_string_lossy())
-        .finish()
-        .expect_ok();
+        .finish();
     let restore_head = head_started.elapsed();
+    restored_head.expect_ok();
+    let head_sample = Sample::of(restore_head, &restored_head);
 
     assert!(
-        per_commit < CATASTROPHIC_COMMIT_MS,
-        "单次提交摊薄耗时失控：{per_commit:.1} ms"
+        per_commit.wall_ms < CATASTROPHIC_COMMIT_MS,
+        "单次提交摊薄耗时失控：{:.1} ms",
+        per_commit.wall_ms
     );
     assert!(
-        per_step < CATASTROPHIC_CHAIN_STEP_MS,
-        "恢复每步耗时失控：{per_step:.1} ms"
+        per_step.wall_ms < CATASTROPHIC_CHAIN_STEP_MS,
+        "恢复每步耗时失控：{:.1} ms",
+        per_step.wall_ms
     );
 
     emit(
         "P1 node chain",
         &[
-            ("commitMs", per_commit),
-            ("chainStepMs", per_step),
-            ("restoreOldestMs", millis(restore_oldest)),
-            ("restoreHeadMs", millis(restore_head)),
+            per_commit.measure("commitMs"),
+            per_step.measure("chainStepMs"),
+            oldest_sample.measure("restoreOldestMs"),
+            head_sample.measure("restoreHeadMs"),
         ],
         json!({
             "nodes": CHAIN_NODES,
             "fileBytes": NODE_FILE_BYTES,
             "buildMs": millis(build),
+            "buildCpuMs": build_cpu.total_ms(),
         }),
     );
 
@@ -321,23 +502,34 @@ fn percentile(samples: &mut [f64], p: f64) -> f64 {
 
 /// 计时一次恢复并逐位校验产物，随后删除输出，避免重复轮次相互争抢磁盘。
 #[track_caller]
-fn timed_restore(fixture: &ArtworkFixture, history_id: &str, name: &str, expected: &[u8]) -> f64 {
+fn timed_restore(
+    fixture: &ArtworkFixture,
+    history_id: &str,
+    name: &str,
+    expected: &[u8],
+) -> Sample {
     let output = fixture.workspace.out(name);
     let started = Instant::now();
-    fixture
+    let outcome = fixture
         .command("restore")
         .arg("history", history_id)
         .arg("output", output.to_string_lossy())
-        .finish()
-        .expect_ok();
-    let elapsed = millis(started.elapsed());
+        .finish();
+    let elapsed = started.elapsed();
+    outcome.expect_ok();
     assert_eq!(
         fs::read(&output).expect("无法读取恢复输出"),
         expected,
         "段索引场景的恢复产物必须逐位一致"
     );
     fs::remove_file(&output).expect("无法清理恢复输出");
-    elapsed
+    Sample::of(elapsed, &outcome)
+}
+
+/// 多轮样本的 CPU 均值：单轮只有几十毫秒，逐轮值受 15.6 ms 记账粒度影响，取均值才有意义。
+fn mean_cpu(samples: &[Sample]) -> Option<f64> {
+    let values: Vec<f64> = samples.iter().filter_map(|sample| sample.cpu_ms).collect();
+    (!values.is_empty()).then(|| values.iter().sum::<f64>() / values.len() as f64)
 }
 
 /// P1B：大文件多段链上的恢复耗时分布。
@@ -363,6 +555,7 @@ fn p1b_segment_reads_baseline() {
 
     let build_started = Instant::now();
     let mut nodes = Vec::with_capacity(SEGMENT_NODES);
+    let mut build_cpu = CpuTime::default();
     for index in 0..SEGMENT_NODES {
         // 每个版本内容全变：delta 无法靠重复块缩小，段数才是真实的。
         write_work_file(&source, SEGMENT_FILE_BYTES, 0xD00 + index as u64 + 1);
@@ -373,6 +566,7 @@ fn p1b_segment_reads_baseline() {
             .arg("note", &format!("segment node {index}"))
             .finish();
         committed.expect_ok();
+        build_cpu.merge(&committed.cpu);
         nodes.push(committed.data_str("historyId"));
     }
     let build = build_started.elapsed();
@@ -398,10 +592,15 @@ fn p1b_segment_reads_baseline() {
         ));
     }
 
-    let oldest_p50 = percentile(&mut oldest_samples, 0.50);
-    let oldest_p95 = percentile(&mut oldest_samples, 0.95);
-    let head_p50 = percentile(&mut head_samples, 0.50);
-    let head_p95 = percentile(&mut head_samples, 0.95);
+    let mut oldest_walls: Vec<f64> = oldest_samples.iter().map(|sample| sample.wall_ms).collect();
+    let mut head_walls: Vec<f64> = head_samples.iter().map(|sample| sample.wall_ms).collect();
+    let oldest_p50 = percentile(&mut oldest_walls, 0.50);
+    let oldest_p95 = percentile(&mut oldest_walls, 0.95);
+    let head_p50 = percentile(&mut head_walls, 0.50);
+    let head_p95 = percentile(&mut head_walls, 0.95);
+    // CPU 侧取多轮均值：单轮只有几十毫秒，逐轮值会被 15.6 ms 的记账粒度量化。
+    let oldest_cpu = mean_cpu(&oldest_samples);
+    let head_cpu = mean_cpu(&head_samples);
     assert!(
         oldest_p95 < CATASTROPHIC_SEGMENT_RESTORE_MS,
         "多段深链恢复耗时失控：p95={oldest_p95:.1} ms"
@@ -415,24 +614,37 @@ fn p1b_segment_reads_baseline() {
     emit(
         "P1 segment reads",
         &[
-            ("restoreOldestP50Ms", oldest_p50),
-            ("restoreOldestP95Ms", oldest_p95),
-            ("restoreHeadP50Ms", head_p50),
-            ("restoreHeadP95Ms", head_p95),
-            (
-                "restoreOldestMiBPerSecond",
-                mib / (oldest_p50 / 1000.0).max(1e-9),
-            ),
-            (
-                "restoreHeadMiBPerSecond",
-                mib / (head_p50 / 1000.0).max(1e-9),
-            ),
+            Sample {
+                wall_ms: oldest_p50,
+                cpu_ms: oldest_cpu,
+            }
+            .measure("restoreOldestP50Ms"),
+            Sample {
+                wall_ms: oldest_p95,
+                cpu_ms: oldest_cpu,
+            }
+            .wall_measure("restoreOldestP95Ms"),
+            Sample {
+                wall_ms: head_p50,
+                cpu_ms: head_cpu,
+            }
+            .measure("restoreHeadP50Ms"),
+            Sample {
+                wall_ms: head_p95,
+                cpu_ms: head_cpu,
+            }
+            .wall_measure("restoreHeadP95Ms"),
+            Sample::wall(mib / (oldest_p50 / 1000.0).max(1e-9))
+                .wall_measure("restoreOldestMiBPerSecond"),
+            Sample::wall(mib / (head_p50 / 1000.0).max(1e-9))
+                .wall_measure("restoreHeadMiBPerSecond"),
         ],
         json!({
             "nodes": SEGMENT_NODES,
             "fileBytes": SEGMENT_FILE_BYTES,
             "restoresPerTarget": SEGMENT_RESTORES,
             "buildMs": millis(build),
+            "buildCpuMs": build_cpu.total_ms(),
         }),
     );
 
@@ -516,6 +728,9 @@ impl AuthFixture {
 }
 
 /// P2：认证发布流水线（渲染 / 编码 / 签名）与回读的单位耗时。
+///
+/// 发布与回读都重复 [`REPEATS`] 轮取最快值：签名只有 10 ms 级，实测单轮会在 8–50 ms 之间
+/// 跳（系统抖动），单轮采样会让严格门把噪声判成回归。
 #[test]
 fn p2_authenticity_publish_and_decode_baseline() {
     let fixture = AuthFixture::new(AUTH_EDGE);
@@ -527,70 +742,105 @@ fn p2_authenticity_publish_and_decode_baseline() {
         .finish()
         .expect_ok();
 
-    let output = fixture.workspace.out("published.jpg");
-    let publish_started = Instant::now();
-    let published = fixture
-        .command("publish")
-        .arg("branch", &fixture.branch_id)
-        .arg("output", output.to_string_lossy())
-        .arg("certificate", fixture.certificate.to_string_lossy())
-        .arg("key", fixture.private_key.to_string_lossy())
-        .arg("title", "Artwork")
-        .arg("creator", "Lilith Artworks stress tests")
-        .arg("rights", "Stress test")
-        .arg("content", "Stress test publish")
-        .arg("algorithm", "es256")
-        .arg("trustmark", "true")
-        .arg("regions", "0,0,1,1")
-        .arg("jpeg-quality", "90")
-        .finish();
-    let publish_total = publish_started.elapsed();
-    published.expect_ok();
+    let mut publish_samples = Vec::with_capacity(REPEATS);
+    let mut published_runs = Vec::with_capacity(REPEATS);
+    for index in 0..REPEATS {
+        // 每轮写不同文件，避免依赖「覆盖已存在输出」的行为。
+        let target = fixture.workspace.out(&format!("published-{index}.jpg"));
+        let started = Instant::now();
+        let published = fixture
+            .command("publish")
+            .arg("branch", &fixture.branch_id)
+            .arg("output", target.to_string_lossy())
+            .arg("certificate", fixture.certificate.to_string_lossy())
+            .arg("key", fixture.private_key.to_string_lossy())
+            .arg("title", "Artwork")
+            .arg("creator", "Lilith Artworks stress tests")
+            .arg("rights", "Stress test")
+            .arg("content", "Stress test publish")
+            .arg("algorithm", "es256")
+            .arg("trustmark", "true")
+            .arg("regions", "0,0,1,1")
+            .arg("jpeg-quality", "90")
+            .finish();
+        let elapsed = started.elapsed();
+        published.expect_ok();
+        assert!(
+            published.data_u64("renderMs") > 0
+                && published.data_u64("encodeMs") > 0
+                && published.data_u64("signingMs") > 0,
+            "发布应自报渲染 / 编码 / 签名各阶段耗时：\n{}",
+            published.describe()
+        );
+        publish_samples.push(Sample::of(elapsed, &published));
+        published_runs.push(published);
+    }
+    let publish_sample = Sample {
+        wall_ms: publish_samples
+            .iter()
+            .map(|sample| sample.wall_ms)
+            .fold(f64::MAX, f64::min),
+        cpu_ms: mean_cpu(&publish_samples),
+    };
+    // 分阶段耗时由产品按单次运行自报，取各轮最小值——与墙钟取最小的口径一致。
+    let stage_min = |key: &str| {
+        published_runs
+            .iter()
+            .map(|outcome| outcome.data_u64(key) as f64)
+            .fold(f64::MAX, f64::min)
+    };
+    let render_ms = stage_min("renderMs");
+    let encode_ms = stage_min("encodeMs");
+    let signing_ms = stage_min("signingMs");
 
-    let render_ms = published.data_u64("renderMs") as f64;
-    let encode_ms = published.data_u64("encodeMs") as f64;
-    let signing_ms = published.data_u64("signingMs") as f64;
+    // 回读只读同一个成品，重复不影响断言，取最快值。
+    let output = fixture
+        .workspace
+        .out(&format!("published-{}.jpg", REPEATS - 1));
+    let decode_sample = repeat_min(|| {
+        let decoded = fixture
+            .command("decode-authenticity")
+            .arg("input", output.to_string_lossy())
+            .finish();
+        assert_eq!(
+            decoded.result["data"]["c2paPresent"].as_bool(),
+            Some(true),
+            "回读应能读到 C2PA 声明：\n{}",
+            decoded.describe()
+        );
+        decoded
+    });
+
     assert!(
-        render_ms > 0.0 && encode_ms > 0.0 && signing_ms > 0.0,
-        "发布应自报渲染 / 编码 / 签名各阶段耗时：\n{}",
-        published.describe()
-    );
-
-    let decode_started = Instant::now();
-    let decoded = fixture
-        .command("decode-authenticity")
-        .arg("input", output.to_string_lossy())
-        .finish();
-    let decode_total = decode_started.elapsed();
-    decoded.expect_ok();
-    assert_eq!(
-        decoded.result["data"]["c2paPresent"].as_bool(),
-        Some(true),
-        "回读应能读到 C2PA 声明：\n{}",
-        decoded.describe()
-    );
-
-    assert!(
-        millis(publish_total) < CATASTROPHIC_AUTH_PUBLISH_MS,
+        publish_sample.wall_ms < CATASTROPHIC_AUTH_PUBLISH_MS,
         "认证发布耗时失控：{:.1} ms",
-        millis(publish_total)
+        publish_sample.wall_ms
     );
     assert!(
-        millis(decode_total) < CATASTROPHIC_AUTH_DECODE_MS,
+        decode_sample.wall_ms < CATASTROPHIC_AUTH_DECODE_MS,
         "认证回读耗时失控：{:.1} ms",
-        millis(decode_total)
+        decode_sample.wall_ms
     );
 
     emit(
         "P2 authenticity",
         &[
-            ("publishMs", millis(publish_total)),
-            ("renderMs", render_ms),
-            ("encodeMs", encode_ms),
-            ("signingMs", signing_ms),
-            ("decodeMs", millis(decode_total)),
+            publish_sample.measure("publishMs"),
+            // 渲染 / 编码 / 签名是产品自报的**分阶段**耗时，测试侧只能拿到整进程 CPU 时间，
+            // 因此这三项只有墙钟。
+            Sample::wall(render_ms).wall_measure("renderMs"),
+            Sample::wall(encode_ms).wall_measure("encodeMs"),
+            Sample::wall(signing_ms).wall_measure("signingMs"),
+            decode_sample.measure("decodeMs"),
         ],
-        json!({ "edge": AUTH_EDGE }),
+        json!({
+            "edge": AUTH_EDGE,
+            "publishCpuMs": published_runs
+                .last()
+                .map(|outcome| outcome.cpu.total_ms())
+                .unwrap_or_default(),
+            "publishes": REPEATS,
+        }),
     );
 }
 
@@ -644,6 +894,7 @@ fn p3_board_dds_import_and_scrub_baseline() {
         .finish();
     let import_total = import_started.elapsed();
     imported.expect_ok();
+    let import_sample = Sample::of(import_total, &imported);
     revision = imported.data_str("revision");
     assert!(!revision.is_empty(), "{}", imported.describe());
     assert_eq!(
@@ -657,6 +908,7 @@ fn p3_board_dds_import_and_scrub_baseline() {
     let scrub = fixture.command("scrub-board-dds").finish();
     let scrub_total = scrub_started.elapsed();
     scrub.expect_ok();
+    let scrub_sample = Sample::of(scrub_total, &scrub);
     assert_eq!(
         scrub.data_u64("images"),
         BOARD_IMAGES as u64,
@@ -664,19 +916,20 @@ fn p3_board_dds_import_and_scrub_baseline() {
         scrub.describe()
     );
 
-    let per_image = millis(import_total) / BOARD_IMAGES as f64;
+    let images = BOARD_IMAGES as f64;
     assert!(
-        per_image < CATASTROPHIC_DDS_PER_IMAGE_MS,
-        "单张图片的 DDS 导入耗时失控：{per_image:.1} ms"
+        import_sample.wall_ms / images < CATASTROPHIC_DDS_PER_IMAGE_MS,
+        "单张图片的 DDS 导入耗时失控：{:.1} ms",
+        import_sample.wall_ms / images
     );
 
     emit(
         "P3 board dds",
         &[
-            ("importPerImageMs", per_image),
-            ("importTotalMs", millis(import_total)),
-            ("scrubMs", millis(scrub_total)),
-            ("scrubPerImageMs", millis(scrub_total) / BOARD_IMAGES as f64),
+            import_sample.scale(images).measure("importPerImageMs"),
+            import_sample.measure("importTotalMs"),
+            scrub_sample.measure("scrubMs"),
+            scrub_sample.scale(images).measure("scrubPerImageMs"),
         ],
         json!({
             "images": BOARD_IMAGES,
@@ -690,15 +943,27 @@ fn p3_board_dds_import_and_scrub_baseline() {
 // P4 库树与搜索
 // ---------------------------------------------------------------------------
 
-/// 重复 `REPEATS` 轮取最小值：同一档位下调度抖动只会抬高耗时，最小值最稳。
-fn repeat_min<F: FnMut() -> Outcome>(mut run: F) -> f64 {
+/// 重复 `REPEATS` 轮：**墙钟取最小值**（同一档位下调度抖动只会抬高耗时，最小值最稳），
+/// **CPU 时间取均值**（单轮只有几十毫秒，逐轮值会被 15.6 ms 的记账粒度量化，平均后才可用）。
+fn repeat_min<F: FnMut() -> Outcome>(mut run: F) -> Sample {
     let mut best = f64::MAX;
+    let mut cpu_total = 0.0;
+    let mut cpu_runs = 0_u32;
     for _ in 0..REPEATS {
         let started = Instant::now();
-        run().expect_ok();
-        best = best.min(millis(started.elapsed()));
+        let outcome = run();
+        let wall = millis(started.elapsed());
+        outcome.expect_ok();
+        if outcome.cpu.measured {
+            cpu_total += outcome.cpu.total_ms();
+            cpu_runs += 1;
+        }
+        best = best.min(wall);
     }
-    best
+    Sample {
+        wall_ms: best,
+        cpu_ms: (cpu_runs > 0).then(|| cpu_total / f64::from(cpu_runs)),
+    }
 }
 
 /// P4：库树装配与两种查询的耗时。
@@ -756,12 +1021,12 @@ fn p4_library_tree_and_search_baseline() {
     let nodes_expected = fixture_nodes + (LIBRARY_GROUPS * (LIBRARY_PER_GROUP + 1)) as u64;
 
     // 每次重复都断言结果正确：基准里混进错误结果就失去意义。
-    let list_tree_ms = repeat_min(|| {
+    let list_tree = repeat_min(|| {
         let outcome = fixture.command("list-tree").finish();
         assert_eq!(outcome.data_u64("nodeCount"), nodes_expected);
         outcome
     });
-    let search_all_ms = repeat_min(|| {
+    let search_all = repeat_min(|| {
         let outcome = fixture.command("search").arg("query", "Artwork").finish();
         assert!(
             outcome.data_u64("count") >= (LIBRARY_GROUPS * LIBRARY_PER_GROUP) as u64,
@@ -770,7 +1035,7 @@ fn p4_library_tree_and_search_baseline() {
         );
         outcome
     });
-    let search_narrow_ms = repeat_min(|| {
+    let search_narrow = repeat_min(|| {
         let outcome = fixture
             .command("search")
             .arg("query", "Artwork 007")
@@ -784,24 +1049,27 @@ fn p4_library_tree_and_search_baseline() {
     });
 
     assert!(
-        list_tree_ms < CATASTROPHIC_LIBRARY_LIST_MS,
-        "整树装配耗时失控：{list_tree_ms:.1} ms"
+        list_tree.wall_ms < CATASTROPHIC_LIBRARY_LIST_MS,
+        "整树装配耗时失控：{:.1} ms",
+        list_tree.wall_ms
     );
     assert!(
-        search_all_ms < CATASTROPHIC_LIBRARY_SEARCH_MS,
-        "全量搜索耗时失控：{search_all_ms:.1} ms"
+        search_all.wall_ms < CATASTROPHIC_LIBRARY_SEARCH_MS,
+        "全量搜索耗时失控：{:.1} ms",
+        search_all.wall_ms
     );
     assert!(
-        search_narrow_ms < CATASTROPHIC_LIBRARY_SEARCH_MS,
-        "窄搜索耗时失控：{search_narrow_ms:.1} ms"
+        search_narrow.wall_ms < CATASTROPHIC_LIBRARY_SEARCH_MS,
+        "窄搜索耗时失控：{:.1} ms",
+        search_narrow.wall_ms
     );
 
     emit(
         "P4 library tree and search",
         &[
-            ("listTreeMs", list_tree_ms),
-            ("searchAllMs", search_all_ms),
-            ("searchNarrowMs", search_narrow_ms),
+            list_tree.measure("listTreeMs"),
+            search_all.measure("searchAllMs"),
+            search_narrow.measure("searchNarrowMs"),
         ],
         json!({
             "groups": LIBRARY_GROUPS,
@@ -875,6 +1143,7 @@ fn p5_repository_backup_io_baseline() {
         .finish();
     let backup_total = started.elapsed();
     outcome.expect_ok();
+    let backup_sample = Sample::of(backup_total, &outcome);
 
     // 顺带做一次正确性对照：副本必须能独立打开并通过完整性与链路校验。
     let copy = PathBuf::from(outcome.data_str("repositoryPath"));
@@ -890,14 +1159,14 @@ fn p5_repository_backup_io_baseline() {
         0.0
     };
     assert!(
-        millis(backup_total) < CATASTROPHIC_BACKUP_MS,
+        backup_sample.wall_ms < CATASTROPHIC_BACKUP_MS,
         "整仓灾备耗时失控：{:.1} ms",
-        millis(backup_total)
+        backup_sample.wall_ms
     );
 
     emit(
         "P5 repository backup",
-        &[("backupMs", millis(backup_total))],
+        &[backup_sample.measure("backupMs")],
         json!({
             "artworks": IO_ARTWORKS,
             "commitsPerArtwork": IO_COMMITS,
@@ -928,7 +1197,7 @@ fn p6_cleanup_scan_baseline() {
     let fixture = ArtworkFixture::new();
     build_repository(&fixture, SCAN_ARTWORKS, SCAN_COMMITS, SCAN_FILE_BYTES);
 
-    let scan_ms = repeat_min(|| {
+    let scan = repeat_min(|| {
         let outcome = fixture.command("scan-unreferenced").finish();
         assert_eq!(
             outcome.data_u64("count"),
@@ -938,7 +1207,7 @@ fn p6_cleanup_scan_baseline() {
         );
         outcome
     });
-    let cleanup_ms = repeat_min(|| {
+    let cleanup = repeat_min(|| {
         let outcome = fixture.command("cleanup").finish();
         assert_eq!(
             outcome.data_u64("pendingCount"),
@@ -950,19 +1219,21 @@ fn p6_cleanup_scan_baseline() {
     });
 
     assert!(
-        scan_ms < CATASTROPHIC_CLEANUP_SCAN_MS,
-        "未引用文件扫描耗时失控：{scan_ms:.1} ms"
+        scan.wall_ms < CATASTROPHIC_CLEANUP_SCAN_MS,
+        "未引用文件扫描耗时失控：{:.1} ms",
+        scan.wall_ms
     );
     assert!(
-        cleanup_ms < CATASTROPHIC_CLEANUP_SCAN_MS,
-        "待清理队列重放耗时失控：{cleanup_ms:.1} ms"
+        cleanup.wall_ms < CATASTROPHIC_CLEANUP_SCAN_MS,
+        "待清理队列重放耗时失控：{:.1} ms",
+        cleanup.wall_ms
     );
 
     emit(
         "P6 cleanup scan",
         &[
-            ("scanUnreferencedMs", scan_ms),
-            ("cleanupQueueMs", cleanup_ms),
+            scan.measure("scanUnreferencedMs"),
+            cleanup.measure("cleanupQueueMs"),
         ],
         json!({
             "artworks": SCAN_ARTWORKS,
@@ -1032,7 +1303,7 @@ fn p7_scheduler_candidate_scan_baseline() {
         }
     }
 
-    let scan_ms = repeat_min(|| {
+    let scan = repeat_min(|| {
         let outcome = fixture.command("scheduler-scan").finish();
         assert_eq!(
             outcome.data_u64("branchCount"),
@@ -1044,12 +1315,13 @@ fn p7_scheduler_candidate_scan_baseline() {
     });
 
     assert!(
-        scan_ms < CATASTROPHIC_SCHEDULER_SCAN_MS,
-        "多分支调度候选扫描耗时失控：{scan_ms:.1} ms"
+        scan.wall_ms < CATASTROPHIC_SCHEDULER_SCAN_MS,
+        "多分支调度候选扫描耗时失控：{:.1} ms",
+        scan.wall_ms
     );
     emit(
         "P7 scheduler scan",
-        &[("schedulerScanMs", scan_ms)],
+        &[scan.measure("schedulerScanMs")],
         json!({
             "artworks": SCHEDULER_ARTWORKS,
             "branches": branches,
@@ -1111,16 +1383,18 @@ fn p8_large_orphan_scan_and_cleanup_baseline() {
         ));
     }
 
-    let scan_started = Instant::now();
-    let scanned = fixture.command("scan-unreferenced").finish();
-    let scan_ms = millis(scan_started.elapsed());
-    scanned.expect_ok();
-    assert_eq!(
-        scanned.data_u64("count"),
-        ORPHAN_FILES as u64,
-        "扫描应发现全部孤儿：\n{}",
-        scanned.describe()
-    );
+    // 扫描会遍历整棵仓库树，单轮实测在 51–203 ms 之间跳（文件系统缓存与后台干扰），
+    // 因此与其他场景一样取 REPEATS 轮最快值；确认清理只能做一次（第二次就没有孤儿了）。
+    let scan_sample = repeat_min(|| {
+        let outcome = fixture.command("scan-unreferenced").finish();
+        assert_eq!(
+            outcome.data_u64("count"),
+            ORPHAN_FILES as u64,
+            "扫描应发现全部孤儿：\n{}",
+            outcome.describe()
+        );
+        outcome
+    });
 
     let ids = relative_paths.join(",");
     let cleanup_started = Instant::now();
@@ -1128,7 +1402,7 @@ fn p8_large_orphan_scan_and_cleanup_baseline() {
         .command("cleanup-unreferenced")
         .arg("ids", &ids)
         .finish();
-    let cleanup_ms = millis(cleanup_started.elapsed());
+    let cleanup_sample = Sample::of(cleanup_started.elapsed(), &cleaned);
     cleaned.expect_ok();
     assert_eq!(
         cleaned.data_u64("cleanedCount"),
@@ -1154,16 +1428,21 @@ fn p8_large_orphan_scan_and_cleanup_baseline() {
     );
 
     assert!(
-        scan_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
-        "大规模孤儿扫描耗时失控：{scan_ms:.1} ms"
+        scan_sample.wall_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
+        "大规模孤儿扫描耗时失控：{:.1} ms",
+        scan_sample.wall_ms
     );
     assert!(
-        cleanup_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
-        "大规模孤儿确认清理耗时失控：{cleanup_ms:.1} ms"
+        cleanup_sample.wall_ms < CATASTROPHIC_ORPHAN_CLEANUP_MS,
+        "大规模孤儿确认清理耗时失控：{:.1} ms",
+        cleanup_sample.wall_ms
     );
     emit(
         "P8 orphan cleanup",
-        &[("scanMs", scan_ms), ("confirmedCleanupMs", cleanup_ms)],
+        &[
+            scan_sample.measure("scanMs"),
+            cleanup_sample.measure("confirmedCleanupMs"),
+        ],
         json!({
             "orphans": ORPHAN_FILES,
             "orphanBytes": ORPHAN_FILES * ORPHAN_FILE_BYTES,

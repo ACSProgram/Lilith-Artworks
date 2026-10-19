@@ -1,6 +1,6 @@
 # 待办清单
 
-更新时间：2026-10-18
+更新时间：2026-10-19
 
 本文件是本项目唯一的未完成事项清单：尚未实现、尚未验证或需要维护者决策的内容都记在这里。它和
 `current-handoff.md` 一样是**表层文档**——只保留当前状况、未完成事项与规划：某项完成或通过验收
@@ -19,27 +19,22 @@
 仓库副本随计划落实后撤除）。阶段 1–5 已实现并切分 `0.3.0-alpha.1`；CI 通过。alpha1 的压力测试
 修复批次（8 条未通过项 + 小选区水印警告 + J5 并发断言口径）已实施并归档，记录见
 `archive/alpha1-stress-failure-fix-plan-2026-10-18.md` 与 `docs/user/stress-test-report.md`；
-alpha1 的剩余未完成项见下节。alpha2 阶段 6（仓储/备份设置分离与仓储空间状态 UI）已实现，
-待维护者验收；阶段 7–9 尚未开始。
+alpha1 的发布前手动测试已于 2026-10-19 收口（见下）。alpha2 阶段 6（仓储/备份设置分离与仓储
+空间状态 UI）已实现，待维护者验收；阶段 7–9 尚未开始。
 
 阶段 4 的 `stress_bench` P1B（多段链恢复 p50/p95）已随本轮采集（`--test-threads=1`，release
-构建），`manual` 档仍未跑、需在发布前补。**这些数字只作为 0.3 决策证据，不替代日常轻量检查；
-且都是墙钟，不能作为跨版本性能标准**——见下节「alpha1 未通过项与度量口径」。
+构建）。2026-10-19 起 `stress_bench` 同时记录墙钟与子进程 **CPU 时间**（用户 + 内核），
+`tests/perf-baseline.json` 的 `#cpu` 键就是它；跨版本比较仍只在同一机器、同一构建档、单线程
+采集下进行，短操作（基线 < 50 ms）的 CPU 时间只记录不参与严格比对。基线文件顶层 `machine`
+字段记录采集机器。
 新增的 `stress_format` 组（`.clip` 容器感知分块与 v1/v2 混存仓库的端到端恢复）是便宜分组，
 随 Windows CI 运行，不在此列。
 
-## alpha1 未通过项与度量口径
-
-2026-10-18 的 release 档整套复跑留下的 8 条未通过记录已按
-`archive/alpha1-stress-failure-fix-plan-2026-10-18.md`（阶段一至阶段三）处理完毕并归档，逐条
-根因、修复与复验结果见该计划与 `docs/user/stress-test-report.md` 的「alpha1 未通过项：诊断与
-修复」。下表只剩**未完成**与**待决策**的部分：
-
-| 优先级 | 事项 | 现状 | 待决策点 |
-| --- | --- | --- | --- |
-| P1 | alpha1 五档的大文件存储数值未采集 | 2026-10-18 那一轮的 C 组数值是在断言失败状态下测到的，不能作为 alpha1 的存储结论；修复批次只复验了 `default` 档的断言（8/8 通过），没有采集 release 档各档数值 | 发布前用 release 构建重跑 `default`/`large`/`heavy`/`extreme` 采集快照、增量与账本数值写进 `docs/user/stress-test-report.md`；`manual` 档按发布前口径另行安排 |
-| P2 | `stress_authenticity` 的 `extreme` 档（G1/G2，16K 大图）未随修复批次复跑 | G4 夹具已改到 512 级，小图档（默认档）已复验通过；16K 档只在 `extreme` 及以上运行，本轮未跑去 | 发布前随大图档复跑一次，确认 G4 与 G1/G2 在同一轮内一致通过 |
-| P2 | 压力测试只采墙钟与峰值内存，不采**进程 CPU 时间** | 场景按磁盘预算并发准入 + `cargo test` 默认并行，同一操作墙钟被调度拉长 2.3–4.1 倍（P1 121.6 → 53.7 ms、P3 1450.7 → 353.0 ms） | 要给「CPU 占用是否变大」一个可比较的答案，需在测试侧采子进程的 user + kernel CPU 时间；在此之前性能只认 `--test-threads=1` 的单线程墙钟 |
+**发布前手动测试已收口**（2026-10-19）：`stress_large` 四档、`stress_scale`、`stress_bench`、
+`stress_baseline` 与 `stress_authenticity` 的 16K 档均已采到 alpha1 的数值，记录见
+`docs/user/stress-test-report.md`，本轮批次记录见 `archive/handoff-log-2026-10-19.md`。
+`stress_large` 的 `manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是
+开发期待办，见 `docs/guides/release-policy.md`；开发阶段与候选版本切分都不跑它。
 
 「空闲链路校验重构」（计划 §2.4，alpha3 阶段 9）默认关闭、按空闲时机触发、以「恢复根文件 +
 逐块验哈希」证明全链健康，所需 `branch_notices` 告警表随阶段 7 的 v4 → v5 迁移建立。

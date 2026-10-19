@@ -77,3 +77,11 @@
   `docs/architecture/overview.md`、`docs/modules/library.md` 与 `docs/modules/history-and-backup.md`，
   行为变化见 `../CHANGELOG.md` 的 `## Unreleased`；维护者人工验收（复现原始场景、备份中保存/
   退出、真跨进程拒绝）待进行。
+- `handoff-log-2026-10-19.md`：alpha1 压力测试收尾与 CPU 时间度量的批次记录——测试侧新增子进程
+  CPU 时间（`GetProcessTimes` + 周期计数，双记墙钟、`#cpu` 基线键、50 ms 门槛、
+  `LILITH_STRESS_PROFILE`、基线 `machine` 字段，零新 crate），release 档补跑四档大文件
+  （均 8/8）、16K 认证大图、规模组与真实仓库基线，`stress_large` C4 的账本口径按 v2 快照增长
+  修正，P2/P8 的单轮采样改为三轮取最小以消除严格门的噪声误报，以及 `manual` 档改为只在正式
+  发布前运行的维护者口径。有效契约并入
+  `docs/guides/validation.md`、`docs/guides/release-policy.md` 与
+  `../user/stress-test-report.md`；当前批次状态改看 `../current-handoff.md`。

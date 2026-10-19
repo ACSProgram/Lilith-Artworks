@@ -103,8 +103,21 @@ CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，�
   2026-10-18 的实测差异是 2.3–4.1 倍（同一基准并行时 P1 单次提交 121.6 ms、P3 导入 1450.7 ms；
   `--test-threads=1` 后 53.7 ms / 353.0 ms）。因此：`stress_bench` 的数字**只认
   `--test-threads=1` 采集**，且只在同一机器、同一构建档内比较；跨版本谈快慢不要引用群跑墙钟。
-  测试目前只采墙钟与峰值内存，**不采进程 CPU 时间**——要评估 CPU 成本需另加度量，见
-  `docs/planning/todo.md`。
+- **`stress_bench` 同时记录子进程 CPU 时间**：每次子进程调用在退出后、句柄关闭前读一次
+  `GetProcessTimes`（用户 + 内核），与墙钟一起写进 `target/stress-report.jsonl` 和
+  `tests/perf-baseline.json`（`场景::标签` 是墙钟，`场景::标签#cpu` 是 CPU 时间）。CPU 时间
+  不含进程被剥夺的时间，因此不受调度排队影响（整机饱和时的缓存争用仍会抬高它）；但它**看不见
+  磁盘等待**，所以只能回答「是不是更费 CPU」，不能替代墙钟回答「用户等了多久」，两者都要看。
+  两个已知限制：一是 Windows 的 CPU 时间按 15.625 ms 的时钟中断记账（实测同一操作报出
+  `0 / 15.6 / 31.3` 这类离散值），因此**基线低于 50 ms 的测量只记录、不参与严格比对**；二是
+  多线程阶段（认证发布的 TrustMark / 编解码）的 CPU 时间是各线程之和，会**大于**墙钟，这是
+  「总算力」口径而不是错误。周期计数（`QueryProcessCycleTime`）只随失败诊断输出，不进基线
+  ——跨机器不可比，混合核机器上还受调度到哪类核影响。度量只用已有的 `windows-sys`（为此开启
+  `Win32_System_WindowsProgramming` 这一 feature），**不引入新 crate**，也不改产品代码。
+- **基线绑定机器**：`tests/perf-baseline.json` 的顶层 `machine` 字段记录采集基线的机器
+  （CPU、内存、系统版本与构建档组合），由维护者维护——`LILITH_STRESS_PERF_UPDATE=1` 只改写对应
+  构建档的表，不动这个字段。仓库里当前的一份是维护者本机（i5-13490F / 32 GB / Windows 11）
+  上的 release 测量；换机器后请核对严格门是否仍通过，而不是把它当成跨机器标准。
 - 运行方式（构建无头入口、档位选择、环境变量与输出文件）见下方「运行方式」；各档位的实测数据、
   磁盘需求与墙钟见 `docs/user/stress-test-report.md` 的「运行成本」一节。
 - **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
@@ -147,8 +160,13 @@ cargo test --features headless --test stress_scale
 cargo test --features headless --test stress_bench -- --nocapture
 
 # 6. 性能基线的更新与回归门（默认只记录，见「可调环境变量」）
+#    脚手架是 debug、被测二进制是 release 时必须显式指定 PROFILE，否则数字记到 debug 档
 LILITH_STRESS_PERF_UPDATE=1 cargo test --features headless --test stress_bench -- --test-threads=1
+LILITH_STRESS_PROFILE=release LILITH_STRESS_PERF_UPDATE=1 \
+  cargo test --features headless --test stress_bench -- --test-threads=1
 LILITH_STRESS_PERF_STRICT=1 cargo test --features headless --test stress_bench -- --test-threads=1
+LILITH_STRESS_PROFILE=release LILITH_STRESS_PERF_STRICT=1 \
+  cargo test --features headless --test stress_bench -- --test-threads=1
 
 # 7. 认证大图（16K 源图）：只在 extreme 及以上档位运行，否则 G1/G2 明确跳过
 LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authenticity
@@ -175,9 +193,18 @@ cargo test --features headless --test stress_baseline -- --test-threads=1 --noca
 - `LILITH_STRESS_JOBS`：并发场景数上限（默认可用核数）。
 - `LILITH_STRESS_PERF_UPDATE=1`：`stress_bench` 把本次测量写入 `src-tauri/tests/perf-baseline.json`
   对应构建档（`debug` / `release`）的条目。基线与构建档绑定——两者绝对耗时相差一个数量级。
+- `LILITH_STRESS_PROFILE`：`stress_bench` 把基线条目记到哪个构建档，默认按测试脚手架自身的
+  `debug_assertions` 推断。用 debug 脚手架驱动 `LILITH_STRESS_BIN` 指向的 **release** 二进制时
+  必须设 `release`，否则数字会被记进 `debug` 档（基线上限、严格比对随之失去意义）。
 - `LILITH_STRESS_PERF_STRICT=1`：`stress_bench` 与基线比对，超过 `LILITH_STRESS_PERF_FACTOR`
   倍（默认 `2.5`）即失败。默认**只记录不比对**，因为绝对耗时依赖机器，把机器差异变成
-  flaky 断言没有意义；跨机器比对时按需放宽 factor。
+  flaky 断言没有意义；跨机器比对时按需放宽 factor。比对同时覆盖墙钟与 CPU 时间，但 CPU 一侧
+  只在基线值 ≥ 50 ms 时生效（见上文对记账粒度的说明）。
+  **门的灵敏度是「2 倍级退化」**：同机同二进制连跑十轮，多数场景的墙钟波动 1.1–1.5 倍，
+  2.5× 门抓不到 1.5 倍这类小幅退化，只用于发现数量级错误。单轮采样的短操作尤其不稳
+  （2026-10-19 实测签名 8–50 ms、孤儿扫描 51–203 ms，曾使 6 次比对误报 2 次），因此
+  P2、P4–P8 一律取 `REPEATS`（`stress_bench.rs` 的常量，当前为 3）轮最小值；新增场景请沿用
+  这一口径，不要引入单轮测量的基线。
 
 结果写入 `target/stress-report.jsonl`（每场景一行 JSON）与 `target/stress-ledger.jsonl`
 （磁盘账本）；工作区位于 `target/stress-workspaces/`，正常结束后自动回收。被测子进程是单线程的

@@ -255,12 +255,22 @@ impl ArtworkFixture {
 
     /// 写入新内容并做一次普通提交，返回历史节点标识。
     pub fn commit(&self, len: usize, seed: u64, note: &str) -> String {
+        self.commit_outcome(len, seed, note).0
+    }
+
+    /// 同 [`Self::commit`]，但同时交出该子进程的 CPU 记账，供性能基准累加。
+    pub fn commit_timed(&self, len: usize, seed: u64, note: &str) -> (String, CpuTime) {
+        let (history_id, outcome) = self.commit_outcome(len, seed, note);
+        (history_id, outcome.cpu)
+    }
+
+    fn commit_outcome(&self, len: usize, seed: u64, note: &str) -> (String, Outcome) {
         write_work_file(&self.work, len, seed);
         let outcome = self.commit_command().arg("note", note).finish();
         outcome.expect_ok();
         let history_id = outcome.data_str("historyId");
         assert!(!history_id.is_empty(), "{}", outcome.describe());
-        history_id
+        (history_id, outcome)
     }
 
     /// 用给定内容覆盖工作文件并做一次普通提交（跟随当前设置的写入格式）。
@@ -520,6 +530,8 @@ impl Running {
             .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
             .unwrap_or(Value::Null);
         let stderr = fs::read_to_string(&self.stderr_path).unwrap_or_default();
+        // 子进程已退出、`Child` 尚未 drop：此刻是读 CPU 记账的唯一窗口（句柄随 drop 关闭）。
+        let cpu = CpuTime::of(&self.child);
         // 取消延迟：进程此刻已退出，因此它是「发出取消 → 收尾完成」的实测值。
         let cancel_latency = self.cancel_instant.map(|instant| instant.elapsed());
         Outcome {
@@ -529,6 +541,7 @@ impl Running {
             result,
             checkpoints: self.checkpoints,
             elapsed: started.elapsed(),
+            cpu,
             stderr: truncate(stderr, STDERR_LIMIT),
             cancel_latency,
         }
@@ -654,6 +667,97 @@ fn truncate(mut value: String, limit: usize) -> String {
     value
 }
 
+/// 子进程的 CPU 记账：用户态 + 内核态 CPU 时间，外加周期计数。
+///
+/// Windows 的 CPU 时间按**时钟中断**记账，实测粒度 15.625 ms（同一台机器上 60 ms 的子进程
+/// 报出 `0.0 / 15.6 / 31.3 / 46.9 / 62.5` 这些离散值，离散度 67.5%），几十毫秒的操作会被
+/// 量化到无法比较；`QueryProcessCycleTime` 的分辨率高得多（同一操作实测离散度 2.6%）。
+/// 因此两者都采：**基线用 CPU 时间**（单位明确、与平台惯例一致），**周期计数只随
+/// [`Outcome::describe`] 输出供诊断**（跨机器不可比，混合核机器上还受调度到哪类核影响，
+/// 不写进 `tests/perf-baseline.json`）。
+///
+/// 两者都**不含**进程被剥夺 CPU 的时间，因此不受 `cargo test` 并行与整机负载影响——这正是
+/// 墙钟做不到的（同一基准并行采集时被拉长 2.3–4.1 倍）。但它们也**不含**等磁盘的时间，
+/// 所以只能回答「花了多少算力」，不能回答「用户等了多久」：墙钟仍要一起记。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CpuTime {
+    pub user: Duration,
+    pub kernel: Duration,
+    /// 周期计数。非 Windows 或 API 失败时为 0。
+    pub cycles: u64,
+    /// 是否真的读到了 CPU 时间。非 Windows 与 API 失败时为 `false`，此时不写基线。
+    pub measured: bool,
+}
+
+impl CpuTime {
+    /// 从**已退出、句柄尚未关闭**的子进程读取 CPU 记账。
+    ///
+    /// 只读内核记账，不读取被测进程的内部状态，符合「测试只经命令行、stdin 与磁盘事实
+    /// 干预与观察」的纪律。
+    pub fn of(child: &Child) -> Self {
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+
+            use windows_sys::Win32::{
+                Foundation::FILETIME, System::Threading::GetProcessTimes,
+                System::WindowsProgramming::QueryProcessCycleTime,
+            };
+
+            let handle = child.as_raw_handle() as *mut core::ffi::c_void;
+            // SAFETY: 句柄来自仍然存活的 `Child`（子进程已退出、句柄未关闭）；
+            // FILETIME 与 u64 都按 C 布局清零后交给 API 填充。
+            unsafe {
+                let mut creation: FILETIME = std::mem::zeroed();
+                let mut exit: FILETIME = std::mem::zeroed();
+                let mut kernel: FILETIME = std::mem::zeroed();
+                let mut user: FILETIME = std::mem::zeroed();
+                if GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) == 0 {
+                    return Self::default();
+                }
+                let mut cycles = 0_u64;
+                if QueryProcessCycleTime(handle, &mut cycles) == 0 {
+                    cycles = 0;
+                }
+                Self {
+                    user: filetime_duration(user),
+                    kernel: filetime_duration(kernel),
+                    cycles,
+                    measured: true,
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = child;
+            Self::default()
+        }
+    }
+
+    pub fn total(&self) -> Duration {
+        self.user + self.kernel
+    }
+
+    pub fn total_ms(&self) -> f64 {
+        self.total().as_secs_f64() * 1000.0
+    }
+
+    /// 累加多个子进程的记账（多进程场景的「总 CPU 成本」）。
+    pub fn merge(&mut self, other: &Self) {
+        self.user += other.user;
+        self.kernel += other.kernel;
+        self.cycles = self.cycles.saturating_add(other.cycles);
+        self.measured |= other.measured;
+    }
+}
+
+/// FILETIME 是 100 ns 为单位的 64 位计数，高 32 位在前。
+#[cfg(windows)]
+fn filetime_duration(value: windows_sys::Win32::Foundation::FILETIME) -> Duration {
+    let ticks = (u64::from(value.dwHighDateTime) << 32) | u64::from(value.dwLowDateTime);
+    Duration::from_nanos(ticks.saturating_mul(100))
+}
+
 pub struct Outcome {
     pub exit_code: i32,
     pub timed_out: bool,
@@ -661,6 +765,8 @@ pub struct Outcome {
     pub result: Value,
     pub checkpoints: Vec<Checkpoint>,
     pub elapsed: Duration,
+    /// 子进程的 CPU 记账（用户 + 内核 + 周期数）。只在 Windows 上可读。
+    pub cpu: CpuTime,
     pub stderr: String,
     /// 从发出取消到进程退出（收尾完成）的实测耗时。只有带闸门的取消场景才有值；
     /// 其余情形为 `None`。受 5 ms 轮询间隔限制，它是**上界**（见 `Running::cancel_instant`）。
@@ -701,12 +807,14 @@ impl Outcome {
 
     pub fn describe(&self) -> String {
         format!(
-            "exit_code={} timed_out={} cancelled={} elapsed_ms={}\n\
+            "exit_code={} timed_out={} cancelled={} elapsed_ms={} cpu_ms={:.1} cpu_cycles={}\n\
              checkpoints={:?}\nresult={}\nstderr:\n{}",
             self.exit_code,
             self.timed_out,
             self.cancelled,
             self.elapsed.as_millis(),
+            self.cpu.total_ms(),
+            self.cpu.cycles,
             self.checkpoint_stages(),
             serde_json::to_string(&self.result).unwrap_or_default(),
             self.stderr

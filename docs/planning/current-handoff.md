@@ -8,14 +8,15 @@
 
 ## 当前批次状态
 
-2026-10-18 批次：**0.3 alpha1（阶段 1–5：统一命令运行时、设置单写入口与跨进程 owner lock、事件
-订阅与 controller 模板、ChunkFile v2 与容器感知分块、调度/清理/灾备算法）已实现并切分为
-`0.3.0-alpha.1`**；CI 通过。release 档整套压力测试留下的 8 条未通过记录已按
-`archive/alpha1-stress-failure-fix-plan-2026-10-18.md`（阶段一至阶段三：检查点分层、快照体积断言
-按 v2 口径改写、G4 夹具改到 512 级、小选区水印警告、J5 并发断言口径）处理完毕并归档，逐条根因、
-修复与复验见 `docs/user/stress-test-report.md` 的「alpha1 未通过项：诊断与修复」。**alpha1 的收尾
-仍欠两项**：release 档五档大文件存储数值未采集、`stress_authenticity` 的 `extreme` 档未复跑；
-两项都记在 `todo.md`。
+2026-10-19 批次：**alpha1 压力测试收尾与 CPU 时间度量已完成并归档**——`stress_large` 四档
+（`default`/`large`/`heavy`/`extreme`，均 8/8）、`stress_scale`（5/5）、`stress_authenticity`
+的 `extreme` 档（16K，5/5）、`stress_baseline`（2/2）与 `stress_bench`（9/9）全部通过；
+`stress_bench` 新增子进程 CPU 时间（用户 + 内核）并重录了 release 基线；`stress_large` C4 的
+账本口径按 v2 快照增长修正；严格门的短操作噪声误报（P2 签名、P8 孤儿扫描）改为三轮取最小后
+连跑 5 次全通过。逐项数值、实现细节与遗留边界见
+`archive/handoff-log-2026-10-19.md`，实测表见 `docs/user/stress-test-report.md`。
+`stress_large` 的 `manual` 档（8 GiB）只在正式发布前运行，开发阶段与候选版本切分都不跑
+（见 `docs/guides/release-policy.md`）。
 
 - **0.2 已收口并归档**：`0be6224` 切分 `0.2.0`，`v0.2.0` 附注标签已打并推送；`main` 固定为 0.2
   发布线。切分内容、压力测试口径、自动与人工门槛、未签名发布说明见
@@ -25,10 +26,9 @@
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：先由维护者验收 alpha2 阶段 6（设置拆分与仓储空间仪表盘），并继续收口 `todo.md`
-  里 alpha1 的剩余项（release 档五档大文件数值采集、`extreme` 档复跑、压力测试的 CPU 时间
-  度量口径）；随后进入 alpha3（原阶段 7–9，含唯一一次 v4 → v5 迁移）。批次划分、依赖与阶段
-  口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
+- **下一步**：先由维护者验收 alpha2 阶段 6（设置拆分与仓储空间仪表盘）；随后进入 alpha3
+  （原阶段 7–9，含唯一一次 v4 → v5 迁移）。`manual` 档压力测试按发布前口径另行安排。
+  批次划分、依赖与阶段口径见 `0.3-architecture-algorithm-plan-2026-10-05.md`。
 - **alpha2 阶段 6 已实现（待维护者验收）**：设置页左侧导航拆为「仓储 / 空间 / 备份」；仓储页
   只保留仓库位置、完整性检查与存储格式，空间页承接仓储仪表盘与文件清理队列/扫描，备份页承接
   自动备份、创建备份与本次运行的最近结果。空间仪表盘由只读数据库聚合
@@ -48,8 +48,8 @@
   `authenticity-preview-<UUID>` 预览会话目录与 `.tmp*` `NamedTempFile` 暂存残留，保留本进程当前
   会话与命名不符的手工条目，删除失败只记日志。`todo.md` 原 P2 条目已随实现删除；作品级
   `artworks/<id>/temp/` 的残留仍走扫描报告→确认流程（2026-10-18 批次）。
-- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
-  阶段 7–9。
+- 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项、alpha2 阶段 6 的验收项、0.3 前的
+  补强候选，以及阶段 7–9。
 
 ## 当前基线
 

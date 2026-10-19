@@ -57,4 +57,8 @@ lto = "thin"
 strip = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_UI_Shell"] }
+# `Win32_System_WindowsProgramming` 只为压力测试里的 CPU 周期计数
+# （`QueryProcessCycleTime`）开启：Windows 的 CPU 时间按 15.625 ms 的时钟中断记账，
+# 几十毫秒的操作会被量化到无法比较。这个 feature 只增加 extern 声明，不引入新 crate，
+# 也不改变发布产物（未使用的声明会被链接器丢弃）。
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_DataExchange", "Win32_System_Ole", "Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_System_WindowsProgramming", "Win32_UI_Shell"] }

@@ -69,9 +69,35 @@ decision, so an untagged version is transitional.
   only the 10-byte common header; missing or unreadable files show 未知 without
   surfacing a global error. No schema change and no extra work on periodic
   history polling.
+- `stress_bench` records each measured operation's process CPU time (user +
+  kernel) next to the wall clock. Each child process is queried once after exit
+  via `GetProcessTimes`; the cycle counter (`QueryProcessCycleTime`) is kept for
+  failure diagnostics only. Results go to `target/stress-report.jsonl` and
+  `tests/perf-baseline.json` — `scenario::label` is wall clock,
+  `scenario::label#cpu` is CPU time. Because CPU time excludes the time a
+  process is descheduled, it stays comparable under `cargo test` parallelism,
+  where the same baseline's wall clock stretched by 2.3–4.1×. It cannot see disk
+  waits, and it is quantized to the 15.625 ms Windows accounting tick, so
+  baselines below 50 ms are recorded but not gated. Strict mode now compares
+  both, and `LILITH_STRESS_PROFILE` names the build profile a baseline belongs
+  to when a debug harness drives a release binary. The measurement reuses the
+  existing `windows-sys` dependency (one feature enabled) and adds no crate.
 
 ### Changed
 
+- The `stress_large` C4 ledger bound now accounts for snapshot growth. Its expected
+  delta still had the v1 shape — v1 snapshots are a constant size, so replacing the
+  head snapshot cost nothing — while v2 snapshots grow with newly distinct content;
+  the `heavy` and `extreme` tiers therefore reported a 12.8 MB / 10.4 MB excess that
+  matched snapshot growth exactly. The expected value now includes
+  `snapshots_after - snapshots_before` (recorded as `snapshotGrowthBytes` in
+  `ledger.jsonl`), and both tiers pass after the fix.
+- `stress_bench` now samples the P2 publish/decode and P8 orphan scan three times
+  and keeps the fastest round, like the other scenarios. Those three were
+  single-shot, and repeated sampling shows their wall clock swinging 4–6× on the
+  same idle machine (signing 8–50 ms against an 11 ms baseline, orphan scan
+  51–203 ms against 71 ms), so the 2.5× strict gate was failing on scheduler noise
+  rather than on a regression.
 - Frontend changes (including test files) now require `npx tsc --noEmit` in the
   lightweight verification set, alongside `npm test`. Vitest transpiles with
   esbuild and strips types without checking them, so type-only errors in tests
