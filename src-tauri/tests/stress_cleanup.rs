@@ -29,15 +29,15 @@ fn b5_crash_orphans_are_discovered_and_reclaimed() {
     assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
     assert_eq!(before.deltas.len(), 0, "{:?}", before.deltas);
 
-    // 第二次提交：在检查点 4（snapshot/delta 已发布、commit 未执行）强杀。
+    // 第二次提交：发布前的检查点全部放行，第 5 个（snapshot/delta 已发布、commit 未执行）强杀。
     write_work_file(&fixture.work, 80 * 1024, 2);
     let crash = fixture
         .commit_command()
         .arg("note", "killed before commit")
         .gate()
         .start()
-        .kill_at(|index, _stage| index == 4);
-    crash.expect_killed_at(4);
+        .kill_at(|index, _stage| index == COMMIT_AFTER_PUBLISH_CHECKPOINT);
+    crash.expect_killed_at(COMMIT_AFTER_PUBLISH_CHECKPOINT);
     assert_eq!(
         assert_healthy(&fixture.workspace, &fixture.repository),
         1,

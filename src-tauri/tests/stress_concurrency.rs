@@ -120,14 +120,14 @@ fn tree_value(fixture: &ArtworkFixture) -> Value {
 ///
 /// 写进程停在两个有代表性的位置：
 /// - **检查点 1（尚未发布任何文件）**：写进程只持有哨兵锁，磁盘与数据库都还是旧状态；
-/// - **检查点 4（快照已发布、数据库事务尚未提交）**：磁盘上已有新文件，但历史尚未推进。
+/// - **检查点 5（快照已发布、数据库事务尚未提交）**：磁盘上已有新文件，但历史尚未推进。
 ///   这是最能暴露撕裂读的窗口——读命令必须看到旧 head，而不是半成品。
 ///
 /// 断言三件事：读命令成功且快速返回（未被写进程的锁挡住）、`list-tree` 与写前逐字段一致、
 /// 历史节点数未推进。写完后再做一次正向对照，确认写进程正常收尾。
 #[test]
 fn j1_read_commands_answer_while_a_write_holds_the_repository_lock() {
-    for park in [1_usize, 4] {
+    for park in [1_usize, COMMIT_AFTER_PUBLISH_CHECKPOINT] {
         let fixture = ArtworkFixture::new();
         fixture.commit(96 * 1024, 1, "baseline");
         assert_eq!(fixture.healthy(), 1);
@@ -552,8 +552,9 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
 
 /// J6：写哨兵被持有时，内容级全库校验必须**明确拒绝**。
 ///
-/// `scrub` 是只读命令，但与精简真正并发时会撞上「节点在读取过程中被移除」，报出一个与
-/// 原因无关的错误。因此只给它加了一道前置判定：写哨兵被持有时直接拒绝并提示
+/// 全库校验会在扫描中刷新节点级校验状态（`history_nodes.verified_ms`），因此从 2026-10-19
+/// 起按**前台写命令**执行、自己取跨进程 owner lock；另一个进程持锁时它拿到的是那条
+/// 「不支持同一仓库的多进程写入」的明确拒绝，而不是早先只探测哨兵时的
 /// 「仓库正在被写入，请稍后重试」。这里用闸门把写进程停在检查点（此时它确实持有哨兵），
 /// 确定性验证这条拒绝；同时断言轻量只读命令（`verify`）保持 J1/J2 的承诺不回退，并验证
 /// 写者结束后同一条命令正常通过——拒绝不能变成永久关闭。
@@ -593,7 +594,9 @@ fn j6_full_scrub_is_refused_while_a_writer_holds_the_sentinel() {
         refusal.describe()
     );
     assert!(
-        refusal.error().contains("仓库正在被写入，请稍后重试"),
+        refusal
+            .error()
+            .contains("仓库正在被另一个进程写入；不支持同一仓库的多进程写入"),
         "拒绝必须给出可行动的理由：\n{}",
         refusal.describe()
     );

@@ -8,6 +8,20 @@
 
 ## 当前批次状态
 
+2026-10-19 晚批次（快速档全套压力测试复跑）：在阶段 7–9 落地后按「除 `extreme` /
+`manual` 外的全部分组」重跑，**全部通过**：便宜九组 44/44（`stress_cancel` 7、`stress_crash` 4、
+`stress_cleanup` 1、`stress_damage` 6、`stress_format` 4、`stress_pin_board` 3、
+`stress_authenticity` 5、`stress_concurrency` 9、`stress_input` 5）加 `gate_guard` 2/2、
+`stress_scale` 5/5、`stress_large` 的 `default`（36.9 s）/ `large`（136.1 s）/ `heavy`（383.6 s）
+各 8/8、`stress_bench` 9/9（单线程，未改写基线）、`stress_baseline` 2/2（未设
+`LILITH_BASELINE_REPO`，真实仓库场景按设计跳过；取消延迟现在覆盖 6 个检查点）。
+复跑暴露的是两处**测试侧漂移**，产品数据与校验均无异常：一是 `57dc8ba` 的缩略图提取插入了一枚
+取消边界，提交检查点序号整体后移，B1/B4/B5 杀到错误位置；二是 `66ba8ec` 让全库校验改按前台写
+命令取 owner lock，J6 断言的拒绝文案随之过期。修正方式见 `CHANGELOG.md` 的 `Unreleased → Fixed`：
+序号收敛到 `stress_support` 的 `COMMIT_*` 常量、B4 改按阶段名定位、A1/基线循环覆盖 6 个边界、
+J1 停回发布后、新增 A0 契约测试；J6 改为断言当前文案。`stress_concurrency` I/J 的复跑随之完成
+（`todo.md` 对应条目已删）。`extreme` 与 `manual` 档仍只在正式发布前运行。
+
 2026-10-19 批次（alpha3 阶段 9，已实现、自动验证通过）：0.2 的「空闲链路校验」改为节点级
 **空闲完整性检查**。新设置 `idleIntegrityCheckEnabled` 默认关闭，入口在设置页「备份」页并显示
 待校验节点数；主窗口隐藏或最小化、仓库静默 10 分钟后，每个空闲窗口最多跑一批（8 个节点或
@@ -42,9 +56,10 @@
 
 2026-10-19 批次（下午）：**alpha2 收口、阶段 9 计划修订与 `0.3.0-alpha.2` 切分**。维护者验收
 alpha2 并决定进入 alpha3：阶段 6（设置页拆「仓储 / 空间 / 备份」与仓储空间仪表盘）、同仓库
-写入排队修复与超期临时目录清扫均通过验收并归档；写入闸门的人工验收与 `stress_concurrency`
-I/J 复跑仍未进行，记入 `todo.md` 的「alpha2 遗留验收」。同日复核后把计划 §2.4 的「空闲链路
-校验重构」改向为「空闲完整性检查」：复用全库扫描（`scrub_repository_integrity`）的逐节点物化
+写入排队修复与超期临时目录清扫均通过验收并归档；写入闸门的人工验收仍未进行
+（`stress_concurrency` I/J 的复跑已由 2026-10-19 晚的快速档全套完成，见本文件首段），
+记入 `todo.md` 的「alpha2 遗留验收」。同日复核后把计划 §2.4 的「空闲链路校验重构」
+改向为「空闲完整性检查」：复用全库扫描（`scrub_repository_integrity`）的逐节点物化
 内核做空闲增量批次，校验状态挂 `history_nodes` 节点级列，`branches` 旧校验三列随 v5 迁移删除，
 **不再建 `branch_notices` 告警表**（阶段 7 迁移范围随之缩减）；门控、让位与默认关闭口径沿用
 2026-10-17 的决定。同日切分 `0.3.0-alpha.2`（未打标签的过渡版本）：五处版本字段同步，

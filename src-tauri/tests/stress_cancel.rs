@@ -35,17 +35,60 @@ fn gated_command(fixture: &ArtworkFixture, command: &str, policy: &Policy) -> Ou
     gated(fixture.command(command), policy)
 }
 
+/// A0 提交检查点清单：给后面所有按序号定位的用例当契约。
+///
+/// 一次内容有变化的提交必须恰好发出 `COMMIT_CHECKPOINTS` 枚交互检查点，最后一枚的阶段名
+/// 是 `事务已写入，尚未提交`。`run_backup` 里新增或删除一处取消边界会整体移动序号，
+/// B1/B4/B5、A1、J1 与 `stress_baseline` 的定位随之错位；这枚测试先失败，把「改常量」
+/// 这件事顶到眼前，而不是让几个强杀用例杀在错误位置再靠磁盘事实猜原因。
+#[test]
+fn a0_commit_checkpoint_sequence_matches_the_documented_boundaries() {
+    let fixture = ArtworkFixture::new();
+    fixture.commit(96 * 1024, 1, "baseline");
+    write_work_file(&fixture.work, 80 * 1024, 2);
+    let outcome = fixture
+        .commit_command()
+        .arg("note", "boundary probe")
+        .gate()
+        .finish();
+    outcome.expect_ok();
+
+    let indexes = outcome
+        .checkpoints
+        .iter()
+        .map(|checkpoint| checkpoint.index)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        indexes,
+        (1..=COMMIT_CHECKPOINTS).collect::<Vec<_>>(),
+        "提交路径的取消边界数量变了：核对 `run_backup` 的 ensure_not_cancelled，\
+         同步 stress_support 的 COMMIT_* 常量与 B1/B4/B5、A1、J1 的注释。\n{}",
+        outcome.describe()
+    );
+    let last_stage = outcome
+        .checkpoints
+        .last()
+        .map(|checkpoint| checkpoint.stage.as_str())
+        .unwrap_or_default();
+    assert!(
+        last_stage.contains("尚未提交"),
+        "最后一枚检查点应是事务内标记点：\n{}",
+        outcome.describe()
+    );
+    assert_eq!(fixture.healthy(), 2, "契约探针本身必须是一次成功的提交");
+}
+
 /// A1 提交取消：在提交的每一个取消检查点各取消一次。
 ///
-/// `run_backup` 的检查点依次是：载入分支后、snapshot 建成后、发布前、发布后（回滚分支）；
-/// 第 5 个落在 `history::commit` 的事务内部（headless-only 标记点，见 B4）。第 4、5 个是
-/// 仅有的两个会走到「已发布文件回滚」代码的取消点——第 4 个走 `run_backup` 的回滚分支，
-/// 第 5 个走 `history::commit` 的错误分支——因此逐个覆盖是必要的。
+/// `run_backup` 的检查点依次是：载入分支后、snapshot 建成后、缩略图提取后、发布前、
+/// 发布后（回滚分支）；第 6 个落在 `history::commit` 的事务内部（headless-only 标记点，
+/// 见 B4）。第 5、6 个是仅有的两个会走到「已发布文件回滚」代码的取消点——第 5 个走
+/// `run_backup` 的回滚分支，第 6 个走 `history::commit` 的错误分支——因此逐个覆盖是必要的。
 #[test]
 fn a1_commit_cancellation_is_clean_at_every_checkpoint() {
     let fixture = ArtworkFixture::new();
     let mut expected_nodes = 0_u64;
-    for target in 1..=5 {
+    for target in 1..=COMMIT_CHECKPOINTS {
         let len = 96 * 1024 + target * 16;
         let seed = 100 + target as u64;
         write_work_file(&fixture.work, len, seed);

@@ -70,6 +70,12 @@ CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，�
   文件分成多少块无关**，marker 文件也不会随处理字节数膨胀——测试因此可以按固定序号强杀/取消，
   且删除或新增一处边界时会同时改变序号（改测试的定位断言时要连注释一起核对）。边界判定的取消
   会被热循环在下一次静默查询时立刻看到，取消延迟不回退。
+- **提交路径的检查点序号集中在一处，并由测试自己守护**：`tests/stress_support/mod.rs` 的
+  `COMMIT_AFTER_PUBLISH_CHECKPOINT` / `COMMIT_TRANSACTION_CHECKPOINT` / `COMMIT_CHECKPOINTS`
+  是强杀与取消用例的唯一定位来源（依次为：载入分支后、快照落盘后、缩略图提取后、发布前、
+  发布后、事务内标记点）。`stress_cancel` 的 A0 会在边界数量或最后一枚的阶段名变化时先失败，
+  提示同步这几个常量与相关注释；事务内标记点由 B4 按阶段名（`事务已写入，尚未提交`）定位，
+  不依赖序号。2026-10-19 的缩略图边界就是因为只改产品、没改序号而让 B1/B4/B5 杀错了位置。
 - **按成本分层**：**九组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
   `stress_damage` / `stress_format` / `stress_pin_board` / `stress_authenticity` /
   `stress_concurrency` / `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；

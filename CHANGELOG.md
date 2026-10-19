@@ -75,6 +75,24 @@ decision, so an untagged version is transitional.
   rather than through the read-only path; it keeps scanning after an individual
   node fails and returns a summary error.
 
+### Fixed
+
+- The stress suite's commit crash/cancel points line up with the current
+  cancellation boundaries again. Adding the thumbnail-extraction boundary
+  shifted every later checkpoint by one, so `stress_crash` B1/B4 and
+  `stress_cleanup` B5 killed at the wrong place: B1/B5 stopped before the
+  publish step and were left with two `.tmp*` files instead of the expected
+  orphans, and B4 never reached the transaction marker. The boundary indexes now
+  live in `stress_support` as `COMMIT_AFTER_PUBLISH_CHECKPOINT` /
+  `COMMIT_TRANSACTION_CHECKPOINT` / `COMMIT_CHECKPOINTS`, B4 selects the marker
+  by its stage name instead of a number, the A1 and `stress_baseline` loops
+  cover all six boundaries, J1 parks at the post-publish boundary again, and a
+  new A0 contract test fails first whenever the boundary list changes.
+- `stress_concurrency` J6 expects the refusal the full scan actually returns.
+  Since the scan became a foreground write command it takes the cross-process
+  owner lock, so a second process gets "仓库正在被另一个进程写入；不支持同一仓库的
+  多进程写入" instead of the probe-era "仓库正在被写入，请稍后重试".
+
 ## 0.3.0-alpha.2 - 2026-10-19
 
 ### Added

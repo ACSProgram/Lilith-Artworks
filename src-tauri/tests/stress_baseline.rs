@@ -170,8 +170,8 @@ fn baseline_synthetic_deep_chain_and_cancel() {
     fs::remove_file(&oldest).expect("无法清理恢复输出");
     fs::remove_file(&head).expect("无法清理恢复输出");
 
-    // B2 提交取消：5 个检查点各取消一次，记录「发出取消 → 进程退出」的延迟。
-    for target in 1..=5_usize {
+    // B2 提交取消：每个检查点各取消一次，记录「发出取消 → 进程退出」的延迟。
+    for target in 1..=COMMIT_CHECKPOINTS {
         write_work_file(&fixture.work, CANCEL_COMMIT_BYTES, 4_000 + target as u64);
         let outcome = fixture
             .commit_command()

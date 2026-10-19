@@ -42,6 +42,22 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(180);
 const STDERR_LIMIT: usize = 4000;
 
+/// 一次「内容有变化」的提交在 `run_backup` 与 `history::commit` 里的取消边界清单
+/// （1 起计）：
+///
+/// 1. 载入分支后；2. 快照落盘并 sync 后；3. 缩略图提取后；4. 发布前；
+/// 5. 发布后（回滚分支）；6. 事务内标记点（阶段名 `事务已写入，尚未提交`）。
+///
+/// 强杀与取消用例靠这些序号定位代码位置，因此**边界一动、序号就整体移动**：
+/// `run_backup` 里新增或删除一处 `ensure_not_cancelled` 会让后面全部错位。
+/// `stress_cancel` 的 A0 契约测试会先失败并指向这里；改动时同步更新这几个常量
+/// 与相关注释，不要只改某一个数字。
+pub const COMMIT_AFTER_PUBLISH_CHECKPOINT: usize = 5;
+/// 事务内标记点（`headless::commit_marker`）：文件已发布、事务已写入、尚未提交。
+pub const COMMIT_TRANSACTION_CHECKPOINT: usize = 6;
+/// 提交路径上的交互检查点总数（含事务内标记点）。
+pub const COMMIT_CHECKPOINTS: usize = COMMIT_TRANSACTION_CHECKPOINT;
+
 static SPAWN_COUNTER: AtomicUsize = AtomicUsize::new(0);
 static PROBE: OnceLock<()> = OnceLock::new();
 /// 同一个测试进程内的多个场景会并行追加同一份报告；不加锁时两行会交错成

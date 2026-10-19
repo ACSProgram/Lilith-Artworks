@@ -45,15 +45,15 @@ fn b1_commit_killed_after_publish_keeps_a_recoverable_orphan() {
     assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
     assert_eq!(before.deltas.len(), 0, "{:?}", before.deltas);
 
-    // 第二次提交：检查点 1–3 放行，在第 4 个检查点（「发布后、提交前」）强杀。
+    // 第二次提交：发布前的检查点全部放行，在第 5 个检查点（「发布后、提交前」）强杀。
     write_work_file(&fixture.work, 80 * 1024, 2);
     let outcome = fixture
         .commit_command()
         .arg("note", "killed before commit")
         .gate()
         .start()
-        .kill_at(|index, _stage| index == 4);
-    outcome.expect_killed_at(4);
+        .kill_at(|index, _stage| index == COMMIT_AFTER_PUBLISH_CHECKPOINT);
+    outcome.expect_killed_at(COMMIT_AFTER_PUBLISH_CHECKPOINT);
 
     // 重开可用：不是「不报错」，而是完整性与链路校验全过、head 未推进。
     assert_eq!(fixture.healthy(), 1, "head 不应被推进");
@@ -321,15 +321,19 @@ fn b4_commit_killed_inside_transaction_discards_uncommitted_writes() {
     assert_eq!(before.deltas.len(), 0, "{:?}", before.deltas);
     let parent_snapshot = before.snapshots[0].clone();
 
-    // 第二次提交：1–4 号检查点在发布路径上放行，第 5 个（标记点）在事务内强杀。
+    // 第二次提交：发布路径上的检查点全部放行，在事务内标记点强杀。
+    //
+    // 这里按**阶段名**而不是序号定位：`事务已写入，尚未提交` 只由 `commit_marker`
+    // 标记一次，因此发布路径上插入新的取消边界也不会把强杀点挪走。序号契约由
+    // `stress_cancel` 的 A0 单独守护。
     write_work_file(&fixture.work, 72 * 1024, 32);
     let outcome = fixture
         .commit_command()
         .arg("note", "killed inside the commit transaction")
         .gate()
         .start()
-        .kill_at(|index, _stage| index == 5);
-    outcome.expect_killed_at(5);
+        .kill_at(|_index, stage| stage.contains("尚未提交"));
+    outcome.expect_killed();
     assert!(
         outcome.target_stage().contains("尚未提交"),
         "强杀应落在事务写入之后、提交之前：\n{}",
