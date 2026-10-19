@@ -46,6 +46,12 @@ pub(crate) struct PublishedOutput {
 const PUBLICATION_PREVIEW_EDGE: u32 = 2400;
 static PREVIEW_CACHE_SESSION: OnceLock<String> = OnceLock::new();
 
+/// 当前进程的预览缓存会话 id；本进程尚未写过任何质量预览缓存时为 `None`。
+/// 仓库临时目录清扫用它保留仍属于本进程的会话目录。
+pub(crate) fn preview_session_id() -> Option<&'static str> {
+    PREVIEW_CACHE_SESSION.get().map(String::as_str)
+}
+
 #[derive(Deserialize, Serialize)]
 struct RenditionCacheMetadata {
     token: String,

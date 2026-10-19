@@ -46,6 +46,10 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
 zstd = "0.13"
 
+# 仅测试使用：仓库临时目录清扫的单测需要把会话目录的修改时间拨回宽限期之前。
+[dev-dependencies]
+filetime = "0.2"
+
 [profile.release]
 panic = "abort"
 codegen-units = 1

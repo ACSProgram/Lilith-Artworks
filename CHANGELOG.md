@@ -139,6 +139,18 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Stale entries in the repository-root `temp/` are swept automatically when a
+  repository opens. `prepare_repository` now runs `cleanup::sweep_repository_temp`
+  once the database is ready: it removes expired `authenticity-preview-<UUID>`
+  preview cache directories (`authenticity::pipeline` keeps one per process,
+  about 40 MB observed in long-lived repositories) and stray `.tmp*`
+  `NamedTempFile` crash residue from restore-chain resolution, both under the
+  shared 30-minute grace period. The current process's own session directory is
+  always kept, entries with other names are untouched, symlinks are not
+  followed, and deletion failures are only logged, so opening never blocks.
+  Losing a preview cache only costs one preview recomputation; per-artwork
+  `artworks/<artwork>/temp/` residue keeps its report-then-confirm path from
+  the previous batch.
 - The pin-board finalize busy-retry test compiles again. Its success-case mock
   resolved only `{ revision: "r2" }` while `finalizePinBoard` is typed as
   `SavePinBoardResult` (`saved`, `revision`, `nowStep`), so the first

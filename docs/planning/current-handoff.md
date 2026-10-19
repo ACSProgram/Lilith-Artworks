@@ -43,6 +43,11 @@
   一次。计划与实施记录见 `archive/repository-write-lock-plan-2026-10-18.md`；原 `todo.md` 的
   对应条目已随修复删除。人工验收（复现原始场景、备份中保存/退出、真跨进程拒绝）与
   `stress_concurrency` I/J 复跑仍未进行。
+- **超期临时目录清理已实现（待维护者验收）**：仓库打开成功后自动清扫仓库根 `temp/`
+  （`cleanup::sweep_repository_temp`，挂在 `prepare_repository`）：只删除超期（30 分钟宽限期）的
+  `authenticity-preview-<UUID>` 预览会话目录与 `.tmp*` `NamedTempFile` 暂存残留，保留本进程当前
+  会话与命名不符的手工条目，删除失败只记日志。`todo.md` 原 P2 条目已随实现删除；作品级
+  `artworks/<id>/temp/` 的残留仍走扫描报告→确认流程（2026-10-18 批次）。
 - 未完成事项全部在 `todo.md`：alpha1 阶段 1–5 的待验收项与压力测试剩余项、0.3 前的补强候选、
   阶段 7–9。
 

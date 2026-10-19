@@ -19,7 +19,7 @@ use super::{
     usecases, OperationCoordinator,
 };
 use crate::backup::BackupState;
-use crate::{history, library, storage};
+use crate::{authenticity::pipeline, cleanup, history, library, storage};
 
 pub(crate) const CURRENT_SETTINGS_VERSION: u32 = 2;
 
@@ -855,7 +855,21 @@ pub(crate) fn prepare_repository(
     } else {
         library::initialize(root)?;
     }
+    sweep_stale_repository_temp(root);
     Ok(Some(root.to_path_buf()))
+}
+
+/// 仓库就绪后清扫超期的仓库 `temp/`（认证预览会话目录与 `.tmp*` 暂存残留）。
+/// 清扫只碰不被引用的临时条目，失败只记日志，绝不阻断仓库打开。
+fn sweep_stale_repository_temp(root: &Path) {
+    let report = cleanup::sweep_repository_temp(root, pipeline::preview_session_id());
+    if report.reclaimed > 0 || report.failed > 0 {
+        log::info!(
+            "仓库打开时清扫临时目录：回收 {} 项，失败 {} 项",
+            report.reclaimed,
+            report.failed
+        );
+    }
 }
 
 pub(crate) fn set_automatic_backups_paused(app: &AppHandle, paused: bool) -> Result<(), String> {

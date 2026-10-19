@@ -29,6 +29,13 @@ const CLEANUP_BATCH_SIZE: usize = 512;
 /// 10 分钟延迟，给长操作留出余量。
 pub(crate) const SCAN_GRACE_MS: i64 = 30 * 60 * 1000;
 
+/// 仓库根 `temp/` 中认证预览缓存会话目录的命名前缀，由
+/// `authenticity::pipeline::preview_cache_directory` 写入。
+const PREVIEW_SESSION_PREFIX: &str = "authenticity-preview-";
+/// `tempfile::NamedTempFile` 的默认文件名前缀（与 `history::contracts` 的
+/// 暂存文件命名口径一致）；仓库根 `temp/` 下的崩溃残留只认它。
+const SCRATCH_FILE_PREFIX: &str = ".tmp";
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CleanupFailure {
@@ -542,6 +549,123 @@ pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
             log::warn!("清理重放失败，条目已留在待清理队列：{error}");
         }
     }
+}
+
+/// 一次仓库临时目录清扫的结果：`reclaimed` 为成功回收的条目数，`failed` 为删除失败数。
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct TempSweepReport {
+    pub(crate) reclaimed: u64,
+    pub(crate) failed: u64,
+}
+
+/// 清扫仓库根 `temp/` 中超期的预览会话目录与暂存文件。
+///
+/// `temp/` 不进入任何引用清单，因此这里直接删除而不走 `pending_file_cleanup`：
+/// 预览缓存丢失只让下一次预览重算一次；`.tmp*` 暂存文件是备份/恢复/检查点的
+/// `NamedTempFile` 在进程被强杀或断电时的残留（正常路径由 `Drop` 删除）。只处理
+/// 两类名字——`authenticity-preview-<UUID>` 会话目录与 `.tmp` 前缀的普通文件——
+/// 手工放置的其它条目一律不动。修改时间晚于 `now - SCAN_GRACE_MS` 的条目视为
+/// 可能仍属于进行中的预览或链解析（本进程或另一进程），跳过；
+/// `active_preview_session` 是本进程当前的预览会话 id，其目录即使超期也保留，
+/// 避免清掉正在使用的缓存。只碰 `temp/` 顶层、不递归匹配、不跟随符号链接；
+/// 删除失败只计数并写日志，不改变调用方的打开流程；目录不可读时按空处理。
+pub(crate) fn sweep_repository_temp(
+    root: &Path,
+    active_preview_session: Option<&str>,
+) -> TempSweepReport {
+    let now_ms = match storage::now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(error) => {
+            log::warn!("无法读取当前时间，跳过仓库临时目录清扫：{error}");
+            return TempSweepReport::default();
+        }
+    };
+    sweep_repository_temp_at(root, active_preview_session, now_ms)
+}
+
+fn sweep_repository_temp_at(
+    root: &Path,
+    active_preview_session: Option<&str>,
+    now_ms: i64,
+) -> TempSweepReport {
+    let mut sweep = TempSweepReport::default();
+    let cutoff_ms = now_ms.saturating_sub(SCAN_GRACE_MS);
+    let temp_directory = root.join("temp");
+    let entries = match fs::read_dir(&temp_directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return sweep,
+        Err(error) => {
+            log::warn!(
+                "无法读取仓库临时目录 {}，跳过清扫：{error}",
+                storage::display_path(&temp_directory)
+            );
+            return sweep;
+        }
+    };
+    let active_session_directory =
+        active_preview_session.map(|session| format!("{PREVIEW_SESSION_PREFIX}{session}"));
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        // `symlink_metadata` 不跟随符号链接：指向目录的链接按链接本身判定，
+        // `is_dir` 为假，不会递归删除链接目标。
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        let is_directory = metadata.is_dir();
+        let remove = if is_preview_session_name(name) {
+            is_directory && active_session_directory.as_deref() != Some(name)
+        } else if is_scratch_file_name(name) {
+            metadata.is_file()
+        } else {
+            continue;
+        };
+        if !remove {
+            continue;
+        }
+        let Some(modified_ms) = modified_ms(&metadata) else {
+            continue;
+        };
+        if modified_ms >= cutoff_ms {
+            continue;
+        }
+        let result = if is_directory {
+            fs::remove_dir_all(entry.path())
+        } else {
+            fs::remove_file(entry.path())
+        };
+        match result {
+            Ok(()) => sweep.reclaimed += 1,
+            Err(error) => {
+                sweep.failed += 1;
+                log::warn!(
+                    "无法回收仓库临时目录中的残留 {}：{error}",
+                    storage::display_path(&entry.path())
+                );
+            }
+        }
+    }
+    sweep
+}
+
+/// 预览会话目录命名：`authenticity-preview-<UUID v4>`；后缀不是合法 UUID 的
+/// 目录视为手工放置的条目，不清理。
+fn is_preview_session_name(name: &str) -> bool {
+    name.strip_prefix(PREVIEW_SESSION_PREFIX)
+        .is_some_and(|session| uuid::Uuid::parse_str(session).is_ok())
+}
+
+fn is_scratch_file_name(name: &str) -> bool {
+    name.strip_prefix(SCRATCH_FILE_PREFIX)
+        .is_some_and(|suffix| !suffix.is_empty())
+}
+
+fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    let elapsed = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    i64::try_from(elapsed.as_millis()).ok()
 }
 
 /// 扫描 `artworks/*/` 下由各领域 provider 声明的受管理文件（历史 snapshot/delta
@@ -1161,6 +1285,14 @@ mod tests {
             .unwrap();
     }
 
+    /// 目录无法用 `OpenOptions` 打开改时间，单测用 `filetime` 拨回宽限期之前。
+    fn age_directory(path: &Path) {
+        let old = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(3_600),
+        );
+        filetime::set_file_mtime(path, old).unwrap();
+    }
+
     fn new_artwork_directory(root: &Path) -> PathBuf {
         root.join("artworks").join(storage::new_id())
     }
@@ -1241,6 +1373,63 @@ mod tests {
         );
         assert_eq!(candidates[0].reason, "备份或恢复中断后残留的临时文件");
         assert_eq!(candidates[0].byte_size, 7);
+    }
+
+    /// 仓库 `temp/` 清扫只回收超期的预览会话目录与 `.tmp*` 暂存文件：当前会话、
+    /// 宽限期内、命名不符与手工放置的条目一律保留。
+    #[test]
+    fn sweep_removes_expired_temp_entries_and_keeps_active_or_foreign_ones() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let temp = root.join("temp");
+        fs::create_dir_all(&temp).unwrap();
+
+        let active_session = storage::new_id();
+        let expired_session = temp.join(format!("authenticity-preview-{}", storage::new_id()));
+        let active_directory = temp.join(format!("authenticity-preview-{active_session}"));
+        let fresh_session = temp.join(format!("authenticity-preview-{}", storage::new_id()));
+        let foreign_directory = temp.join("authenticity-preview-not-a-uuid");
+        for path in [
+            &expired_session,
+            &active_directory,
+            &fresh_session,
+            &foreign_directory,
+        ] {
+            fs::create_dir_all(path).unwrap();
+            fs::write(path.join("token.jpg"), b"jpeg").unwrap();
+        }
+        age_directory(&expired_session);
+        age_directory(&active_directory);
+        age_directory(&foreign_directory);
+
+        let expired_scratch = temp.join(".tmpd0BGy8");
+        let fresh_scratch = temp.join(".tmpAbC123");
+        let unrelated = temp.join("notes.txt");
+        for path in [&expired_scratch, &fresh_scratch, &unrelated] {
+            fs::write(path, b"scratch").unwrap();
+        }
+        age_file(&expired_scratch);
+        age_file(&unrelated);
+
+        let sweep =
+            sweep_repository_temp_at(&root, Some(&active_session), storage::now_ms().unwrap());
+        assert_eq!(sweep.reclaimed, 2);
+        assert_eq!(sweep.failed, 0);
+        assert!(!expired_session.exists());
+        assert!(!expired_scratch.exists());
+        // 当前会话、宽限期内、命名不符与手工放置的条目全部保留。
+        assert!(active_directory.exists());
+        assert!(fresh_session.exists());
+        assert!(foreign_directory.exists());
+        assert!(fresh_scratch.exists());
+        assert!(unrelated.exists());
+
+        // 没有 temp 目录时按空处理，不报错。
+        let other_root = directory.path().join("other");
+        let empty = sweep_repository_temp_at(&other_root, None, storage::now_ms().unwrap());
+        assert_eq!(empty.reclaimed, 0);
+        assert_eq!(empty.failed, 0);
     }
 
     #[test]

@@ -3200,6 +3200,7 @@ dependencies = [
  "base64 0.22.1",
  "bcdec_rs",
  "c2pa",
+ "filetime",
  "hex",
  "ico",
  "image",
