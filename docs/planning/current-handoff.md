@@ -17,6 +17,18 @@
 与 `cargo fmt --check` 已通过，改动已提交；GUI 手工验收（文字清晰度、定位、导出、迁移后的旧仓库）
 尚未进行。更新版本的仓库会被旧程序直接拒绝，避免降级写入。
 
+2026-10-19 批次（alpha3 阶段 8，已实现、自动验证通过）：提交 worker 在内容变化时抽取节点
+缩略图（`.clip` 内嵌 SQLite 的 `CanvasPreview`、`.psd`/`.psb` 优先 Image Resources 缩略图资源、
+否则合并合成图，位图直接解码），以 512 px 无损 WebP + 版本 1 写入 v5 已有的
+`history_nodes.thumbnail` / `thumbnail_version`，不进入 ChunkFile、scrub 或恢复；内容未变化的快速
+检查、检查点、fork 与 snapshot 修复沿用已有缩略图，存量节点不回填。历史页「节点信息」在选中节点
+时经 `get_history_node_thumbnail` 按需读取并显示，缺失或解析失败显示占位。新增的 preview 单测
+（位图、合成 clip/psd raw/RLE/ZIP、PS 4.0 的 BGR 缩略图、损坏回退）、worker 写入/检查点保留测试
+与前端展示测试通过；
+`cargo test --lib`（286 通过）、`npx tsc --noEmit`、`npm test`（237 通过）、`cargo fmt --check`
+与 `cargo check --all-targets` 已通过。GUI 手工验收（真实 `.clip`/`.psd` 预览、占位与详情区布局）
+尚未进行。
+
 2026-10-19 批次（下午）：**alpha2 收口、阶段 9 计划修订与 `0.3.0-alpha.2` 切分**。维护者验收
 alpha2 并决定进入 alpha3：阶段 6（设置页拆「仓储 / 空间 / 备份」与仓储空间仪表盘）、同仓库
 写入排队修复与超期临时目录清扫均通过验收并归档；写入闸门的人工验收与 `stress_concurrency`
@@ -48,8 +60,8 @@ I/J 复跑仍未进行，记入 `todo.md` 的「alpha2 遗留验收」。同日�
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：阶段 7 已实现并完成自动验证，等待 GUI 手工验收；随后进入阶段 8–9（节点缩略图、
-  空闲完整性检查），沿用已落地的 v5 节点级列。批次划分、依赖与阶段口径见
+- **下一步**：阶段 7 与阶段 8 已实现并完成自动验证，等待 GUI 手工验收；随后进入阶段 9（空闲
+  完整性检查），沿用已落地的 v5 节点级列。批次划分、依赖与阶段口径见
   `0.3-architecture-algorithm-plan-2026-10-05.md`。`manual` 档压力测试按发布前口径另行安排。
 - alpha2 的实现记录（阶段 6 的设置拆分与仪表盘、写入闸门、临时目录清扫）已随验收归档，见
   `archive/handoff-log-2026-10-19.md` 第 7 节与 `archive/repository-write-lock-plan-2026-10-18.md`；

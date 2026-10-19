@@ -121,6 +121,7 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     forkBranch: vi.fn(),
     renameNode: vi.fn(),
     readNodeFormat: vi.fn().mockResolvedValue("v2"),
+    readNodeThumbnail: vi.fn().mockResolvedValue(null),
     cancelOperation: vi.fn(),
     ...overrides,
   };
@@ -339,5 +340,40 @@ describe("HistoryModule node inspector", () => {
 
     expect(await screen.findByText("ChunkFile v2")).toBeTruthy();
     expect(readNodeFormat).toHaveBeenCalledWith("main-head");
+  });
+
+  it("shows the selected node's stored thumbnail in branch view", async () => {
+    const readNodeThumbnail = vi.fn().mockResolvedValue("data:image/webp;base64,cHJldmlldw==");
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    const image = await screen.findByRole("img", { name: "Main head 的缩略图" });
+    expect(image.getAttribute("src")).toBe("data:image/webp;base64,cHJldmlldw==");
+    expect(readNodeThumbnail).toHaveBeenCalledWith("main-head");
+  });
+
+  it("shows a placeholder when the selected node has no thumbnail", async () => {
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    expect(await screen.findByText("无可用预览")).toBeTruthy();
   });
 });

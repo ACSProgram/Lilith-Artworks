@@ -7,7 +7,7 @@
 | 问题 | 起点文档 | 实现位置 |
 | --- | --- | --- |
 | 作品树、搜索、拖放、回收站 | `docs/modules/library.md` | `src/modules/library/`、`src-tauri/src/library/` |
-| 分支、提交、创建分支、恢复、精简、检查点 | `docs/modules/history-and-backup.md` | `src/modules/history/`、`src-tauri/src/history/`、`src-tauri/src/backup/` |
+| 分支、提交、创建分支、恢复、精简、检查点、节点缩略图 | `docs/modules/history-and-backup.md` | `src/modules/history/`、`src-tauri/src/history/`、`src-tauri/src/backup/`、`src-tauri/src/preview/` |
 | 发布、成品、C2PA、TrustMark、识别 | `docs/modules/authenticity.md` | `src/modules/authenticity/`、`src-tauri/src/authenticity/` |
 | 素材板、画板、图片导入导出、画板回收站 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
 | 设置、托盘、窗口生命周期 | `docs/architecture/overview.md` | `src-tauri/src/app/`、`src-tauri/src/lib.rs` |
@@ -20,7 +20,7 @@
 1. 先读所选模块文档和 `docs/planning/current-handoff.md`（当前批次状态）；未完成事项查
    `docs/planning/todo.md`，历史批次记录见 `docs/planning/archive/`。
 2. 再读前端 `types.ts`/`api.ts` 或 Rust `model.rs`/`commands.rs`，确认 DTO 与命令契约。
-3. 最后读实现。数据库工作进入领域仓储；ChunkFile 格式只在必要时进入 `backup/chunk_file/`（`format.rs` 是字节布局，`store.rs` 是段读取，`snapshot.rs`/`delta.rs` 是写入与链解析），`.clip`/`.psd` 容器边界读 `format/container.rs`。
+3. 最后读实现。数据库工作进入领域仓储；ChunkFile 格式只在必要时进入 `backup/chunk_file/`（`format.rs` 是字节布局，`store.rs` 是段读取，`snapshot.rs`/`delta.rs` 是写入与链解析），`.clip`/`.psd` 容器边界读 `format/container.rs`，节点缩略图抽取读 `preview/`。
 
 ## 边界
 
@@ -40,6 +40,7 @@
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
 - `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。
+- `preview` 只读工作文件、返回派生缩略图，不写仓库文件也不进 ChunkFile；任何失败只让该节点没有预览。
 - `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `run_read`，
   变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
   DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。

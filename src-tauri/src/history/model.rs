@@ -145,6 +145,10 @@ pub(crate) struct HistoryCommit<'a> {
     pub(crate) snapshot_path: &'a str,
     pub(crate) delta_path: Option<&'a str>,
     pub(crate) delta_size: Option<u64>,
+    /// Optional derived preview. Stored with the node row and never part of
+    /// the ChunkFile content or its digest.
+    pub(crate) thumbnail: Option<&'a [u8]>,
+    pub(crate) thumbnail_version: Option<i64>,
 }
 
 #[derive(Debug, Clone)]

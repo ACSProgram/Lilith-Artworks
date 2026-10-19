@@ -13,7 +13,7 @@ use crate::{
     cancel::CancelToken,
     cleanup,
     history::{self, HistoryCommit},
-    storage,
+    preview, storage,
 };
 
 use super::{
@@ -138,6 +138,20 @@ fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadat
     }
 }
 
+/// 工作文件在本次提交读取期间被改写时整体作废：快照、摘要和派生预览都必须
+/// 描述同一份内容，不做部分接受。
+fn ensure_source_unchanged(
+    before: &SourceMetadata,
+    after: &SourceMetadata,
+) -> Result<(), BackupRunError> {
+    if before.length != after.length || before.modified != after.modified {
+        return Err(BackupRunError::Failed(
+            "工作文件在读取期间发生变化，本次提交已取消".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// 从工作文件流式创建快照。
 ///
 /// 独立成函数只为让「快照写入」这一步能被磁盘写满注入测试直接复用：产品路径传入
@@ -206,12 +220,8 @@ pub(crate) fn run_backup(
         .sync_all()
         .map_err(|error| format!("无法同步 snapshot：{error}"))?;
     ensure_not_cancelled(cancel)?;
-    let after = source_metadata(source_path)?;
-    if before.length != after.length || before.modified != after.modified {
-        return Err(BackupRunError::Failed(
-            "工作文件在读取期间发生变化，本次提交已取消".into(),
-        ));
-    }
+    let after_snapshot = source_metadata(source_path)?;
+    ensure_source_unchanged(&before, &after_snapshot)?;
 
     let digest = snapshot.file_digest().to_hex();
     let checked_ms = storage::now_ms()?;
@@ -237,7 +247,7 @@ pub(crate) fn run_backup(
         }
         history::mark_unchanged(root, branch_id, checked_ms)?;
         // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
-        record_source_metadata(root, branch_id, &after);
+        record_source_metadata(root, branch_id, &after_snapshot);
         log::info!(
             "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}",
             head.id,
@@ -253,6 +263,16 @@ pub(crate) fn run_backup(
     }
 
     let history_id = storage::new_id();
+    // The content changed, so this is the only path that pays for a preview.
+    // Any unsupported or malformed work file simply produces no thumbnail; the
+    // commit result never depends on it.
+    let thumbnail = preview::extract(source_path, cancel);
+    ensure_not_cancelled(cancel)?;
+    // The preview re-reads the file, so re-check the file against the snapshot
+    // baseline: a preview may never describe content different from the one
+    // that was chunked.
+    let after_preview = source_metadata(source_path)?;
+    ensure_source_unchanged(&before, &after_preview)?;
     let snapshot_final = artwork_directory
         .join("snapshots")
         .join(format!("{history_id}.lbc"));
@@ -334,6 +354,10 @@ pub(crate) fn run_backup(
         snapshot_path: &snapshot_relative,
         delta_path: delta_relative.as_deref(),
         delta_size,
+        thumbnail: thumbnail
+            .as_ref()
+            .map(|thumbnail| thumbnail.bytes.as_slice()),
+        thumbnail_version: thumbnail.as_ref().map(|thumbnail| thumbnail.version),
     };
     // `history::commit` takes ownership of the commit payload, so capture the
     // sizes for the result log before handing it over.
@@ -354,7 +378,7 @@ pub(crate) fn run_backup(
     // 不影响已成功的提交结果。
     cleanup::replay(root, &cleanup_ids);
     // 提交成功，记录基线元数据供快速检查使用。
-    record_source_metadata(root, branch_id, &after);
+    record_source_metadata(root, branch_id, &after_preview);
     log::info!(
         "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, format={:?}, chunking={:?}, elapsed_ms={}",
         options.format,
@@ -503,6 +527,62 @@ mod tests {
         )
         .unwrap();
         fs::read(output).unwrap()
+    }
+
+    #[test]
+    fn changed_commits_store_a_node_thumbnail_and_keep_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.png");
+        let image =
+            image::RgbaImage::from_fn(800, 400, |x, y| image::Rgba([x as u8, y as u8, 120, 255]));
+        image.save(&source).unwrap();
+        library::initialize(&root).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
+
+        let first = run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let history_id = first.history_id.unwrap();
+        let (bytes, version) = history::load_thumbnail(&root, &history_id)
+            .unwrap()
+            .expect("changed commit should store a preview");
+        assert_eq!(version, crate::preview::THUMBNAIL_VERSION);
+        let decoded = image::load_from_memory(&bytes).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (512, 256));
+
+        // Unchanged checks and checkpoints keep the existing node preview.
+        let second = run_backup(
+            &root,
+            &artwork.branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert!(second.unchanged);
+        super::super::restore::ensure_checkpoint(
+            &root,
+            &history_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(
+            history::load_thumbnail(&root, &history_id)
+                .unwrap()
+                .unwrap()
+                .0,
+            bytes
+        );
     }
 
     #[test]

@@ -3201,6 +3201,7 @@ dependencies = [
  "bcdec_rs",
  "c2pa",
  "filetime",
+ "flate2",
  "hex",
  "ico",
  "image",

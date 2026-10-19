@@ -13,7 +13,8 @@
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
 - SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file/`。
-- `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与后续缩略图功能共用这一份解析，不要在备份或认证模块里另写。
+- `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。
+- 节点缩略图抽取：`src-tauri/src/preview/`；只读工作文件、按格式分派，失败只跳过预览，不改变提交结果。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
 - 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
 
@@ -24,6 +25,7 @@
 - `src-tauri/src/library/`：仓库初始化、作品树、搜索与项目回收站。
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
+- `src-tauri/src/preview/`：历史节点派生缩略图。只读工作文件、按格式分派（`.clip` 内嵌 SQLite、`.psd`/`.psb`、直接位图），任何失败只让该节点没有预览，不改提交结果；不参与 ChunkFile、摘要、scrub 与恢复。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
 - `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与未引用扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
@@ -55,6 +57,19 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 仓库根 `temp/` 不进入引用清单，因此走一条更直接的自动清扫：仓库打开成功后（`prepare_repository`）执行 `cleanup::sweep_repository_temp`，只删除两类名字——超期（同一 30 分钟宽限期）的 `authenticity-preview-<UUID>` 预览缓存会话目录（`authenticity::pipeline` 每进程一个，丢失只让下一次预览重算）与 `.tmp` 前缀的 `NamedTempFile` 暂存残留（恢复链解析在进程被强杀或断电时留下的孤儿）——本进程当前会话目录一律保留，命名不符的手工条目一律不动；只碰顶层、不跟随符号链接，删除失败只记日志，不阻断打开。作品级 `artworks/<artwork>/temp/` 的 `.tmp*` 残留不在此列，仍走未引用文件扫描的报告→确认流程。
 
 **空 id 不再等于「处理全部」**：`retry_pending_file_cleanup` 传空 id 时只重放**仓库内条目**（`repository_file` / `repository_directory`），`external_file` 条目一律跳过。外部条目保存的是仓库之外的绝对路径，删除它等于一条任意路径删除，唯一门槛只是攻击者需要知道目标文件的 SHA-256；若它随启动自动重放，被投毒的仓库就等于自带一条「自动、无确认的删除任意文件」原语。因此外部条目改为在队列里**逐条显式确认**：列表直接展示完整路径、所属作品与期望 SHA-256，点击「确认删除…」后由滑动确认控件（`ConfirmDialog` 的 `slideToConfirm`）承担最终动作，确认后以**显式 id** 调用同一命令执行；「全部重试」按钮在只剩外部条目时禁用，并注明它只重放仓库内条目。既有的「摘要不匹配即不删」约束不变（`cleanup::remove_external_file` 仍只在 SHA-256 相等时删除）。首次启动时应用仍会自动重放一次仓库内条目，队列中的残留仓库内条目即上次未清干净的文件。
+
+## 节点缩略图
+
+提交 worker 在确认工作文件内容已变化后，从同一份工作文件抽取派生预览并随新节点写入 `history_nodes.thumbnail` / `thumbnail_version`。缩略图固定最长边 512 px、无损 WebP、版本 1；它是旁路产物，**不进入 ChunkFile、不参与 `sha256`、scrub 与恢复，也不进入 `pending_file_cleanup` 或灾备路径清单**——删除节点/分支时随行删除，整仓备份的 SQLite 副本天然包含它。
+
+抽取位于 `src-tauri/src/preview/`，只读、有界、可取消；任何失败只让该节点没有预览，绝不影响提交、摘要或恢复：
+
+- `.clip`：复用 `format/container.rs` 定位 `SQLi` 块，把该块有界复制到系统临时目录后以只读 SQLite 打开，扫描名字含 `preview` 的表（优先 `CanvasPreview`）中的可解码 BLOB。容器自带的画布预览 PNG 若无法解码（例如非标准 filter 字节）则回退为占位。
+- `.psd` / `.psb`：优先 Image Resources 中的 1036 / 1033 缩略图资源（JPEG 或 raw RGB；1033 按规范是 BGR，取出后换回 RGB）；取不到时跳过 Image Resources 与 Layer and Mask 段，直接解码合并合成图（8/16 位，RGB / 灰度 / CMYK，raw / RLE / ZIP ± prediction）。无法识别、截断或超出 64 MP 预算时无预览。
+- png / jpg / webp / tiff / bmp / gif：在同一解码预算内直接解码并按最长边缩放。
+- 其它格式、解析失败或损坏头部：无预览，详情区显示占位。
+
+内容未变化的快速检查不打开工作文件，沿用 head 已有缩略图；完整检查确认内容未变化时也不改写。检查点、fork 与 snapshot 修复作用于同一节点或复用原节点，不重新抽取；存量节点不回填。历史图与列表查询继续使用显式列名，不把 BLOB 带出；详情区选中节点时通过只读命令 `get_history_node_thumbnail` 单独拉取 data URL。读取只服务当前 `thumbnail_version` 的载荷，未知版本按「无预览」处理，避免把不认识的编码当作 WebP 发给前端。
 
 ## 存储大小语义
 
@@ -161,6 +176,7 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 ```text
 get_artwork_history
 get_history_node_format
+get_history_node_thumbnail
 fork_artwork_branch
 update_artwork_branch
 run_branch_backup
@@ -231,6 +247,7 @@ scan_repository_storage_disk
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
 - 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节；delta 文件整体是 zstd 流，识别到 zstd 帧魔数后先流式解压出前 10 字节再判版本（`stored_format_label`），snapshot 则按明文读取。走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
+- 同一个「节点信息」栏在选中节点时按需显示该节点的缩略图：命令 `get_history_node_thumbnail` 只读取该行的 `thumbnail` BLOB 并返回 data URL；无预览、读取失败或节点已无缩略图时显示「无可用预览」，不进入全局错误提示，也不触发 restore 或工作文件读取。缩略图请求只随选中节点与历史刷新发起，不进入图轮询。
 - `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。

@@ -13,6 +13,8 @@ export const historyApi = {
     invokeCommand<ArtworkHistory>("get_artwork_history", { artworkId }),
   nodeFormat: (historyId: string) =>
     invokeCommand<string | null>("get_history_node_format", { historyId }),
+  nodeThumbnail: (historyId: string) =>
+    invokeCommand<string | null>("get_history_node_thumbnail", { historyId }),
   fork: (request: ForkBranchRequest) =>
     invokeCommand<ArtworkHistory>("fork_artwork_branch", { request }),
   updateBranch: (request: UpdateBranchBackupRequest) =>

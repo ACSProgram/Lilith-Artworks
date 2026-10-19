@@ -230,6 +230,9 @@
 
 .history-inspector { min-width: 0; overflow: auto; background: var(--surface); }
 .history-inspector > header { padding: 15px 16px; border-bottom: 1px solid var(--border); font-size: 12px; font-weight: 650; }
+.history-preview { display: grid; place-items: center; min-height: 120px; margin: 14px 16px 0; padding: 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
+.history-preview img { display: block; max-width: 100%; max-height: 220px; border-radius: 4px; object-fit: contain; }
+.history-preview-empty { color: var(--muted); font-size: 10px; }
 .history-inspector p { padding: 16px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .history-inspector dl { margin: 0; padding: 7px 16px 20px; }
 .history-inspector dl div { padding: 10px 0; border-bottom: 1px solid var(--border); }

@@ -103,6 +103,15 @@ export function useHistoryController({
     }
   }, []);
 
+  /** 节点缩略图是派生数据；缺失或读取失败只显示占位，不影响历史读取。 */
+  const readNodeThumbnail = useCallback(async (historyId: string): Promise<string | null> => {
+    try {
+      return await historyApi.nodeThumbnail(historyId);
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
     setHistory(null);
     setLoading(true);
@@ -338,6 +347,7 @@ export function useHistoryController({
     forkBranch,
     renameNode,
     readNodeFormat,
+    readNodeThumbnail,
     cancelOperation,
   };
 }

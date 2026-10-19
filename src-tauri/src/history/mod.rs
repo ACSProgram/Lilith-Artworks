@@ -17,7 +17,7 @@ pub(crate) use repository::{
     acknowledge_backup_disable_notices, all_node_ids, apply_compaction, artwork_directory,
     clear_verify_error, commit, compaction_target, count_scheduled_files, create_branch,
     ensure_directories, list, list_idle_verify_targets, list_scheduled, load_branch,
-    load_idle_verify_target, load_node, load_scheduled, load_source_metadata,
+    load_idle_verify_target, load_node, load_scheduled, load_source_metadata, load_thumbnail,
     mark_automatic_backup_error, mark_automatic_backup_skipped, mark_checkpoint, mark_error,
     mark_unchanged, mark_verified, mark_verify_error, materialization_chain,
     next_backup_disable_notice_target, node_storage_path, record_source_metadata, rename_node,

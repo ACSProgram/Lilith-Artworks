@@ -34,6 +34,19 @@ decision, so an untagged version is transitional.
 - Repository backups record their result in `repository_backup_runs`, and
   `get_last_repository_backup_run` lets the settings page show the latest backup
   after a restart instead of only within the current run.
+- History nodes now carry a derived thumbnail so the branch inspector can show
+  a preview without restoring the work file. A changed commit extracts it from
+  the same file it already reads: `.clip` uses the canvas preview stored in the
+  embedded SQLite database, `.psd` / `.psb` prefer the PS 4.0/5.0 thumbnail
+  resource (the Photoshop 4.0 resource is BGR and is swapped back to RGB) and
+  otherwise decode the merged composite (raw, RLE or ZIP), and
+  png/jpg/webp/tiff/bmp/gif are decoded directly. Previews are stored as
+  versioned, 512 px lossless WebP in `history_nodes.thumbnail` /
+  `thumbnail_version`, never inside ChunkFile content; unchanged checks,
+  checkpoints, forks and snapshot repairs keep the existing preview, and any
+  unsupported or malformed input only falls back to a placeholder.
+  `get_history_node_thumbnail` serves the selected node's preview on demand
+  without selecting the BLOB in graph or list reads.
 
 ### Changed
 

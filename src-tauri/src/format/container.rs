@@ -70,6 +70,107 @@ pub(crate) fn detect(head: &[u8]) -> Option<ContainerKind> {
     }
 }
 
+/// Byte range of one top-level block payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlockPayloadRange {
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+}
+
+impl BlockPayloadRange {
+    pub(crate) fn len(self) -> u64 {
+        self.end - self.start
+    }
+}
+
+/// Locate the payload of the first top-level block with `tag`.
+///
+/// The walk reads only block headers and seeks over payloads, so locating the
+/// embedded SQLite database of a multi-gigabyte `.clip` stays cheap. Unlike
+/// [`clip_structural_units`] this does not require the container to be fully
+/// consistent (no `Foot` or tile validation): callers only use it to read one
+/// payload, and any inconsistency before that payload is still rejected.
+pub(crate) fn clip_block_payload_range<R: Read + Seek>(
+    source: &mut R,
+    tag: &[u8; 4],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<BlockPayloadRange>, ContainerError> {
+    let (file_length, first_block) = read_file_header(source)?;
+    let mut offset = first_block;
+    while offset + CSFC_BLOCK_HEADER as u64 <= file_length {
+        if cancelled() {
+            return Err(ContainerError::Cancelled);
+        }
+        let (block_tag, payload_start, payload_end) =
+            read_block_header(source, offset, file_length)?;
+        if &block_tag == tag {
+            return Ok(Some(BlockPayloadRange {
+                start: payload_start,
+                end: payload_end,
+            }));
+        }
+        if &block_tag == b"Foot" {
+            break;
+        }
+        offset = payload_end;
+    }
+    Ok(None)
+}
+
+/// Read and validate the CSFC file header; returns `(file_length, first_block)`.
+///
+/// Both the structural walk and the single-payload lookup go through this so
+/// the magic, declared length and first-block offset are checked identically.
+fn read_file_header<R: Read + Seek>(source: &mut R) -> Result<(u64, u64), ContainerError> {
+    let file_length = source
+        .seek(SeekFrom::End(0))
+        .map_err(|error| ContainerError::Invalid(format!("无法读取容器长度：{error}")))?;
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| ContainerError::Invalid(format!("无法回到容器起点：{error}")))?;
+    if file_length < CSFC_FILE_HEADER as u64 {
+        return Err(ContainerError::Invalid("容器头部不完整".into()));
+    }
+    let mut file_header = [0_u8; CSFC_FILE_HEADER];
+    read_exact(source, &mut file_header, "容器头部")?;
+    if &file_header[0..8] != CSFC_MAGIC {
+        return Err(ContainerError::Invalid("不是 CSFC 容器".into()));
+    }
+    let declared_total = be_u64(&file_header, 8);
+    if declared_total != file_length {
+        return Err(ContainerError::Invalid(format!(
+            "容器声明长度 {declared_total} 与文件长度 {file_length} 不一致"
+        )));
+    }
+    let first_block = be_u64(&file_header, 16);
+    if first_block < CSFC_FILE_HEADER as u64 || first_block > file_length {
+        return Err(ContainerError::Invalid(format!(
+            "容器首个块偏移 {first_block} 越界"
+        )));
+    }
+    Ok((file_length, first_block))
+}
+
+/// Read one block header; returns `(tag, payload_start, payload_end)`.
+fn read_block_header<R: Read + Seek>(
+    source: &mut R,
+    offset: u64,
+    file_length: u64,
+) -> Result<([u8; 4], u64, u64), ContainerError> {
+    let mut header = [0_u8; CSFC_BLOCK_HEADER];
+    source
+        .seek(SeekFrom::Start(offset))
+        .map_err(|error| ContainerError::Invalid(format!("无法定位容器块：{error}")))?;
+    read_exact(source, &mut header, "容器块头")?;
+    let tag: [u8; 4] = header[4..8].try_into().expect("4-byte tag");
+    let payload_start = offset + CSFC_BLOCK_HEADER as u64;
+    let payload_end = payload_start
+        .checked_add(be_u64(&header, 8))
+        .filter(|end| *end <= file_length)
+        .ok_or_else(|| ContainerError::Invalid(format!("块偏移 {offset} 的载荷越过文件末尾")))?;
+    Ok((tag, payload_start, payload_end))
+}
+
 /// One structural unit in file order. Units are contiguous and tile
 /// `[0, file_length)` exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,33 +195,7 @@ pub(crate) fn clip_structural_units<R: Read + Seek>(
     source: &mut R,
     cancelled: &dyn Fn() -> bool,
 ) -> Result<Vec<StructuralUnit>, ContainerError> {
-    let file_length = source
-        .seek(SeekFrom::End(0))
-        .map_err(|error| ContainerError::Invalid(format!("无法读取容器长度：{error}")))?;
-    source
-        .seek(SeekFrom::Start(0))
-        .map_err(|error| ContainerError::Invalid(format!("无法回到容器起点：{error}")))?;
-    if file_length < CSFC_FILE_HEADER as u64 {
-        return Err(ContainerError::Invalid("容器头部不完整".into()));
-    }
-
-    let mut file_header = [0_u8; CSFC_FILE_HEADER];
-    read_exact(source, &mut file_header, "容器头部")?;
-    if &file_header[0..8] != CSFC_MAGIC {
-        return Err(ContainerError::Invalid("不是 CSFC 容器".into()));
-    }
-    let declared_total = be_u64(&file_header, 8);
-    if declared_total != file_length {
-        return Err(ContainerError::Invalid(format!(
-            "容器声明长度 {declared_total} 与文件长度 {file_length} 不一致"
-        )));
-    }
-    let first_block = be_u64(&file_header, 16);
-    if first_block < CSFC_FILE_HEADER as u64 || first_block > file_length {
-        return Err(ContainerError::Invalid(format!(
-            "容器首个块偏移 {first_block} 越界"
-        )));
-    }
+    let (file_length, first_block) = read_file_header(source)?;
 
     // Bytes in front of the first block (the file header is part of them) are
     // already covered, so they form the first unit.
@@ -138,20 +213,7 @@ pub(crate) fn clip_structural_units<R: Read + Seek>(
         }
         tick = tick.saturating_add(1);
 
-        let mut header = [0_u8; CSFC_BLOCK_HEADER];
-        source
-            .seek(SeekFrom::Start(offset))
-            .map_err(|error| ContainerError::Invalid(format!("无法定位容器块：{error}")))?;
-        read_exact(source, &mut header, "容器块头")?;
-        let tag: [u8; 4] = header[4..8].try_into().expect("4-byte tag");
-        let payload_start = offset + CSFC_BLOCK_HEADER as u64;
-        let payload_len = be_u64(&header, 8);
-        let payload_end = payload_start
-            .checked_add(payload_len)
-            .filter(|end| *end <= file_length)
-            .ok_or_else(|| {
-                ContainerError::Invalid(format!("块偏移 {offset} 的载荷越过文件末尾"))
-            })?;
+        let (tag, payload_start, payload_end) = read_block_header(source, offset, file_length)?;
 
         if &tag == b"Exta" {
             push_exta_units(

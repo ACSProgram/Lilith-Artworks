@@ -1,8 +1,10 @@
 use std::path::Path;
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+
 use crate::{
     app::command_runtime::{CommandContext, CommandError},
-    backup, cleanup, history, storage,
+    backup, cleanup, history, preview, storage,
 };
 
 pub(crate) fn list(
@@ -29,6 +31,24 @@ pub(crate) fn node_format(
         Ok(backup::chunk_file::stored_format_label(&path)
             .ok()
             .map(str::to_string))
+    })
+}
+
+/// 读取节点随行保存的派生缩略图；没有预览时返回 `None`，不影响节点信息展示。
+pub(crate) fn thumbnail(
+    context: &CommandContext,
+    history_id: &str,
+) -> Result<Option<String>, CommandError> {
+    context.run_read("get_history_node_thumbnail", |session| {
+        let Some((bytes, version)) =
+            history::load_thumbnail(session.root(), history_id).map_err(CommandError::from)?
+        else {
+            return Ok(None);
+        };
+        // 只服务当前编码版本：将来换编码时，旧行不会被当作 WebP 发给前端，
+        // 重建由版本号驱动。
+        Ok((version == preview::THUMBNAIL_VERSION)
+            .then(|| format!("data:image/webp;base64,{}", STANDARD.encode(bytes))))
     })
 }
 

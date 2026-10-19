@@ -44,10 +44,15 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
     restoreNode, compactNodes, deleteBranch, reverifyBranch, deleteSubtree, setCheckpoint,
-    forkBranch, renameNode, readNodeFormat, cancelOperation,
+    forkBranch, renameNode, readNodeFormat, readNodeThumbnail, cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [nodeFormat, setNodeFormat] = useState<{
+    nodeId: string;
+    value: string | null;
+    loading: boolean;
+  } | null>(null);
+  const [nodeThumbnail, setNodeThumbnail] = useState<{
     nodeId: string;
     value: string | null;
     loading: boolean;
@@ -134,6 +139,22 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       cancelled = true;
     };
   }, [readNodeFormat, selectedNode, view]);
+
+  // 缩略图随节点行保存，选中时单独读取；历史刷新后重新拉取，不进入图轮询。
+  useEffect(() => {
+    if (!selectedNode || view !== "branch") {
+      setNodeThumbnail(null);
+      return;
+    }
+    let cancelled = false;
+    setNodeThumbnail({ nodeId: selectedNode.id, value: null, loading: true });
+    void readNodeThumbnail(selectedNode.id).then((value) => {
+      if (!cancelled) setNodeThumbnail({ nodeId: selectedNode.id, value, loading: false });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [readNodeThumbnail, selectedNode, view]);
 
   const roots = useMemo(() => buildHistoryTree(history?.nodes ?? []), [history?.nodes]);
   const branchLine = useMemo(() => selectedBranch && history
@@ -372,25 +393,34 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       </section>
       <aside className="history-inspector">
         <header>节点信息</header>
-        {selectedNode ? <dl>
-          <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
-          {selectedNode.note && <div><dt>提交备注</dt><dd>{selectedNode.note}</dd></div>}
-          <div><dt>提交类型</dt><dd>{selectedNode.commitKind === "automatic" ? "自动备份" : "主动提交"}</dd></div>
-          <div>
-            <dt>格式版本</dt>
-            <dd>
-              {nodeFormat?.nodeId === selectedNode.id && !nodeFormat.loading
-                ? nodeFormat.value
-                  ? <span className="history-format-tag">ChunkFile {nodeFormat.value}</span>
-                  : <span className="history-format-muted">未知</span>
-                : <span className="history-format-muted">读取中…</span>}
-            </dd>
+        {selectedNode ? <>
+          <div className="history-preview">
+            {nodeThumbnail?.nodeId === selectedNode.id
+              ? nodeThumbnail.value
+                ? <img src={nodeThumbnail.value} alt={`${selectedNode.title} 的缩略图`} />
+                : <span className="history-preview-empty">{nodeThumbnail.loading ? "读取预览…" : "无可用预览"}</span>
+              : <span className="history-preview-empty">读取预览…</span>}
           </div>
-          <div><dt>原文件</dt><dd>{formatBytes(selectedNode.logicalSize)}</dd></div>
-          <div><dt>当前存储</dt><dd>{formatBytes(selectedNode.chunkFileSize)}</dd></div>
-          <div><dt>数据块</dt><dd>{selectedNode.chunkCount}</dd></div>
-          <div><dt>SHA-256</dt><dd><code>{selectedNode.sha256}</code></dd></div>
-        </dl> : <p>左键选择节点查看信息；右键打开节点操作。进入分支只在节点唯一属于一个分支时提供。</p>}
+          <dl>
+            <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
+            {selectedNode.note && <div><dt>提交备注</dt><dd>{selectedNode.note}</dd></div>}
+            <div><dt>提交类型</dt><dd>{selectedNode.commitKind === "automatic" ? "自动备份" : "主动提交"}</dd></div>
+            <div>
+              <dt>格式版本</dt>
+              <dd>
+                {nodeFormat?.nodeId === selectedNode.id && !nodeFormat.loading
+                  ? nodeFormat.value
+                    ? <span className="history-format-tag">ChunkFile {nodeFormat.value}</span>
+                    : <span className="history-format-muted">未知</span>
+                  : <span className="history-format-muted">读取中…</span>}
+              </dd>
+            </div>
+            <div><dt>原文件</dt><dd>{formatBytes(selectedNode.logicalSize)}</dd></div>
+            <div><dt>当前存储</dt><dd>{formatBytes(selectedNode.chunkFileSize)}</dd></div>
+            <div><dt>数据块</dt><dd>{selectedNode.chunkCount}</dd></div>
+            <div><dt>SHA-256</dt><dd><code>{selectedNode.sha256}</code></dd></div>
+          </dl>
+        </> : <p>左键选择节点查看信息；右键打开节点操作。进入分支只在节点唯一属于一个分支时提供。</p>}
       </aside>
     </div>
 

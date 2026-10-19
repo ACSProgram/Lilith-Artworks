@@ -325,6 +325,26 @@ pub(crate) fn node_storage_path(root: &Path, history_id: &str) -> Result<Option<
         .flatten())
 }
 
+/// Load one node's derived thumbnail. The graph/list queries never select the
+/// BLOB, so previews are fetched only when the inspector asks for them.
+pub(crate) fn load_thumbnail(
+    root: &Path,
+    history_id: &str,
+) -> Result<Option<(Vec<u8>, i64)>, String> {
+    let stored: Option<(Option<Vec<u8>>, Option<i64>)> = storage::open(root)?
+        .query_row(
+            "SELECT thumbnail, thumbnail_version FROM history_nodes WHERE id = ?1",
+            [history_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    Ok(stored.and_then(|(bytes, version)| match (bytes, version) {
+        (Some(bytes), Some(version)) if !bytes.is_empty() => Some((bytes, version)),
+        _ => None,
+    }))
+}
+
 pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection
@@ -479,8 +499,9 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<Strin
         .execute(
             "INSERT INTO history_nodes
          (id, artwork_id, created_on_branch_id, parent_id, title, note, commit_kind, created_ms,
-          logical_size, chunk_file_size, sha256, chunk_count, snapshot_path, delta_path)
-          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+          logical_size, chunk_file_size, sha256, chunk_count, snapshot_path, delta_path,
+          thumbnail, thumbnail_version)
+          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 commit.id,
                 artwork_id,
@@ -495,7 +516,9 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<Strin
                 commit.sha256.to_ascii_uppercase(),
                 i64::try_from(commit.chunk_count).map_err(|_| "块数量超出范围")?,
                 commit.snapshot_path,
-                Option::<String>::None
+                Option::<String>::None,
+                commit.thumbnail,
+                commit.thumbnail_version
             ],
         )
         .map_err(storage::database_error)?;
@@ -1751,6 +1774,8 @@ mod tests {
                     snapshot_path: &snapshot,
                     delta_path: delta.as_deref(),
                     delta_size: delta.as_ref().map(|_| 1),
+                    thumbnail: None,
+                    thumbnail_version: None,
                 },
             )
             .unwrap();
@@ -2104,6 +2129,8 @@ mod tests {
                 snapshot_path: "artworks/root.snapshot",
                 delta_path: None,
                 delta_size: None,
+                thumbnail: None,
+                thumbnail_version: None,
             },
         )
         .unwrap();
@@ -2133,6 +2160,8 @@ mod tests {
                 snapshot_path: "artworks/fork.snapshot",
                 delta_path: Some("artworks/fork.delta"),
                 delta_size: Some(1),
+                thumbnail: None,
+                thumbnail_version: None,
             },
         )
         .unwrap();
