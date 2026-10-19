@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { PinBoardImage } from "./types";
+import type { PinBoardItem } from "./types";
 import {
   arrangeImages,
   fitViewportToBounds,
@@ -16,13 +16,14 @@ import {
   type Quad,
 } from "./geometry";
 
-function image(imageId: number, points: Quad): PinBoardImage {
+function image(itemId: number, points: Quad): PinBoardItem {
   return {
     boardId: 1,
-    imageId,
+    itemId,
+    kind: "bitmap",
     width: 100,
     height: 100,
-    order: imageId,
+    order: itemId,
     layer: 1,
     deleted: false,
     points,
@@ -101,7 +102,7 @@ describe("pin-board geometry", () => {
     const arranged = arrangeImages(images, [500, -250], 10);
     const result = images.map((source) => ({
       ...source,
-      points: arranged.get(source.imageId) ?? source.points,
+      points: arranged.get(source.itemId) ?? source.points,
     }));
 
     expect(imageSize(result[0])[1]).toBeCloseTo(50);

@@ -160,7 +160,10 @@ fn classify_legacy(message: &str) -> (CommandErrorKind, &'static str, bool) {
             false,
         );
     }
-    if message.contains("版本不受支持") || message.contains("不是 Lilith Artworks 仓库") {
+    if message.contains("版本不受支持")
+        || message.contains("更新版本")
+        || message.contains("不是 Lilith Artworks 仓库")
+    {
         return (CommandErrorKind::Repository, "repository_invalid", false);
     }
     if message.contains("不存在") || message.contains("找不到") {

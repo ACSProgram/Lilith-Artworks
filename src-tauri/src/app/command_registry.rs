@@ -61,6 +61,7 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::backup::set_history_checkpoint,
         crate::backup::reverify_branch_history,
         crate::backup::get_backup_runtime_status,
+        crate::backup::get_last_repository_backup_run,
         crate::backup::cancel_backup_operation,
         // Authenticity
         crate::app::workflows::enter_branch_publication,
@@ -95,7 +96,9 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::pin_board::paste_pin_board_images,
         crate::pin_board::import_pin_board_images,
         crate::pin_board::import_pin_board_clipboard_image,
+        crate::pin_board::create_pin_board_text,
         crate::pin_board::export_pin_board_images,
+        crate::pin_board::write_pin_board_item_png,
         crate::pin_board::read_pin_board_image_png,
         crate::pin_board::read_pin_board_texture,
         crate::pin_board::read_pin_board_clipboard_paths,

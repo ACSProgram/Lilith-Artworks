@@ -143,6 +143,40 @@ export function useRepositoryMaintenance(
     };
   }, [settings.repository.ready, settings.settingsOpen, settings.settingsPage]);
 
+  // 最近一次整仓备份跨重启保留；只读失败时保持空态，不打扰用户。
+  useEffect(() => {
+    if (!settings.settingsOpen || settings.settingsPage !== "space" || !settings.repository.ready) {
+      return undefined;
+    }
+    let disposed = false;
+    void appApi.getLastRepositoryBackupRun()
+      .then((run) => {
+        if (disposed || !run) return;
+        // 读取期间可能刚完成一次备份：只接受不比当前结果更旧的记录。
+        setLastRepositoryBackup((current) => {
+          if (current && current.completedAtMs >= run.createdMs) return current;
+          return {
+            report: {
+              backupPath: run.backupPath,
+              repositoryPath: run.repositoryPath,
+              fileCount: run.fileCount,
+              totalBytes: run.totalBytes,
+              historyNodes: run.historyNodes,
+              finalArtifacts: run.finalArtifacts,
+              certificationRecords: run.certificationRecords,
+              reclaimedStagingDirectories: 0,
+              failedStagingDirectories: 0,
+            },
+            completedAtMs: run.createdMs,
+          };
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      disposed = true;
+    };
+  }, [settings.repository.ready, settings.settingsOpen, settings.settingsPage, settings.repository.rootPath]);
+
   const refreshPendingCleanup = useCallback(async () => {
     if (!settings.repository.ready) {
       setPendingCleanup([]);
@@ -181,8 +215,8 @@ export function useRepositoryMaintenance(
         report.pinBoardMissingDds + report.pinBoardCorruptDds + report.pinBoardOrphanDds;
       notify(
         pinBoardIssues > 0
-          ? `完整性检查完成，但发现画板 DDS 问题：缺失 ${report.pinBoardMissingDds}、损坏 ${report.pinBoardCorruptDds}、孤儿 ${report.pinBoardOrphanDds}（共 ${report.pinBoardImages} 张画板图片）。`
-          : `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录、${report.pinBoardImages} 张画板图片。`,
+          ? `完整性检查完成，但发现画板 DDS 问题：缺失 ${report.pinBoardMissingDds}、损坏 ${report.pinBoardCorruptDds}、孤儿 ${report.pinBoardOrphanDds}（共 ${report.pinBoardBitmaps} 个画板位图）。`
+          : `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录、${report.pinBoardBitmaps} 个画板位图。`,
       );
     } catch (error) {
       notify(errorMessage(error));

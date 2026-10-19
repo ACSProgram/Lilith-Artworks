@@ -25,7 +25,8 @@ pub(crate) const MAX_SOURCE_PIXELS: u64 = 96_000_000;
 pub(crate) const MAX_DDS_SOURCE_PIXELS: u64 = 268_435_456;
 pub(crate) const DXGI_FORMAT_BC7_UNORM: u32 = 98;
 pub(crate) const DDS_DX10_HEADER_BYTES: usize = 148;
-pub(crate) const MAX_BOARD_IMAGES: usize = 20_000;
+/// 单块画板的条目上限（位图与文字合计，规划确认的规模假设）。
+pub(crate) const MAX_BOARD_ITEMS: usize = 20_000;
 pub(crate) const MAX_IMPORT_FILES: usize = 256;
 pub(crate) const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_IMAGE_PIXELS: u64 = 64_000_000;

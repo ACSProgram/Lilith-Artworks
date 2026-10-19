@@ -35,7 +35,11 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                     b.backup_disable_notice_pending,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
                     (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id),
-                    b.backup_quick_enabled, b.verify_error, b.verified_ms
+                    b.backup_quick_enabled,
+                    (SELECT node.verify_error FROM history_nodes node
+                      WHERE node.id = b.head_history_id),
+                    (SELECT node.verified_ms FROM history_nodes node
+                      WHERE node.id = b.head_history_id)
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
@@ -510,7 +514,6 @@ pub(crate) fn commit(root: &Path, commit: HistoryCommit<'_>) -> Result<Vec<Strin
         .execute(
             "UPDATE branches SET head_history_id = ?2, last_check_ms = ?3, last_success_ms = ?3,
                 last_error = NULL, consecutive_backup_failures = 0, backup_retry_at_ms = NULL,
-                verify_error = NULL,
                 updated_ms = ?3 WHERE id = ?1",
             params![commit.branch_id, commit.id, commit.created_ms],
         )
@@ -1111,7 +1114,6 @@ pub(crate) fn delete_subtree(
         transaction.execute(
             "UPDATE branches SET head_history_id = NULLIF(?2, ''),
                     created_from_history_id = CASE WHEN ?4 <> 0 THEN ?5 ELSE created_from_history_id END,
-                    verify_error = NULL,
                     updated_ms = ?3 WHERE id = ?1",
             params![branch_id, cursor, storage::now_ms()?, i64::from(origin_deleted), fallback]
         ).map_err(storage::database_error)?;
@@ -1524,15 +1526,12 @@ pub(crate) fn load_scheduled(
         .map_err(storage::database_error)
 }
 
-/// 空闲校验的派生队列：所有未进回收站、head 非空且尚未校验到当前 head 的分支。
+/// 空闲校验的派生队列：所有未进回收站、head 非空且 head 节点尚未通过校验的分支。
 ///
+/// v5 起校验状态挂在节点上：新提交生成的 head 天然没有 `verified_ms`；校验失败
+/// 的节点 `verify_error` 非空并退出自动队列，直到 head 变化或用户手动重查清空。
 /// 与 [`list_scheduled`] 是两条不同查询：本查询不要求 `backup_enabled`（手动提交的
 /// 分支同样需要校验），也不排除已发布分支（其 head 是强制检查点，校验成本低）。
-/// `verify_error` 非空的分支暂不重试，直到 head 变化或用户手动重查清空该列。
-///
-/// NULL 语义：`head_history_id` 允许为空（分支已建但未提交），因此条件显式写成
-/// `head IS NOT NULL AND (verified IS NULL OR verified != head)`，避免把无 head 的
-/// 分支纳入队列并每轮空跑。
 pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarget>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection
@@ -1543,8 +1542,8 @@ pub(crate) fn list_idle_verify_targets(root: &Path) -> Result<Vec<IdleVerifyTarg
              JOIN history_nodes node ON node.id = b.head_history_id
              WHERE n.trashed_ms IS NULL
                AND b.head_history_id IS NOT NULL
-               AND (b.verified_history_id IS NULL OR b.verified_history_id != b.head_history_id)
-               AND b.verify_error IS NULL
+               AND node.verified_ms IS NULL
+               AND node.verify_error IS NULL
              ORDER BY node.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
@@ -1576,8 +1575,8 @@ pub(crate) fn load_idle_verify_target(
              JOIN history_nodes node ON node.id = b.head_history_id
              WHERE b.id = ?1 AND n.trashed_ms IS NULL
                AND b.head_history_id IS NOT NULL
-               AND (b.verified_history_id IS NULL OR b.verified_history_id != b.head_history_id)
-               AND b.verify_error IS NULL",
+               AND node.verified_ms IS NULL
+               AND node.verify_error IS NULL",
             [branch_id],
             |row| {
                 Ok(IdleVerifyTarget {
@@ -1592,8 +1591,8 @@ pub(crate) fn load_idle_verify_target(
         .map_err(storage::database_error)
 }
 
-/// 记录一次成功的校验。只有 head 仍等于被校验的节点时才写入，避免把结果记到校验
-/// 期间已经变化的新 head 上。返回是否真正写入。
+/// 记录一次成功的校验。只有分支 head 仍等于被校验的节点时才写入，避免把结果记到
+/// 校验期间已经变化的新 head 上。返回是否真正写入。
 pub(crate) fn mark_verified(
     root: &Path,
     branch_id: &str,
@@ -1602,15 +1601,17 @@ pub(crate) fn mark_verified(
 ) -> Result<bool, String> {
     let changed = storage::open(root)?
         .execute(
-            "UPDATE branches SET verified_history_id = ?2, verified_ms = ?3, verify_error = NULL
-             WHERE id = ?1 AND head_history_id = ?2",
+            "UPDATE history_nodes SET verified_ms = ?3, verify_error = NULL
+             WHERE id = ?2 AND EXISTS(
+               SELECT 1 FROM branches WHERE id = ?1 AND head_history_id = ?2
+             )",
             params![branch_id, history_id, verified_ms],
         )
         .map_err(storage::database_error)?;
     Ok(changed > 0)
 }
 
-/// 记录一次失败的校验摘要；分支随之退出派生队列，直到 head 变化或用户手动重查。
+/// 记录一次失败的校验摘要；节点随之退出自动队列，直到 head 变化或用户手动重查。
 /// 与 [`mark_verified`] 相同，只有 head 未变时才写入。
 pub(crate) fn mark_verify_error(
     root: &Path,
@@ -1620,32 +1621,38 @@ pub(crate) fn mark_verify_error(
 ) -> Result<bool, String> {
     let changed = storage::open(root)?
         .execute(
-            "UPDATE branches SET verify_error = ?3 WHERE id = ?1 AND head_history_id = ?2",
+            "UPDATE history_nodes SET verify_error = ?3
+             WHERE id = ?2 AND EXISTS(
+               SELECT 1 FROM branches WHERE id = ?1 AND head_history_id = ?2
+             )",
             params![branch_id, history_id, error],
         )
         .map_err(storage::database_error)?;
     Ok(changed > 0)
 }
 
-/// 清除校验失败摘要，使分支重新进入派生队列（"重新校验此分支"）。
+/// 清除 head 节点的校验失败摘要，使分支重新进入派生队列（"重新校验此分支"）。
 pub(crate) fn clear_verify_error(root: &Path, branch_id: &str) -> Result<(), String> {
     let connection = storage::open(root)?;
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM branches WHERE id = ?1)",
-            [branch_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)?;
-    if !exists {
-        return Err("找不到分支".into());
-    }
-    connection
+    let changed = connection
         .execute(
-            "UPDATE branches SET verify_error = NULL WHERE id = ?1",
+            "UPDATE history_nodes SET verify_error = NULL
+             WHERE id = (SELECT head_history_id FROM branches WHERE id = ?1)",
             [branch_id],
         )
         .map_err(storage::database_error)?;
+    if changed == 0 {
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM branches WHERE id = ?1)",
+                [branch_id],
+                |row| row.get(0),
+            )
+            .map_err(storage::database_error)?;
+        if !exists {
+            return Err("找不到分支".into());
+        }
+    }
     Ok(())
 }
 

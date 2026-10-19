@@ -858,9 +858,10 @@ fn load_board_images(connection: &Connection) -> Result<Vec<BoardImageInfo>, Str
     note_query();
     let mut statement = connection
         .prepare(
-            "SELECT board_id, file_path
-               FROM pin_board_images
-              WHERE TRIM(file_path) <> ''",
+            "SELECT i.board_id, b.file_path
+               FROM pin_board_items i
+               JOIN pin_board_bitmaps b ON b.item_id = i.id
+              WHERE TRIM(b.file_path) <> ''",
         )
         .map_err(storage::database_error)?;
     let rows = statement
@@ -1001,10 +1002,11 @@ fn disk_plan(connection: &Connection) -> Result<DiskPlan, String> {
 
     let mut statement = connection
         .prepare(
-            "SELECT b.artwork_id, i.board_id, i.file_path
-               FROM pin_board_images i
+            "SELECT b.artwork_id, i.board_id, bm.file_path
+               FROM pin_board_items i
+               JOIN pin_board_bitmaps bm ON bm.item_id = i.id
                JOIN pin_boards b ON b.id = i.board_id
-              WHERE TRIM(i.file_path) <> ''",
+              WHERE TRIM(bm.file_path) <> ''",
         )
         .map_err(storage::database_error)?;
     let rows = statement

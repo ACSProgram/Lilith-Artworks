@@ -1,4 +1,4 @@
-import type { PinBoardImage } from "./types";
+import type { PinBoardItem } from "./types";
 
 export interface Viewport {
   centerX: number;
@@ -22,7 +22,7 @@ export const DEFAULT_VIEWPORT: Viewport = {
   height: 5000,
 };
 
-export function imageBounds(image: Pick<PinBoardImage, "points">): Bounds {
+export function imageBounds(image: Pick<PinBoardItem, "points">): Bounds {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
@@ -57,7 +57,7 @@ export function boundsCenter(bounds: Bounds): Point {
   ];
 }
 
-export function imagesBounds(images: Pick<PinBoardImage, "points">[]): Bounds | null {
+export function imagesBounds(images: Pick<PinBoardItem, "points">[]): Bounds | null {
   if (images.length === 0) return null;
   return images.reduce<Bounds>((bounds, image) => {
     const next = imageBounds(image);
@@ -111,7 +111,7 @@ export function intersects(left: Bounds, right: Bounds): boolean {
 }
 
 export function imageDisplayMaxDimension(
-  image: PinBoardImage,
+  image: PinBoardItem,
   viewport: Viewport,
   canvasHeight: number,
 ): number {
@@ -218,7 +218,7 @@ export function quadCenter(quad: Quad): Point {
   ];
 }
 
-export function imageSize(image: Pick<PinBoardImage, "points">): Point {
+export function imageSize(image: Pick<PinBoardItem, "points">): Point {
   const distance = (left: Point, right: Point) => Math.hypot(
     right[0] - left[0],
     right[1] - left[1],
@@ -277,7 +277,7 @@ export function snapRotationDelta(points: Quad, delta: number): number {
   return snapped - base;
 }
 
-export function imagesCenter(images: Pick<PinBoardImage, "points">[]): Point {
+export function imagesCenter(images: Pick<PinBoardItem, "points">[]): Point {
   if (images.length === 0) return [0, 0];
   const centers = images.map((image) => quadCenter(image.points));
   return [
@@ -287,7 +287,7 @@ export function imagesCenter(images: Pick<PinBoardImage, "points">[]): Point {
 }
 
 export function arrangeImages(
-  images: PinBoardImage[],
+  images: PinBoardItem[],
   center: Point,
   gap: number,
 ): Map<number, Quad> {
@@ -297,7 +297,7 @@ export function arrangeImages(
   const nodes = images.map((image, index) => {
     const [width, height] = imageSize(image);
     return {
-      imageId: image.imageId,
+      itemId: image.itemId,
       index,
       width: width * (maximumHeight / Math.max(height, 1e-6)),
       height: maximumHeight,
@@ -339,7 +339,7 @@ export function arrangeImages(
         [x + node.width, y - node.height],
         [x, y - node.height],
       ];
-      arranged.set(node.imageId, points);
+      arranged.set(node.itemId, points);
       allCenter = [
         allCenter[0] + (x + node.width / 2),
         allCenter[1] + (y - node.height / 2),
@@ -351,8 +351,8 @@ export function arrangeImages(
   }
   if (nodeCount === 0) return arranged;
   allCenter = [allCenter[0] / nodeCount, allCenter[1] / nodeCount];
-  for (const [imageId, points] of arranged) {
-    arranged.set(imageId, translateQuad(points, center[0] - allCenter[0], center[1] - allCenter[1]));
+  for (const [itemId, points] of arranged) {
+    arranged.set(itemId, translateQuad(points, center[0] - allCenter[0], center[1] - allCenter[1]));
   }
   return arranged;
 }

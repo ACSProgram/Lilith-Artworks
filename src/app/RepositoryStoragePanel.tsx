@@ -355,7 +355,7 @@ export function RepositoryStoragePanel({
                             <div className="storage-board-row" key={board.boardId}>
                               <span>{board.name}{board.trashed ? " · 回收站" : ""}</span>
                               <small>
-                                {board.imageCount} 张
+                                {board.imageCount} 个条目
                                 {ddsBytes != null ? ` · ${formatBytes(ddsBytes)}` : " · 未扫描磁盘"}
                               </small>
                             </div>

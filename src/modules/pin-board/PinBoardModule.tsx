@@ -927,7 +927,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <strong>{title}</strong>
             <span>
               {view
-                ? `${renderer ? interaction.imageCount : view.images.filter((image) => !image.deleted).length} 张图片${view.missingTextures ? `，${view.missingTextures} 张缺失` : ""}`
+                ? `${renderer ? interaction.imageCount : view.items.filter((image) => !image.deleted).length} 个条目${view.missingTextures ? `，其中 ${view.missingTextures} 个位图缺失` : ""}`
                 : "选择画板"}
             </span>
           </div>

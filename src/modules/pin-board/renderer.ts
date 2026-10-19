@@ -3,8 +3,9 @@ import { diagnosticsLog, diagnosticsSlowStep } from "../../shared/diagnostics";
 import { pinBoardApi } from "./api";
 import type {
   PinBoardClipboardImage,
-  PinBoardEditableImage,
-  PinBoardImage,
+  PinBoardEditableItem,
+  PinBoardItem,
+  PinBoardTextItem,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
@@ -52,6 +53,12 @@ import {
   textureUploadLayout,
   type PinBoardTextureBudgets,
 } from "./texturePolicy";
+import {
+  requestedTextTextureDimension,
+  textRgbaPayload,
+  textTextureResidentBytes,
+  textTextureRgbaBytes,
+} from "./textLayout";
 
 /** 结算遇到 `repository_busy` 时的重试间隔。 */
 const FINALIZE_BUSY_RETRY_DELAY_MS = 300;
@@ -95,7 +102,7 @@ type LoadedTexture = {
 };
 
 type TextureLoadCandidate = {
-  image: PinBoardImage;
+  image: PinBoardItem;
   maxDimension: number;
   estimatedBytes: number;
   priority: number;
@@ -104,7 +111,7 @@ type TextureLoadCandidate = {
 };
 
 type ImageSnapshot = {
-  imageId: number;
+  itemId: number;
   deleted: boolean;
   layer: number;
   points: Quad;
@@ -195,8 +202,22 @@ function cloneQuad(quad: Quad): Quad {
   return quad.map((point) => [...point] as Point) as Quad;
 }
 
-function cloneImage(image: PinBoardImage): PinBoardImage {
+function cloneImage(image: PinBoardItem): PinBoardItem {
   return { ...image, points: cloneQuad(image.points), uv: cloneQuad(image.uv) };
+}
+
+function estimatedLoadBytes(image: PinBoardItem, maxDimension: number): number {
+  if (image.kind === "text") {
+    // 文字没有 DDS：负载是前端栅格化出的 RGBA 加头，另外留一份给 canvas 到
+    // 上传缓冲的临时拷贝。
+    return 12 + textTextureRgbaBytes(image, maxDimension) * 2;
+  }
+  return estimatedTextureLoadBytes(image, maxDimension);
+}
+
+function estimatedResidentBytes(image: PinBoardItem, maxDimension: number): number {
+  if (image.kind === "text") return textTextureResidentBytes(image, maxDimension);
+  return estimatedTextureResidentBytes(image, maxDimension);
 }
 
 function isRgbaPayload(bytes: Uint8Array): boolean {
@@ -230,7 +251,7 @@ function checkedPayloadBytes(width: number, height: number, bytesPerPixel: numbe
 }
 
 function vertexData(
-  image: Pick<PinBoardImage, "points" | "uv">,
+  image: Pick<PinBoardItem, "points" | "uv">,
   uvScale: readonly [number, number] = [1, 1],
 ): Float32Array {
   return new Float32Array(QUAD_TRIANGLE_ORDER.flatMap((index) => [
@@ -241,13 +262,13 @@ function vertexData(
   ]));
 }
 
-function outlineData(image: Pick<PinBoardImage, "points">): Float32Array {
+function outlineData(image: Pick<PinBoardItem, "points">): Float32Array {
   return new Float32Array([0, 1, 2, 3, 0].flatMap((index) => image.points[index]));
 }
 
 function createGeometryBuffers(
   device: any,
-  image: PinBoardImage,
+  image: PinBoardItem,
   uvScale: readonly [number, number] = [1, 1],
 ) {
   const vertices = vertexData(image, uvScale);
@@ -407,17 +428,20 @@ async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
 
 async function loadTexture(
   gpu: GpuState,
-  image: PinBoardImage,
+  image: PinBoardItem,
   maxDimension: number,
 ): Promise<LoadedTexture> {
-  const response = await pinBoardApi.readPinBoardTexture(image.boardId, image.imageId, maxDimension);
+  // 位图读仓库内的 DDS；文字由前端按同一请求长边栅格化，随后共用 RGBA 上传路径。
+  const response = image.kind === "text"
+    ? textRgbaPayload(image, maxDimension)
+    : await pinBoardApi.readPinBoardTexture(image.boardId, image.itemId, maxDimension);
   // 画板切换会先销毁旧设备，但旧 IPC 读取可能稍后才返回。不要让这个返回值继续
   // 触碰已经释放的 WebGPU 对象——此前会直接进入 createTexture/writeTexture，在
   // WebView2 的 GPU 路径上形成悬空设备调用。
   if (gpu.released) {
     diagnosticsLog(
       "warn",
-      `texture.read completed after gpu release: gpuSeq=${gpu.sequence}, imageId=${image.imageId}, dim=${maxDimension}`,
+      `texture.read completed after gpu release: gpuSeq=${gpu.sequence}, itemId=${image.itemId}, dim=${maxDimension}`,
     );
     throw new Error("纹理读取所属的 GPU 设备已释放");
   }
@@ -548,8 +572,8 @@ function clearColor(canvas: HTMLCanvasElement) {
 export class PinBoardRenderer {
   private boardId = 0;
   private readonly viewport: Viewport = { ...DEFAULT_VIEWPORT };
-  private images: PinBoardImage[] = [];
-  private readonly imageById = new Map<number, PinBoardImage>();
+  private images: PinBoardItem[] = [];
+  private readonly imageById = new Map<number, PinBoardItem>();
   private readonly textures = new Map<number, LoadedTexture>();
   /** 常驻缩略图缓存：每个访问过的图片保留一张低分辨率预览，滑动视图时
    *  高清纹理被淘汰后仍可立即绘制，避免闪烁。只在独立预览预算超限时
@@ -567,7 +591,7 @@ export class PinBoardRenderer {
   private readonly resizeObserver: ResizeObserver;
   private readonly themeObserver: MutationObserver;
   private readonly history: HistoryEntry[] = [];
-  private visibleImages: PinBoardImage[] = [];
+  private visibleImages: PinBoardItem[] = [];
   private historyIndex = 0;
   private savedStateKey = "";
   private revision = "";
@@ -616,7 +640,7 @@ export class PinBoardRenderer {
   private dragBefore: ImageSnapshot[] = [];
   private selectionScreenQuad: Quad | null = null;
   /**
-   * 纹理未就绪的图片占位层：DOM 节点按 imageId 复用，避免每帧增删；位置随
+   * 纹理未就绪的图片占位层：DOM 节点按 itemId 复用，避免每帧增删；位置随
    * 视口/图片旋转同步。纹理（缩略图或高清）到位后由下一次 `draw()` 移除。
    */
   private readonly placeholderNodes = new Map<number, HTMLElement>();
@@ -887,9 +911,9 @@ export class PinBoardRenderer {
 
   private activateBoard(view: PinBoardView, session: PinBoardViewSession | null) {
     this.boardId = view.boardId;
-    this.images = view.images.map(cloneImage);
+    this.images = view.items.map(cloneImage);
     this.imageById.clear();
-    for (const image of this.images) this.imageById.set(image.imageId, image);
+    for (const image of this.images) this.imageById.set(image.itemId, image);
     this.revision = view.revision;
     this.finalized = false;
     this.finalizePromise = null;
@@ -912,8 +936,8 @@ export class PinBoardRenderer {
       );
       this.locked = session.locked;
       if (!this.locked) {
-        for (const imageId of session.selectedImageIds) {
-          if (this.imageById.has(imageId)) this.selectedIds.add(imageId);
+        for (const itemId of session.selectedImageIds) {
+          if (this.imageById.has(itemId)) this.selectedIds.add(itemId);
         }
       }
     } else {
@@ -1076,21 +1100,27 @@ export class PinBoardRenderer {
 
   copySelection(): PinBoardClipboardImage[] {
     if (this.locked) return [];
+    // 画板内复制/粘贴只承载位图；文字条目当前没有可复制的载荷通道。
     return this.selectedImages()
+      .filter((image) => image.kind === "bitmap")
       .sort((left, right) => left.order - right.order)
       .map((image) => ({
         displayWidth: imageSize(image)[0],
         displayHeight: imageSize(image)[1],
         sourceBoardId: image.boardId,
-        sourceImageId: image.imageId,
+        sourceItemId: image.itemId,
         width: image.width,
         height: image.height,
         uv: cloneQuad(image.uv),
       }));
   }
 
+  selectedTextItems(): PinBoardTextItem[] {
+    return this.selectedImages().filter((item): item is PinBoardTextItem => item.kind === "text");
+  }
+
   selectedImageIds(): number[] {
-    return this.selectedImages().map((image) => image.imageId);
+    return this.selectedImages().map((image) => image.itemId);
   }
 
   /**
@@ -1102,7 +1132,7 @@ export class PinBoardRenderer {
     this.finishActiveInteraction();
     this.selectedIds.clear();
     for (const image of this.images) {
-      if (!image.deleted) this.selectedIds.add(image.imageId);
+      if (!image.deleted) this.selectedIds.add(image.itemId);
     }
     this.refreshSelectionVisuals();
   }
@@ -1119,27 +1149,27 @@ export class PinBoardRenderer {
 
   copyImageToClipboardId(): number | null {
     const selected = this.selectedImages();
-    return selected.length === 1 ? selected[0].imageId : null;
+    return selected.length === 1 && selected[0].kind === "bitmap" ? selected[0].itemId : null;
   }
 
   deleteSelected() {
     const selected = this.selectedImages();
     if (this.locked || selected.length === 0) return;
-    const imageIds = selected.map((image) => image.imageId);
-    const before = this.snapshot(imageIds);
+    const itemIds = selected.map((image) => image.itemId);
+    const before = this.snapshot(itemIds);
     for (const image of selected) image.deleted = true;
-    const after = this.snapshot(imageIds);
+    const after = this.snapshot(itemIds);
     this.pushHistory(before, after);
     this.selectedIds.clear();
-    this.afterModelChange(imageIds);
+    this.afterModelChange(itemIds);
   }
 
-  applyMutationResult(view: PinBoardView, imageIds: number[]) {
+  applyMutationResult(view: PinBoardView, itemIds: number[]) {
     if (!this.loaded || view.boardId !== this.boardId) return;
-    const added = imageIds.flatMap((imageId) => view.images.filter((image) => image.imageId === imageId));
+    const added = itemIds.flatMap((itemId) => view.items.filter((image) => image.itemId === itemId));
     if (added.length === 0) return;
-    for (const image of view.images) {
-      const current = this.imageById.get(image.imageId);
+    for (const image of view.items) {
+      const current = this.imageById.get(image.itemId);
       if (current) {
         current.order = image.order;
         current.layer = image.layer;
@@ -1147,7 +1177,7 @@ export class PinBoardRenderer {
       }
     }
     const before = added.map((image) => ({
-      imageId: image.imageId,
+      itemId: image.itemId,
       deleted: true,
       layer: image.layer,
       points: cloneQuad(image.points),
@@ -1156,14 +1186,14 @@ export class PinBoardRenderer {
     for (const image of added) {
       const copy = cloneImage(image);
       this.images.push(copy);
-      this.imageById.set(copy.imageId, copy);
-      this.selectedIds.add(copy.imageId);
+      this.imageById.set(copy.itemId, copy);
+      this.selectedIds.add(copy.itemId);
     }
-    const after = this.snapshot(imageIds);
+    const after = this.snapshot(itemIds);
     this.revision = view.revision;
     this.savedStateKey = this.stateKey();
     this.pushHistory(before, after);
-    this.afterModelChange(imageIds);
+    this.afterModelChange(itemIds);
   }
 
   toggleLock() {
@@ -1198,7 +1228,7 @@ export class PinBoardRenderer {
     const entry = this.history[this.historyIndex - 1];
     this.historyIndex -= 1;
     this.restore(entry.before);
-    this.afterModelChange(entry.before.map((image) => image.imageId));
+    this.afterModelChange(entry.before.map((image) => image.itemId));
   }
 
   redo() {
@@ -1206,7 +1236,7 @@ export class PinBoardRenderer {
     const entry = this.history[this.historyIndex];
     this.historyIndex += 1;
     this.restore(entry.after);
-    this.afterModelChange(entry.after.map((image) => image.imageId));
+    this.afterModelChange(entry.after.map((image) => image.itemId));
   }
 
   scaleSelected(factor: number) {
@@ -1250,7 +1280,7 @@ export class PinBoardRenderer {
     const gap = this.worldUnitsPerCssPixel() * this.arrangementGapCssPixels;
     const arranged = arrangeImages(selected, center, gap);
     this.commitMutation((image) => {
-      const points = arranged.get(image.imageId);
+      const points = arranged.get(image.itemId);
       if (points) image.points = points;
     });
   }
@@ -1365,8 +1395,8 @@ export class PinBoardRenderer {
   }
 
   private stateKey(): string {
-    return JSON.stringify(this.images.map(({ imageId, order, layer, deleted, points, uv }) => ({
-      imageId,
+    return JSON.stringify(this.images.map(({ itemId, order, layer, deleted, points, uv }) => ({
+      itemId,
       order,
       layer,
       deleted,
@@ -1375,9 +1405,9 @@ export class PinBoardRenderer {
     })));
   }
 
-  private editableImages(): PinBoardEditableImage[] {
-    return this.images.map(({ imageId, order, layer, deleted, points, uv }) => ({
-      imageId,
+  private editableImages(): PinBoardEditableItem[] {
+    return this.images.map(({ itemId, order, layer, deleted, points, uv }) => ({
+      itemId,
       order,
       layer,
       deleted,
@@ -1519,10 +1549,10 @@ export class PinBoardRenderer {
         // 拖拽则累加框选。
         const additiveSelection = isAdditiveSelectionModifier(event);
         if (additiveSelection && hit) {
-          if (this.selectedIds.has(hit.imageId)) this.selectedIds.delete(hit.imageId);
+          if (this.selectedIds.has(hit.itemId)) this.selectedIds.delete(hit.itemId);
           else {
-            this.selectedIds.add(hit.imageId);
-            this.bringToFront([hit.imageId]);
+            this.selectedIds.add(hit.itemId);
+            this.bringToFront([hit.itemId]);
           }
           this.refreshSelectionVisuals();
           event.preventDefault();
@@ -1533,15 +1563,15 @@ export class PinBoardRenderer {
         const insideSelection = selection
           ? pointInQuad(this.dragWorld, selection)
           : false;
-        if (hit && this.selectedIds.has(hit.imageId)) {
+        if (hit && this.selectedIds.has(hit.itemId)) {
           this.dragMode = "images";
           this.dragBefore = this.snapshot([...this.selectedIds]);
         } else if (hit) {
           this.selectedIds.clear();
-          this.selectedIds.add(hit.imageId);
-          this.bringToFront([hit.imageId]);
+          this.selectedIds.add(hit.itemId);
+          this.bringToFront([hit.itemId]);
           this.dragMode = "images";
-          this.dragBefore = this.snapshot([hit.imageId]);
+          this.dragBefore = this.snapshot([hit.itemId]);
           this.refreshSelectionVisuals();
         } else if (insideSelection) {
           this.dragMode = "images";
@@ -1551,7 +1581,7 @@ export class PinBoardRenderer {
           if (additiveSelection) {
             // 累加式框选：保留当前选中作为基底，框到的新图在此基础上加入，
             // 因此可以连续多次框选，已选中的不会消失。
-            for (const imageId of this.selectedIds) this.marqueeBaseIds.add(imageId);
+            for (const itemId of this.selectedIds) this.marqueeBaseIds.add(itemId);
           } else {
             this.selectedIds.clear();
           }
@@ -1623,24 +1653,24 @@ export class PinBoardRenderer {
         const deltaX = world[0] - this.dragWorld[0];
         const deltaY = world[1] - this.dragWorld[1];
         for (const snapshot of this.dragBefore) {
-          const image = this.imageById.get(snapshot.imageId);
+          const image = this.imageById.get(snapshot.itemId);
           if (image) image.points = translateQuad(snapshot.points, deltaX, deltaY);
         }
-        this.afterLiveChange(this.dragBefore.map((image) => image.imageId));
+        this.afterLiveChange(this.dragBefore.map((image) => image.itemId));
       } else if (this.dragMode === "rotate") {
         const delta = Math.atan2(
           world[1] - this.rotateCenter[1],
           world[0] - this.rotateCenter[0],
         ) - this.rotateStartAngle;
         for (const snapshot of this.dragBefore) {
-          const image = this.imageById.get(snapshot.imageId);
+          const image = this.imageById.get(snapshot.itemId);
           if (!image) continue;
           // Shift 吸附图片的**绝对角度**（0°/15°/30°…）而非本次拖拽的增量：
           // 增量吸附会让已带偏角的图片停在「偏角 + n×15°」，永远回不到 0°。
           const radians = event.shiftKey ? snapRotationDelta(snapshot.points, delta) : delta;
           image.points = rotateQuad(snapshot.points, radians, this.rotateCenter);
         }
-        this.afterLiveChange(this.dragBefore.map((image) => image.imageId));
+        this.afterLiveChange(this.dragBefore.map((image) => image.itemId));
       } else if (this.dragMode === "scale") {
         const distance = Math.hypot(
           world[0] - this.scaleAnchor[0],
@@ -1659,10 +1689,10 @@ export class PinBoardRenderer {
         }, 0);
         const factor = Math.max(distance / this.scaleStartDistance, minimumScale);
         for (const snapshot of this.dragBefore) {
-          const image = this.imageById.get(snapshot.imageId);
+          const image = this.imageById.get(snapshot.itemId);
           if (image) image.points = scaleQuad(snapshot.points, factor, this.scaleAnchor);
         }
-        this.afterLiveChange(this.dragBefore.map((image) => image.imageId));
+        this.afterLiveChange(this.dragBefore.map((image) => image.itemId));
       } else {
         this.marqueeWorld = world;
         const bounds = this.boundsBetween(this.dragWorld, world);
@@ -1674,7 +1704,7 @@ export class PinBoardRenderer {
         this.updateMarqueeOverlay(bounds);
         if (!sameSelection(this.selectedIds, next)) {
           this.selectedIds.clear();
-          for (const imageId of next) this.selectedIds.add(imageId);
+          for (const itemId of next) this.selectedIds.add(itemId);
           this.refreshSelectionVisuals();
         }
       }
@@ -1692,9 +1722,9 @@ export class PinBoardRenderer {
     const pointerId = this.dragPointerId;
     if ((this.dragMode === "images" || this.dragMode === "rotate" || this.dragMode === "scale")
       && this.dragBefore.length > 0) {
-      const after = this.snapshot(this.dragBefore.map((image) => image.imageId));
+      const after = this.snapshot(this.dragBefore.map((image) => image.itemId));
       this.pushHistory(this.dragBefore, after);
-      this.afterModelChange(after.map((image) => image.imageId));
+      this.afterModelChange(after.map((image) => image.itemId));
     } else if (this.dragMode === "pan") {
       this.scheduleLoads(0);
     } else if (this.dragMode === "marquee") {
@@ -1751,10 +1781,10 @@ export class PinBoardRenderer {
     );
     this.cursorWorld = point;
     const hit = this.hitImage(point);
-    if (!this.locked && hit && !this.selectedIds.has(hit.imageId)) {
+    if (!this.locked && hit && !this.selectedIds.has(hit.itemId)) {
       this.selectedIds.clear();
-      this.selectedIds.add(hit.imageId);
-      this.bringToFront([hit.imageId]);
+      this.selectedIds.add(hit.itemId);
+      this.bringToFront([hit.itemId]);
       this.refreshSelectionVisuals();
     }
     this.onContextMenu({
@@ -1912,19 +1942,19 @@ export class PinBoardRenderer {
     this.viewport.height = this.clampViewportHeight(fitted.height);
   }
 
-  private selectedImages(): PinBoardImage[] {
-    return this.images.filter((image) => !image.deleted && this.selectedIds.has(image.imageId));
+  private selectedImages(): PinBoardItem[] {
+    return this.images.filter((image) => !image.deleted && this.selectedIds.has(image.itemId));
   }
 
-  private bringToFront(imageIds: number[]) {
-    if (imageIds.length === 0) return;
-    const promotedIds = new Set(imageIds);
+  private bringToFront(itemIds: number[]) {
+    if (itemIds.length === 0) return;
+    const promotedIds = new Set(itemIds);
     const ordered = [...this.images].sort((left, right) => (
-      left.order - right.order || left.imageId - right.imageId
+      left.order - right.order || left.itemId - right.itemId
     ));
     const next = [
-      ...ordered.filter((image) => promotedIds.has(image.imageId)),
-      ...ordered.filter((image) => !promotedIds.has(image.imageId)),
+      ...ordered.filter((image) => promotedIds.has(image.itemId)),
+      ...ordered.filter((image) => !promotedIds.has(image.itemId)),
     ];
     let changed = false;
     next.forEach((image, order) => {
@@ -1939,7 +1969,7 @@ export class PinBoardRenderer {
     }
   }
 
-  private hitImage(point: Point): PinBoardImage | null {
+  private hitImage(point: Point): PinBoardItem | null {
     for (let index = this.visibleImages.length - 1; index >= 0; index -= 1) {
       const image = this.visibleImages[index];
       if (pointInQuad(point, image.points)) return image;
@@ -1947,11 +1977,11 @@ export class PinBoardRenderer {
     return null;
   }
 
-  private snapshot(imageIds: number[]): ImageSnapshot[] {
-    return imageIds.flatMap((imageId) => {
-      const image = this.imageById.get(imageId);
+  private snapshot(itemIds: number[]): ImageSnapshot[] {
+    return itemIds.flatMap((itemId) => {
+      const image = this.imageById.get(itemId);
       return image ? [{
-        imageId,
+        itemId,
         deleted: image.deleted,
         layer: image.layer,
         points: cloneQuad(image.points),
@@ -1962,7 +1992,7 @@ export class PinBoardRenderer {
 
   private restore(snapshots: ImageSnapshot[]) {
     for (const snapshot of snapshots) {
-      const image = this.imageById.get(snapshot.imageId);
+      const image = this.imageById.get(snapshot.itemId);
       if (!image) continue;
       image.deleted = snapshot.deleted;
       image.layer = snapshot.layer;
@@ -1972,19 +2002,19 @@ export class PinBoardRenderer {
   }
 
   private commitMutation(
-    mutate: (image: PinBoardImage) => void,
+    mutate: (image: PinBoardItem) => void,
     mergeKey?: string,
   ) {
     if (this.locked || this.selectedIds.size === 0) return;
-    const imageIds = [...this.selectedIds];
-    const before = this.snapshot(imageIds);
-    for (const imageId of imageIds) {
-      const image = this.imageById.get(imageId);
+    const itemIds = [...this.selectedIds];
+    const before = this.snapshot(itemIds);
+    for (const itemId of itemIds) {
+      const image = this.imageById.get(itemId);
       if (image) mutate(image);
     }
-    const after = this.snapshot(imageIds);
+    const after = this.snapshot(itemIds);
     this.pushHistory(before, after, mergeKey);
-    this.afterModelChange(imageIds);
+    this.afterModelChange(itemIds);
   }
 
   private pushHistory(before: ImageSnapshot[], after: ImageSnapshot[], mergeKey?: string) {
@@ -2005,21 +2035,21 @@ export class PinBoardRenderer {
     this.historyIndex = this.history.length;
   }
 
-  private afterLiveChange(imageIds: number[]) {
+  private afterLiveChange(itemIds: number[]) {
     this.dirty = true;
-    this.syncGeometryBuffers(imageIds);
+    this.syncGeometryBuffers(itemIds);
     this.refreshViewport(VIEWPORT_LOAD_DELAY_MS);
     this.emitState();
   }
 
-  private afterModelChange(imageIds: number[]) {
-    for (const imageId of [...this.selectedIds]) {
-      if (this.imageById.get(imageId)?.deleted) this.selectedIds.delete(imageId);
+  private afterModelChange(itemIds: number[]) {
+    for (const itemId of [...this.selectedIds]) {
+      if (this.imageById.get(itemId)?.deleted) this.selectedIds.delete(itemId);
     }
     this.dirty = this.stateKey() !== this.savedStateKey;
     if (this.dirty) this.scheduleAutosave();
     else this.cancelAutosave();
-    this.syncGeometryBuffers(imageIds);
+    this.syncGeometryBuffers(itemIds);
     this.refreshViewport(0);
     this.emitState();
   }
@@ -2051,10 +2081,10 @@ export class PinBoardRenderer {
     }
   }
 
-  private syncGeometryBuffers(imageIds: number[]) {
-    for (const imageId of imageIds) {
-      const loaded = this.textures.get(imageId) ?? this.previewTextures.get(imageId);
-      const image = this.imageById.get(imageId);
+  private syncGeometryBuffers(itemIds: number[]) {
+    for (const itemId of itemIds) {
+      const loaded = this.textures.get(itemId) ?? this.previewTextures.get(itemId);
+      const image = this.imageById.get(itemId);
       if (!loaded || !image) continue;
       this.gpu.device.queue.writeBuffer(
         loaded.vertexBuffer,
@@ -2075,9 +2105,9 @@ export class PinBoardRenderer {
     this.sortVisibleImages();
     const now = performance.now();
     for (const image of this.visibleImages) {
-      const loaded = this.textures.get(image.imageId);
+      const loaded = this.textures.get(image.itemId);
       if (loaded) loaded.lastUsed = now;
-      const preview = this.previewTextures.get(image.imageId);
+      const preview = this.previewTextures.get(image.itemId);
       if (preview) preview.lastUsed = now;
     }
     this.gpu.device.queue.writeBuffer(
@@ -2113,7 +2143,7 @@ export class PinBoardRenderer {
       pass.setPipeline(this.gpu.pipeline);
       pass.setBindGroup(0, this.gpu.viewportBindGroup);
       for (const image of this.visibleImages) {
-        const loaded = this.textures.get(image.imageId) ?? this.previewTextures.get(image.imageId);
+        const loaded = this.textures.get(image.itemId) ?? this.previewTextures.get(image.itemId);
         if (!loaded) continue;
         pass.setBindGroup(1, loaded.bindGroup);
         pass.setVertexBuffer(0, loaded.vertexBuffer);
@@ -2123,8 +2153,8 @@ export class PinBoardRenderer {
         pass.setPipeline(this.gpu.outlinePipeline);
         pass.setBindGroup(0, this.gpu.viewportBindGroup);
         for (const image of this.visibleImages) {
-          if (!this.selectedIds.has(image.imageId)) continue;
-          const loaded = this.textures.get(image.imageId) ?? this.previewTextures.get(image.imageId);
+          if (!this.selectedIds.has(image.itemId)) continue;
+          const loaded = this.textures.get(image.itemId) ?? this.previewTextures.get(image.itemId);
           if (!loaded) continue;
           pass.setVertexBuffer(0, loaded.outlineBuffer);
           pass.draw(5);
@@ -2145,7 +2175,7 @@ export class PinBoardRenderer {
   /**
    * 同步「纹理未就绪」占位层：为可见但尚无纹理（缩略图或高清）的图片铺一块
    * 灰底方框标示图片范围，中心配一个动态加载图标。加载失败的图片改显静态
-   * 告警图标，避免永久转圈。节点按 imageId 复用，只在集合变化时增删。
+   * 告警图标，避免永久转圈。节点按 itemId 复用，只在集合变化时增删。
    */
   private updatePlaceholderOverlay() {
     const layer = this.placeholderElement;
@@ -2160,19 +2190,19 @@ export class PinBoardRenderer {
     }
     const pending = new Map<number, { quad: Quad; failed: boolean }>();
     for (const image of this.visibleImages) {
-      if (this.textures.has(image.imageId) || this.previewTextures.has(image.imageId)) continue;
-      pending.set(image.imageId, {
+      if (this.textures.has(image.itemId) || this.previewTextures.has(image.itemId)) continue;
+      pending.set(image.itemId, {
         quad: image.points,
-        failed: this.failedTextureDimensions.has(image.imageId),
+        failed: this.failedTextureDimensions.has(image.itemId),
       });
     }
-    for (const [imageId, node] of this.placeholderNodes) {
-      if (pending.has(imageId)) continue;
+    for (const [itemId, node] of this.placeholderNodes) {
+      if (pending.has(itemId)) continue;
       node.remove();
-      this.placeholderNodes.delete(imageId);
+      this.placeholderNodes.delete(itemId);
     }
-    for (const [imageId, entry] of pending) {
-      let node = this.placeholderNodes.get(imageId);
+    for (const [itemId, entry] of pending) {
+      let node = this.placeholderNodes.get(itemId);
       if (!node) {
         node = document.createElement("div");
         node.className = "pin-board-placeholder";
@@ -2183,7 +2213,7 @@ export class PinBoardRenderer {
         failed.textContent = "!";
         node.append(spinner, failed);
         layer.appendChild(node);
-        this.placeholderNodes.set(imageId, node);
+        this.placeholderNodes.set(itemId, node);
       }
       node.classList.toggle("failed", entry.failed);
       const screenQuad = entry.quad.map((point) => worldToScreen(point, rect, this.viewport)) as Quad;
@@ -2280,36 +2310,36 @@ export class PinBoardRenderer {
       // 常驻缩略图兜底：没有缩略图时先生成缩略图候选，保证滑动回来后
       // 即使高清纹理尚未加载也能立即绘制，不闪烁。缩略图失败按维度记录，
       // 不会阻止更高分辨率的重试。
-      if (!this.previewTextures.has(image.imageId)
-        && !this.failedAtOrAbove(image.imageId, PREVIEW_TEXTURE_DIMENSION)) {
+      if (!this.previewTextures.has(image.itemId)
+        && !this.failedAtOrAbove(image.itemId, PREVIEW_TEXTURE_DIMENSION)) {
         list.push({
           image,
           maxDimension: PREVIEW_TEXTURE_DIMENSION,
-          estimatedBytes: estimatedTextureLoadBytes(image, PREVIEW_TEXTURE_DIMENSION),
+          estimatedBytes: estimatedLoadBytes(image, PREVIEW_TEXTURE_DIMENSION),
           priority,
           isPreview: true,
         });
       }
       const desiredDimension = this.requestedDimension(image);
-      const qualityCap = this.textureQualityCaps.get(image.imageId);
+      const qualityCap = this.textureQualityCaps.get(image.itemId);
       const maxDimension = qualityCap
         ? Math.min(desiredDimension, qualityCap)
         : desiredDimension;
-      const current = this.textures.get(image.imageId);
+      const current = this.textures.get(image.itemId);
       if (!(current && current.maxDimension >= maxDimension * 0.9)
-        && !this.failedAtOrAbove(image.imageId, maxDimension)) {
+        && !this.failedAtOrAbove(image.itemId, maxDimension)) {
         list.push({
           image,
           maxDimension,
-          estimatedBytes: estimatedTextureLoadBytes(image, maxDimension),
+          estimatedBytes: estimatedLoadBytes(image, maxDimension),
           priority,
         });
       }
       return list;
     });
     return candidates.sort((left, right) => (
-      Number(this.selectedIds.has(right.image.imageId))
-        - Number(this.selectedIds.has(left.image.imageId))
+      Number(this.selectedIds.has(right.image.itemId))
+        - Number(this.selectedIds.has(left.image.itemId))
       // 缩略图优先于高清，先给可见图片铺上兜底内容，再逐张清晰化。
       || Number(right.isPreview === true) - Number(left.isPreview === true)
       || left.priority - right.priority
@@ -2318,8 +2348,8 @@ export class PinBoardRenderer {
   }
 
   /** 该图片在目标尺寸（及其之上）是否已记录过加载失败。 */
-  private failedAtOrAbove(imageId: number, maxDimension: number): boolean {
-    const failed = this.failedTextureDimensions.get(imageId);
+  private failedAtOrAbove(itemId: number, maxDimension: number): boolean {
+    const failed = this.failedTextureDimensions.get(itemId);
     return failed !== undefined && failed >= maxDimension * 0.9;
   }
 
@@ -2346,7 +2376,7 @@ export class PinBoardRenderer {
             if (this.destroyed) {
               diagnosticsLog(
                 "info",
-                `texture load settled after renderer destroy: boardId=${this.boardId}, gpuSeq=${this.gpu.sequence}, imageId=${candidate.image.imageId}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
+                `texture load settled after renderer destroy: boardId=${this.boardId}, gpuSeq=${this.gpu.sequence}, itemId=${candidate.image.itemId}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
               );
             }
             activeCount -= 1;
@@ -2364,7 +2394,7 @@ export class PinBoardRenderer {
   private async loadCandidate(candidate: TextureLoadCandidate, generation: number) {
     const { image, maxDimension, isPreview } = candidate;
     const target = isPreview ? this.previewTextures : this.textures;
-    let current: LoadedTexture | null = target.get(image.imageId) ?? null;
+    let current: LoadedTexture | null = target.get(image.itemId) ?? null;
     let loaded: LoadedTexture | null = null;
     let lastError: unknown = null;
     try {
@@ -2380,10 +2410,10 @@ export class PinBoardRenderer {
       if (fallback < maxDimension) dimensions.push(fallback);
 
       for (const dimension of dimensions) {
-        const residentBytes = estimatedTextureResidentBytes(image, dimension);
+        const residentBytes = estimatedResidentBytes(image, dimension);
         const reservationBytes = residentBytes + PIN_BOARD_TEXTURE_STAGING_MARGIN_BYTES;
-        current = target.get(image.imageId) ?? null;
-        const reserved = this.reserveTextureBytes(image.imageId, reservationBytes, isPreview);
+        current = target.get(image.itemId) ?? null;
+        const reserved = this.reserveTextureBytes(image.itemId, reservationBytes, isPreview);
         if (!reserved) {
           lastError = new Error("纹理显存预算不足");
           continue;
@@ -2403,39 +2433,42 @@ export class PinBoardRenderer {
         return;
       }
       // 高清纹理还要确认图片仍在可见集；缩略图常驻，滑出视口后继续保留。
-      if (!isPreview && !this.visibleImages.some((visible) => visible.imageId === image.imageId)) {
+      if (!isPreview && !this.visibleImages.some((visible) => visible.itemId === image.itemId)) {
         destroyTexture(loaded);
         return;
       }
-      const replacement = target.get(image.imageId);
+      const replacement = target.get(image.itemId);
       if (replacement && replacement.maxDimension >= maxDimension * 0.9) {
         destroyTexture(loaded);
         return;
       }
       if (replacement) destroyTexture(replacement);
-      target.set(image.imageId, loaded);
+      target.set(image.itemId, loaded);
       if (!isPreview) {
         if (loaded.maxDimension < maxDimension) {
-          this.textureQualityCaps.set(image.imageId, loaded.maxDimension);
+          this.textureQualityCaps.set(image.itemId, loaded.maxDimension);
         } else {
-          this.textureQualityCaps.delete(image.imageId);
+          this.textureQualityCaps.delete(image.itemId);
         }
       }
-      this.evictTextures(image.imageId, 0, isPreview);
-      this.failedTextureDimensions.delete(image.imageId);
+      this.evictTextures(image.itemId, 0, isPreview);
+      this.failedTextureDimensions.delete(image.itemId);
       this.draw();
     } catch (error) {
       if (this.destroyed || generation !== this.generation) return;
-      const previous = this.failedTextureDimensions.get(image.imageId) ?? 0;
-      this.failedTextureDimensions.set(image.imageId, Math.max(previous, maxDimension));
+      const previous = this.failedTextureDimensions.get(image.itemId) ?? 0;
+      this.failedTextureDimensions.set(image.itemId, Math.max(previous, maxDimension));
       // 缩略图失败静默（高清失败仍按原样上报），避免预算波动反复打扰用户。
-      if (!isPreview) this.onError(`图片 ${image.imageId} 加载失败：${errorMessage(error)}`);
+      if (!isPreview) this.onError(`图片 ${image.itemId} 加载失败：${errorMessage(error)}`);
     }
   }
 
-  private requestedDimension(image: PinBoardImage): number {
+  private requestedDimension(image: PinBoardItem): number {
     const displayDimension = imageDisplayMaxDimension(image, this.viewport, this.canvas.height);
     const deviceLimit = this.gpu.device.limits.maxTextureDimension2D as number;
+    if (image.kind === "text") {
+      return requestedTextTextureDimension(image, displayDimension, deviceLimit);
+    }
     return requestedTextureDimension(image, displayDimension, deviceLimit);
   }
 
@@ -2444,9 +2477,9 @@ export class PinBoardRenderer {
     const budget = isPreview ? this.previewTextureBudgetBytes : this.textureBudgetBytes;
     let total = [...target.values()].reduce((sum, loaded) => sum + loaded.byteSize, 0);
     if (total + additionalBytes <= budget) return;
-    const visible = new Set(this.visibleImages.map((image) => image.imageId));
+    const visible = new Set(this.visibleImages.map((image) => image.itemId));
     const candidates = [...target.entries()]
-      .filter(([imageId]) => imageId !== protectedImageId)
+      .filter(([itemId]) => itemId !== protectedImageId)
       .sort((left, right) => {
         const visibilityOrder = Number(visible.has(left[0])) - Number(visible.has(right[0]));
         if (visibilityOrder !== 0) return visibilityOrder;
@@ -2460,9 +2493,9 @@ export class PinBoardRenderer {
         if (left[1].byteSize !== right[1].byteSize) return left[1].byteSize - right[1].byteSize;
         return left[1].lastUsed - right[1].lastUsed;
       });
-    for (const [imageId, loaded] of candidates) {
+    for (const [itemId, loaded] of candidates) {
       destroyTexture(loaded);
-      target.delete(imageId);
+      target.delete(itemId);
       total -= loaded.byteSize;
       if (total + additionalBytes <= budget) break;
     }

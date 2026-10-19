@@ -40,7 +40,7 @@
 - 仓库命令分三级进入：读命令（树、搜索、回收站列表、历史、设置快照）共享仓库租约并运行在后台线程，长备份、恢复或精简期间仍然可用；同进程的写命令先在写入闸门里按优先级排队（Shutdown > Foreground > Interactive > Background，等待有上限且可取消；后台优先级只 try、拿不到即让位），再取得跨进程仓库 owner lock，之后额外持有仓库操作锁互相串行。同进程的第二个写者因此在闸门里等待，不再互相返回 `repository_busy`；跨进程边界不变——另一个进程持 owner lock 时仍立即以 `repository_busy` 拒绝（文案「仓库正在被另一个进程写入；不支持同一仓库的多进程写入」）。进程内排队超时或与本进程写者竞争失败同样返回 `repository_busy`（可重试），但文案为「仓库正在写入，请稍后重试」。只有切换仓库路径的设置保存独占仓库租约，等待全部在途命令结束后再替换路径。前端保存新路径前立即清空旧仓库状态，并以 ready 仓库路径重建 Library/Artwork 工作区，因此仓库 A 与克隆仓库 B 即使包含相同 UUID，旧请求和选择也不会复用到 B。
 - 发现旧名称的备用 `.sqlite3` 时，先执行 `wal_checkpoint(TRUNCATE)` 合并已提交 WAL、关闭连接并清理旧 sidecar，再改名为标准数据库名；如果仍有进程占用导致 checkpoint busy，则保留原文件并返回错误，不做不完整迁移。
 - 数据库发现与「目录是否非空」判定忽略仓库根目录下的运行时文件：跨进程 owner lock 的锁库 `.lilith-write-lock.sqlite3*` 与 owner 元数据 `.lilith-write-owner.json` 不是作品数据库，也不能让首次初始化被误判为非空目录。
-- `schema.rs` 是仓库格式常量、当前建库 SQL、完整校验、轻量校验和 schema 迁移的唯一所有者；Library 业务仓储不再内嵌 schema SQL。新建仓库直接以当前 `SCHEMA_VERSION` 落库；打开旧版本仓库时按迁移链向前升级，版本高于当前 `SCHEMA_VERSION` 的仓库一律拒绝，不提供降级。
+- `schema.rs` 是仓库格式常量、当前建库 SQL、完整校验、轻量校验和 schema 迁移的唯一所有者；Library 业务仓储不再内嵌 schema SQL。新建仓库直接以当前 `SCHEMA_VERSION`（v5）落库；打开旧版本仓库时按 `v1 → v2 → v3 → v4 → v5` 迁移链向前升级。若仓库版本高于当前 `SCHEMA_VERSION`（例如旧程序打开新仓库），打开被直接拒绝且不写入任何结构，避免旧代码按旧表形状破坏数据；不提供降级。
 - 打开既有仓库时，`validate_repository_semantics` 除受控相对路径外还校验 `branches.source_path` / `source_path_key`：该字段按设计保存仓库之外的绝对路径，因此走独立的**结构校验**（绝对路径、无设备命名空间、不在仓库目录内），**不检查文件是否存在**（工作文件会被移动或删除，打开仓库必须仍然成功），也不拒绝网络位置（NAS 是合法用法）。挡住的是「打开他人构造或分享的仓库后，路径被写成 `\\.\`、`\\?\` 之类的设备对象或仓库内部文件」——这类值只可能来自手工写入，写入侧早已拒绝。空字符串表示分支尚未选择工作文件，属于合法状态。判定逻辑集中在 `storage::validate_branch_source_path` / `storage::path_namespace`，都是纯词法判断，不做 canonicalize。
 
 ## 回收站

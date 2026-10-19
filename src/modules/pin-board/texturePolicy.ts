@@ -1,6 +1,6 @@
-import type { PinBoardImage } from "./types";
+import type { PinBoardItem } from "./types";
 
-type TextureSource = Pick<PinBoardImage, "width" | "height">;
+type TextureSource = Pick<PinBoardItem, "width" | "height">;
 
 export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 

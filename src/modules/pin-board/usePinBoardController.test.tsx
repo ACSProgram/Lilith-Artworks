@@ -58,7 +58,7 @@ const board: PinBoardSummary = {
 const view: PinBoardView = {
   boardId: 1,
   name: "Board",
-  images: [],
+  items: [],
   missingTextures: 0,
   revision: "r1",
   nowStep: 0,
@@ -133,7 +133,7 @@ describe("usePinBoardController", () => {
 
   it("applies operation progress events to the current transfer", async () => {
     const renderer = fakeRenderer();
-    const imported = deferred<{ view: PinBoardView; imageIds: number[] }>();
+    const imported = deferred<{ view: PinBoardView; itemIds: number[] }>();
     api.importPinBoardImages.mockReturnValue(imported.promise);
 
     const { result } = renderHook(() => usePinBoardController({
@@ -171,7 +171,7 @@ describe("usePinBoardController", () => {
     });
 
     await act(async () => {
-      imported.resolve({ view, imageIds: [10] });
+      imported.resolve({ view, itemIds: [10] });
       await pending;
     });
     expect(result.current.transferProgress).toBeNull();

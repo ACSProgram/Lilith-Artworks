@@ -10,6 +10,7 @@ import type {
   BackupDisableNoticeTarget,
   BackupRuntimeStatus,
   RepositoryBackupReport,
+  RepositoryBackupRun,
   RepositoryScrubReport,
   RepositoryStatus,
   RepositoryStorageDiskScan,
@@ -51,6 +52,8 @@ export const appApi = {
     invokeCommand<RepositoryScrubReport>("scrub_repository_integrity"),
   createRepositoryBackup: (destinationParent: string) =>
     invokeCommand<RepositoryBackupReport>("create_repository_backup", { destinationParent }),
+  getLastRepositoryBackupRun: () =>
+    invokeCommand<RepositoryBackupRun | null>("get_last_repository_backup_run"),
   getBackupRuntimeStatus: () =>
     invokeCommand<BackupRuntimeStatus>("get_backup_runtime_status"),
   cancelBackupOperation: () =>

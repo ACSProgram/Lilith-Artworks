@@ -43,14 +43,14 @@ pub(crate) fn initialize(root: &Path) -> Result<(), String> {
             .map(|metadata| metadata.len() == 0)
             .unwrap_or(false);
 
-    let connection = Connection::open(&database)
+    let mut connection = Connection::open(&database)
         .map_err(|error| format!("无法打开作品数据库 {}：{error}", display_path(&database)))?;
     configure(&connection)?;
     if create {
         super::schema::create(&connection)?;
         create_directories(root)?;
     } else {
-        super::schema::migrate(&connection)?;
+        super::schema::migrate(&mut connection)?;
         super::schema::validate(&connection)?;
         super::schema::validate_repository_semantics(&connection, root)?;
         create_directories(root)?;
@@ -63,8 +63,8 @@ pub(crate) fn open_existing(root: &Path) -> Result<(), String> {
     let database = locate_database(root)?;
     require_database_file(&database)?;
 
-    let connection = storage::open(root)?;
-    super::schema::migrate(&connection)?;
+    let mut connection = storage::open(root)?;
+    super::schema::migrate(&mut connection)?;
     super::schema::validate(&connection)?;
     super::schema::validate_repository_semantics(&connection, root)?;
     create_directories(root)
@@ -1334,11 +1334,35 @@ mod tests {
             "consecutive_backup_failures",
             "backup_retry_at_ms",
             "backup_disable_notice_pending",
-            "verified_history_id",
+            "backup_quick_enabled",
+            "last_source_size",
+            "last_source_modified_ms",
+        ] {
+            assert!(branch_columns.iter().any(|item| item == column), "{column}");
+        }
+        for column in ["verified_history_id", "verified_ms", "verify_error"] {
+            assert!(
+                !branch_columns.iter().any(|item| item == column),
+                "{column}"
+            );
+        }
+        let node_columns: Vec<String> = {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(history_nodes)")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(1))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for column in [
+            "thumbnail",
+            "thumbnail_version",
             "verified_ms",
             "verify_error",
         ] {
-            assert!(branch_columns.iter().any(|item| item == column), "{column}");
+            assert!(node_columns.iter().any(|item| item == column), "{column}");
         }
         assert_eq!(defaults, (0, 1, 0));
         open_existing(&fixture.root).unwrap();

@@ -11,8 +11,9 @@ use crate::{
 
 use super::repository::{board_relative_path, is_dds_name, parse_board_dds_path, BOARD_DIRECTORY};
 
-/// 画板 DDS 的引用清单。条目文件路径在 DB 里是 `<image-id>.dds`，仓库中的完整
-/// 位置由 `artworks/<artwork-id>/boards/<board-id>/` 与文件名拼出。
+/// 画板 DDS 的引用清单。位图载荷的文件路径在 DB 里是 `<item-id>.dds`，仓库中的
+/// 完整位置由 `artworks/<artwork-id>/boards/<board-id>/` 与文件名拼出。文字条目
+/// 没有位图载荷行，自然不会进入路径清单。
 ///
 /// 只有规范文件名的记录参与引用；`file_path` 被改坏的记录由完整性扫描报告，不把
 /// 它声称的任意路径当作有效引用。
@@ -22,8 +23,9 @@ impl ReferenceInventory for PinBoardReferenceInventory {
     fn collect_targets(&self, connection: &Connection) -> Result<Vec<ManagedFile>, String> {
         let mut statement = connection
             .prepare(
-                "SELECT b.artwork_id, i.board_id, i.id, i.file_path
-                   FROM pin_board_images i
+                "SELECT b.artwork_id, i.board_id, i.id, bm.file_path
+                   FROM pin_board_items i
+                   JOIN pin_board_bitmaps bm ON bm.item_id = i.id
                    JOIN pin_boards b ON b.id = i.board_id",
             )
             .map_err(storage::database_error)?;
@@ -39,9 +41,9 @@ impl ReferenceInventory for PinBoardReferenceInventory {
             .map_err(storage::database_error)?;
         let mut targets = Vec::new();
         for row in rows {
-            let (artwork_id, board_id, image_id, file_path) =
+            let (artwork_id, board_id, item_id, file_path) =
                 row.map_err(storage::database_error)?;
-            if file_path != format!("{image_id}.dds") {
+            if file_path != format!("{item_id}.dds") {
                 continue;
             }
             targets.push(ManagedFile {
@@ -61,18 +63,19 @@ impl ReferenceInventory for PinBoardReferenceInventory {
         if target.owner != ManagedFileOwner::PinBoardDds {
             return Ok(ValidationOutcome::OwnerMismatch(target.owner));
         }
-        let Some((artwork_id, board_id, image_id)) = parse_board_dds_path(&target.path) else {
+        let Some((artwork_id, board_id, item_id)) = parse_board_dds_path(&target.path) else {
             return Ok(ValidationOutcome::Unreferenced);
         };
         let referenced = connection
             .query_row(
                 "SELECT EXISTS(
-                   SELECT 1 FROM pin_board_images i
+                   SELECT 1 FROM pin_board_items i
+                   JOIN pin_board_bitmaps bm ON bm.item_id = i.id
                    JOIN pin_boards b ON b.id = i.board_id
                    WHERE i.id = ?1 AND i.board_id = ?2 AND b.artwork_id = ?3
-                     AND i.file_path = ?4
+                     AND bm.file_path = ?4
                  )",
-                params![image_id, board_id, artwork_id, format!("{image_id}.dds")],
+                params![item_id, board_id, artwork_id, format!("{item_id}.dds")],
                 |row| row.get::<_, bool>(0),
             )
             .map_err(storage::database_error)?;
@@ -151,9 +154,10 @@ mod tests {
                    (id, artwork_id, name, sort_order, now_step, max_step, revision,
                     created_ms, updated_ms)
                  VALUES ({board_id}, '{artwork_id}', 'board', 0, 0, 0, '{}', 0, 0);
-                 INSERT INTO pin_board_images
-                   (id, board_id, file_path, width, height, created_ms)
-                 VALUES ({image_id}, {board_id}, '{image_id}.dds', 4, 4, 0);",
+                 INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                 VALUES ({image_id}, {board_id}, 0, 0);
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                 VALUES ({image_id}, '{image_id}.dds', 4, 4);",
                 "0".repeat(64)
             ))
             .unwrap();
@@ -168,10 +172,11 @@ mod tests {
         let connection = storage::open(&root).unwrap();
         insert_image(&connection, &artwork_id, 1, 7);
         connection
-            .execute(
-                "INSERT INTO pin_board_images (id, board_id, file_path, width, height, created_ms)
-                 VALUES (8, 1, 'elsewhere.dds', 4, 4, 0)",
-                [],
+            .execute_batch(
+                "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                   VALUES (8, 1, 0, 0);
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                   VALUES (8, 'elsewhere.dds', 4, 4);",
             )
             .unwrap();
 

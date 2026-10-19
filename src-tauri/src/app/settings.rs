@@ -1412,13 +1412,13 @@ mod tests {
             )
             .unwrap();
         let error = state.ready_repository_path().unwrap_err();
-        assert!(error.contains("版本不受支持"), "{error}");
+        assert!(error.contains("更新版本"), "{error}");
         assert_eq!(library::take_integrity_check_count(), 0);
 
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '4' WHERE key = 'schema_version'",
+                "UPDATE repository_meta SET value = '5' WHERE key = 'schema_version'",
                 [],
             )
             .unwrap();

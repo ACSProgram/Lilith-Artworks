@@ -13,13 +13,13 @@ use super::repository::{board_relative_path, is_dds_name, BOARD_DIRECTORY};
 /// 画板 DDS 完整性扫描结果。
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct BoardDdsReport {
-    /// 检查的 `pin_board_images` 记录数。
-    pub(crate) images: u64,
+    /// 检查的位图条目（`pin_board_bitmaps`）记录数。文字条目没有实体文件，不计入。
+    pub(crate) bitmaps: u64,
     /// 记录存在但 DDS 文件缺失。
     pub(crate) missing: u64,
     /// 文件存在但路径归属、DDS/BC7 头、尺寸、长度或 BC7 解码校验失败。
     pub(crate) corrupt: u64,
-    /// 磁盘上存在但无 `pin_board_images` 记录的 DDS。
+    /// 磁盘上存在但无 `pin_board_bitmaps` 记录的 DDS。
     pub(crate) orphans: u64,
 }
 
@@ -29,8 +29,8 @@ enum DdsCheck {
     Corrupt,
 }
 
-/// 双向检查画板 DDS：逐条 `pin_board_images` 记录校验其 DDS，再遍历画板目录统计
-/// 无记录的孤儿 DDS。只报告，不修改数据库或磁盘。
+/// 双向检查画板 DDS：逐条位图载荷校验其 DDS，再遍历画板目录统计无记录的孤儿
+/// DDS。文字等无实体文件的条目跳过。只报告，不修改数据库或磁盘。
 pub(crate) fn scrub_board_dds(
     root: &Path,
     cancelled: impl Fn() -> bool,
@@ -40,8 +40,9 @@ pub(crate) fn scrub_board_dds(
     let records = {
         let mut statement = connection
             .prepare(
-                "SELECT b.artwork_id, i.board_id, i.id, i.file_path, i.width, i.height
-                   FROM pin_board_images i
+                "SELECT b.artwork_id, i.board_id, i.id, bm.file_path, bm.width, bm.height
+                   FROM pin_board_items i
+                   JOIN pin_board_bitmaps bm ON bm.item_id = i.id
                    JOIN pin_boards b ON b.id = i.board_id
                   ORDER BY b.artwork_id, i.board_id, i.id",
             )
@@ -74,7 +75,7 @@ pub(crate) fn scrub_board_dds(
         if cancelled() {
             return Err("画板 DDS 完整性检查已取消".into());
         }
-        report.images += 1;
+        report.bitmaps += 1;
         let relative = board_dds_relative_path(artwork_id, *board_id, *image_id);
         referenced.insert(relative.clone());
         let expected_name = format!("{image_id}.dds");
@@ -114,7 +115,7 @@ fn board_dds_relative_path(artwork_id: &str, board_id: i64, image_id: i64) -> St
     )
 }
 
-/// 校验单条记录的 DDS：路径归属（文件名须为 `<image-id>.dds`，由调用方先行判定）、
+/// 校验单条记录的 DDS：路径归属（文件名须为 `<item-id>.dds`，由调用方先行判定）、
 /// 文件存在、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度、BC7 解码。
 fn check_dds_file(root: &Path, relative: &str, width: u32, height: u32) -> DdsCheck {
     let path = match storage::resolve_path(root, relative) {
@@ -254,15 +255,15 @@ mod tests {
         (directory, artwork_id, 1)
     }
 
-    fn insert_image(root: &Path, board_id: i64, image_id: i64, width: u32, height: u32) {
+    fn insert_image(root: &Path, board_id: i64, item_id: i64, width: u32, height: u32) {
         storage::open(root)
             .unwrap()
-            .execute(
-                "INSERT INTO pin_board_images
-                   (id, board_id, file_path, width, height, created_ms)
-                 VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-                params![image_id, board_id, format!("{image_id}.dds"), width, height],
-            )
+            .execute_batch(&format!(
+                "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                   VALUES ({item_id}, {board_id}, 0, 0);
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                   VALUES ({item_id}, '{item_id}.dds', {width}, {height});"
+            ))
             .unwrap();
     }
 
@@ -302,7 +303,7 @@ mod tests {
         assert_eq!(
             report,
             BoardDdsReport {
-                images: 3,
+                bitmaps: 3,
                 missing: 1,
                 corrupt: 1,
                 orphans: 1,
@@ -322,7 +323,7 @@ mod tests {
         assert_eq!(
             scrub_board_dds(&root, || false, |_, _| {}).unwrap(),
             BoardDdsReport {
-                images: 1,
+                bitmaps: 1,
                 ..BoardDdsReport::default()
             }
         );
@@ -338,7 +339,7 @@ mod tests {
         storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE pin_board_images SET file_path = 'elsewhere.dds' WHERE id = 1",
+                "UPDATE pin_board_bitmaps SET file_path = 'elsewhere.dds' WHERE item_id = 1",
                 [],
             )
             .unwrap();

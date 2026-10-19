@@ -71,11 +71,18 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 **磁盘实际口径**：只扫描仓库目录本身，外部首次导出路径不计入。manifest 中可识别的 snapshot / delta / 最终成品 / 认证仓库副本 / 画板 DDS 按实际文件大小归类；SQLite 主库与 WAL、仓库 `temp/`、作品 `artworks/<artwork>/temp/`（备份与恢复的暂存区，含崩溃残留的 `.tmp*`）、未识别文件合并为「其它」。分类之和等于仓库目录实际文件字节。两套口径并列显示、不静默合并；差异本身用于发现记录与磁盘不一致。
 
-**画板 DDS 分类**按「条目是否存在实体文件」判定：阶段 6 查询 `pin_board_images.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`；阶段 7 重建画板表后只把同一判定改为 `pin_board_bitmaps.file_path`，不引入 kind 枚举。
+**画板 DDS 分类**按「条目是否存在实体文件」判定：查询 `pin_board_bitmaps.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`。文字条目没有载荷行，不进入磁盘与记录口径。
 
 **压缩比分层报告**：snapshot 压缩比 = `Σ 快照节点 logical_size / Σ 快照文件字节`；delta 还原比 = `Σ 父节点 logical_size / Σ history_edges.delta_size`，不混算整仓平均。明细按作品 → 分支 → 节点展开，逐行给出 `logical_size`、`chunk_file_size`（snapshot 行为快照文件大小，其余行为重建读取量）、`chunk_count`、压缩比与 checkpoint / snapshot 标记；画板与认证输出按类别展开。
 
 聚合固定为 8 条查询（`src-tauri/src/storage_overview.rs` 的 `overview_from_connection`），不按作品或节点逐条回查；30 作品 / 360 节点的 debug 单测记录查询次数与耗时上界。
+
+## 仓库版本迁移
+
+- 当前 `SCHEMA_VERSION = 5`，新建仓库直接以 v5 落库。打开旧仓库时沿 `v1 → v2 → v3 → v4 → v5` 迁移链向前升级。
+- **更新版本的仓库一律拒绝打开**：例如 0.2 线（支持到 v4）遇到 v5 仓库会直接返回“由更新版本的 Lilith Artworks 创建”并停止，不尝试读写或降级，避免旧程序按旧结构写入造成损坏；轻量版本检查同样要求精确匹配当前版本。
+- `v4 → v5` 是 0.3 唯一一次表重建：画板改为 `pin_board_items` + `pin_board_bitmaps` / `pin_board_texts` 多态结构，旧 `pin_board_images` 与 `image_id` 历史原位迁移；`history_nodes` 追加 `thumbnail`、`thumbnail_version`、`verified_ms`、`verify_error`；删除 `branches` 上 0.2 遗留的 `verified_history_id` / `verified_ms` / `verify_error`；建立 snapshot/delta/认证路径索引与 `repository_backup_runs`。
+- 迁移在 `PRAGMA foreign_keys = OFF` 下用 `BEGIN IMMEDIATE` 执行，提交前做 `PRAGMA foreign_key_check`；任一步失败整笔回滚并保留 v4 原表，提交后才恢复 `foreign_keys = ON`。
 
 ## 提交与恢复
 
@@ -85,7 +92,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 仓储页提供可取消的全库完整性扫描。扫描在共享运行锁和仓库 lease 内逐个物化全部历史节点，因此同时覆盖 snapshot 缺失、格式/块损坏、delta 损坏以及数据库摘要不匹配。设置弹窗打开或操作运行期间由应用层轮询共享备份运行状态，显示当前阶段、确定/不确定进度和统一取消入口；状态预检会阻止把新的设置页长任务排在已有备份操作之后。
 
-备份视图也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。备份视图在本次运行内显示最近一次创建备份的文件数、大小与恢复路径；重启后不保留，持久化改由 alpha3 的 v4 → v5 迁移承接（见计划 §2.2）。
+备份视图也提供在线整仓备份，用户可见命名统一为“创建备份”。命令在共享运行锁和仓库 lease 内先 checkpoint SQLite WAL，再按扫描、复制、校验、发布阶段把数据库和仓库内全部普通文件逐块复制到同一目标卷的临时 bundle；符号链接、仓库内部输出目录和复制期间变化的文件会被拒绝。复制阶段边复制边计算每个文件的完整 SHA-256 与首尾各 64 KiB 的抽样摘要，写入 v2 `manifest.json`，生成清单时不再完整重读这些文件；只有副本校验与 checkpoint 会改写的数据库主文件重新取摘要。副本的领域校验由应用层注入的 `contracts::RepositoryIntegrityProvider` 完成（打开副本、历史链 scrub、受控发布文件 scrub），灾备核心不再直接导入 library/authenticity；计数随报告返回。发布前先复核清单：`Sample` 模式只重读每个文件首尾各 64 KiB 的抽样摘要，`Full` 模式完整重读（内部保留的强校验选项），两者都同时核对文件集合与大小；复核通过后才以目录重命名发布。取消或失败会显式清理未发布的临时 bundle，并把清理成功或失败附加到返回错误。命令在复制开始之前（校验目标目录之后）还会清扫目标目录**顶层**残留的未发布暂存目录：只处理名字为 `.lilith-artworks-<32 位十六进制>.tmp`、确实是目录（用 `symlink_metadata` 判断，不跟随符号链接）且修改时间早于 30 分钟宽限期的项，逐个删除并把回收数量与失败数写入返回报告（`reclaimedStagingDirectories` / `failedStagingDirectories`）。宽限期避免误删正在进行（本进程或另一进程）的灾备暂存目录，删除失败只计数、不阻断本次备份；只碰顶层、不递归匹配。应用不持久化上一次的目标目录，因此不提供针对旧目标的独立清扫入口。bundle 内的 `repository/` 是可直接打开的恢复副本，`manifest.json` 位于其外层。分支工作文件是仓库外部输入，不属于整仓备份；恢复后仍需保证相应外部工作文件可用，或为分支重新选择工作文件。备份成功后会把本次结果写入 `repository_backup_runs`（文件数、总字节、历史节点/成品/认证计数、恢复路径与完成时间）；设置页重启后读取最新一行显示最近一次备份，失败写入只记警告，不改变已经成功的备份结果。
 
 ## 调度
 
@@ -109,15 +116,15 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 调度器在第一优先级（到期自动备份）之外增加第二优先级：仓库空闲时校验分支 head 的链路完整性，作为完整扫描之外的“新链早发现”。它只在前台命令、待处理手动提交和到期备份都不占用时运行，并随托盘“暂停所有自动备份”一并暂停（用户意图是“别动仓库”）。没有到期备份时校验始终先走；有到期备份时，连续完成 4 次自动备份后若已有就绪候选，先插队跑一轮校验（aging，防低优先级饥饿；计数在校验批次完成后清零）。每轮选出一批候选回到循环顶部重新评估优先级，保证到期备份与前台操作的响应性。
 
-派生队列不引入独立的待办表：查询所有未进回收站、`head_history_id` 非空且 `verified_history_id` 与 head 不一致（含 `verified_history_id IS NULL`）的分支，`verify_error` 非空的分支暂不重试。条件显式写成 `head_history_id IS NOT NULL AND (verified_history_id IS NULL OR verified_history_id != head_history_id)`，避免 SQL 的 NULL 语义把无 head 的分支纳入队列并每轮空跑。该查询不要求 `backup_enabled`（手动提交的分支同样需要校验），也不排除已发布分支（其 head 是强制检查点，校验成本低）——与排除已发布分支的备份调度查询是两条不同查询。回收站过滤经 `artworks → library_nodes.trashed_ms` 判断。新提交、精简改接、检查点在改变 head 时天然使分支重新入队，重启后队列自动重建。
+派生队列不引入独立的待办表：查询所有未进回收站、`head_history_id` 非空且 head 节点 `verified_ms IS NULL`、`verify_error IS NULL` 的分支；已有校验失败的分支暂不重试。该查询不要求 `backup_enabled`（手动提交的分支同样需要校验），也不排除已发布分支（其 head 是强制检查点，校验成本低）——与排除已发布分支的备份调度查询是两条不同查询。回收站过滤经 `artworks → library_nodes.trashed_ms` 判断。新提交会生成新的 head 节点，校验列自然为空，因此分支重新入队；重启后队列同样由节点状态自动重建。
 
 每轮只校验 head 节点 `created_ms` 已早于 `now - IDLE_VERIFY_DELAY_MS`（常量，默认 10 分钟）的候选，避免刚写完就整链重读；这里用 head 节点的创建时间而不是 `last_check_ms`——快速检查的“内容未变化”会推进后者但不改变 head，用它会让延迟条件永不满足。候选按 Artwork 去重，同一作品同时最多一个校验任务；每批最多 4 个任务并行。每个任务在自己的线程里只做只读准备（复查候选、读取 snapshot 并逐块验证），并持有独立的 `OperationId` 与取消/让位令牌；结果写回仍在共享运行锁内串行执行，锁内再次确认 head 未变。手动提交成功会经既有 `wake_scheduler` 唤醒调度器，新 head 随之进入派生队列；精简与检查点不改变 head，因此不触发重新入队。
 
 校验范围收敛到 head 的单个 snapshot：`materialization_chain` 在目标节点持有 snapshot 时只返回该节点，而 head 恒持有 snapshot（提交以非可选 snapshot 建节点，`unmark_checkpoint` 拒绝取消 head、分支起点与分叉点的检查点），因此校验 head 等价于校验它的一个 snapshot 文件。实现复用 `validate_snapshot`（比对 `ChunkFile::file_digest()` 与数据库 `sha256`，并把全部分块流入 sink 逐块验哈希），不回溯整条链。
 
-结果写入 `branches` 的校验列：成功且锁内确认 head 未变时写 `verified_history_id` 与 `verified_ms` 并清空 `verify_error`；失败写 `verify_error`，分支退出队列（不自动重试），直到 head 变化或用户手动重查。单个任务的校验失败只影响该分支；取消或前台让位不写结果、不计为失败。校验失败只记录警告，永不自动禁用备份、不阻断提交与恢复，也不进入自动备份的失败退避——两者独立。全库完整性扫描（`scrub_repository_integrity`）仍是唯一的全量保证，空闲校验与它是互补关系。
+结果写入 head 节点的校验列：成功且锁内确认 head 未变时写 `history_nodes.verified_ms` 并清空 `history_nodes.verify_error`；失败写 head 节点的 `verify_error`，分支退出队列（不自动重试），直到 head 变化或用户手动重查。单个任务的校验失败只影响该分支；取消或前台让位不写结果、不计为失败。校验失败只记录警告，永不自动禁用备份、不阻断提交与恢复，也不进入自动备份的失败退避——两者独立。全库完整性扫描（`scrub_repository_integrity`）仍是唯一的全量保证，空闲校验与它是互补关系。v4 → v5 迁移删除了 `branches` 上 0.2 遗留的校验三列；节点级列同时为后续缩略图/节点校验界面提供持久结构。
 
-分支状态行把校验失败作为独立于备份失败的第三态展示：备份失败沿用 `lastError`，链路校验失败单独用警示色摘要 + 可展开详情（含复制入口），并附“重新校验此分支”按钮（清除 `verify_error` 并唤醒调度器重新入队）与“运行全库扫描”引导。两者语义独立、文案不合并。
+分支状态行把校验失败作为独立于备份失败的第三态展示：备份失败沿用 `lastError`，链路校验失败单独用警示色摘要 + 可展开详情（含复制入口），数据来自 head 节点的 `verify_error`，并附“重新校验此分支”按钮（清空 head 节点 `verify_error` 并唤醒调度器重新入队）与“运行全库扫描”引导。两者语义独立、文案不合并。
 
 ## 历史操作
 

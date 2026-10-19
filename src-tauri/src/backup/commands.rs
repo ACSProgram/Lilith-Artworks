@@ -92,6 +92,19 @@ pub(crate) async fn reverify_branch_history(
 }
 
 #[tauri::command]
+pub(crate) async fn get_last_repository_backup_run(
+    coordinator: State<'_, OperationCoordinator>,
+) -> Result<Option<crate::backup::RepositoryBackupRun>, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::Backup, |context| {
+            usecases::backup::last_repository_backup(context)
+        })
+        .await
+        .map_err(String::from)
+}
+
+#[tauri::command]
 pub(crate) fn get_backup_runtime_status(
     state: State<'_, BackupState>,
 ) -> Result<BackupRuntimeStatus, String> {

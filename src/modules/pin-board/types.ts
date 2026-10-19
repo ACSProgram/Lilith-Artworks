@@ -30,12 +30,12 @@ export interface PinBoardSummary {
 
 export interface PinBoardClipboardImage {
   sourceBoardId: number;
-  sourceImageId: number;
+  sourceItemId: number;
   width: number;
   height: number;
   displayWidth: number;
   displayHeight: number;
-  uv: PinBoardImage["uv"];
+  uv: PinBoardItem["uv"];
 }
 
 export interface PinBoardTransferProgress {
@@ -44,9 +44,11 @@ export interface PinBoardTransferProgress {
   total: number;
 }
 
-export interface PinBoardImage {
+export type PinBoardTextAlign = "left" | "center" | "right";
+
+interface PinBoardItemBase {
   boardId: number;
-  imageId: number;
+  itemId: number;
   width: number;
   height: number;
   order: number;
@@ -57,22 +59,39 @@ export interface PinBoardImage {
   available: boolean;
 }
 
+/** 位图条目：纹理来自仓库内的 DDS 文件。 */
+export interface PinBoardBitmapItem extends PinBoardItemBase {
+  kind: "bitmap";
+}
+
+/** 文字条目：没有实体文件，由前端按需栅格化。 */
+export interface PinBoardTextItem extends PinBoardItemBase {
+  kind: "text";
+  text: string;
+  fontFamily: string;
+  fontSize: number;
+  color: string;
+  align: PinBoardTextAlign;
+}
+
+export type PinBoardItem = PinBoardBitmapItem | PinBoardTextItem;
+
 export interface PinBoardView {
   boardId: number;
   name: string;
-  images: PinBoardImage[];
+  items: PinBoardItem[];
   missingTextures: number;
   revision: string;
   nowStep: number;
 }
 
-export interface PinBoardEditableImage {
-  imageId: number;
+export interface PinBoardEditableItem {
+  itemId: number;
   order: number;
   layer: number;
   deleted: boolean;
-  points: PinBoardImage["points"];
-  uv: PinBoardImage["uv"];
+  points: PinBoardItem["points"];
+  uv: PinBoardItem["uv"];
 }
 
 export interface SavePinBoardResult {
@@ -83,5 +102,5 @@ export interface SavePinBoardResult {
 
 export interface PinBoardMutationResult {
   view: PinBoardView;
-  imageIds: number[];
+  itemIds: number[];
 }

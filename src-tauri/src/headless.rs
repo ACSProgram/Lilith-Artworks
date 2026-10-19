@@ -987,7 +987,7 @@ fn import_board_images(
         .unwrap_or_default()
         .to_owned();
     let image_count = view
-        .get("images")
+        .get("items")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
     Ok(json!({

@@ -9,10 +9,11 @@
 - 选择判定（加选修饰键、框选命中）：`selection.ts`
 - 进程内视图恢复：`session.ts`
 - Tauri 命令与类型：`api.ts`、`types.ts`
+- 绘制、度量与导出共用的文字布局/栅格化：`textLayout.ts`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
-- 素材板表定义（自仓库 schema v2 引入）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`）
+- 素材板表定义（仓库 schema v5 起为多态条目）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -22,7 +23,7 @@
 
 素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
 
-整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板。设置页的"仓库完整性"扫描已覆盖画板 DDS 的双向检查：逐条 `pin_board_images` 记录校验 DDS 存在、路径归属（`<image-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；`pin_board_images` 无摘要列且不做 schema 迁移，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
+整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
 前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为 controller 与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存/导入/导出状态、错误状态，并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者；`PinBoardModule.tsx` 只负责视图、弹窗与局部交互，`PinBoardRenderer` 只处理 GPU、画板装载与绘制。导入/导出/文字的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
 
@@ -36,12 +37,12 @@
 
 工作区挂载：历史/发布/识别三个窗格以 `artworkId` 为 key 整块重置，**素材板窗格不带 key**，因此跨作品保留渲染器与设备；仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
-持久化只属于 Rust：SQLite（仓库 schema v2 引入的三张素材板表）保存画板、图片记录与 step 历史；BC7 DDS 实体文件存于 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`。不迁移 Lilith Client 的旧 `index.json` 画板库。
+持久化只属于 Rust：SQLite（仓库 schema v5 起的多态条目表）保存画板、公共条目、按 kind 的载荷子表与 step 历史；位图实体存为 BC7 DDS `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，文字载荷只存数据库。不迁移 Lilith Client 的旧 `index.json` 画板库。
 
 ## 并发与锁
 
 - 普通浏览（列表、加载、纹理读取、导出 PNG 到剪贴板）经 `OperationCoordinator::run_read`
-  走共享读租约；各读命令附带标签（如 `read_pin_board_texture board=.. image=.. dim=..`），使
+  走共享读租约；各读命令附带标签（如 `read_pin_board_texture board=.. item=.. dim=..`），使
   `repository read took N ms` 慢读告警能归因到具体命令；
 - 保存、粘贴、导入、画板增删改与回收站操作经 `run_repository_write` 走仓库 lease + 仓库操作锁；
   结算（`finalize_pin_board`）改走 `run_repository_write_shutdown`，以 Shutdown 优先级插入进程内
@@ -53,13 +54,16 @@
 
 ```text
 <repository>/artworks/<artwork-id>/
-  boards/<board-id>/<image-id>.dds    ← 图片实体（BC7，沿用归一化规则）
+  boards/<board-id>/<item-id>.dds    ← 位图条目实体（BC7）；文字条目没有文件
 
 SQLite:
   pin_boards        id, artwork_id, name, sort_order, now_step, max_step,
                     revision, deleted_at(回收站软删除), 时间戳
-  pin_board_images  id, board_id, file_path, 逻辑宽高
-  pin_board_history (board_id, image_id, step) → deleted, layer, sort_order,
+  pin_board_items   id, board_id, kind(0=位图, 1=文字), created_ms
+  pin_board_bitmaps item_id, file_path, 逻辑宽高
+  pin_board_texts   item_id, text, font_family, font_size, color, align,
+                    measured_width, measured_height
+  pin_board_history (board_id, item_id, step) → deleted, layer, sort_order,
                     transform_json(points/uv)
 ```
 
@@ -67,7 +71,7 @@ SQLite:
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；两者都经共享 `ConfirmDialog` 确认，其中「清空回收站」的最终动作由滑动确认控件承担，单块画板的永久删除沿用点击确认；
-- 画板结算清除仍为删除状态的图片记录时，其 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_images` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
+- 画板结算清除仍为删除状态的条目时，位图条目的 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。文字条目没有实体文件，结算只删除条目记录。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_bitmaps` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
 - 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页「空间」页的「文件清理」区确认后入队清理（该区同时列出待清理队列并支持单条/全部重试）；`cleanup::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。设置页「空间」页的队列与扫描入口见 `docs/modules/history-and-backup.md`。
 
 ## 命令面
@@ -78,18 +82,19 @@ SQLite:
 
 画板内容：
 
-- `load_pin_board`、`save_pin_board`、`finalize_pin_board`
-- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图/文字素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出进度经 `CommandContext` 广播 `AppEvent.operationProgress` 回传（不再使用 `Channel`，只保留给需要传输大块载荷的通道）
-- `export_pin_board_images`（PNG 到用户选择目录）、`read_pin_board_image_png`（系统剪贴板复制）、`read_pin_board_texture`（画板 ID + 图片 ID + 请求长边）
+- `load_pin_board`、`save_pin_board`（`items` 为纯变换 DTO）、`finalize_pin_board`
+- `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出进度经 `CommandContext` 广播 `AppEvent.operationProgress` 回传（不再使用 `Channel`，只保留给需要传输大块载荷的通道）
+- `create_pin_board_text`（文本、字号、颜色、对齐、前端度量宽高与中心点）——文字条目只落数据库，不生成图片；创建后 0.3 不支持改字/改色/改字号
+- `export_pin_board_images`（位图条目解码为 PNG 到用户选择目录）、`write_pin_board_item_png`（前端按导出倍率栅格化并在浏览器编码 PNG，原生端校验格式、尺寸与像素预算后原子写盘）、`read_pin_board_image_png`（系统剪贴板复制，仅位图）、`read_pin_board_texture`（位图读取 DDS；文字返回“无 DDS”信号，前端栅格化）
 - `read_pin_board_clipboard_paths`（Windows `CF_HDROP`）
 
 **仓库外路径的两道闸门**与认证模块同一口径，各管一件事：
 
-- `import_pin_board_images` / `export_pin_board_images` 在命令层用
+- `import_pin_board_images` / `export_pin_board_images` / `write_pin_board_item_png` 在命令层用
   `path_scope::ensure_authorized` 要求每条源图路径与导出目录都已在 Tauri 文件系统 scope
   中（原生文件选择器会自动写入）。scope 属于 UI 关注点，检查实现放在
   `src-tauri/src/path_scope.rs`，认证与素材板共用，领域模块之间不互相导入；
-- `repository::import_images` / `export_images` 在领域层用
+- `repository::import_images` / `export_images` / `write_text_png` 在领域层用
   `storage::ensure_outside_repository` 拒绝仓库内部的源文件与导出目录——GUI 与无头入口
   都会经过本函数，因此这一道对两条链路同时生效。
 
@@ -114,17 +119,17 @@ SQLite:
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
-- “添加文字”生成透明 PNG 素材，尺寸补齐到 4 像素压缩块边界，走普通图片导入链路；
+- “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。导出时按逻辑长边的 2 倍（受 8192 与 64 MiB RGBA 像素预算约束）栅格化，由浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘——传的是压缩后的 PNG 而不是 RGBA，避免一次 IPC 搬运数千万个数字。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计和画板内复制；系统剪贴板复制只支持位图；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
 - 画板列表为空或未选中画板时，画布区域显示“当前未选择素材板”等占位提示，不显示加载动画；
-- 纹理未就绪的占位：画布上可见、但**缩略图与高清纹理都尚未就绪**的图片，会在其显示范围上铺一块中性灰方框（DOM 层 `.pin-board-placeholder-layer`，由 `renderer.updatePlaceholderOverlay` 按世界→屏幕变换定位），中心是旋转的强调色弧线图标；方框随平移/缩放/旋转同步，图标反向抵消图片角度保持竖直，并随方框缩放（任一边小于 18px 时只留底色）。纹理到位后由下一次 `draw()` 自动移除；节点按 `imageId` 复用，画板释放与 `destroy()` 时清理。加载失败的图片（`failedTextureDimensions` 有记录）改显**红色调**方框与静态 `!` 徽标，不再无限转圈。占位层 `pointer-events: none`，不影响拖拽、框选与拖入导入；缺失 DDS 的图片（`available: false`）不在可见集内，因此不显示占位（仍由工具栏「N 张缺失」提示）；
+- 纹理未就绪的占位：画布上可见、但**缩略图与高清纹理都尚未就绪**的图片，会在其显示范围上铺一块中性灰方框（DOM 层 `.pin-board-placeholder-layer`，由 `renderer.updatePlaceholderOverlay` 按世界→屏幕变换定位），中心是旋转的强调色弧线图标；方框随平移/缩放/旋转同步，图标反向抵消图片角度保持竖直，并随方框缩放（任一边小于 18px 时只留底色）。纹理到位后由下一次 `draw()` 自动移除；节点按 `itemId` 复用，画板释放与 `destroy()` 时清理。加载失败的图片（`failedTextureDimensions` 有记录）改显**红色调**方框与静态 `!` 徽标，不再无限转圈。占位层 `pointer-events: none`，不影响拖拽、框选与拖入导入；缺失 DDS 的图片（`available: false`）不在可见集内，因此不显示占位（仍由工具栏「N 张缺失」提示）；
 - 侧栏画板支持拖放排序（沿用 Client 的拖放语义）：拖动行到目标行的上/下半区决定插入到前/后，落库前先本地乐观重排，失败回滚；`reorder_pin_boards` 要求传入的 id 集合与当前未删除画板完全一致（缺项、重复或跨作品 id 一律拒绝），顺序只是列表元数据，不影响已打开画板的编辑会话；
 - 将当前选中画板移入回收站时渲染器不销毁，只以「跳过旧画板 finalize」的方式切换：有回退画板时 `loadBoard(..., finalizeCurrent=false)`，无可回退画板时 `unloadBoard(false)`；跳过对已删除画板的 finalize 保存，避免时序上的写库失败。
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、controller 生命周期注册与进度事件），不启动 Tauri；
-- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序/迁移（临时目录 SQLite），不依赖 Tauri 运行时；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、controller 生命周期注册与进度事件），不启动 Tauri；
+- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4→v5 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字条目与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

@@ -1469,8 +1469,9 @@ mod tests {
             .is_empty());
     }
 
-    /// 造一条画板图片记录（`pin_board_images`），供画板 DDS 引用检查使用。
-    fn insert_pin_board_image(root: &Path, artwork_id: &str, board_id: i64, image_id: i64) {
+    /// 造一条画板位图条目（`pin_board_items` + `pin_board_bitmaps`），供画板
+    /// DDS 引用检查使用。
+    fn insert_pin_board_image(root: &Path, artwork_id: &str, board_id: i64, item_id: i64) {
         storage::open(root)
             .unwrap()
             .execute_batch(&format!(
@@ -1479,9 +1480,10 @@ mod tests {
                    (id, artwork_id, name, sort_order, now_step, max_step, revision,
                     created_ms, updated_ms)
                  VALUES ({board_id}, '{artwork_id}', 'board', 0, 0, 0, '{}', 0, 0);
-                 INSERT INTO pin_board_images
-                   (id, board_id, file_path, width, height, created_ms)
-                 VALUES ({image_id}, {board_id}, '{image_id}.dds', 4, 4, 0);",
+                 INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                 VALUES ({item_id}, {board_id}, 0, 0);
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                 VALUES ({item_id}, '{item_id}.dds', 4, 4);",
                 "0".repeat(64)
             ))
             .unwrap();
@@ -1515,7 +1517,7 @@ mod tests {
             .map(|candidate| candidate.path.clone())
             .collect::<Vec<_>>();
 
-        // 只有无记录的 DDS 被报告；仍被 pin_board_images 引用的保留。
+        // 只有无记录的 DDS 被报告；仍被 pin_board_bitmaps 引用的保留。
         assert_eq!(candidates.len(), 1);
         assert!(paths.contains(&storage::relative_path(&root, &orphan).unwrap()));
         assert!(!paths.contains(&storage::relative_path(&root, &referenced).unwrap()));

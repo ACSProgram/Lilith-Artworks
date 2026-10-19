@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use rusqlite::{Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 use crate::storage;
 
@@ -8,15 +8,12 @@ use crate::storage;
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 4;
+pub(super) const SCHEMA_VERSION: i64 = 5;
 
-/// 素材板（pin-board）三张表。v2 起：
-/// - `pin_boards`：按 Artwork 平铺一层画板，`deleted_at` 为回收站软删除；
-/// - `pin_board_images`：图片记录，DDS 实体存于
-///   `artworks/<artwork-id>/boards/<board-id>/<image-id>.dds`；
-/// - `pin_board_history`：每张图片按 step 的历史状态（撤销/恢复持久化），
-///   变换（points/uv）以 JSON 存储。
-const PIN_BOARD_TABLES_SQL: &str = "
+/// v2 的素材板三张表必须冻结为旧形状：`v1 → v2` 迁移会先建出这些表，再由
+/// `v4 → v5` 重建。若复用更新后的建表 SQL，v1 仓库会在 v2 步骤直接建出 v5 表，
+/// 随后的 v5 重建就找不到旧表。
+const PIN_BOARD_TABLES_V2_SQL: &str = "
              CREATE TABLE pin_boards (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                artwork_id TEXT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
@@ -54,6 +51,92 @@ const PIN_BOARD_TABLES_SQL: &str = "
                PRIMARY KEY (board_id, image_id, step)
              );";
 
+/// v5 素材板：公共条目表 + 按 kind 的载荷子表。
+///
+/// - `pin_board_items`：与 kind 无关的公共列，`kind = 0` 位图、`kind = 1` 文字；
+/// - `pin_board_bitmaps`：位图载荷，DDS 实体存于
+///   `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`；
+/// - `pin_board_texts`：文字载荷（固定字体族、度量结果随条目持久化）；
+/// - `pin_board_history`：每个条目按 step 的变换历史，不承载载荷。
+const PIN_BOARD_TABLES_SQL: &str = "
+             CREATE TABLE pin_boards (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               artwork_id TEXT NOT NULL REFERENCES artworks(id) ON DELETE CASCADE,
+               name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 120),
+               sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+               now_step INTEGER NOT NULL DEFAULT 0 CHECK (now_step >= 0),
+               max_step INTEGER NOT NULL DEFAULT 0 CHECK (max_step >= 0),
+               revision TEXT NOT NULL CHECK (length(revision) = 64),
+               deleted_at INTEGER,
+               created_ms INTEGER NOT NULL,
+               updated_ms INTEGER NOT NULL
+             );
+             CREATE INDEX pin_boards_artwork
+               ON pin_boards(artwork_id, deleted_at, sort_order, id);
+             CREATE INDEX pin_boards_trash ON pin_boards(deleted_at, id);
+
+             CREATE TABLE pin_board_items (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+               kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+               created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX pin_board_items_board ON pin_board_items(board_id, id);
+
+             CREATE TABLE pin_board_bitmaps (
+               item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+               file_path TEXT NOT NULL,
+               width INTEGER NOT NULL CHECK (width > 0),
+               height INTEGER NOT NULL CHECK (height > 0)
+             );
+
+             CREATE TABLE pin_board_texts (
+               item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+               text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 5000),
+               font_family TEXT NOT NULL CHECK (length(font_family) BETWEEN 1 AND 200),
+               font_size REAL NOT NULL CHECK (font_size > 0 AND font_size <= 1000),
+               color TEXT NOT NULL CHECK (length(color) = 7),
+               align TEXT NOT NULL CHECK (align IN ('left', 'center', 'right')),
+               measured_width REAL NOT NULL CHECK (measured_width > 0),
+               measured_height REAL NOT NULL CHECK (measured_height > 0)
+             );
+
+             CREATE TABLE pin_board_history (
+               board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+               item_id INTEGER NOT NULL REFERENCES pin_board_items(id) ON DELETE CASCADE,
+               step INTEGER NOT NULL CHECK (step >= 0),
+               deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+               layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 2),
+               sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+               transform_json TEXT NOT NULL,
+               PRIMARY KEY (board_id, item_id, step)
+             );";
+
+const PATH_INDEXES_SQL: &str = "
+             CREATE INDEX IF NOT EXISTS history_nodes_snapshot_path
+               ON history_nodes(snapshot_path) WHERE snapshot_path IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS history_nodes_delta_path
+               ON history_nodes(delta_path) WHERE delta_path IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS certification_records_stored_path
+               ON certification_records(stored_path);
+             CREATE INDEX IF NOT EXISTS certification_records_output_path
+               ON certification_records(output_path);";
+
+const REPOSITORY_BACKUP_RUNS_SQL: &str = "
+             CREATE TABLE repository_backup_runs (
+               id TEXT PRIMARY KEY,
+               backup_path TEXT NOT NULL,
+               repository_path TEXT NOT NULL,
+               file_count INTEGER NOT NULL CHECK (file_count >= 0),
+               total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+               history_nodes INTEGER NOT NULL CHECK (history_nodes >= 0),
+               final_artifacts INTEGER NOT NULL CHECK (final_artifacts >= 0),
+               certification_records INTEGER NOT NULL CHECK (certification_records >= 0),
+               created_ms INTEGER NOT NULL
+             );
+             CREATE INDEX repository_backup_runs_created
+               ON repository_backup_runs(created_ms DESC, id);";
+
 #[cfg(test)]
 thread_local! {
     static INTEGRITY_CHECK_COUNT: Cell<usize> = const { Cell::new(0) };
@@ -69,7 +152,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
                INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '4');
+               ('schema_version', '5');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -115,9 +198,6 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                backup_quick_enabled INTEGER NOT NULL DEFAULT 0 CHECK (backup_quick_enabled IN (0, 1)),
                last_source_size INTEGER,
                last_source_modified_ms INTEGER,
-               verified_history_id TEXT,
-               verified_ms INTEGER,
-               verify_error TEXT,
                created_ms INTEGER NOT NULL,
                updated_ms INTEGER NOT NULL,
                UNIQUE (artwork_id, source_path_key)
@@ -140,6 +220,10 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                chunk_count INTEGER NOT NULL CHECK (chunk_count >= 0),
                snapshot_path TEXT,
                delta_path TEXT,
+               thumbnail BLOB,
+               thumbnail_version INTEGER,
+               verified_ms INTEGER,
+               verify_error TEXT,
                CHECK (snapshot_path IS NOT NULL OR delta_path IS NOT NULL)
              );
              CREATE INDEX history_nodes_parent ON history_nodes(parent_id, created_ms, id);
@@ -225,6 +309,10 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
              CREATE INDEX pending_file_cleanup_created
                ON pending_file_cleanup(created_ms, id);
+
+             {PATH_INDEXES_SQL}
+
+             {REPOSITORY_BACKUP_RUNS_SQL}
 
              CREATE TRIGGER artwork_nodes_only
              BEFORE INSERT ON artworks
@@ -338,7 +426,8 @@ pub(super) fn validate_repository_semantics(
              UNION ALL SELECT 'history_nodes.id', id FROM history_nodes
              UNION ALL SELECT 'final_artifacts.id', id FROM final_artifacts
              UNION ALL SELECT 'certification_records.id', id FROM certification_records
-             UNION ALL SELECT 'pending_file_cleanup.id', id FROM pending_file_cleanup",
+             UNION ALL SELECT 'pending_file_cleanup.id', id FROM pending_file_cleanup
+             UNION ALL SELECT 'repository_backup_runs.id', id FROM repository_backup_runs",
         )
         .map_err(storage::database_error)?;
     let id_rows = ids
@@ -362,8 +451,8 @@ pub(super) fn validate_repository_semantics(
              UNION ALL SELECT 'final_artifacts.source_path', source_path FROM final_artifacts
              UNION ALL SELECT 'certification_records.stored_path', stored_path
                FROM certification_records
-             UNION ALL SELECT 'pin_board_images.file_path', file_path
-               FROM pin_board_images
+             UNION ALL SELECT 'pin_board_bitmaps.file_path', file_path
+               FROM pin_board_bitmaps
              UNION ALL SELECT 'pending_file_cleanup.path', path FROM pending_file_cleanup
                WHERE path_kind <> 'external_file'",
         )
@@ -447,30 +536,46 @@ fn repository_version(connection: &Connection) -> Result<i64, String> {
 }
 
 fn validate_current_version(version: i64) -> Result<(), String> {
+    if version > SCHEMA_VERSION {
+        return Err(newer_version_error(version));
+    }
     if version != SCHEMA_VERSION {
         return Err(format!("作品仓库版本不受支持：{version}"));
     }
     Ok(())
 }
 
-/// 打开既有仓库时执行追加式 schema 迁移。迁移不支持回退；高于当前版本的
-/// 仓库直接拒绝打开。v1 → v2 追加素材板三张表；v2 → v3 为分支追加快速
-/// 自动备份开关与上次全量检查记录的源文件元数据；v3 → v4 为分支追加空闲
-/// 链路校验状态（最近校验通过的 head、校验时间与失败摘要）。全部为追加列，
-/// 不改既有数据；v4 三列只是校验结果的派生缓存，不参与外键约束。
-pub(super) fn migrate(connection: &Connection) -> Result<(), String> {
+/// 打开「比自己新」的仓库时统一用它拒绝：迁移与校验两条路径共用同一句文案，
+/// 避免旧程序改写新结构。
+fn newer_version_error(version: i64) -> String {
+    format!(
+        "作品仓库由更新版本的 Lilith Artworks 创建（schema v{version}，当前版本支持到 \
+         v{SCHEMA_VERSION}），已拒绝打开以避免损坏仓库"
+    )
+}
+
+/// 打开既有仓库时执行 schema 迁移。迁移不支持回退；高于当前版本的仓库直接
+/// 拒绝打开。v1 → v2 追加素材板三张表；v2 → v3 为分支追加快速自动备份开关与
+/// 上次全量检查记录的源文件元数据；v3 → v4 为分支追加空闲链路校验状态；
+/// v4 → v5 是 0.3 唯一一次表重建：画板条目改为多态结构，`history_nodes`
+/// 追加缩略图与节点级校验列，删除 0.2 遗留的 `branches` 校验三列，并建立路径
+/// 索引与 `repository_backup_runs`。
+pub(super) fn migrate(connection: &mut Connection) -> Result<(), String> {
     let version = repository_version(connection)?;
     if version == SCHEMA_VERSION {
         return Ok(());
     }
-    if version < 1 || version > SCHEMA_VERSION {
+    if version > SCHEMA_VERSION {
+        return Err(newer_version_error(version));
+    }
+    if version < 1 {
         return Err(format!("作品仓库版本不受支持：{version}"));
     }
     if version < 2 {
         connection
             .execute_batch(&format!(
                 "BEGIN IMMEDIATE;
-                 {PIN_BOARD_TABLES_SQL}
+                 {PIN_BOARD_TABLES_V2_SQL}
                  UPDATE repository_meta SET value = '2' WHERE key = 'schema_version';
                  COMMIT;"
             ))
@@ -501,7 +606,113 @@ pub(super) fn migrate(connection: &Connection) -> Result<(), String> {
             )
             .map_err(|error| format!("无法迁移作品数据库结构：{error}"))?;
     }
+    if version < 5 {
+        migrate_v4_to_v5(connection)?;
+    }
     Ok(())
+}
+
+/// v4 → v5：在 `PRAGMA foreign_keys = OFF` 下重建画板表并一次性补齐 0.3 的
+/// 持久结构。外键检查在事务内、提交前执行，任一步失败整笔回滚；提交后恢复
+/// `foreign_keys = ON`。
+fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("无法暂停外键检查进行迁移：{error}"))?;
+    let migration = (|| -> Result<(), String> {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage::database_error)?;
+        transaction
+            .execute_batch(
+                "ALTER TABLE pin_board_history RENAME TO pin_board_history_v4;
+                 ALTER TABLE pin_board_images RENAME TO pin_board_images_v4;
+
+                 CREATE TABLE pin_board_items (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+                   created_ms INTEGER NOT NULL
+                 );
+                 CREATE INDEX pin_board_items_board ON pin_board_items(board_id, id);
+
+                 CREATE TABLE pin_board_bitmaps (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   file_path TEXT NOT NULL,
+                   width INTEGER NOT NULL CHECK (width > 0),
+                   height INTEGER NOT NULL CHECK (height > 0)
+                 );
+
+                 CREATE TABLE pin_board_texts (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 5000),
+                   font_family TEXT NOT NULL CHECK (length(font_family) BETWEEN 1 AND 200),
+                   font_size REAL NOT NULL CHECK (font_size > 0 AND font_size <= 1000),
+                   color TEXT NOT NULL CHECK (length(color) = 7),
+                   align TEXT NOT NULL CHECK (align IN ('left', 'center', 'right')),
+                   measured_width REAL NOT NULL CHECK (measured_width > 0),
+                   measured_height REAL NOT NULL CHECK (measured_height > 0)
+                 );
+
+                 CREATE TABLE pin_board_history (
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   item_id INTEGER NOT NULL REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   step INTEGER NOT NULL CHECK (step >= 0),
+                   deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                   layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 2),
+                   sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                   transform_json TEXT NOT NULL,
+                   PRIMARY KEY (board_id, item_id, step)
+                 );
+
+                 INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                   SELECT id, board_id, 0, created_ms FROM pin_board_images_v4;
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                   SELECT id, file_path, width, height FROM pin_board_images_v4;
+                 INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                   SELECT board_id, image_id, step, deleted, layer, sort_order, transform_json
+                     FROM pin_board_history_v4;
+
+                 DROP TABLE pin_board_history_v4;
+                 DROP TABLE pin_board_images_v4;
+
+                 ALTER TABLE history_nodes ADD COLUMN thumbnail BLOB;
+                 ALTER TABLE history_nodes ADD COLUMN thumbnail_version INTEGER;
+                 ALTER TABLE history_nodes ADD COLUMN verified_ms INTEGER;
+                 ALTER TABLE history_nodes ADD COLUMN verify_error TEXT;
+
+                 ALTER TABLE branches DROP COLUMN verified_history_id;
+                 ALTER TABLE branches DROP COLUMN verified_ms;
+                 ALTER TABLE branches DROP COLUMN verify_error;",
+            )
+            .map_err(|error| format!("无法重建素材板结构：{error}"))?;
+        transaction
+            .execute_batch(PATH_INDEXES_SQL)
+            .map_err(|error| format!("无法建立路径索引：{error}"))?;
+        transaction
+            .execute_batch(REPOSITORY_BACKUP_RUNS_SQL)
+            .map_err(|error| format!("无法建立整仓备份记录表：{error}"))?;
+        {
+            let mut foreign_keys = transaction
+                .prepare("PRAGMA foreign_key_check")
+                .map_err(storage::database_error)?;
+            if foreign_keys.exists([]).map_err(storage::database_error)? {
+                return Err("v5 迁移后的外键完整性检查失败".into());
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE repository_meta SET value = '5' WHERE key = 'schema_version'",
+                [],
+            )
+            .map_err(storage::database_error)?;
+        transaction.commit().map_err(storage::database_error)
+    })();
+    let restored = connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("无法恢复外键检查：{error}"));
+    migration.and(restored)
 }
 
 #[cfg(test)]

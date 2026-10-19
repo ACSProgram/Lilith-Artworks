@@ -8,6 +8,15 @@
 
 ## 当前批次状态
 
+2026-10-19 批次（alpha3 阶段 7，进行中）：画板条目已泛化为多态 item（位图 + 文字），并落地唯一
+一次 v4 → v5 迁移：`pin_board_items` / `pin_board_bitmaps` / `pin_board_texts`、
+`history_nodes` 缩略图与节点级校验列、删除 `branches` 旧校验三列、路径索引与
+`repository_backup_runs`。渲染、清理、scrub、空间统计与导出按 kind 分派；文字由前端按同一套字体
+度量栅格化，导出在浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘；备份页重启后
+读取最近一次整仓备份。`cargo test --lib`（273 通过）、`npx tsc --noEmit`、`npm test`（235 通过）
+与 `cargo fmt --check` 已通过，改动已提交；GUI 手工验收（文字清晰度、定位、导出、迁移后的旧仓库）
+尚未进行。更新版本的仓库会被旧程序直接拒绝，避免降级写入。
+
 2026-10-19 批次（下午）：**alpha2 收口、阶段 9 计划修订与 `0.3.0-alpha.2` 切分**。维护者验收
 alpha2 并决定进入 alpha3：阶段 6（设置页拆「仓储 / 空间 / 备份」与仓储空间仪表盘）、同仓库
 写入排队修复与超期临时目录清扫均通过验收并归档；写入闸门的人工验收与 `stress_concurrency`
@@ -39,8 +48,8 @@ I/J 复跑仍未进行，记入 `todo.md` 的「alpha2 遗留验收」。同日�
   算法；不改持久 schema（仓库保持 v4）。逐阶段实现记录、提交清单、各阶段落实口径与计划裁剪说明
   见 `archive/handoff-log-2026-10-18.md`；行为变化见 `CHANGELOG.md` 的 `## 0.3.0-alpha.1` 小节；
   落地契约见 `docs/architecture/overview.md` 与 `docs/modules/`。
-- **下一步**：进入 alpha3（原阶段 7–9：画板条目多态、节点缩略图、空闲完整性检查），共用唯一
-  一次 v4 → v5 迁移，从阶段 7 开始；批次划分、依赖与阶段口径见
+- **下一步**：阶段 7 已实现并完成自动验证，等待 GUI 手工验收；随后进入阶段 8–9（节点缩略图、
+  空闲完整性检查），沿用已落地的 v5 节点级列。批次划分、依赖与阶段口径见
   `0.3-architecture-algorithm-plan-2026-10-05.md`。`manual` 档压力测试按发布前口径另行安排。
 - alpha2 的实现记录（阶段 6 的设置拆分与仪表盘、写入闸门、临时目录清扫）已随验收归档，见
   `archive/handoff-log-2026-10-19.md` 第 7 节与 `archive/repository-write-lock-plan-2026-10-18.md`；
@@ -54,9 +63,9 @@ I/J 复跑仍未进行，记入 `todo.md` 的「alpha2 遗留验收」。同日�
 - 版本：`dev` 已切 `0.3.0-alpha.2`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
   schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
   `docs/guides/release-policy.md` 单独决定。
-- repository schema v4；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。
-  0.3 alpha1 与 alpha2 保持 v4（alpha1 的清理仅用连接内临时表），唯一一次 v4 → v5 迁移由 alpha3
-  阶段 7 执行。
+- repository schema v5（alpha3 阶段 7 已落地）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2
+  （设置页可回退到 v1）。0.3 alpha1 与 alpha2 保持 v4；唯一一次 v4 → v5 迁移已随阶段 7 实现，
+  高于当前版本的仓库由旧程序直接拒绝。
 - 0.3 基线（阶段 0 一次性采集）：临时仓库副本 `D:\temp\Artworks`（3 作品 / 59 历史节点 /
   ≈9.83 GiB），采集后已按采集前状态还原。该副本是**外部临时资料**，随 0.3 计划落实后撤除，
   不作为本项目的长期测试夹具或门槛；后续批次的回归对照用 `stress_bench` 与 `stress_baseline`

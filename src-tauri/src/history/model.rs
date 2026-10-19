@@ -28,9 +28,10 @@ pub(crate) struct ArtworkBranch {
     pub(crate) backup_disable_notice_pending: bool,
     pub(crate) final_artifact_locked: bool,
     pub(crate) published_count: u32,
-    /// 最近一次空闲链路校验失败的摘要；成功或 head 变化时清空。
+    /// head 节点的空闲链路校验失败摘要；v5 起取自 `history_nodes.verify_error`，
+    /// 成功或 head 变化时清空。
     pub(crate) verify_error: Option<String>,
-    /// 最近一次校验通过的时间；成功写入 `verified_history_id` 时一并记录。
+    /// head 节点最近一次校验通过的时间；与 `verify_error` 同源（`history_nodes.verified_ms`）。
     pub(crate) verified_ms: Option<i64>,
 }
 

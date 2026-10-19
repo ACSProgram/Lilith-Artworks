@@ -1,7 +1,7 @@
 //! 素材板（pin-board）领域模块：按 Artwork 的自由画布图片工作台。
 //!
 //! - 前端唯一入口为 `src/modules/pin-board/api.ts`，命令名与 DTO 以本模块为准；
-//! - 持久化见 `repository.rs`（schema v2 三张表），图像格式见 `dds.rs`；
+//! - 持久化见 `repository.rs`（schema v5 多态条目表），图像格式见 `dds.rs`；
 //! - 普通浏览走共享读租约，保存/导入/粘贴/删除等变更走仓库 lease + 仓库操作锁
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
@@ -23,15 +23,14 @@ use crate::{
     cleanup, path_scope,
 };
 use repository::{
-    EditablePinBoardImage, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
-    SavePinBoardResult,
+    EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView, SavePinBoardResult,
 };
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PinBoardMutationResult {
     view: PinBoardView,
-    image_ids: Vec<i64>,
+    item_ids: Vec<i64>,
 }
 
 #[tauri::command]
@@ -179,13 +178,13 @@ pub(crate) async fn load_pin_board(
 pub(crate) async fn save_pin_board(
     coordinator: State<'_, OperationCoordinator>,
     board_id: i64,
-    images: Vec<EditablePinBoardImage>,
+    items: Vec<EditablePinBoardItem>,
     expected_revision: String,
 ) -> Result<SavePinBoardResult, String> {
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            usecases::pin_board::save_board(context, board_id, &images, &expected_revision)
+            usecases::pin_board::save_board(context, board_id, &items, &expected_revision)
         })
         .await
         .map_err(String::from)
@@ -219,7 +218,7 @@ pub(crate) async fn paste_pin_board_images(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            let (view, image_ids) = usecases::pin_board::paste_images(
+            let (view, item_ids) = usecases::pin_board::paste_images(
                 context,
                 board_id,
                 &images,
@@ -228,7 +227,7 @@ pub(crate) async fn paste_pin_board_images(
                 gap,
                 &expected_revision,
             )?;
-            Ok(PinBoardMutationResult { view, image_ids })
+            Ok(PinBoardMutationResult { view, item_ids })
         })
         .await
         .map_err(String::from)
@@ -254,7 +253,7 @@ pub(crate) async fn import_pin_board_images(
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
             context.report_progress("正在导入图片", 0, 0);
-            let (view, image_ids) = usecases::pin_board::import_images(
+            let (view, item_ids) = usecases::pin_board::import_images(
                 context,
                 board_id,
                 &paths,
@@ -266,7 +265,7 @@ pub(crate) async fn import_pin_board_images(
                     context.report_progress("正在导入图片", current as u64, total as u64)
                 },
             )?;
-            Ok(PinBoardMutationResult { view, image_ids })
+            Ok(PinBoardMutationResult { view, item_ids })
         })
         .await
         .map_err(String::from)
@@ -285,7 +284,7 @@ pub(crate) async fn import_pin_board_clipboard_image(
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
             context.report_progress("正在处理剪贴板图片", 0, 3);
-            let (view, image_ids) = usecases::pin_board::import_clipboard_image(
+            let (view, item_ids) = usecases::pin_board::import_clipboard_image(
                 context,
                 board_id,
                 &bytes,
@@ -294,7 +293,45 @@ pub(crate) async fn import_pin_board_clipboard_image(
                 &expected_revision,
             )?;
             context.report_progress("正在保存剪贴板图片", 3, 3);
-            Ok(PinBoardMutationResult { view, image_ids })
+            Ok(PinBoardMutationResult { view, item_ids })
+        })
+        .await
+        .map_err(String::from)
+}
+
+/// 新增文字条目：文本、字体度量与颜色由前端给出，Rust 只负责存储与位置。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub(crate) async fn create_pin_board_text(
+    coordinator: State<'_, OperationCoordinator>,
+    board_id: i64,
+    text: String,
+    font_size: f64,
+    color: String,
+    align: String,
+    measured_width: f64,
+    measured_height: f64,
+    center_x: f64,
+    center_y: f64,
+    expected_revision: String,
+) -> Result<PinBoardMutationResult, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::PinBoard, move |context| {
+            let (view, item_ids) = usecases::pin_board::create_text(
+                context,
+                board_id,
+                &text,
+                font_size,
+                &color,
+                &align,
+                measured_width,
+                measured_height,
+                center_x,
+                center_y,
+                &expected_revision,
+            )?;
+            Ok(PinBoardMutationResult { view, item_ids })
         })
         .await
         .map_err(String::from)
@@ -305,7 +342,7 @@ pub(crate) async fn export_pin_board_images(
     coordinator: State<'_, OperationCoordinator>,
     window: tauri::WebviewWindow,
     board_id: i64,
-    image_ids: Vec<i64>,
+    item_ids: Vec<i64>,
     output_directory: String,
 ) -> Result<usize, String> {
     path_scope::ensure_authorized(
@@ -319,7 +356,7 @@ pub(crate) async fn export_pin_board_images(
             usecases::pin_board::export_images(
                 context,
                 board_id,
-                &image_ids,
+                &item_ids,
                 &output_directory,
                 |current, total| {
                     context.report_progress("正在导出图片", current as u64, total as u64)
@@ -330,16 +367,47 @@ pub(crate) async fn export_pin_board_images(
         .map_err(String::from)
 }
 
+/// 写出文字条目的导出图：前端按屏幕同一套字体度量栅格化并编码 PNG，原生端
+/// 只校验格式与尺寸后原子写盘。
+#[tauri::command]
+pub(crate) async fn write_pin_board_item_png(
+    coordinator: State<'_, OperationCoordinator>,
+    window: tauri::WebviewWindow,
+    board_id: i64,
+    item_id: i64,
+    output_directory: String,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    path_scope::ensure_authorized(
+        &window.fs_scope(),
+        Path::new(output_directory.trim()),
+        "导出位置",
+    )?;
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::PinBoard, move |context| {
+            usecases::pin_board::write_item_png(
+                context,
+                board_id,
+                item_id,
+                &output_directory,
+                &bytes,
+            )
+        })
+        .await
+        .map_err(String::from)
+}
+
 #[tauri::command]
 pub(crate) async fn read_pin_board_image_png(
     coordinator: State<'_, OperationCoordinator>,
     board_id: i64,
-    image_id: i64,
+    item_id: i64,
 ) -> Result<Response, String> {
     let coordinator = coordinator.inner().clone();
     let bytes = coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            usecases::pin_board::read_image_png(context, board_id, image_id)
+            usecases::pin_board::read_image_png(context, board_id, item_id)
         })
         .await
         .map_err(String::from)?;
@@ -350,7 +418,7 @@ pub(crate) async fn read_pin_board_image_png(
 pub(crate) async fn read_pin_board_texture(
     coordinator: State<'_, OperationCoordinator>,
     board_id: i64,
-    image_id: i64,
+    item_id: i64,
     max_dimension: u32,
 ) -> Result<Response, String> {
     let cache_level = coordinator
@@ -363,7 +431,7 @@ pub(crate) async fn read_pin_board_texture(
             usecases::pin_board::read_texture(
                 context,
                 board_id,
-                image_id,
+                item_id,
                 max_dimension,
                 &cache_level,
             )

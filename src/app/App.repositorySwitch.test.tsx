@@ -21,6 +21,7 @@ const appApi = vi.hoisted(() => ({
   getBackupDisableNoticeTarget: vi.fn(),
   scrubRepositoryIntegrity: vi.fn(),
   createRepositoryBackup: vi.fn(),
+  getLastRepositoryBackupRun: vi.fn(async () => null),
   getBackupRuntimeStatus: vi.fn(),
   cancelBackupOperation: vi.fn(),
   getRepositoryStorageOverview: vi.fn(),
@@ -488,7 +489,7 @@ describe("App repository switching", () => {
       historyNodes: 3,
       finalArtifacts: 1,
       certificationRecords: 2,
-      pinBoardImages: 5,
+      pinBoardBitmaps: 5,
       pinBoardMissingDds: 0,
       pinBoardCorruptDds: 0,
       pinBoardOrphanDds: 0,
@@ -503,7 +504,7 @@ describe("App repository switching", () => {
 
     expect(
       await screen.findByText(
-        "完整性检查通过：3 个历史节点、1 个最终成品、2 条认证记录、5 张画板图片。",
+        "完整性检查通过：3 个历史节点、1 个最终成品、2 条认证记录、5 个画板位图。",
       ),
     ).toBeTruthy();
   });
@@ -522,7 +523,7 @@ describe("App repository switching", () => {
       historyNodes: 3,
       finalArtifacts: 1,
       certificationRecords: 2,
-      pinBoardImages: 5,
+      pinBoardBitmaps: 5,
       pinBoardMissingDds: 1,
       pinBoardCorruptDds: 0,
       pinBoardOrphanDds: 2,
@@ -537,7 +538,7 @@ describe("App repository switching", () => {
 
     expect(
       await screen.findByText(
-        "完整性检查完成，但发现画板 DDS 问题：缺失 1、损坏 0、孤儿 2（共 5 张画板图片）。",
+        "完整性检查完成，但发现画板 DDS 问题：缺失 1、损坏 0、孤儿 2（共 5 个画板位图）。",
       ),
     ).toBeTruthy();
   });

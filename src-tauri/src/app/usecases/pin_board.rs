@@ -2,7 +2,7 @@ use crate::{
     app::command_runtime::{CommandContext, CommandError},
     cleanup,
     pin_board::repository::{
-        self, EditablePinBoardImage, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
+        self, EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
         SavePinBoardResult,
     },
     storage,
@@ -153,7 +153,7 @@ pub(crate) fn load_board(
 pub(crate) fn save_board(
     context: &CommandContext,
     board_id: i64,
-    images: &[EditablePinBoardImage],
+    items: &[EditablePinBoardItem],
     expected_revision: &str,
 ) -> Result<SavePinBoardResult, CommandError> {
     context.run_repository_write(|session| {
@@ -162,7 +162,7 @@ pub(crate) fn save_board(
             &mut connection,
             session.root(),
             board_id,
-            images,
+            items,
             expected_revision,
         )
         .map_err(CommandError::from)
@@ -267,10 +267,44 @@ pub(crate) fn import_clipboard_image(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_text(
+    context: &CommandContext,
+    board_id: i64,
+    text: &str,
+    font_size: f64,
+    color: &str,
+    align: &str,
+    measured_width: f64,
+    measured_height: f64,
+    center_x: f64,
+    center_y: f64,
+    expected_revision: &str,
+) -> Result<(PinBoardView, Vec<i64>), CommandError> {
+    context.run_repository_write(|session| {
+        let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
+        repository::create_text(
+            &mut connection,
+            session.root(),
+            board_id,
+            text,
+            font_size,
+            color,
+            align,
+            measured_width,
+            measured_height,
+            center_x,
+            center_y,
+            expected_revision,
+        )
+        .map_err(CommandError::from)
+    })
+}
+
 pub(crate) fn export_images(
     context: &CommandContext,
     board_id: i64,
-    image_ids: &[i64],
+    item_ids: &[i64],
     output_directory: &str,
     on_progress: impl FnMut(usize, usize),
 ) -> Result<usize, CommandError> {
@@ -280,9 +314,30 @@ pub(crate) fn export_images(
             &connection,
             session.root(),
             board_id,
-            image_ids,
+            item_ids,
             output_directory,
             on_progress,
+        )
+        .map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn write_item_png(
+    context: &CommandContext,
+    board_id: i64,
+    item_id: i64,
+    output_directory: &str,
+    bytes: &[u8],
+) -> Result<String, CommandError> {
+    context.run_repository_write(|session| {
+        let connection = storage::open(session.root()).map_err(CommandError::from)?;
+        repository::write_text_png(
+            &connection,
+            session.root(),
+            board_id,
+            item_id,
+            output_directory,
+            bytes,
         )
         .map_err(CommandError::from)
     })
@@ -291,12 +346,12 @@ pub(crate) fn export_images(
 pub(crate) fn read_image_png(
     context: &CommandContext,
     board_id: i64,
-    image_id: i64,
+    item_id: i64,
 ) -> Result<Vec<u8>, CommandError> {
-    let label = format!("read_pin_board_image_png board={board_id} image={image_id}");
+    let label = format!("read_pin_board_image_png board={board_id} item={item_id}");
     context.run_read(&label, |session| {
         let connection = storage::open(session.root()).map_err(CommandError::from)?;
-        repository::read_image_png(&connection, session.root(), board_id, image_id)
+        repository::read_image_png(&connection, session.root(), board_id, item_id)
             .map_err(CommandError::from)
     })
 }
@@ -304,19 +359,19 @@ pub(crate) fn read_image_png(
 pub(crate) fn read_texture(
     context: &CommandContext,
     board_id: i64,
-    image_id: i64,
+    item_id: i64,
     max_dimension: u32,
     cache_level: &str,
 ) -> Result<Vec<u8>, CommandError> {
     let label =
-        format!("read_pin_board_texture board={board_id} image={image_id} dim={max_dimension}");
+        format!("read_pin_board_texture board={board_id} item={item_id} dim={max_dimension}");
     context.run_read(&label, |session| {
         let connection = storage::open(session.root()).map_err(CommandError::from)?;
         repository::read_texture(
             &connection,
             session.root(),
             board_id,
-            image_id,
+            item_id,
             max_dimension,
             crate::pin_board::dds::texture_cache_budget_bytes(cache_level),
         )

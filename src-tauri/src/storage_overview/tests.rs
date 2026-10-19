@@ -208,12 +208,12 @@ fn insert_board_image(
     height: i64,
 ) {
     connection
-        .execute(
-            "INSERT INTO pin_board_images
-               (id, board_id, file_path, width, height, created_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, 0)",
-            params![id, board_id, file_path, width, height],
-        )
+        .execute_batch(&format!(
+            "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+               VALUES ({id}, {board_id}, 0, 0);
+             INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+               VALUES ({id}, '{file_path}', {width}, {height});"
+        ))
         .unwrap();
 }
 

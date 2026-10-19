@@ -13,6 +13,11 @@ import { registerPinBoardLifecycleParticipant } from "./lifecycle";
 import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
 import { getBoardSession, getSelectedBoardId, setSelectedBoardId } from "./session";
 import { textureBudgetsForLevel } from "./texturePolicy";
+import {
+  exportTextMaxDimension,
+  measurePinBoardText,
+  rasterizePinBoardTextPng,
+} from "./textLayout";
 import type {
   PinBoardClipboardImage,
   PinBoardModuleSettings,
@@ -56,34 +61,6 @@ async function clipboardImageBytes(): Promise<number[] | null> {
     // Clipboard access may be unavailable; import falls back to paths and the dialog.
   }
   return null;
-}
-
-async function renderTextImage(text: string, fontSize: number, color: string): Promise<number[]> {
-  const lines = text.replace(/\r\n?/g, "\n").split("\n");
-  const canvas = document.createElement("canvas");
-  const context = canvas.getContext("2d");
-  if (!context) throw new Error("无法创建文字画布");
-  const font = `${fontSize}px "Microsoft YaHei UI", "Segoe UI", sans-serif`;
-  const padding = Math.max(12, Math.ceil(fontSize * 0.35));
-  const lineHeight = Math.ceil(fontSize * 1.3);
-  context.font = font;
-  const textWidth = Math.max(...lines.map((line) => context.measureText(line || " ").width));
-  const width = Math.max(4, Math.ceil(textWidth + padding * 2));
-  const height = Math.max(4, lineHeight * lines.length + padding * 2);
-  canvas.width = Math.ceil(width / 4) * 4;
-  canvas.height = Math.ceil(height / 4) * 4;
-  context.clearRect(0, 0, canvas.width, canvas.height);
-  context.font = font;
-  context.fillStyle = color;
-  context.textBaseline = "top";
-  lines.forEach((line, index) => context.fillText(line, padding, padding + index * lineHeight));
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((result) => {
-      if (result) resolve(result);
-      else reject(new Error("无法生成文字图片"));
-    }, "image/png");
-  });
-  return Array.from(new Uint8Array(await blob.arrayBuffer()));
 }
 
 export interface PinBoardControllerOptions {
@@ -461,9 +438,9 @@ export function usePinBoardController({
     try {
       const result = await action(current, current.boardRevision);
       if (!isLoadCurrent(sequence)) return null;
-      current.applyMutationResult(result.view, result.imageIds);
+      current.applyMutationResult(result.view, result.itemIds);
       setInteraction(current.interactionState);
-      setStatus(success(result.imageIds.length));
+      setStatus(success(result.itemIds.length));
       return result;
     } catch (error) {
       if (isLoadCurrent(sequence)) setStatus(errorMessage(error));
@@ -485,8 +462,13 @@ export function usePinBoardController({
   }, []);
 
   const copyImages = useCallback(() => {
-    const images = rendererRef.current?.copySelection() ?? [];
-    if (images.length === 0) return;
+    const current = rendererRef.current;
+    const selectedIds = current?.selectedImageIds() ?? [];
+    const images = current?.copySelection() ?? [];
+    if (images.length === 0) {
+      if (selectedIds.length > 0) setStatus("文字条目暂不支持画板内复制。");
+      return;
+    }
     clipboardRef.current = images;
     setClipboardCount(images.length);
     setStatus(`已复制 ${images.length} 张画板图片`);
@@ -495,7 +477,13 @@ export function usePinBoardController({
   const copyImageToClipboard = useCallback(async () => {
     const current = rendererRef.current;
     const imageId = current?.copyImageToClipboardId() ?? null;
-    if (!current || imageId === null || selected === null) return;
+    if (!current || selected === null) return;
+    if (imageId === null) {
+      if (current.selectedImageIds().length > 0) {
+        setStatus("文字条目暂不支持复制到系统剪贴板。");
+      }
+      return;
+    }
     try {
       const response = await pinBoardApi.readPinBoardImagePng(selected, imageId);
       const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
@@ -618,8 +606,8 @@ export function usePinBoardController({
           (count) => `已导入 ${count} 张图片`,
         );
         if (!result) break;
-        imported += result.imageIds.length;
-        const placed = result.view.images.find((image) => result.imageIds.includes(image.imageId));
+        imported += result.itemIds.length;
+        const placed = result.view.items.find((image) => result.itemIds.includes(image.itemId));
         if (placed) {
           centerX += Math.hypot(
             placed.points[1][0] - placed.points[0][0],
@@ -646,14 +634,21 @@ export function usePinBoardController({
     if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
     transferBusyRef.current = true;
     transferOperationId.current = null;
-    setTransferProgress({ label: "正在生成文字", current: 0, total: 3 });
+    setTransferProgress({ label: "正在添加文字", current: 0, total: 1 });
     try {
-      const bytes = await renderTextImage(text, fontSize, color);
+      // 度量与渲染共用 `textLayout`；Rust 只持久化度量结果与载荷，不生成图片。
+      // 对话框不提供对齐选项，条目统一按居中排版（Rust 侧已校验取值）。
+      const metrics = measurePinBoardText(text, fontSize);
       await replaceAfterImageMutation((renderer, revision) => {
         const [centerX, centerY] = placement;
-        return pinBoardApi.importPinBoardClipboardImage(
+        return pinBoardApi.createPinBoardText(
           selected,
-          bytes,
+          text,
+          fontSize,
+          color,
+          "center",
+          metrics.width,
+          metrics.height,
           centerX,
           centerY,
           revision,
@@ -674,20 +669,32 @@ export function usePinBoardController({
   const exportImages = useCallback(async () => {
     const current = rendererRef.current;
     if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
-    const imageIds = current.selectedImageIds();
-    if (imageIds.length === 0) return;
+    const itemIds = current.selectedImageIds();
+    if (itemIds.length === 0) return;
     transferBusyRef.current = true;
     transferOperationId.current = null;
     try {
       const directory = await pickPinBoardExportDirectory();
       if (!directory || !await current.save()) return;
-      setTransferProgress({ label: "正在导出图片", current: 0, total: imageIds.length });
-      const count = await pinBoardApi.exportPinBoardImages(
+      setTransferProgress({ label: "正在导出图片", current: 0, total: itemIds.length });
+      let count = await pinBoardApi.exportPinBoardImages(
         selected,
-        imageIds,
+        itemIds,
         directory,
       );
-      setStatus(`已导出 ${count} 张图片`);
+      // 文字条目由前端按导出倍率栅格化并编码 PNG，逐条写盘；位图由原生端解码。
+      for (const item of current.selectedTextItems()) {
+        setTransferProgress({ label: "正在导出文字", current: count, total: itemIds.length });
+        const png = await rasterizePinBoardTextPng(item, exportTextMaxDimension(item));
+        await pinBoardApi.writePinBoardItemPng(
+          selected,
+          item.itemId,
+          directory,
+          Array.from(png),
+        );
+        count += 1;
+      }
+      setStatus(`已导出 ${count} 个条目`);
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {

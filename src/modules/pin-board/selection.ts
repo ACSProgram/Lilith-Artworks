@@ -1,5 +1,5 @@
 import { quadIntersectsBounds, type Bounds } from "./geometry";
-import type { PinBoardImage } from "./types";
+import type { PinBoardItem } from "./types";
 
 /**
  * 加选修饰键：Ctrl/Cmd 或 Shift。
@@ -22,14 +22,14 @@ export function isAdditiveSelectionModifier(event: {
  * 不会取消，可多次框选累加），否则传空集合（替换框选）。返回新的集合，不修改入参。
  */
 export function marqueeSelection(
-  images: readonly PinBoardImage[],
+  images: readonly PinBoardItem[],
   bounds: Bounds,
   base: Iterable<number>,
 ): Set<number> {
   const selected = new Set<number>(base);
   for (const image of images) {
     if (!image.deleted && image.available && quadIntersectsBounds(image.points, bounds)) {
-      selected.add(image.imageId);
+      selected.add(image.itemId);
     }
   }
   return selected;
@@ -42,8 +42,8 @@ export function sameSelection(
 ): boolean {
   if (left === right) return true;
   if (left.size !== right.size) return false;
-  for (const imageId of left) {
-    if (!right.has(imageId)) return false;
+  for (const itemId of left) {
+    if (!right.has(itemId)) return false;
   }
   return true;
 }

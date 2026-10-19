@@ -11,6 +11,38 @@ decision, so an untagged version is transitional.
 
 ## Unreleased
 
+### Added
+
+- Pin-board items are now polymorphic (`pin_board_items` plus per-kind payload
+  tables) instead of images only. A text item is the first non-bitmap kind:
+  `create_pin_board_text` stores text, font, size, colour, alignment and the
+  front-end's measured logical size; the renderer rasterizes it on demand at the
+  requested texture long edge with the same font metrics used for export. Export
+  rasterizes text at twice its logical long edge, encodes PNG in the webview and
+  hands the bytes to `write_pin_board_item_png`, which validates the payload and
+  publishes it atomically; shipping compressed PNG instead of raw RGBA keeps the
+  IPC payload in the hundreds of kilobytes. Text has no DDS, so copying it inside
+  the board or to the system clipboard remains bitmap-only for now, while export
+  handles both kinds.
+- The repository schema moves to v5 with a single v4 → v5 migration. It rebuilds
+  the pin-board tables while preserving item IDs and step history, adds
+  `history_nodes.thumbnail` / `thumbnail_version` / `verified_ms` /
+  `verify_error`, removes the legacy `branches` verification columns, creates
+  snapshot/delta/certification path indexes and adds `repository_backup_runs`.
+  Failed migrations roll back completely, and repositories from a newer schema
+  are refused before any write so an older build cannot corrupt them.
+- Repository backups record their result in `repository_backup_runs`, and
+  `get_last_repository_backup_run` lets the settings page show the latest backup
+  after a restart instead of only within the current run.
+
+### Changed
+
+- Cleanup, unreferenced scans, DDS scrubbing, storage accounting and reference
+  inventories now read `pin_board_bitmaps`; text items have no file path and are
+  excluded by construction. Idle link verification keeps its previous behaviour
+  by storing success/failure on the checked head node until the stage 9
+  node-level verifier replaces it.
+
 ## 0.3.0-alpha.2 - 2026-10-19
 
 ### Added

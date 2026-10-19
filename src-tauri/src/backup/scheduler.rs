@@ -404,7 +404,8 @@ fn select_idle_verify(
 }
 
 /// 单个链路校验的只读结论。校验失败作为 `IdleVerifyError::Failed` 返回：
-/// 它会被写入 `verify_error` 并使分支退出队列，与其他后台任务互不影响。
+/// 它会被写入 head 节点的 `verify_error` 并使分支退出自动队列，与其他后台任务
+/// 互不影响。
 struct PreparedVerify {
     target: IdleVerifyTarget,
     outcome: Result<(), IdleVerifyError>,
@@ -426,7 +427,8 @@ impl From<String> for VerifyBatchError {
 /// 并行准备 + 串行写回一批链路校验。
 ///
 /// 文件校验是只读的，按 Artwork 最多并行 `IDLE_VERIFY_WORKERS` 条；写
-/// `verified_history_id` / `verify_error` 仍经共享运行锁串行执行，不并行写事务。
+/// `history_nodes.verified_ms` / `verify_error` 仍经共享运行锁串行执行，不并行
+/// 写事务。
 fn run_verify_batch(
     app_state: &AppState,
     state: &BackupState,
@@ -693,7 +695,7 @@ enum IdleVerifyError {
     /// 有前台命令在等待共享运行锁，本轮让位，不计入失败。
     ForegroundWaiting,
     Cancelled,
-    /// 校验失败（摘要已写入 `verify_error`）；不重试，也不影响备份。
+    /// 校验失败（摘要已写入 head 节点的 `verify_error`）；不重试，也不影响备份。
     Failed(String),
     Infrastructure(String),
 }

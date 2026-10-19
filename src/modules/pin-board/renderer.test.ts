@@ -3,7 +3,7 @@ import { viewportBounds, type Viewport } from "./geometry";
 import { PinBoardRenderer } from "./renderer";
 import { pinBoardApi } from "./api";
 import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
-import type { PinBoardImage } from "./types";
+import type { PinBoardItem } from "./types";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -49,13 +49,14 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
   return renderer;
 }
 
-function boardImage(imageId: number, points: PinBoardImage["points"], deleted = false): PinBoardImage {
+function boardImage(itemId: number, points: PinBoardItem["points"], deleted = false): PinBoardItem {
   return {
     boardId: 1,
-    imageId,
+    itemId,
+    kind: "bitmap",
     width: 100,
     height: 100,
-    order: imageId,
+    order: itemId,
     layer: 1,
     deleted,
     points,
@@ -227,13 +228,14 @@ describe("pin-board renderer keep-alive", () => {
   });
 
   it("generates preview candidates first so scrolling never blanks a board image", () => {
-    const points = [[0, 0], [400, 0], [400, 300], [0, 300]] as unknown as PinBoardImage["points"];
+    const points = [[0, 0], [400, 0], [400, 300], [0, 300]] as unknown as PinBoardItem["points"];
     const image = {
-      imageId: 7,
+      itemId: 7,
+      kind: "bitmap",
       width: 4000,
       height: 3000,
       points,
-    } as unknown as PinBoardImage;
+    } as unknown as PinBoardItem;
     const renderer = rendererWith({
       visibleImages: [image],
       previewTextures: new Map(),
@@ -260,13 +262,14 @@ describe("pin-board renderer keep-alive", () => {
   });
 
   it("skips the preview candidate once a thumbnail is already resident", () => {
-    const points = [[0, 0], [400, 0], [400, 300], [0, 300]] as unknown as PinBoardImage["points"];
+    const points = [[0, 0], [400, 0], [400, 300], [0, 300]] as unknown as PinBoardItem["points"];
     const image = {
-      imageId: 7,
+      itemId: 7,
+      kind: "bitmap",
       width: 4000,
       height: 3000,
       points,
-    } as unknown as PinBoardImage;
+    } as unknown as PinBoardItem;
     const renderer = rendererWith({
       visibleImages: [image],
       previewTextures: new Map([[7, makeLoaded(256 * 1024, 1)]]),
@@ -351,7 +354,7 @@ describe("pin-board renderer keep-alive", () => {
 });
 
 type AutosaveTestRenderer = {
-  afterModelChange: (imageIds: number[]) => void;
+  afterModelChange: (itemIds: number[]) => void;
   save: () => Promise<boolean>;
   destroy: (finalize?: boolean) => void;
   setAutosaveEnabled: (enabled: boolean) => void;
@@ -571,7 +574,7 @@ type SelectionTestRenderer = {
   selectAll: () => void;
 };
 describe("pin-board renderer select-all", () => {
-  const quad: PinBoardImage["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
+  const quad: PinBoardItem["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
 
   it("selects every non-deleted image on the whole board", () => {
     const refreshSelectionVisuals = vi.fn();
@@ -606,8 +609,8 @@ describe("pin-board renderer select-all", () => {
 });
 
 describe("pin-board additive marquee selection", () => {
-  const topLeft: PinBoardImage["points"] = [[-450, 450], [-350, 450], [-350, 350], [-450, 350]];
-  const bottomRight: PinBoardImage["points"] = [[350, -350], [450, -350], [450, -450], [350, -450]];
+  const topLeft: PinBoardItem["points"] = [[-450, 450], [-350, 450], [-350, 350], [-450, 350]];
+  const bottomRight: PinBoardItem["points"] = [[350, -350], [450, -350], [450, -450], [350, -450]];
   const topLeftBounds = { minX: -500, minY: 300, maxX: -300, maxY: 500 };
   const bottomRightBounds = { minX: 300, minY: -500, maxX: 500, maxY: -300 };
 

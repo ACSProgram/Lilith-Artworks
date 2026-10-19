@@ -6,6 +6,7 @@ use std::{
     time::UNIX_EPOCH,
 };
 
+use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -45,6 +46,20 @@ pub(crate) struct RepositoryBackupReport {
     pub(crate) certification_records: u64,
     pub(crate) reclaimed_staging_directories: u64,
     pub(crate) failed_staging_directories: u64,
+}
+
+/// 持久化的整仓备份结果；备份页重启后只读取最新一行。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepositoryBackupRun {
+    pub(crate) backup_path: String,
+    pub(crate) repository_path: String,
+    pub(crate) file_count: u64,
+    pub(crate) total_bytes: u64,
+    pub(crate) history_nodes: u64,
+    pub(crate) final_artifacts: u64,
+    pub(crate) certification_records: u64,
+    pub(crate) created_ms: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -431,6 +446,64 @@ pub(crate) fn create_repository_backup(
             }
         }
     }
+}
+
+/// 整仓备份成功后落一行结果；写失败不应改变已经成功的备份结果。
+pub(crate) fn record_repository_backup_run(
+    root: &Path,
+    report: &RepositoryBackupReport,
+) -> Result<(), String> {
+    let connection = storage::open(root)?;
+    let created_ms = storage::now_ms()?;
+    connection
+        .execute(
+            "INSERT INTO repository_backup_runs
+               (id, backup_path, repository_path, file_count, total_bytes,
+                history_nodes, final_artifacts, certification_records, created_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            rusqlite::params![
+                storage::new_id(),
+                report.backup_path,
+                report.repository_path,
+                i64::try_from(report.file_count).map_err(|_| "备份文件数超出范围")?,
+                i64::try_from(report.total_bytes).map_err(|_| "备份总字节数超出范围")?,
+                i64::try_from(report.history_nodes).map_err(|_| "历史节点数超出范围")?,
+                i64::try_from(report.final_artifacts).map_err(|_| "成品数超出范围")?,
+                i64::try_from(report.certification_records).map_err(|_| "认证记录数超出范围")?,
+                created_ms,
+            ],
+        )
+        .map_err(storage::database_error)?;
+    Ok(())
+}
+
+pub(crate) fn last_repository_backup_run(
+    root: &Path,
+) -> Result<Option<RepositoryBackupRun>, String> {
+    let connection = storage::open(root)?;
+    connection
+        .query_row(
+            "SELECT backup_path, repository_path, file_count, total_bytes,
+                    history_nodes, final_artifacts, certification_records, created_ms
+               FROM repository_backup_runs
+              ORDER BY created_ms DESC, id DESC
+              LIMIT 1",
+            [],
+            |row| {
+                Ok(RepositoryBackupRun {
+                    backup_path: row.get(0)?,
+                    repository_path: row.get(1)?,
+                    file_count: row.get::<_, i64>(2)? as u64,
+                    total_bytes: row.get::<_, i64>(3)? as u64,
+                    history_nodes: row.get::<_, i64>(4)? as u64,
+                    final_artifacts: row.get::<_, i64>(5)? as u64,
+                    certification_records: row.get::<_, i64>(6)? as u64,
+                    created_ms: row.get(7)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(storage::database_error)
 }
 
 fn validate_destination(root: &Path, destination_parent: &Path) -> Result<(), String> {
@@ -1062,5 +1135,39 @@ mod tests {
         assert_eq!(report.history_nodes, 7);
         assert_eq!(report.final_artifacts, 3);
         assert_eq!(report.certification_records, 5);
+    }
+
+    #[test]
+    fn records_and_reads_the_latest_repository_backup_run() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        library::initialize(&root).unwrap();
+
+        assert!(last_repository_backup_run(&root).unwrap().is_none());
+
+        let report = |name: &str, file_count: u64| RepositoryBackupReport {
+            backup_path: format!("{name}/backup"),
+            repository_path: format!("{name}/backup/repository"),
+            file_count,
+            total_bytes: file_count * 10,
+            history_nodes: 3,
+            final_artifacts: 2,
+            certification_records: 1,
+            reclaimed_staging_directories: 0,
+            failed_staging_directories: 0,
+        };
+        record_repository_backup_run(&root, &report("first", 4)).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        record_repository_backup_run(&root, &report("second", 9)).unwrap();
+
+        let latest = last_repository_backup_run(&root).unwrap().unwrap();
+        assert_eq!(latest.backup_path, "second/backup");
+        assert_eq!(latest.repository_path, "second/backup/repository");
+        assert_eq!(latest.file_count, 9);
+        assert_eq!(latest.total_bytes, 90);
+        assert_eq!(latest.history_nodes, 3);
+        assert_eq!(latest.final_artifacts, 2);
+        assert_eq!(latest.certification_records, 1);
+        assert!(latest.created_ms > 0);
     }
 }

@@ -200,7 +200,7 @@ pub(crate) fn scrub_repository(
             history_nodes,
             final_artifacts: controlled.0,
             certification_records: controlled.1,
-            pin_board_images: board_dds.images,
+            pin_board_bitmaps: board_dds.bitmaps,
             pin_board_missing_dds: board_dds.missing,
             pin_board_corrupt_dds: board_dds.corrupt,
             pin_board_orphan_dds: board_dds.orphans,
@@ -236,7 +236,7 @@ pub(crate) fn create_repository_backup(
 ) -> Result<backup::RepositoryBackupReport, CommandError> {
     context.run_foreground(None, |session| {
         context.report_progress("正在准备备份", 0, 0);
-        backup::create_repository_backup(
+        let report = backup::create_repository_backup(
             session.root(),
             destination_parent,
             context.cancel(),
@@ -244,7 +244,20 @@ pub(crate) fn create_repository_backup(
             BackupVerificationMode::Sample,
             |label, current, total| context.report_progress(label, current, total),
         )
-        .map_err(CommandError::from)
+        .map_err(CommandError::from)?;
+        // 结果记录失败不改变已经成功的备份；前端仍可用本次返回值展示。
+        if let Err(error) = backup::record_repository_backup_run(session.root(), &report) {
+            log::warn!("repository backup result could not be recorded: {error}");
+        }
+        Ok(report)
+    })
+}
+
+pub(crate) fn last_repository_backup(
+    context: &CommandContext,
+) -> Result<Option<backup::RepositoryBackupRun>, CommandError> {
+    context.run_read("get_last_repository_backup_run", |session| {
+        backup::last_repository_backup_run(session.root()).map_err(CommandError::from)
     })
 }
 

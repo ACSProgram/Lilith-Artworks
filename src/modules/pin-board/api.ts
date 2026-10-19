@@ -3,9 +3,10 @@ import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invokeCommand } from "../../shared/tauri";
 import type {
   PinBoardClipboardImage,
-  PinBoardEditableImage,
+  PinBoardEditableItem,
   PinBoardMutationResult,
   PinBoardSummary,
+  PinBoardTextAlign,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
@@ -40,9 +41,9 @@ export const pinBoardApi = {
     invokeCommand<PinBoardView>("load_pin_board", { boardId }),
   savePinBoard: (
     boardId: number,
-    images: PinBoardEditableImage[],
+    items: PinBoardEditableItem[],
     expectedRevision: string,
-  ) => invokeCommand<SavePinBoardResult>("save_pin_board", { boardId, images, expectedRevision }),
+  ) => invokeCommand<SavePinBoardResult>("save_pin_board", { boardId, items, expectedRevision }),
   finalizePinBoard: (boardId: number, expectedRevision: string) =>
     invokeCommand<SavePinBoardResult>("finalize_pin_board", { boardId, expectedRevision }),
   pastePinBoardImages: (
@@ -74,18 +75,50 @@ export const pinBoardApi = {
   ) => invokeCommand<PinBoardMutationResult>("import_pin_board_clipboard_image", {
     boardId, bytes, centerX, centerY, expectedRevision,
   }),
+  createPinBoardText: (
+    boardId: number,
+    text: string,
+    fontSize: number,
+    color: string,
+    align: PinBoardTextAlign,
+    measuredWidth: number,
+    measuredHeight: number,
+    centerX: number,
+    centerY: number,
+    expectedRevision: string,
+  ) => invokeCommand<PinBoardMutationResult>("create_pin_board_text", {
+    boardId,
+    text,
+    fontSize,
+    color,
+    align,
+    measuredWidth,
+    measuredHeight,
+    centerX,
+    centerY,
+    expectedRevision,
+  }),
   exportPinBoardImages: (
     boardId: number,
-    imageIds: number[],
+    itemIds: number[],
     outputDirectory: string,
   ) => invokeCommand<number>("export_pin_board_images", {
-    boardId, imageIds, outputDirectory,
+    boardId, itemIds, outputDirectory,
+  }),
+  /** 写文字条目的导出图：前端编码 PNG，原生端校验后原子写盘。 */
+  writePinBoardItemPng: (
+    boardId: number,
+    itemId: number,
+    outputDirectory: string,
+    bytes: number[],
+  ) => invokeCommand<string>("write_pin_board_item_png", {
+    boardId, itemId, outputDirectory, bytes,
   }),
   readPinBoardClipboardPaths: () => invokeCommand<string[]>("read_pin_board_clipboard_paths"),
-  readPinBoardImagePng: (boardId: number, imageId: number) =>
-    invokeCommand<Uint8Array>("read_pin_board_image_png", { boardId, imageId }),
-  readPinBoardTexture: (boardId: number, imageId: number, maxDimension: number) =>
-    invokeCommand<Uint8Array>("read_pin_board_texture", { boardId, imageId, maxDimension }),
+  readPinBoardImagePng: (boardId: number, itemId: number) =>
+    invokeCommand<Uint8Array>("read_pin_board_image_png", { boardId, itemId }),
+  readPinBoardTexture: (boardId: number, itemId: number, maxDimension: number) =>
+    invokeCommand<Uint8Array>("read_pin_board_texture", { boardId, itemId, maxDimension }),
 };
 
 /** 文件对话框与窗口状态属于模块的 Tauri 访问边界，组件通过 api.ts 间接调用。 */

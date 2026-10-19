@@ -66,8 +66,8 @@ export interface RepositoryIntegrityCounts {
 }
 
 export interface RepositoryScrubReport extends RepositoryIntegrityCounts {
-  /** 检查的画板图片记录数。 */
-  pinBoardImages: number;
+  /** 检查的画板位图记录数；文字条目没有实体文件，不计入。 */
+  pinBoardBitmaps: number;
   /** 记录存在但 DDS 缺失。 */
   pinBoardMissingDds: number;
   /** DDS 存在但校验失败（路径归属、头、尺寸、长度或解码）。 */
@@ -85,6 +85,15 @@ export interface RepositoryBackupReport extends RepositoryIntegrityCounts {
   reclaimedStagingDirectories: number;
   /** 未能回收的残留暂存目录数量；不为零也不阻断本次备份。 */
   failedStagingDirectories: number;
+}
+
+/** 持久化的最近一次整仓备份结果；重启后由设置页读取。 */
+export interface RepositoryBackupRun extends RepositoryIntegrityCounts {
+  backupPath: string;
+  repositoryPath: string;
+  fileCount: number;
+  totalBytes: number;
+  createdMs: number;
 }
 
 /** 当前占用共享运行锁的任务类型；与后端 `BackupTaskKind` 的序列化值一致。 */
