@@ -350,6 +350,47 @@ fn malformed_container_falls_back_to_cdc() {
 }
 
 #[test]
+fn byte_progress_reports_a_cumulative_total() {
+    // 70 KiB 按默认块大小会切成多块：每一步都要累加，而不是把本块的字节
+    // 直接当成进度条的当前位置（那样进度会一直在 0 附近来回跳）。
+    let bytes: Vec<u8> = (0..70_000_u32)
+        .map(|value| u8::try_from(value % 251).unwrap())
+        .collect();
+    let mut snapshot = Cursor::new(Vec::new());
+    let layout = v1_create(
+        &mut Cursor::new(&bytes),
+        &mut snapshot,
+        ChunkingConfig::default(),
+    )
+    .unwrap();
+    assert!(layout.chunk_count() > 1);
+
+    let token = CancelToken::standalone();
+    let mut restored = Vec::new();
+    let seen = {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |processed: u64| seen.borrow_mut().push(processed);
+        let task = ChunkTask::new(&token, Some(&progress));
+        layout
+            .copy_original(
+                &mut Cursor::new(snapshot.into_inner()),
+                &mut restored,
+                &task,
+            )
+            .unwrap();
+        seen.into_inner()
+    };
+
+    assert_eq!(restored, bytes);
+    assert_eq!(seen.len(), layout.chunk_count());
+    assert!(
+        seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "累计进度不得回退：{seen:?}"
+    );
+    assert_eq!(seen.last().copied(), Some(layout.logical_size()));
+}
+
+#[test]
 fn cancellation_stops_snapshot_creation_and_delta_reads() {
     let token = CancelToken::standalone();
     token.cancel();

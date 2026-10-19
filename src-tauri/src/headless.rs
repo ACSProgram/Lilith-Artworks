@@ -562,6 +562,7 @@ fn resolve_within(workspace: &Path, path: &Path, label: &str) -> Result<PathBuf,
 /// 阶段标记与取消闸门。
 ///
 /// - `--marker`：每个可观察阶段追加一行，只写不阻塞，供测试观察与后续强杀场景使用。
+///   由进度回调驱动的阶段（`progress_stage`）只在阶段名切换时写，不会逐块追加。
 /// - `--cancel-on-stdin`：每个**交互检查点**先写 marker，再阻塞等待 stdin 的一行判定
 ///   （`cancel` / `continue`，EOF 视为取消）。因此测试可以**逐检查点**决定取消时机，
 ///   不存在「读到 marker 时进程已经跑过下一个检查点」的竞态。
@@ -578,6 +579,8 @@ struct Interlock {
     index: AtomicUsize,
     cancelled: AtomicBool,
     last_stage: Mutex<String>,
+    /// 上次写进标记文件的进度阶段名。进度回调逐块触发，标记行只在阶段切换时写。
+    written_stage: Mutex<String>,
 }
 
 impl Interlock {
@@ -607,6 +610,7 @@ impl Interlock {
             index: AtomicUsize::new(0),
             cancelled: AtomicBool::new(false),
             last_stage: Mutex::new(String::new()),
+            written_stage: Mutex::new(String::new()),
         })
     }
 
@@ -626,6 +630,31 @@ impl Interlock {
             *stage = label.to_owned();
         }
         self.write_line(&format!("stage {label}"));
+    }
+
+    /// 由进度回调驱动的阶段：标记行只在阶段名切换时写。
+    ///
+    /// 进度回调在热路径上逐块触发（一次大文件恢复可达十万次），逐次写标记行会
+    /// 让标记文件随处理字节数膨胀，而压测的轮询每次都要整文件重读。`last_stage`
+    /// 仍每块刷新，检查点行因此带着最新进度。
+    fn progress_stage(&self, label: &str, current: u64, total: u64) {
+        if let Ok(mut stage) = self.last_stage.lock() {
+            *stage = format!("{label} {current}/{total}");
+        }
+        let changed = match self.written_stage.lock() {
+            Ok(mut written) => {
+                if *written == label {
+                    false
+                } else {
+                    *written = label.to_owned();
+                    true
+                }
+            }
+            Err(_) => false,
+        };
+        if changed {
+            self.write_line(&format!("stage {label} {current}/{total}"));
+        }
     }
 
     /// 一个取消检查点，返回值即「此刻是否已请求取消」。
@@ -713,7 +742,7 @@ struct HeadlessObserver {
 
 impl OperationObserver for HeadlessObserver {
     fn progress(&self, label: &str, current: u64, total: u64) {
-        self.interlock.stage(&format!("{label} {current}/{total}"));
+        self.interlock.progress_stage(label, current, total);
     }
 }
 

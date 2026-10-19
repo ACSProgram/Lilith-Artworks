@@ -52,7 +52,8 @@ pub(crate) fn restore(
     let logical_size = layout.logical_size();
     progress("正在导出恢复文件", 0, logical_size);
     {
-        let export_progress = |bytes| progress("正在导出恢复文件", bytes, logical_size);
+        // 回调收到的是累计导出字节，可以直接作为进度条的 current。
+        let export_progress = |processed| progress("正在导出恢复文件", processed, logical_size);
         let task = ChunkTask::new(cancel, Some(&export_progress));
         let mut reader = store.reader();
         layout
@@ -209,9 +210,11 @@ fn write_reverse_delta(
     let delta_relative = storage::relative_path(root, &delta_final)?;
     let mut delta_temp = NamedTempFile::new_in(artwork_directory.join("temp"))
         .map_err(|error| format!("无法创建增量临时文件：{error}"))?;
-    let logical_size = parent_layout.logical_size();
+    // 增量只写父版本相对子版本变化的块，用父文件大小做总量会让进度永远停在低位；
+    // 因此总量取本次真正要复制的载荷字节，至少为 1 以免出现零分母。
+    let delta_total = child_layout.delta_payload_bytes(&parent_layout).max(1);
     {
-        let delta_progress = |bytes| progress("正在重建反向增量", bytes, logical_size);
+        let delta_progress = |processed| progress("正在重建反向增量", processed, delta_total);
         let task = ChunkTask::new(cancel, Some(&delta_progress));
         let mut reader = store.reader();
         child_layout
@@ -355,8 +358,9 @@ pub(crate) fn ensure_checkpoint_with_progress(
         .map_err(|error| format!("无法创建 checkpoint 临时文件：{error}"))?;
     let logical_size = layout.logical_size();
     {
-        let checkpoint_progress = |bytes| {
-            progress("正在写入检查点", bytes, logical_size);
+        // 回调收到的是累计写入字节，可以直接作为进度条的 current。
+        let checkpoint_progress = |processed| {
+            progress("正在写入检查点", processed, logical_size);
         };
         let task = ChunkTask::new(cancel, Some(&checkpoint_progress));
         let mut reader = store.reader();

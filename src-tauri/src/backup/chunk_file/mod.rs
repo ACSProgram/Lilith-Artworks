@@ -15,6 +15,7 @@
 //! from where it happened ([`ErrorDimension`]).
 
 use std::{
+    cell::Cell,
     error::Error,
     fmt,
     fs::File,
@@ -259,8 +260,9 @@ impl ChunkWriteOptions {
 /// Cancellation and byte-progress for one chunk-file operation.
 ///
 /// `cancel` is the same `CancelToken` the command runtime uses; `progress`
-/// receives the number of logical bytes processed in this operation so callers
-/// can report byte-based progress instead of only node counts.
+/// receives the **cumulative** number of logical bytes processed in this
+/// operation, so callers can feed it straight into a progress bar as `current`
+/// without adding the deltas up themselves.
 ///
 /// This task is polled inside the chunking hot loop (once per chunk / structural
 /// unit), so it only performs the token's **silent** observation
@@ -272,6 +274,9 @@ impl ChunkWriteOptions {
 pub(crate) struct ChunkTask<'a> {
     cancel: Option<&'a CancelToken>,
     progress: Option<&'a dyn Fn(u64)>,
+    /// 累计已处理的逻辑字节。只在本任务内累加，热循环每块读改写一次
+    /// `Cell` 即可，不需要额外锁。
+    processed_bytes: Cell<u64>,
 }
 
 impl<'a> ChunkTask<'a> {
@@ -280,6 +285,7 @@ impl<'a> ChunkTask<'a> {
         Self {
             cancel: None,
             progress: None,
+            processed_bytes: Cell::new(0),
         }
     }
 
@@ -287,6 +293,7 @@ impl<'a> ChunkTask<'a> {
         Self {
             cancel: Some(cancel),
             progress,
+            processed_bytes: Cell::new(0),
         }
     }
 
@@ -307,10 +314,17 @@ impl<'a> ChunkTask<'a> {
         self.cancel.is_some_and(|token| token.observed())
     }
 
+    /// 上报本步处理的字节数；回调收到的是本任务至今累计处理的逻辑字节。
+    ///
+    /// 热点路径每块调用一次，累计值在任务内单调不减，只有需要跨步骤重置时
+    /// （例如换了统计维度）才值得新建一个任务。
     pub(super) fn report(&self, bytes: u64) {
-        if let Some(progress) = self.progress {
-            progress(bytes);
-        }
+        let Some(progress) = self.progress else {
+            return;
+        };
+        let processed = self.processed_bytes.get().saturating_add(bytes);
+        self.processed_bytes.set(processed);
+        progress(processed);
     }
 }
 

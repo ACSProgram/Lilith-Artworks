@@ -166,6 +166,7 @@ impl OperationCoordinator {
             cancel,
             current_class: Mutex::new(OperationClass::Read),
             last_progress: Mutex::new(None),
+            last_progress_log: Mutex::new(None),
         };
 
         let started_event = AppEvent::new(
@@ -604,6 +605,8 @@ impl OperationCoordinator {
         self.inner.observer.progress(label, current, total);
         // 事件通道只表达可消费的进度：阶段变化、完成、回退或间隔足够长时才广播。
         // 观察者（无头 marker）不受节流影响，仍能看到每一次检查点。
+        // 进度值按累计口径上报，因此同一阶段内 `current` 单调不减，
+        // `current < last_current` 只会在同名阶段重新开始时出现。
         const PROGRESS_EVENT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
         let should_emit = match context.last_progress.lock() {
             Ok(mut last) => {
@@ -653,10 +656,32 @@ impl OperationCoordinator {
             class,
             OperationClass::Read | OperationClass::RepositoryWrite
         ) {
-            log::debug!(
-                "operation progress: class={}, label={label}, current={current}, total={total}",
-                class.as_str()
-            );
+            // 进度回调在大文件上是逐块触发的（一次恢复可达十万次），逐次写日志
+            // 会自己把日志文件刷爆，也让真正的事件淹没在噪声里。这里只按阶段
+            // 切换和固定间隔抽样，慢操作仍然留下可读的时间线。
+            const PROGRESS_LOG_INTERVAL: Duration = Duration::from_secs(5);
+            let should_log = match context.last_progress_log.lock() {
+                Ok(mut last) => {
+                    let now = Instant::now();
+                    let log = match last.as_ref() {
+                        Some((at, last_label)) => {
+                            last_label != label || now.duration_since(*at) >= PROGRESS_LOG_INTERVAL
+                        }
+                        None => true,
+                    };
+                    if log {
+                        *last = Some((now, label.to_owned()));
+                    }
+                    log
+                }
+                Err(_) => false,
+            };
+            if should_log {
+                log::debug!(
+                    "operation progress: class={}, label={label}, current={current}, total={total}",
+                    class.as_str()
+                );
+            }
             self.inner
                 .backup_state
                 .report_progress(context.domain.as_str(), label, current, total);
@@ -706,6 +731,9 @@ pub(crate) struct CommandContext {
     cancel: CancelToken,
     current_class: Mutex<OperationClass>,
     last_progress: Mutex<Option<(Instant, String, u64)>>,
+    /// 进度日志的抽样状态：阶段名与上次写日志的时刻。进度回调在热路径上
+    /// 逐块触发，日志只按阶段切换或固定间隔抽样（见 `docs/guides/logging.md`）。
+    last_progress_log: Mutex<Option<(Instant, String)>>,
 }
 
 #[allow(dead_code)]

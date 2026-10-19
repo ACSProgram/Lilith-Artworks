@@ -419,6 +419,23 @@ impl ChunkFile {
         self.chunk_index.get(key).copied()
     }
 
+    /// [`ChunkFile::create_reverse_delta`] 将要写入的 DATA 载荷字节数。
+    ///
+    /// 反向增量只携带父版本相对自身变化的块，所以它的真实工作量是这些块的
+    /// 逻辑字节，而不是父文件的 `logical_size`。这里按与写入时一致的规则
+    /// （父块不在自身索引中、同一块只计一次）求和，只做索引比对，不读载荷，
+    /// 让调用方能把进度归一到一个能真正走满的总量。
+    pub(crate) fn delta_payload_bytes(&self, parent: &ChunkFile) -> u64 {
+        let mut seen = HashSet::new();
+        let mut bytes = 0_u64;
+        for record in &parent.chunks {
+            if !self.chunk_index.contains_key(&record.key) && seen.insert(record.key) {
+                bytes = bytes.saturating_add(u64::from(record.key.length));
+            }
+        }
+        bytes
+    }
+
     pub(crate) fn create_reverse_delta<R, W>(
         &self,
         parent: &ChunkFile,

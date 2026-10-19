@@ -47,8 +47,11 @@
 
 - 消息用 `key=value` 字段，字段名稳定、可解析（如 `boardId=`、`gpuSeq=`、`elapsedMs=`）。
 - 命令执行由 `OperationCoordinator` 统一记录 `operation started: id=…, domain=…, repo=…` 与
-  `operation finished/failed: id=…, domain=…, outcome=…, elapsed_ms=…, code=…, kind=…`；
-  进度只在 `debug` 档记录，正常使用不产生噪声。
+  `operation finished/failed: id=…, domain=…, outcome=…, elapsed_ms=…, code=…, kind=…`。
+- **进度只在 `debug` 档记录，并且按阶段切换或固定间隔抽样**。`operation progress:` 这行由
+  `report_runtime_progress` 统一写：同名阶段最多每 5 秒一行，阶段名变化时立刻补一行。
+  进度回调在热路径上逐块触发（一次大文件恢复可达十万次），逐次写会让日志文件被自己的
+  进度刷爆，也会把真正的异常淹没——需要完整的时间线时看 `operation started/finished`。
 - 需要归因到具体实体的长任务在 use-case 里另记一行目标标识（如
   `history restore target: history_id=…, operation_id=…`），用 `operation_id` 与协调器的开始/结束
   行串起来；不要为同一件事再写一遍耗时日志。

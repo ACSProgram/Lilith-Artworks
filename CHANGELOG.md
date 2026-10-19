@@ -98,6 +98,21 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- Byte progress is cumulative again. `ChunkTask::report` hands the callback the
+  total logical bytes processed so far instead of the size of the step that just
+  finished, so restore, checkpoint and reverse-delta bars climb towards 100%
+  instead of oscillating between a few kilobytes on a multi-chunk file. The
+  reverse-delta phase also reports against the payload bytes it really copies
+  (`delta_payload_bytes`) rather than the parent file size, which kept that bar
+  near zero even when the work was finished.
+- Progress logging is sampled instead of written per step. `operation progress:`
+  was emitted once per chunk, so restoring a 2 GiB node flooded the log with
+  ~114,600 lines in a minute and rotated five files; it now writes one line when
+  the phase changes and otherwise at most every five seconds.
+- The headless `--marker` channel appends one `stage` line per phase instead of
+  one per chunk. Progress callbacks fire per chunk, so a single large restore
+  added megabytes of stage lines and every stress poll re-read the whole marker
+  file; checkpoint lines still carry the latest progress numbers.
 - Checkpoint deltas and stale `history_nodes.delta_path` entries were invisible to
   the scan because the reference inventory counted every recorded path, including
   deltas that no read path can reach. They are now reported as redundant files and
