@@ -223,7 +223,7 @@ scan_repository_storage_disk
 - 总览使用弱强调标出当前分支的祖先路径，并对当前分支 HEAD 标签使用实色强调；节点选中态使用更强的边框、背景和外框，不与当前分支提示混淆。
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
-- 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节，走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
+- 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节；delta 文件整体是 zstd 流，识别到 zstd 帧魔数后先流式解压出前 10 字节再判版本（`stored_format_label`），snapshot 则按明文读取。走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
 - `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。

@@ -18,7 +18,7 @@ use std::{
     error::Error,
     fmt,
     fs::File,
-    io::{self, Read},
+    io::{self, Read, Seek, SeekFrom},
     mem::size_of,
     path::Path,
 };
@@ -37,6 +37,8 @@ pub(crate) use self::{delta::ChunkFileDelta, snapshot::ChunkFile, store::ChunkSt
 
 pub(super) const SNAPSHOT_MAGIC: [u8; 8] = *b"LBCHUNK\0";
 pub(super) const DELTA_MAGIC: [u8; 8] = *b"LBDELTA\0";
+/// delta 文件整体作为一条 zstd 流落盘；磁盘字节以该帧魔数开头。
+pub(super) const ZSTD_FRAME_MAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
 pub(super) const FORMAT_VERSION_V1: u16 = 1;
 pub(super) const FORMAT_VERSION_V2: u16 = 2;
 /// v1 头里的 chunker 字段固定为滚动哈希实现编号。
@@ -164,10 +166,12 @@ pub(crate) enum FormatVersion {
 /// 读取 snapshot / delta 文件头中的格式版本，只消费文件前 10 个字节。
 ///
 /// 节点详情只需要展示版本标签，不应为此打开块表或解压 delta 载荷。
+/// delta 文件整体是一条 zstd 流，`LBDELTA\0` 头在流内：识别到 zstd 帧魔数后
+/// 先流式解压出前 10 字节再判版本，snapshot 文件则按明文直接读取。
 pub(crate) fn stored_format_label(path: &Path) -> ChunkFileResult<&'static str> {
     let mut file = File::open(path)?;
     let mut header = [0_u8; 10];
-    file.read_exact(&mut header)?;
+    read_stored_format_header(&mut file, &mut header)?;
     if header[..8] != SNAPSHOT_MAGIC && header[..8] != DELTA_MAGIC {
         return Err(invalid_format(ErrorDimension::File, "不是受管理的历史文件"));
     }
@@ -175,6 +179,24 @@ pub(crate) fn stored_format_label(path: &Path) -> ChunkFileResult<&'static str> 
         FormatVersion::V1 => Ok("v1"),
         FormatVersion::V2 => Ok("v2"),
     }
+}
+
+/// 把存储文件的前 10 个字节读入 `header`，对 zstd 包装的 delta 先做流式解压。
+fn read_stored_format_header(file: &mut File, header: &mut [u8; 10]) -> ChunkFileResult<()> {
+    let mut prefix = [0_u8; 4];
+    file.read_exact(&mut prefix)?;
+    if prefix != ZSTD_FRAME_MAGIC {
+        header[..4].copy_from_slice(&prefix);
+        file.read_exact(&mut header[4..])?;
+        return Ok(());
+    }
+    file.seek(SeekFrom::Start(0))?;
+    let decompress_error = |error: io::Error| {
+        invalid_format(ErrorDimension::Format, format!("无法解压 delta：{error}"))
+    };
+    let mut decoder = zstd::stream::read::Decoder::new(&mut *file).map_err(decompress_error)?;
+    decoder.read_exact(header).map_err(decompress_error)?;
+    Ok(())
 }
 
 impl FormatVersion {

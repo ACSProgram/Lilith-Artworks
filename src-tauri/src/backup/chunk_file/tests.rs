@@ -534,6 +534,9 @@ fn stored_format_label_reads_only_the_file_header() {
     for (bytes, expected) in [
         (encode_snapshot(b"v1 payload"), "v1"),
         (encode_v2_snapshot(b"v2 payload"), "v2"),
+        // 落盘的 delta 整体是 zstd 流，版本在解压后的 LBDELTA 头里。
+        (encode_reverse_delta(b"v1 child", b"v1 parent"), "v1"),
+        (encode_v2_reverse_delta(b"v2 child", b"v2 parent"), "v2"),
     ] {
         let mut file = tempfile::NamedTempFile::new().unwrap();
         file.write_all(&bytes).unwrap();

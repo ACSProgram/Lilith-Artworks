@@ -139,6 +139,17 @@ decision, so an untagged version is transitional.
 
 ### Fixed
 
+- The history node inspector now shows the real format version for delta
+  nodes. `stored_format_label` read the stored file's first 10 raw bytes and
+  required `LBCHUNK\0`/`LBDELTA\0` magic, but published delta files are whole
+  zstd streams — the `LBDELTA\0` header (which carries the version) lives
+  inside the stream — so every delta, v1 and v2 alike, failed the magic check
+  and the UI showed 未知 while snapshots showed their version. The label reader
+  now recognizes the zstd frame magic and streams the first 10 bytes through a
+  zstd decoder before checking the version; plaintext snapshot reads are
+  unchanged. The zstd frame magic is shared as `ZSTD_FRAME_MAGIC` instead of a
+  hardcoded array in the delta opener, and the header-label unit test now
+  covers zstd-wrapped v1 and v2 deltas.
 - Stale entries in the repository-root `temp/` are swept automatically when a
   repository opens. `prepare_repository` now runs `cleanup::sweep_repository_temp`
   once the database is ready: it removes expired `authenticity-preview-<UUID>`

@@ -22,7 +22,7 @@ use super::{
     },
     incompatible, integrity, invalid_format, ChunkDigest, ChunkFileError, ChunkFileResult,
     ChunkKey, ChunkRecord, ChunkStore, ChunkTask, ChunkingConfig, ErrorDimension, FormatVersion,
-    CANCEL_CHECK_INTERVAL, DELTA_OP_SIZE, STREAM_BUFFER_SIZE,
+    CANCEL_CHECK_INTERVAL, DELTA_OP_SIZE, STREAM_BUFFER_SIZE, ZSTD_FRAME_MAGIC,
 };
 
 use super::snapshot::ChunkFile;
@@ -103,7 +103,7 @@ impl ChunkFileDelta {
         let mut prefix = [0_u8; 4];
         delta.read_exact(&mut prefix)?;
         delta.seek(SeekFrom::Start(0))?;
-        let compressed = prefix == [0x28, 0xb5, 0x2f, 0xfd];
+        let compressed = prefix == ZSTD_FRAME_MAGIC;
         let payload = create_payload()?;
         let mut payload = if compressed {
             let mut decoder = zstd::stream::read::Decoder::new(&mut *delta).map_err(|error| {
