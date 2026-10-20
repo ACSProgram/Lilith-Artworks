@@ -1,12 +1,14 @@
 //! 素材板 SQLite 持久化与画板文件布局。
 //!
-//! 存储布局（schema v5 起，见 `library/schema.rs`）：
+//! 存储布局（schema v6 起，见 `library/schema.rs`）：
 //! - `pin_boards`：按 Artwork 平铺一层画板，`deleted_at` 为回收站软删除；
-//! - `pin_board_items`：与 kind 无关的公共条目；
+//! - `pin_board_items`：与 kind 无关的公共条目（0 位图 / 1 文字 / 2 笔迹）；
 //! - `pin_board_bitmaps`：位图载荷，DDS 实体存于
 //!   `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`；
 //! - `pin_board_texts`：文字载荷，不落实体文件；
-//! - `pin_board_history`：每个条目按 step 的变换历史（撤销/恢复持久化）。
+//! - `pin_board_strokes`：笔迹载荷（工具、颜色、线宽、包围盒、几何 BLOB），不落实体文件；
+//! - `pin_board_history`：每个条目按 step 的变换历史（撤销/恢复持久化）。笔迹条目的
+//!   `layer` 恒为 3（标注层），写入时强制改写，不接受前端传入的值。
 //!
 //! 本模块只通过 `storage.rs` 打开连接，不读取 ChunkFile；回收站永久删除经
 //! `cleanup.rs` 队列清理 DDS 目录。
@@ -17,6 +19,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::dds;
+use super::stroke;
 use crate::{cleanup, platform::path::display_path, storage};
 
 pub(crate) const BOARD_DIRECTORY: &str = "boards";
@@ -34,6 +37,7 @@ pub(crate) const MAX_TEXT_PNG_BYTES: u64 = 32 * 1024 * 1024;
 
 const ITEM_KIND_BITMAP: i64 = 0;
 const ITEM_KIND_TEXT: i64 = 1;
+const ITEM_KIND_STROKE: i64 = 2;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +67,14 @@ pub(crate) enum PinBoardItemPayload {
         font_size: f64,
         color: String,
         align: String,
+    },
+    /// 笔迹只带标量元数据；几何 BLOB 走 `read_pin_board_strokes` 的二进制通道，
+    /// 不进 `load_pin_board` 的 JSON。
+    #[serde(rename_all = "camelCase")]
+    Stroke {
+        tool: u8,
+        color: String,
+        stroke_width: f64,
     },
 }
 
@@ -629,6 +641,13 @@ struct TextPayload {
 }
 
 #[derive(Debug, Clone)]
+struct StrokePayload {
+    tool: u8,
+    color: String,
+    stroke_width: f64,
+}
+
+#[derive(Debug, Clone)]
 struct ItemState {
     kind: i64,
     file_path: Option<String>,
@@ -639,6 +658,7 @@ struct ItemState {
     sort_order: u64,
     transform: ImageTransform,
     text: Option<TextPayload>,
+    stroke: Option<StrokePayload>,
 }
 
 /// 内容操作使用的画板上下文：只接受未在回收站的画板。
@@ -677,6 +697,32 @@ pub(crate) fn open_board_context(
     })
 }
 
+/// `current_states` 的一行原始数据：三张载荷子表按 kind 各自填充，只有对应 kind
+/// 的列会被读取。列多且大多可空，收成结构体比 21 元组更好核对。
+struct StateRow {
+    item_id: i64,
+    kind: i64,
+    file_path: Option<String>,
+    bitmap_width: Option<f64>,
+    bitmap_height: Option<f64>,
+    text_width: Option<f64>,
+    text_height: Option<f64>,
+    stroke_box_width: Option<f64>,
+    stroke_box_height: Option<f64>,
+    deleted: bool,
+    layer: u8,
+    sort_order: u64,
+    transform_json: String,
+    text: Option<String>,
+    font_family: Option<String>,
+    font_size: Option<f64>,
+    text_color: Option<String>,
+    align: Option<String>,
+    stroke_tool: Option<i64>,
+    stroke_color: Option<String>,
+    stroke_width: Option<f64>,
+}
+
 fn current_states(
     connection: &Connection,
     board_id: i64,
@@ -687,11 +733,14 @@ fn current_states(
             "SELECT i.id, i.kind, b.file_path,
                     CAST(b.width AS REAL), CAST(b.height AS REAL),
                     t.measured_width, t.measured_height,
+                    CAST(s.width AS REAL), CAST(s.height AS REAL),
                     h.deleted, h.layer, h.sort_order, h.transform_json,
-                    t.text, t.font_family, t.font_size, t.color, t.align
+                    t.text, t.font_family, t.font_size, t.color, t.align,
+                    s.tool, s.color, s.stroke_width
                FROM pin_board_items i
                LEFT JOIN pin_board_bitmaps b ON b.item_id = i.id
                LEFT JOIN pin_board_texts t ON t.item_id = i.id
+               LEFT JOIN pin_board_strokes s ON s.item_id = i.id
                JOIN pin_board_history h
                  ON h.board_id = i.board_id AND h.item_id = i.id
                 AND h.step = (SELECT MAX(step) FROM pin_board_history
@@ -701,67 +750,75 @@ fn current_states(
         .map_err(storage::database_error)?;
     let rows = statement
         .query_map(params![board_id, now_step as i64], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<f64>>(3)?,
-                row.get::<_, Option<f64>>(4)?,
-                row.get::<_, Option<f64>>(5)?,
-                row.get::<_, Option<f64>>(6)?,
-                row.get::<_, i64>(7)? != 0,
-                row.get::<_, i64>(8)? as u8,
-                row.get::<_, i64>(9)? as u64,
-                row.get::<_, String>(10)?,
-                row.get::<_, Option<String>>(11)?,
-                row.get::<_, Option<String>>(12)?,
-                row.get::<_, Option<f64>>(13)?,
-                row.get::<_, Option<String>>(14)?,
-                row.get::<_, Option<String>>(15)?,
-            ))
+            Ok(StateRow {
+                item_id: row.get(0)?,
+                kind: row.get(1)?,
+                file_path: row.get(2)?,
+                bitmap_width: row.get(3)?,
+                bitmap_height: row.get(4)?,
+                text_width: row.get(5)?,
+                text_height: row.get(6)?,
+                stroke_box_width: row.get(7)?,
+                stroke_box_height: row.get(8)?,
+                deleted: row.get::<_, i64>(9)? != 0,
+                layer: row.get::<_, i64>(10)? as u8,
+                sort_order: row.get::<_, i64>(11)? as u64,
+                transform_json: row.get(12)?,
+                text: row.get(13)?,
+                font_family: row.get(14)?,
+                font_size: row.get(15)?,
+                text_color: row.get(16)?,
+                align: row.get(17)?,
+                stroke_tool: row.get(18)?,
+                stroke_color: row.get(19)?,
+                stroke_width: row.get(20)?,
+            })
         })
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(storage::database_error)?
-        .into_iter()
+        .map_err(storage::database_error)?;
+    rows.into_iter()
         .map(|row| {
-            let (
+            let StateRow {
                 item_id,
                 kind,
                 file_path,
-                bitmap_width,
-                bitmap_height,
-                text_width,
-                text_height,
-                deleted,
-                layer,
-                sort_order,
                 transform_json,
-                text,
-                font_family,
-                font_size,
-                color,
-                align,
-            ) = row;
-            let transform: ImageTransform = serde_json::from_str(&transform_json)
+                ..
+            } = &row;
+            let transform: ImageTransform = serde_json::from_str(transform_json)
                 .map_err(|error| format!("画板条目变换数据无效：{error}"))?;
-            let (width, height, payload) = match kind {
+            let (width, height, text, stroke) = match *kind {
                 ITEM_KIND_BITMAP => {
-                    let width = bitmap_width.ok_or("位图条目缺少尺寸记录")?;
-                    let height = bitmap_height.ok_or("位图条目缺少尺寸记录")?;
-                    (width, height, None)
+                    let width = row.bitmap_width.ok_or("位图条目缺少尺寸记录")?;
+                    let height = row.bitmap_height.ok_or("位图条目缺少尺寸记录")?;
+                    (width, height, None, None)
                 }
                 ITEM_KIND_TEXT => {
-                    let width = text_width.ok_or("文字条目缺少度量记录")?;
-                    let height = text_height.ok_or("文字条目缺少度量记录")?;
+                    let width = row.text_width.ok_or("文字条目缺少度量记录")?;
+                    let height = row.text_height.ok_or("文字条目缺少度量记录")?;
                     let payload = TextPayload {
-                        text: text.ok_or("文字条目缺少内容")?,
-                        font_family: font_family.ok_or("文字条目缺少字体")?,
-                        font_size: font_size.ok_or("文字条目缺少字号")?,
-                        color: color.ok_or("文字条目缺少颜色")?,
-                        align: align.ok_or("文字条目缺少对齐方式")?,
+                        text: row.text.clone().ok_or("文字条目缺少内容")?,
+                        font_family: row.font_family.clone().ok_or("文字条目缺少字体")?,
+                        font_size: row.font_size.ok_or("文字条目缺少字号")?,
+                        color: row.text_color.clone().ok_or("文字条目缺少颜色")?,
+                        align: row.align.clone().ok_or("文字条目缺少对齐方式")?,
                     };
-                    (width, height, Some(payload))
+                    (width, height, Some(payload), None)
+                }
+                ITEM_KIND_STROKE => {
+                    let width = row.stroke_box_width.ok_or("笔迹条目缺少包围盒宽度")?;
+                    let height = row.stroke_box_height.ok_or("笔迹条目缺少包围盒高度")?;
+                    let tool = row
+                        .stroke_tool
+                        .and_then(|value| u8::try_from(value).ok())
+                        .ok_or("笔迹条目缺少工具记录")?;
+                    let payload = StrokePayload {
+                        tool,
+                        color: row.stroke_color.clone().ok_or("笔迹条目缺少颜色")?,
+                        stroke_width: row.stroke_width.ok_or("笔迹条目缺少线宽")?,
+                    };
+                    (width, height, None, Some(payload))
                 }
                 other => return Err(format!("未知画板条目类型：{other}")),
             };
@@ -769,25 +826,25 @@ fn current_states(
                 return Err(format!("画板条目 {item_id} 的尺寸无效"));
             }
             Ok((
-                item_id,
+                *item_id,
                 ItemState {
-                    kind,
-                    file_path,
+                    kind: *kind,
+                    file_path: file_path.clone(),
                     width,
                     height,
-                    deleted,
-                    layer,
-                    sort_order,
+                    deleted: row.deleted,
+                    layer: row.layer,
+                    sort_order: row.sort_order,
                     transform,
-                    text: payload,
+                    text,
+                    stroke,
                 },
             ))
         })
-        .collect::<Result<Vec<_>, String>>()?;
-    Ok(rows)
+        .collect::<Result<Vec<_>, String>>()
 }
 
-/// 位图条目的 DDS 是否可用。文字条目没有实体文件，恒为可用。
+/// 位图条目的 DDS 是否可用。文字与笔迹条目没有实体文件，恒为可用。
 fn item_available(context: &BoardContext, item_id: i64, state: &ItemState) -> bool {
     if state.kind != ITEM_KIND_BITMAP {
         return true;
@@ -811,19 +868,31 @@ pub(crate) fn load_view(
     let mut items = Vec::with_capacity(states.len());
     for (item_id, state) in states {
         let available = item_available(&context, item_id, &state);
-        let payload = if state.kind == ITEM_KIND_TEXT {
-            let text = state
-                .text
-                .ok_or_else(|| format!("文字条目 {item_id} 缺少载荷"))?;
-            PinBoardItemPayload::Text {
-                text: text.text,
-                font_family: text.font_family,
-                font_size: text.font_size,
-                color: text.color,
-                align: text.align,
+        let payload = match state.kind {
+            ITEM_KIND_TEXT => {
+                let text = state
+                    .text
+                    .ok_or_else(|| format!("文字条目 {item_id} 缺少载荷"))?;
+                PinBoardItemPayload::Text {
+                    text: text.text,
+                    font_family: text.font_family,
+                    font_size: text.font_size,
+                    color: text.color,
+                    align: text.align,
+                }
             }
-        } else {
-            PinBoardItemPayload::Bitmap {}
+            ITEM_KIND_STROKE => {
+                let stroke = state
+                    .stroke
+                    .ok_or_else(|| format!("笔迹条目 {item_id} 缺少载荷"))?;
+                PinBoardItemPayload::Stroke {
+                    tool: stroke.tool,
+                    color: stroke.color,
+                    stroke_width: stroke.stroke_width,
+                }
+            }
+            ITEM_KIND_BITMAP => PinBoardItemPayload::Bitmap {},
+            other => return Err(format!("未知画板条目类型：{other}")),
         };
         items.push(PinBoardItem {
             board_id,
@@ -859,7 +928,9 @@ pub(crate) fn load_view(
 }
 
 fn validate_editable(item: &EditablePinBoardItem) -> Result<(), String> {
-    if item.layer > 2 {
+    // 0–2 是图片与文字共用的三层；3 只有笔迹能落——笔迹固定占标注层，由
+    // `effective_layer` 在写入前强制改写，不接受前端传入的其它值。
+    if item.layer > stroke::STROKE_LAYER {
         return Err(format!("条目 {} 的图层无效", item.item_id));
     }
     if item
@@ -880,9 +951,19 @@ fn validate_editable(item: &EditablePinBoardItem) -> Result<(), String> {
     Ok(())
 }
 
+/// 条目的实际写入图层。笔迹固定进标注层，前端传来的值一律忽略——这是防御性
+/// 契约，避免渲染顺序被状态泄漏或旧版本前端带偏。
+fn effective_layer(kind: i64, requested: u8) -> u8 {
+    if kind == ITEM_KIND_STROKE {
+        stroke::STROKE_LAYER
+    } else {
+        requested
+    }
+}
+
 fn same_state(left: &ItemState, right: &EditablePinBoardItem) -> bool {
     left.deleted == right.deleted
-        && left.layer == right.layer
+        && left.layer == effective_layer(left.kind, right.layer)
         && left.transform.points == right.points
         && left.transform.uv == right.uv
 }
@@ -913,10 +994,12 @@ pub(crate) fn save_board(
     }
 
     let stored = current_states(&transaction, board_id, now_step)?;
+    let mut kinds = std::collections::HashMap::with_capacity(stored.len());
     let mut changed = std::collections::HashSet::new();
     let mut order_changed = false;
     let mut found = 0usize;
     for (item_id, state) in &stored {
+        kinds.insert(*item_id, state.kind);
         let Some(editable) = requested.get(item_id) else {
             continue;
         };
@@ -952,6 +1035,10 @@ pub(crate) fn save_board(
             )
             .map_err(storage::database_error)?;
         let editable = requested.get(item_id).expect("checked above");
+        let layer = effective_layer(
+            kinds.get(item_id).copied().unwrap_or(ITEM_KIND_BITMAP),
+            editable.layer,
+        );
         transaction
             .execute(
                 "INSERT INTO pin_board_history
@@ -962,7 +1049,7 @@ pub(crate) fn save_board(
                     item_id,
                     next_step as i64,
                     editable.deleted as i64,
-                    editable.layer as i64,
+                    layer as i64,
                     editable.order as i64,
                     serde_json::to_string(&ImageTransform {
                         points: editable.points,
@@ -1196,9 +1283,11 @@ fn record_initial_state(
     item_id: i64,
     step: u64,
     order: u64,
+    kind: i64,
     editable: &EditablePinBoardItem,
 ) -> Result<(), String> {
     validate_editable(editable)?;
+    let layer = effective_layer(kind, editable.layer) as i64;
     let transform = serde_json::to_string(&ImageTransform {
         points: editable.points,
         uv: editable.uv,
@@ -1210,13 +1299,7 @@ fn record_initial_state(
             "INSERT INTO pin_board_history
                (board_id, item_id, step, deleted, layer, sort_order, transform_json)
              VALUES (?1, ?2, 0, 1, ?3, ?4, ?5)",
-            params![
-                board_id,
-                item_id,
-                editable.layer as i64,
-                order as i64,
-                transform
-            ],
+            params![board_id, item_id, layer, order as i64, transform],
         )
         .map_err(storage::database_error)?;
     transaction
@@ -1229,7 +1312,7 @@ fn record_initial_state(
                 item_id,
                 step as i64,
                 editable.deleted as i64,
-                editable.layer as i64,
+                layer,
                 order as i64,
                 transform,
             ],
@@ -1375,6 +1458,7 @@ pub(crate) fn paste_images(
             item_id,
             setup.next_step,
             index as u64,
+            ITEM_KIND_BITMAP,
             &editable,
         )?;
         finalize_bitmap_row(&transaction, item_id, width, height)?;
@@ -1468,6 +1552,7 @@ pub(crate) fn import_images(
             item_id,
             setup.next_step,
             index as u64,
+            ITEM_KIND_BITMAP,
             &editable,
         )?;
         finalize_bitmap_row(&transaction, item_id, width, height)?;
@@ -1529,6 +1614,7 @@ pub(crate) fn import_clipboard_image(
         item_id,
         setup.next_step,
         0,
+        ITEM_KIND_BITMAP,
         &editable,
     )?;
     finalize_bitmap_row(&transaction, item_id, width, height)?;
@@ -1633,6 +1719,7 @@ pub(crate) fn create_text(
         item_id,
         setup.next_step,
         0,
+        ITEM_KIND_TEXT,
         &editable,
     )?;
     bump_revision(&transaction, board_id)?;
@@ -1642,11 +1729,132 @@ pub(crate) fn create_text(
 }
 
 fn normalise_color(color: &str) -> Result<String, String> {
-    let bytes = color.as_bytes();
-    if bytes.len() != 7 || bytes[0] != b'#' || !bytes[1..].iter().all(u8::is_ascii_hexdigit) {
-        return Err("文字颜色必须是 #RRGGBB".into());
+    stroke::normalise_hex_color(color, "文字")
+}
+
+/// 新增笔迹条目：几何 BLOB 由前端编码，原生端只校验结构与声明尺寸，不解释
+/// 具体形状。与文字一样只落数据库，不生成图片，也不占 DDS 文件。
+///
+/// `layer` 不由调用方决定：笔迹固定写入标注层（`stroke::STROKE_LAYER`）。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_stroke(
+    connection: &mut Connection,
+    root: &Path,
+    board_id: i64,
+    tool: u8,
+    color: &str,
+    stroke_width: f64,
+    width: f64,
+    height: f64,
+    geometry: &[u8],
+    center_x: f64,
+    center_y: f64,
+    expected_revision: &str,
+) -> Result<(PinBoardView, Vec<i64>), String> {
+    let header = stroke::validate_geometry(geometry)?;
+    if header.tool != tool {
+        // 工具同时出现在列与 BLOB 头部；不一致说明编码端有 bug，宁可拒绝也不写进
+        // 一条自相矛盾的记录（列用于检索，头部用于渲染）。
+        return Err("笔迹工具与几何头部不一致".into());
     }
-    Ok(color.to_ascii_uppercase())
+    stroke::validate_extent(width, height, stroke_width)?;
+    let color = stroke::normalise_hex_color(color, "笔迹")?;
+    if !center_x.is_finite() || !center_y.is_finite() {
+        return Err("笔迹位置无效".into());
+    }
+
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let setup = begin_item_mutation(
+        &transaction,
+        root,
+        board_id,
+        expected_revision,
+        1,
+        ITEM_KIND_STROKE,
+    )?;
+    let item_id = setup.item_ids[0];
+    transaction
+        .execute(
+            "INSERT INTO pin_board_strokes
+               (item_id, tool, color, stroke_width, width, height, geometry)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                item_id,
+                i64::from(header.tool),
+                color,
+                stroke_width,
+                width,
+                height,
+                geometry
+            ],
+        )
+        .map_err(storage::database_error)?;
+    let points = dds::imported_points(&[(width, height)], center_x, center_y, 0.0)
+        .into_iter()
+        .next()
+        .ok_or("无法计算笔迹位置")?;
+    let editable = EditablePinBoardItem {
+        item_id,
+        order: 0,
+        layer: stroke::STROKE_LAYER,
+        deleted: false,
+        points,
+        uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+    };
+    record_initial_state(
+        &transaction,
+        board_id,
+        item_id,
+        setup.next_step,
+        0,
+        ITEM_KIND_STROKE,
+        &editable,
+    )?;
+    bump_revision(&transaction, board_id)?;
+    transaction.commit().map_err(storage::database_error)?;
+    let view = load_view(connection, root, board_id)?;
+    Ok((view, vec![item_id]))
+}
+
+/// 读取整板笔迹几何并打包成二进制，供渲染器一次性建缓冲（不经过 JSON）。
+///
+/// 包含已删除但尚未结算的条目：`load_pin_board` 的 `deleted` 才是可见性的事实
+/// 来源，几何读取保持与视图同集合，前端不必为「删了又撤销」再请求一次。
+/// 每条几何在打包前都按读侧口径校验，损坏记录会明确报错而不是被静默丢弃。
+pub(crate) fn read_strokes(connection: &Connection, board_id: i64) -> Result<Vec<u8>, String> {
+    require_active_board(connection, board_id)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT i.id, s.tool, s.color, s.stroke_width,
+                    CAST(s.width AS REAL), CAST(s.height AS REAL), s.geometry
+               FROM pin_board_items i
+               JOIN pin_board_strokes s ON s.item_id = i.id
+              WHERE i.board_id = ?1
+              ORDER BY i.id",
+        )
+        .map_err(storage::database_error)?;
+    let rows = statement
+        .query_map([board_id], |row| {
+            Ok(stroke::StrokeRecord {
+                item_id: row.get(0)?,
+                tool: row.get::<_, i64>(1)? as u8,
+                color: row.get(2)?,
+                stroke_width: row.get(3)?,
+                width: row.get(4)?,
+                height: row.get(5)?,
+                geometry: row.get(6)?,
+            })
+        })
+        .map_err(storage::database_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage::database_error)?;
+    for record in &rows {
+        stroke::validate_geometry(&record.geometry)
+            .map_err(|error| format!("笔迹条目 {} 的几何无效：{error}", record.item_id))?;
+        stroke::validate_extent(record.width, record.height, record.stroke_width)
+            .map_err(|error| format!("笔迹条目 {}：{error}", record.item_id))?;
+    }
+    stroke::encode_batch(&rows)
 }
 
 /// 导出文件名：`<item-id>.png`，同目录已存在同名文件时追加 `-2`、`-3`…，绝不覆盖
@@ -1856,7 +2064,7 @@ pub(crate) fn read_image_png(
     let context = open_board_context(connection, root, board_id)?;
     let (kind, file_path) = item_kind_and_file(connection, board_id, item_id)?;
     if kind != ITEM_KIND_BITMAP {
-        return Err("文字条目没有位图，请在画板内渲染后复制".into());
+        return Err("该条目没有位图，请在画板内渲染后复制".into());
     }
     let file_path = file_path.ok_or("位图条目缺少文件记录")?;
     let source = bitmap_source_path(root, &context, item_id, &file_path)?;
@@ -1889,7 +2097,7 @@ pub(crate) fn read_texture(
     let context = open_board_context(connection, root, board_id)?;
     let (kind, file_path) = item_kind_and_file(connection, board_id, item_id)?;
     if kind != ITEM_KIND_BITMAP {
-        return Err("文字条目没有 DDS，由前端按需栅格化".into());
+        return Err("该条目没有 DDS，由前端按需绘制".into());
     }
     let file_path = file_path.ok_or("位图条目缺少文件记录")?;
     let canonical = bitmap_source_path(root, &context, item_id, &file_path)?;
@@ -2285,6 +2493,572 @@ mod tests {
         assert!(error.contains("没有位图"), "{error}");
     }
 
+    /// 造一段自由笔几何：头部 + `points` 个点，坐标为顺序填充的归一化值。
+    fn pen_geometry(points: usize) -> Vec<u8> {
+        let mut geometry = vec![stroke::STROKE_GEOMETRY_VERSION, stroke::TOOL_PEN, 0, 0];
+        geometry.extend_from_slice(&(points as u32).to_le_bytes());
+        for index in 0..points {
+            let x = ((index * 65535) / points.max(1)) as u16;
+            geometry.extend_from_slice(&x.to_le_bytes());
+            geometry.extend_from_slice(&x.to_le_bytes());
+            geometry.push(128);
+        }
+        geometry
+    }
+
+    fn shape_geometry(tool: u8, direction: u8) -> Vec<u8> {
+        let mut geometry = vec![stroke::STROKE_GEOMETRY_VERSION, tool, direction, 0];
+        geometry.extend_from_slice(&0u32.to_le_bytes());
+        geometry
+    }
+
+    #[test]
+    fn creates_stroke_items_on_the_annotation_layer() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "笔迹板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let geometry = pen_geometry(3);
+
+        let (view, item_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_PEN,
+            "#a1b2c3",
+            2.5,
+            120.0,
+            40.0,
+            &geometry,
+            640.0,
+            360.0,
+            &revision,
+        )
+        .unwrap();
+
+        assert_eq!(item_ids.len(), 1);
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == item_ids[0])
+            .unwrap();
+        assert_eq!((item.width, item.height), (120.0, 40.0));
+        assert_eq!(item.layer, stroke::STROKE_LAYER);
+        assert!(!item.deleted);
+        assert!(item.available, "笔迹没有实体文件，恒为可用");
+        match &item.payload {
+            PinBoardItemPayload::Stroke {
+                tool,
+                color,
+                stroke_width,
+            } => {
+                assert_eq!(*tool, stroke::TOOL_PEN);
+                assert_eq!(color, "#A1B2C3");
+                assert_eq!(*stroke_width, 2.5);
+            }
+            other => panic!("应返回笔迹载荷：{other:?}"),
+        }
+        assert_eq!(view.missing_textures, 0);
+        // 笔迹只落数据库：不占位图载荷，也不进入 DDS 引用清单。
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_bitmaps"),
+            0
+        );
+        assert!(crate::pin_board::PinBoardReferenceInventory
+            .collect_targets(&connection)
+            .unwrap()
+            .is_empty());
+        // step 0 的删除态默认节点与添加步骤都写在标注层。
+        let layers: Vec<i64> = {
+            let mut statement = connection
+                .prepare("SELECT layer FROM pin_board_history ORDER BY step")
+                .unwrap();
+            statement
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(layers, vec![3, 3]);
+        assert_eq!(
+            scalar(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_strokes
+                 WHERE tool = 0 AND color = '#A1B2C3' AND stroke_width = 2.5"
+            ),
+            1
+        );
+    }
+
+    #[test]
+    fn stroke_items_stay_on_the_annotation_layer_when_saved() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "图层板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (_, stroke_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_RECT,
+            "#FF0000",
+            4.0,
+            80.0,
+            60.0,
+            &shape_geometry(stroke::TOOL_RECT, 2),
+            100.0,
+            100.0,
+            &revision,
+        )
+        .unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "同板文字",
+            20.0,
+            "#00FF00",
+            "left",
+            80.0,
+            30.0,
+            500.0,
+            500.0,
+            &revision,
+        )
+        .unwrap();
+
+        // 前端把两者都声明成底层；笔迹必须被强制拉回标注层，文字照旧。
+        let items = view
+            .items
+            .iter()
+            .map(|item| EditablePinBoardItem {
+                item_id: item.item_id,
+                order: item.order as u64,
+                layer: 0,
+                deleted: false,
+                points: item.points,
+                uv: item.uv,
+            })
+            .collect::<Vec<_>>();
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap();
+        assert!(saved.saved);
+
+        let layer_of = |connection: &Connection, item_id: i64| -> i64 {
+            connection
+                .query_row(
+                    "SELECT layer FROM pin_board_history
+                     WHERE item_id = ?1 ORDER BY step DESC LIMIT 1",
+                    [item_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(layer_of(&connection, stroke_ids[0]), 3);
+        assert_eq!(layer_of(&connection, text_ids[0]), 0);
+        let stored = load_view(&connection, &root, board.board_id).unwrap();
+        assert_eq!(
+            stored
+                .items
+                .iter()
+                .find(|item| item.item_id == stroke_ids[0])
+                .unwrap()
+                .layer,
+            3
+        );
+
+        // 只把图层写错、几何没变时不算改动：笔迹被强制拉回 3，与库里一致，
+        // 因此不产生新步骤（前端传来 0/1/2 都不会让笔迹漂移出标注层）。
+        let latest = load_view(&connection, &root, board.board_id).unwrap();
+        let stroke_item = latest
+            .items
+            .iter()
+            .find(|item| item.item_id == stroke_ids[0])
+            .unwrap();
+        let only_stroke = vec![EditablePinBoardItem {
+            item_id: stroke_item.item_id,
+            order: stroke_item.order as u64,
+            layer: 2,
+            deleted: false,
+            points: stroke_item.points,
+            uv: stroke_item.uv,
+        }];
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &only_stroke,
+            &revision,
+        )
+        .unwrap();
+        assert!(!saved.saved, "笔迹的图层请求应被忽略，不算改动");
+        assert_eq!(layer_of(&connection, stroke_ids[0]), 3);
+
+        // 超出标注层的图层值仍然拒绝：3 是笔迹的固定位置，不是可调范围。
+        let mut invalid = only_stroke;
+        invalid[0].layer = 4;
+        let revision = board_revision(&connection, board.board_id);
+        let error =
+            save_board(&mut connection, &root, board.board_id, &invalid, &revision).unwrap_err();
+        assert!(error.contains("图层无效"), "{error}");
+    }
+
+    #[test]
+    fn reads_stroke_geometry_as_one_binary_batch() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "几何板").unwrap();
+        let pen = pen_geometry(2);
+        let revision = board_revision(&connection, board.board_id);
+        create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_PEN,
+            "#010203",
+            2.5,
+            100.0,
+            40.0,
+            &pen,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_ELLIPSE,
+            "#AABBCC",
+            1.0,
+            30.0,
+            30.0,
+            &shape_geometry(stroke::TOOL_ELLIPSE, 3),
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+
+        let bytes = read_strokes(&connection, board.board_id).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[0..4].try_into().unwrap()), 2);
+        let mut offset = 4;
+        let mut geometry_lengths = Vec::new();
+        for expected_tool in [stroke::TOOL_PEN, stroke::TOOL_ELLIPSE] {
+            offset += 4; // itemId
+            assert_eq!(bytes[offset], expected_tool);
+            offset += 1;
+            offset += 4; // color
+            let stroke_width = f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+            assert!(stroke_width > 0.0);
+            offset += 12; // strokeWidth 剩余 + width + height
+            let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            geometry_lengths.push(length);
+            offset += length;
+        }
+        assert_eq!(offset, bytes.len());
+        assert_eq!(geometry_lengths, vec![pen.len(), 8]);
+
+        // 空板返回「0 条」而不是空载荷，前端可以无条件解析。
+        let empty = create_board(&mut connection, &artwork_id, "空板").unwrap();
+        let bytes = read_strokes(&connection, empty.board_id).unwrap();
+        assert_eq!(bytes, 0u32.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn stroke_items_do_not_participate_in_bitmap_paths() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "剪贴板板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (_, item_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_LINE,
+            "#FFFFFF",
+            1.0,
+            10.0,
+            10.0,
+            &shape_geometry(stroke::TOOL_LINE, 0),
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let export_directory = directory.path().join("exports");
+        fs::create_dir(&export_directory).unwrap();
+        assert_eq!(
+            export_images(
+                &connection,
+                &root,
+                board.board_id,
+                &item_ids,
+                export_directory.to_str().unwrap(),
+                |_, _| {}
+            )
+            .unwrap(),
+            0
+        );
+        assert!(fs::read_dir(&export_directory).unwrap().next().is_none());
+        let error =
+            read_texture(&connection, &root, board.board_id, item_ids[0], 256, 1).unwrap_err();
+        assert!(error.contains("没有 DDS"), "{error}");
+        let error = read_image_png(&connection, &root, board.board_id, item_ids[0]).unwrap_err();
+        assert!(error.contains("没有位图"), "{error}");
+        let error = write_text_png(
+            &connection,
+            &root,
+            board.board_id,
+            item_ids[0],
+            export_directory.to_str().unwrap(),
+            &test_png(2, 2),
+        )
+        .unwrap_err();
+        assert!(error.contains("只有文字条目"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_stroke_payloads() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "校验板").unwrap();
+        let geometry = pen_geometry(2);
+        let attempt = |connection: &mut Connection,
+                       tool: u8,
+                       color: &str,
+                       stroke_width: f64,
+                       width: f64,
+                       height: f64,
+                       geometry: &[u8],
+                       center_x: f64| {
+            let revision: String = connection
+                .query_row(
+                    "SELECT revision FROM pin_boards WHERE id = ?1",
+                    [board.board_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            create_stroke(
+                connection,
+                &root,
+                board.board_id,
+                tool,
+                color,
+                stroke_width,
+                width,
+                height,
+                geometry,
+                center_x,
+                0.0,
+                &revision,
+            )
+            .map(|_| ())
+        };
+
+        let empty = attempt(&mut connection, 0, "#000000", 1.0, 1.0, 1.0, &[], 0.0).unwrap_err();
+        assert!(empty.contains("不完整"), "{empty}");
+        let mismatch = attempt(
+            &mut connection,
+            0,
+            "#000000",
+            1.0,
+            10.0,
+            10.0,
+            &shape_geometry(stroke::TOOL_RECT, 0),
+            0.0,
+        )
+        .unwrap_err();
+        assert!(mismatch.contains("不一致"), "{mismatch}");
+        let bad_color =
+            attempt(&mut connection, 0, "red", 1.0, 10.0, 10.0, &geometry, 0.0).unwrap_err();
+        assert!(bad_color.contains("#RRGGBB"), "{bad_color}");
+        let bad_width = attempt(
+            &mut connection,
+            0,
+            "#000000",
+            0.0,
+            10.0,
+            10.0,
+            &geometry,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(bad_width.contains("线宽"), "{bad_width}");
+        let degenerate = attempt(
+            &mut connection,
+            0,
+            "#000000",
+            1.0,
+            0.0,
+            10.0,
+            &geometry,
+            0.0,
+        )
+        .unwrap_err();
+        assert!(degenerate.contains("包围盒"), "{degenerate}");
+        let nan_position = attempt(
+            &mut connection,
+            0,
+            "#000000",
+            1.0,
+            10.0,
+            10.0,
+            &geometry,
+            f64::NAN,
+        )
+        .unwrap_err();
+        assert!(nan_position.contains("位置"), "{nan_position}");
+
+        // 全部被拒绝：画板上没有留下条目，也没有多出的历史步骤。
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_items WHERE board_id = ?1",
+                board.board_id
+            ),
+            0
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_history"),
+            0
+        );
+    }
+
+    #[test]
+    fn read_strokes_rejects_a_corrupted_geometry_blob() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "坏几何板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (_, item_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_PEN,
+            "#000000",
+            1.0,
+            10.0,
+            10.0,
+            &pen_geometry(2),
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        assert!(read_strokes(&connection, board.board_id).is_ok());
+
+        // 记录被外部改写（版本字节不认识 + 长度对不上）时明确报错，不静默丢条目。
+        connection
+            .execute(
+                "UPDATE pin_board_strokes SET geometry = X'0900010002000000' WHERE item_id = ?1",
+                [item_ids[0]],
+            )
+            .unwrap();
+        let error = read_strokes(&connection, board.board_id).unwrap_err();
+        assert!(error.contains("几何无效"), "{error}");
+        assert!(error.contains(&item_ids[0].to_string()), "{error}");
+    }
+
+    #[test]
+    fn finalize_removes_stroke_rows_without_touching_dds_cleanup() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "结算板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, item_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_ARROW,
+            "#123456",
+            3.0,
+            50.0,
+            50.0,
+            &shape_geometry(stroke::TOOL_ARROW, 1),
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let stroke_item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == item_ids[0])
+            .unwrap();
+
+        // 标记删除 → 结算：笔迹记录随条目级联删除，且没有 DDS 清理入队。
+        let revision = board_revision(&connection, board.board_id);
+        let items = vec![EditablePinBoardItem {
+            item_id: stroke_item.item_id,
+            order: stroke_item.order as u64,
+            layer: stroke_item.layer,
+            deleted: true,
+            points: stroke_item.points,
+            uv: stroke_item.uv,
+        }];
+        let saved = save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap();
+        assert!(saved.saved);
+        let revision = board_revision(&connection, board.board_id);
+        let (_, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+        assert!(cleanup_ids.is_empty(), "笔迹没有实体文件，不应入队清理");
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_items"),
+            0
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_strokes"),
+            0
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            0
+        );
+    }
+
+    #[test]
+    fn serializes_stroke_items_with_kind_and_flat_metadata() {
+        let points = [[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        let value = serde_json::to_value(&PinBoardItem {
+            board_id: 1,
+            item_id: 5,
+            width: 10.0,
+            height: 10.0,
+            order: 0,
+            layer: stroke::STROKE_LAYER,
+            deleted: false,
+            points,
+            uv: points,
+            available: true,
+            payload: PinBoardItemPayload::Stroke {
+                tool: stroke::TOOL_PEN,
+                color: "#AABBCC".into(),
+                stroke_width: 2.0,
+            },
+        })
+        .unwrap();
+        assert_eq!(value["kind"], "stroke");
+        assert_eq!(value["tool"], 0);
+        assert_eq!(value["color"], "#AABBCC");
+        assert_eq!(value["strokeWidth"], 2.0);
+        assert_eq!(value["layer"], 3);
+        // 几何不进视图 JSON：前端走 `read_pin_board_strokes` 的二进制通道。
+        assert!(value.get("geometry").is_none());
+    }
+
     #[test]
     fn writes_text_png_and_rejects_invalid_payloads() {
         let (directory, mut connection) = test_repository();
@@ -2597,6 +3371,7 @@ mod migration_tests {
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
+                 DROP TABLE pin_board_strokes;
                  DROP TABLE pin_board_history;
                  DROP TABLE pin_board_texts;
                  DROP TABLE pin_board_bitmaps;
@@ -2651,6 +3426,7 @@ mod migration_tests {
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = OFF;
+                 DROP TABLE pin_board_strokes;
                  CREATE TABLE pin_board_images (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
                    board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
@@ -2697,7 +3473,84 @@ mod migration_tests {
                  ALTER TABLE branches ADD COLUMN verified_history_id TEXT;
                  ALTER TABLE branches ADD COLUMN verified_ms INTEGER;
                  ALTER TABLE branches ADD COLUMN verify_error TEXT;
+                 ALTER TABLE branches DROP COLUMN last_check_elapsed_ms;
+                 ALTER TABLE branches DROP COLUMN last_check_mode;
+                 ALTER TABLE branches DROP COLUMN quick_hit_count;
                  UPDATE repository_meta SET value = '4' WHERE key = 'schema_version';",
+            )
+            .unwrap();
+    }
+
+    /// 把 v6 画板表按 v5 形状重建并保留数据：v5 没有笔迹表，`kind` 只允许 0/1、
+    /// `layer` 只允许 0–2，分支表也没有备份检查元数据三列。
+    fn downgrade_to_v5(connection: &Connection) {
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DROP TABLE pin_board_strokes;
+                 ALTER TABLE pin_board_bitmaps RENAME TO pin_board_bitmaps_v6;
+                 ALTER TABLE pin_board_texts RENAME TO pin_board_texts_v6;
+                 ALTER TABLE pin_board_history RENAME TO pin_board_history_v6;
+                 ALTER TABLE pin_board_items RENAME TO pin_board_items_v6;
+
+                 CREATE TABLE pin_board_items (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+                   created_ms INTEGER NOT NULL
+                 );
+                 CREATE TABLE pin_board_bitmaps (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   file_path TEXT NOT NULL,
+                   width INTEGER NOT NULL CHECK (width > 0),
+                   height INTEGER NOT NULL CHECK (height > 0)
+                 );
+                 CREATE TABLE pin_board_texts (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 5000),
+                   font_family TEXT NOT NULL CHECK (length(font_family) BETWEEN 1 AND 200),
+                   font_size REAL NOT NULL CHECK (font_size > 0 AND font_size <= 1000),
+                   color TEXT NOT NULL CHECK (length(color) = 7),
+                   align TEXT NOT NULL CHECK (align IN ('left', 'center', 'right')),
+                   measured_width REAL NOT NULL CHECK (measured_width > 0),
+                   measured_height REAL NOT NULL CHECK (measured_height > 0)
+                 );
+                 CREATE TABLE pin_board_history (
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   item_id INTEGER NOT NULL REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   step INTEGER NOT NULL CHECK (step >= 0),
+                   deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                   layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 2),
+                   sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                   transform_json TEXT NOT NULL,
+                   PRIMARY KEY (board_id, item_id, step)
+                 );
+
+                 INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                   SELECT id, board_id, kind, created_ms FROM pin_board_items_v6;
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                   SELECT item_id, file_path, width, height FROM pin_board_bitmaps_v6;
+                 INSERT INTO pin_board_texts
+                   (item_id, text, font_family, font_size, color, align,
+                    measured_width, measured_height)
+                   SELECT item_id, text, font_family, font_size, color, align,
+                          measured_width, measured_height
+                     FROM pin_board_texts_v6;
+                 INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                   SELECT board_id, item_id, step, deleted, layer, sort_order, transform_json
+                     FROM pin_board_history_v6;
+
+                 DROP TABLE pin_board_history_v6;
+                 DROP TABLE pin_board_texts_v6;
+                 DROP TABLE pin_board_bitmaps_v6;
+                 DROP TABLE pin_board_items_v6;
+                 CREATE INDEX pin_board_items_board ON pin_board_items(board_id, id);
+
+                 ALTER TABLE branches DROP COLUMN last_check_elapsed_ms;
+                 ALTER TABLE branches DROP COLUMN last_check_mode;
+                 ALTER TABLE branches DROP COLUMN quick_hit_count;
+                 UPDATE repository_meta SET value = '5' WHERE key = 'schema_version';",
             )
             .unwrap();
     }
@@ -2797,7 +3650,7 @@ mod migration_tests {
     }
 
     /// v1 仓库（无素材板表、分支表也没有 v2/v3/v4 追加列）打开时必须通过追加式
-    /// 迁移升级到当前版本 v5，且 v1 形状的既有结构保持可读。
+    /// 迁移升级到当前版本 v6，且 v1 形状的既有结构保持可读。
     #[test]
     fn migrates_a_v1_repository_to_the_current_version_append_only() {
         let directory = tempfile::tempdir().unwrap();
@@ -2819,12 +3672,13 @@ mod migration_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         for table in [
             "pin_boards",
             "pin_board_items",
             "pin_board_bitmaps",
             "pin_board_texts",
+            "pin_board_strokes",
             "pin_board_history",
             "repository_backup_runs",
         ] {
@@ -2839,6 +3693,9 @@ mod migration_tests {
             "backup_quick_enabled",
             "last_source_size",
             "last_source_modified_ms",
+            "last_check_elapsed_ms",
+            "last_check_mode",
+            "quick_hit_count",
         ] {
             assert!(branch_columns.iter().any(|item| item == column), "{column}");
         }
@@ -2885,7 +3742,7 @@ mod migration_tests {
                     |row| row.get(0)
                 )
                 .unwrap(),
-            5
+            6
         );
         assert!(!table_exists(&connection, "pin_board_images"));
         let items: Vec<(i64, i64, i64)> = {
@@ -3022,7 +3879,229 @@ mod migration_tests {
         assert!(!table_exists(&connection, "pin_board_items"));
     }
 
-    /// 旧程序（支持到 v4）必须拒绝打开 v5 仓库，且不改动版本与表结构。
+    /// v5 → v6 必须保留位图、文字与每一步变换历史，新建笔迹表并放开 kind / layer
+    /// 的取值，同时为分支补上备份检查元数据三列（旧行为空或取默认值）。
+    #[test]
+    fn migrates_v5_boards_and_adds_backup_check_columns() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root);
+        let artwork_id = crate::storage::new_id();
+        let branch_id = crate::storage::new_id();
+        {
+            let connection = crate::storage::open(&root).unwrap();
+            insert_board_fixture(&connection, &artwork_id);
+            let transform = r#"{"points":[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]],"uv":[[0.0,0.0],[1.0,0.0],[1.0,1.0],[0.0,1.0]]}"#;
+            connection
+                .execute(
+                    "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                     VALUES (13, 1, 1, 1)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO pin_board_texts
+                       (item_id, text, font_family, font_size, color, align,
+                        measured_width, measured_height)
+                     VALUES (13, '迁移文字', 'sans-serif', 20.0, '#112233', 'left', 60.0, 30.0)",
+                    [],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO pin_board_history
+                       (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                     VALUES (1, 13, 1, 0, 1, 0, ?1)",
+                    [transform],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO branches
+                       (id, artwork_id, title, source_path, source_path_key, created_ms, updated_ms)
+                     VALUES (?1, ?2, '迁移分支', 'C:/outside.psd', 'c:/outside.psd', 1, 1)",
+                    [&branch_id, &artwork_id],
+                )
+                .unwrap();
+            downgrade_to_v5(&connection);
+        }
+
+        crate::library::open_existing(&root).unwrap();
+
+        let connection = crate::storage::open(&root).unwrap();
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT CAST(value AS INTEGER) FROM repository_meta
+                     WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            6
+        );
+        assert!(table_exists(&connection, "pin_board_strokes"));
+        let items: Vec<(i64, i64)> = {
+            let mut statement = connection
+                .prepare("SELECT id, kind FROM pin_board_items ORDER BY id")
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(items, vec![(11, 0), (12, 0), (13, 1)]);
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT COUNT(*) FROM pin_board_history WHERE item_id = 11",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            connection
+                .query_row::<String, _, _>(
+                    "SELECT text FROM pin_board_texts WHERE item_id = 13",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            "迁移文字"
+        );
+
+        // 分支三列：旧行不填也是合法状态（两列 NULL，计数取默认 0）。
+        let columns_in_branches = columns(&connection, "branches");
+        for column in [
+            "last_check_elapsed_ms",
+            "last_check_mode",
+            "quick_hit_count",
+        ] {
+            assert!(
+                columns_in_branches.iter().any(|item| item == column),
+                "{column}"
+            );
+        }
+        let defaults: (Option<i64>, Option<String>, i64) = connection
+            .query_row(
+                "SELECT last_check_elapsed_ms, last_check_mode, quick_hit_count
+                   FROM branches WHERE id = ?1",
+                [&branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(defaults, (None, None, 0));
+
+        // 新结构可写笔迹条目：kind = 2 与 layer = 3 都被接受。
+        connection
+            .execute(
+                "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                 VALUES (14, 1, 2, 1)",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO pin_board_strokes
+                   (item_id, tool, color, stroke_width, width, height, geometry)
+                 VALUES (14, 0, '#000000', 1.0, 10.0, 10.0,
+                         X'01000000010000000000000080')",
+                [],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                 VALUES (1, 14, 1, 0, 3, 0, '{}')",
+                [],
+            )
+            .unwrap();
+        // 越界取值仍被新表的 CHECK 挡住。
+        assert!(connection
+            .execute(
+                "INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                 VALUES (15, 1, 3, 1)",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                 VALUES (1, 14, 2, 0, 4, 0, '{}')",
+                [],
+            )
+            .is_err());
+
+        // 外键级联在新表上继续生效（笔迹与文字都随画板级联删除）。
+        connection
+            .execute("DELETE FROM pin_boards WHERE id = 1", [])
+            .unwrap();
+        for table in [
+            "pin_board_items",
+            "pin_board_bitmaps",
+            "pin_board_texts",
+            "pin_board_strokes",
+            "pin_board_history",
+        ] {
+            let count: i64 = connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table}");
+        }
+    }
+
+    /// 迁移中若外键检查失败，整笔事务回滚：版本仍是 v5，v5 形状的表仍在。
+    #[test]
+    fn failed_v6_migration_rolls_back_to_v5() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root);
+        let artwork_id = crate::storage::new_id();
+        {
+            let connection = crate::storage::open(&root).unwrap();
+            insert_board_fixture(&connection, &artwork_id);
+            downgrade_to_v5(&connection);
+            connection
+                .execute_batch(
+                    "PRAGMA foreign_keys = OFF;
+                     INSERT INTO pin_board_history
+                       (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                     VALUES (1, 999, 0, 0, 1, 0, '{}');",
+                )
+                .unwrap();
+        }
+
+        let error = crate::library::open_existing(&root).unwrap_err();
+        assert!(error.contains("外键完整性检查失败"), "{error}");
+
+        let connection = crate::storage::open(&root).unwrap();
+        assert_eq!(
+            connection
+                .query_row::<i64, _, _>(
+                    "SELECT CAST(value AS INTEGER) FROM repository_meta
+                     WHERE key = 'schema_version'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            5
+        );
+        assert!(!table_exists(&connection, "pin_board_strokes"));
+        assert!(!table_exists(&connection, "pin_board_items_v6"));
+        assert!(!columns(&connection, "branches")
+            .iter()
+            .any(|item| item == "quick_hit_count"));
+    }
+
+    /// 旧程序（支持到 v6）必须拒绝打开 v7 仓库，且不改动版本与表结构。
     #[test]
     fn rejects_repositories_from_newer_versions() {
         let directory = tempfile::tempdir().unwrap();
@@ -3032,7 +4111,7 @@ mod migration_tests {
             let connection = crate::storage::open(&root).unwrap();
             connection
                 .execute(
-                    "UPDATE repository_meta SET value = '6' WHERE key = 'schema_version'",
+                    "UPDATE repository_meta SET value = '7' WHERE key = 'schema_version'",
                     [],
                 )
                 .unwrap();
@@ -3048,7 +4127,7 @@ mod migration_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "6");
+        assert_eq!(version, "7");
         assert!(table_exists(&connection, "pin_board_items"));
     }
 }

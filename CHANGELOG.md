@@ -15,6 +15,37 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- Pin-board items gain a third kind: annotations drawn with a pen, line, arrow,
+  rectangle or ellipse. A stroke lives only in the database — `pin_board_strokes`
+  holds the tool, colour, stroke width, bounding box and a compact geometry blob,
+  and no texture or file is created — so strokes stay out of the DDS reference
+  list, cleanup, scrub, the orphan scan, disk accounting, in-board copy and the
+  system clipboard, which remain bitmap-only. The geometry is a small-endian,
+  versioned layout that both sides validate the same way: a freehand stroke
+  carries quantized points and pressure, a shape carries none and derives its two
+  ends from the bounding box plus a direction bit, and the write-side limit of
+  4096 points is thinned by distance rather than refused. `create_pin_board_stroke`
+  passes the blob as an ordinary argument — a `Uint8Array` arrives as a numeric
+  array, about 75 KB at the limit, so no raw channel is worth opening — and
+  `read_pin_board_strokes` returns the whole board as one binary payload that the
+  renderer parses into a map without JSON. A stroke always sits on the annotation
+  layer: `save_pin_board` ignores the `layer` sent by the front end and writes
+  three, so sending a different layer alone is not a change. The canvas does not
+  draw strokes yet; the SDF pipeline, the tools, the layer switches and the
+  pressure work remain in the plan.
+- The repository schema is v6, reached by a single v5 → v6 migration that also
+  widens the pin-board tables (`kind` accepts 2, `history.layer` accepts 3) and
+  adds `branches.last_check_elapsed_ms`, `branches.last_check_mode` (quick / full /
+  fallback) and `branches.quick_hit_count` for the backup scheduler. The four
+  pin-board tables are rebuilt together, because their foreign keys point at
+  `pin_board_items` and SQLite rewrites them when a table is renamed; the migration
+  runs with foreign keys off, checks them before committing and rolls back whole on
+  failure, so a v5 repository still opens as v5. The three scheduler columns are
+  created here only: the scheduler still keeps the check cost in memory, their
+  wiring is not part of this batch, and reading them yields NULL / 0.
+
 ### Changed
 
 - The pin board's `阵列排序` is rewritten, and the placement math now lives in a

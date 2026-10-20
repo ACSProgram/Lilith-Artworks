@@ -8,7 +8,7 @@ use crate::storage;
 use std::cell::Cell;
 
 pub(super) const REPOSITORY_FORMAT: &str = "lilith-artworks";
-pub(super) const SCHEMA_VERSION: i64 = 5;
+pub(super) const SCHEMA_VERSION: i64 = 6;
 
 /// v2 的素材板三张表必须冻结为旧形状：`v1 → v2` 迁移会先建出这些表，再由
 /// `v4 → v5` 重建。若复用更新后的建表 SQL，v1 仓库会在 v2 步骤直接建出 v5 表，
@@ -51,13 +51,19 @@ const PIN_BOARD_TABLES_V2_SQL: &str = "
                PRIMARY KEY (board_id, image_id, step)
              );";
 
-/// v5 素材板：公共条目表 + 按 kind 的载荷子表。
+/// 当前（v6）素材板：公共条目表 + 按 kind 的载荷子表。
 ///
-/// - `pin_board_items`：与 kind 无关的公共列，`kind = 0` 位图、`kind = 1` 文字；
+/// - `pin_board_items`：与 kind 无关的公共列，`kind = 0` 位图、`kind = 1` 文字、
+///   `kind = 2` 笔迹；
 /// - `pin_board_bitmaps`：位图载荷，DDS 实体存于
 ///   `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`；
 /// - `pin_board_texts`：文字载荷（固定字体族、度量结果随条目持久化）；
-/// - `pin_board_history`：每个条目按 step 的变换历史，不承载载荷。
+/// - `pin_board_strokes`：笔迹载荷（工具、颜色、线宽、包围盒与几何 BLOB，只存数据库）；
+/// - `pin_board_history`：每个条目按 step 的变换历史，不承载载荷。笔迹的 `layer`
+///   恒为 3（标注层），因此该列的取值范围是 0–3。
+///
+/// 笔刷与形状类型放在笔迹几何 BLOB 的头部（见 `pin_board/stroke.rs`），不新增
+/// kind，也不重建 `pin_board_items`。
 const PIN_BOARD_TABLES_SQL: &str = "
              CREATE TABLE pin_boards (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,7 +84,7 @@ const PIN_BOARD_TABLES_SQL: &str = "
              CREATE TABLE pin_board_items (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
-               kind INTEGER NOT NULL CHECK (kind IN (0, 1)),
+               kind INTEGER NOT NULL CHECK (kind IN (0, 1, 2)),
                created_ms INTEGER NOT NULL
              );
              CREATE INDEX pin_board_items_board ON pin_board_items(board_id, id);
@@ -101,12 +107,22 @@ const PIN_BOARD_TABLES_SQL: &str = "
                measured_height REAL NOT NULL CHECK (measured_height > 0)
              );
 
+             CREATE TABLE pin_board_strokes (
+               item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+               tool INTEGER NOT NULL CHECK (tool BETWEEN 0 AND 4),
+               color TEXT NOT NULL CHECK (length(color) = 7),
+               stroke_width REAL NOT NULL CHECK (stroke_width > 0 AND stroke_width <= 1000),
+               width REAL NOT NULL CHECK (width > 0),
+               height REAL NOT NULL CHECK (height > 0),
+               geometry BLOB NOT NULL CHECK (length(geometry) BETWEEN 8 AND 20488)
+             );
+
              CREATE TABLE pin_board_history (
                board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
                item_id INTEGER NOT NULL REFERENCES pin_board_items(id) ON DELETE CASCADE,
                step INTEGER NOT NULL CHECK (step >= 0),
                deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
-               layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 2),
+               layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 3),
                sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
                transform_json TEXT NOT NULL,
                PRIMARY KEY (board_id, item_id, step)
@@ -152,7 +168,7 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
              );
                INSERT INTO repository_meta (key, value) VALUES
                ('format', 'lilith-artworks'),
-               ('schema_version', '5');
+               ('schema_version', '6');
 
              CREATE TABLE library_nodes (
                id TEXT PRIMARY KEY,
@@ -198,6 +214,9 @@ pub(super) fn create(connection: &Connection) -> Result<(), String> {
                backup_quick_enabled INTEGER NOT NULL DEFAULT 0 CHECK (backup_quick_enabled IN (0, 1)),
                last_source_size INTEGER,
                last_source_modified_ms INTEGER,
+               last_check_elapsed_ms INTEGER,
+               last_check_mode TEXT CHECK (last_check_mode IN ('quick', 'full', 'fallback')),
+               quick_hit_count INTEGER NOT NULL DEFAULT 0 CHECK (quick_hit_count >= 0),
                created_ms INTEGER NOT NULL,
                updated_ms INTEGER NOT NULL,
                UNIQUE (artwork_id, source_path_key)
@@ -563,9 +582,10 @@ fn newer_version_error(version: i64) -> String {
 /// 打开既有仓库时执行 schema 迁移。迁移不支持回退；高于当前版本的仓库直接
 /// 拒绝打开。v1 → v2 追加素材板三张表；v2 → v3 为分支追加快速自动备份开关与
 /// 上次全量检查记录的源文件元数据；v3 → v4 为分支追加空闲链路校验状态；
-/// v4 → v5 是 0.3 唯一一次表重建：画板条目改为多态结构，`history_nodes`
-/// 追加缩略图与节点级校验列，删除 0.2 遗留的 `branches` 校验三列，并建立路径
-/// 索引与 `repository_backup_runs`。
+/// v4 → v5 重建画板条目为多态结构，`history_nodes` 追加缩略图与节点级校验列，
+/// 删除 0.2 遗留的 `branches` 校验三列，并建立路径索引与 `repository_backup_runs`；
+/// v5 → v6 为素材板加入笔迹条目（并重建 `pin_board_items` / `pin_board_history`
+/// 以放开 kind 与 layer 的取值范围），同时为分支追加备份检查元数据三列。
 pub(super) fn migrate(connection: &mut Connection) -> Result<(), String> {
     let version = repository_version(connection)?;
     if version == SCHEMA_VERSION {
@@ -614,6 +634,9 @@ pub(super) fn migrate(connection: &mut Connection) -> Result<(), String> {
     }
     if version < 5 {
         migrate_v4_to_v5(connection)?;
+    }
+    if version < 6 {
+        migrate_v5_to_v6(connection)?;
     }
     Ok(())
 }
@@ -710,6 +733,139 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
         transaction
             .execute(
                 "UPDATE repository_meta SET value = '5' WHERE key = 'schema_version'",
+                [],
+            )
+            .map_err(storage::database_error)?;
+        transaction.commit().map_err(storage::database_error)
+    })();
+    let restored = connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|error| format!("无法恢复外键检查：{error}"));
+    migration.and(restored)
+}
+
+/// v5 → v6：为素材板加入笔迹条目，并为分支补上备份检查元数据三列。
+///
+/// 素材板四张表必须一起重建：`pin_board_bitmaps` / `pin_board_texts` /
+/// `pin_board_history` 的外键都指向 `pin_board_items`，而 SQLite 的表重命名会
+/// 连带改写这些外键——只重建父表会留下指向 `pin_board_items_v5` 的悬空引用，
+/// 而它随后会被删除。因此先把四张表全部改名，再建新表、复制数据、删除旧表。
+///
+/// 新表比旧表只放宽了取值范围（`kind IN (0,1,2)`、`layer BETWEEN 0 AND 3`），
+/// 因此复制数据不需要任何转换。索引创建放在旧表删除之后：索引名不随表重命名
+/// 改变，提前创建会与旧表上的同名索引冲突。
+///
+/// 分支三列都是可空或带默认值，旧行迁移后不需要回填：
+/// - `last_check_elapsed_ms`：上一次成功检查的耗时，调度器据此放宽间隔（重启后
+///   仍然记得，不必重新学习）；
+/// - `last_check_mode`：本次检查方式（`quick` / `full` / `fallback`），供分支状态
+///   行显示；
+/// - `quick_hit_count`：连续快速命中次数，供「每 N 次强制一次全量」收窄整秒盲区。
+///
+/// 三列在本批次只建立，还没有读写它们的代码：调度器目前仍在内存里记检查耗时
+/// 与方式（`docs/modules/history-and-backup.md` 的「调度」）。接线仍待安排，见
+/// `docs/planning/todo.md` 的「备份检查元数据持久化」。
+fn migrate_v5_to_v6(connection: &mut Connection) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA foreign_keys = OFF;")
+        .map_err(|error| format!("无法暂停外键检查进行迁移：{error}"))?;
+    let migration = (|| -> Result<(), String> {
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(storage::database_error)?;
+        transaction
+            .execute_batch(
+                "ALTER TABLE pin_board_bitmaps RENAME TO pin_board_bitmaps_v5;
+                 ALTER TABLE pin_board_texts RENAME TO pin_board_texts_v5;
+                 ALTER TABLE pin_board_history RENAME TO pin_board_history_v5;
+                 ALTER TABLE pin_board_items RENAME TO pin_board_items_v5;
+
+                 CREATE TABLE pin_board_items (
+                   id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   kind INTEGER NOT NULL CHECK (kind IN (0, 1, 2)),
+                   created_ms INTEGER NOT NULL
+                 );
+
+                 CREATE TABLE pin_board_bitmaps (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   file_path TEXT NOT NULL,
+                   width INTEGER NOT NULL CHECK (width > 0),
+                   height INTEGER NOT NULL CHECK (height > 0)
+                 );
+
+                 CREATE TABLE pin_board_texts (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   text TEXT NOT NULL CHECK (length(text) BETWEEN 1 AND 5000),
+                   font_family TEXT NOT NULL CHECK (length(font_family) BETWEEN 1 AND 200),
+                   font_size REAL NOT NULL CHECK (font_size > 0 AND font_size <= 1000),
+                   color TEXT NOT NULL CHECK (length(color) = 7),
+                   align TEXT NOT NULL CHECK (align IN ('left', 'center', 'right')),
+                   measured_width REAL NOT NULL CHECK (measured_width > 0),
+                   measured_height REAL NOT NULL CHECK (measured_height > 0)
+                 );
+
+                 CREATE TABLE pin_board_strokes (
+                   item_id INTEGER PRIMARY KEY REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   tool INTEGER NOT NULL CHECK (tool BETWEEN 0 AND 4),
+                   color TEXT NOT NULL CHECK (length(color) = 7),
+                   stroke_width REAL NOT NULL CHECK (stroke_width > 0 AND stroke_width <= 1000),
+                   width REAL NOT NULL CHECK (width > 0),
+                   height REAL NOT NULL CHECK (height > 0),
+                   geometry BLOB NOT NULL CHECK (length(geometry) BETWEEN 8 AND 20488)
+                 );
+
+                 CREATE TABLE pin_board_history (
+                   board_id INTEGER NOT NULL REFERENCES pin_boards(id) ON DELETE CASCADE,
+                   item_id INTEGER NOT NULL REFERENCES pin_board_items(id) ON DELETE CASCADE,
+                   step INTEGER NOT NULL CHECK (step >= 0),
+                   deleted INTEGER NOT NULL CHECK (deleted IN (0, 1)),
+                   layer INTEGER NOT NULL CHECK (layer BETWEEN 0 AND 3),
+                   sort_order INTEGER NOT NULL CHECK (sort_order >= 0),
+                   transform_json TEXT NOT NULL,
+                   PRIMARY KEY (board_id, item_id, step)
+                 );
+
+                 INSERT INTO pin_board_items (id, board_id, kind, created_ms)
+                   SELECT id, board_id, kind, created_ms FROM pin_board_items_v5;
+                 INSERT INTO pin_board_bitmaps (item_id, file_path, width, height)
+                   SELECT item_id, file_path, width, height FROM pin_board_bitmaps_v5;
+                 INSERT INTO pin_board_texts
+                   (item_id, text, font_family, font_size, color, align,
+                    measured_width, measured_height)
+                   SELECT item_id, text, font_family, font_size, color, align,
+                          measured_width, measured_height
+                     FROM pin_board_texts_v5;
+                 INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                   SELECT board_id, item_id, step, deleted, layer, sort_order, transform_json
+                     FROM pin_board_history_v5;
+
+                 DROP TABLE pin_board_history_v5;
+                 DROP TABLE pin_board_texts_v5;
+                 DROP TABLE pin_board_bitmaps_v5;
+                 DROP TABLE pin_board_items_v5;
+
+                 CREATE INDEX pin_board_items_board ON pin_board_items(board_id, id);
+
+                 ALTER TABLE branches ADD COLUMN last_check_elapsed_ms INTEGER;
+                 ALTER TABLE branches ADD COLUMN last_check_mode TEXT
+                   CHECK (last_check_mode IN ('quick', 'full', 'fallback'));
+                 ALTER TABLE branches ADD COLUMN quick_hit_count
+                   INTEGER NOT NULL DEFAULT 0 CHECK (quick_hit_count >= 0);",
+            )
+            .map_err(|error| format!("无法迁移仓库结构到 v6：{error}"))?;
+        {
+            let mut foreign_keys = transaction
+                .prepare("PRAGMA foreign_key_check")
+                .map_err(storage::database_error)?;
+            if foreign_keys.exists([]).map_err(storage::database_error)? {
+                return Err("v6 迁移后的外键完整性检查失败".into());
+            }
+        }
+        transaction
+            .execute(
+                "UPDATE repository_meta SET value = '6' WHERE key = 'schema_version'",
                 [],
             )
             .map_err(storage::database_error)?;

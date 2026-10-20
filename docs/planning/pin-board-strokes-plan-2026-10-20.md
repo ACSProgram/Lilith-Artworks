@@ -96,11 +96,16 @@ pin_board_strokes
 | 4 | 编辑能力与图层可见性 | 笔迹与图片交互一致，四层可单独开关 |
 | 5 | 压感、手感与性能验收 | 采样/光滑/压感 + 压力测试与指标 |
 
-每个阶段结束时单独提交，提交信息按 `AGENTS.md` 的英文祈使句格式，文档与代码同一提交。
+阶段 1 已于 2026-10-20 落地并提交，阶段 2–5 未开始。每个阶段结束时单独提交，提交信息按
+`AGENTS.md` 的英文祈使句格式，文档与代码同一提交。
 
 ---
 
 ## 阶段 1：schema v6、存储层与命令面
+
+**状态：已实现（2026-10-20）**。迁移、存储层、命令面与前端的几何契约都按下面的口径落地；
+与计划不同的只有「待验证」那条，结论见本节末的「落地结论」。行为变化见 `CHANGELOG.md` 的
+`## Unreleased`。
 
 **迁移 v5 → v6 一次完成两组改动**，`SCHEMA_VERSION` 只跳一次：
 
@@ -133,11 +138,13 @@ pin_board_strokes
 - `read_pin_board_strokes(board_id) -> Response`：二进制，布局为
   `u32 条目数` + 每条目 `(u32 itemId, u8 tool, u32 color, f32 strokeWidth, f32 width, f32 height,
   u32 geometryLen, bytes)`。前端一次解析成 `Map<itemId, StrokeGeometry>`，**零 JSON 解析**。
-  二进制返回沿用 `read_pin_board_texture`（`mod.rs:422`）的 `ipc::Response` 先例。
+  二进制返回沿用 `read_pin_board_texture`（`mod.rs:482`）的 `ipc::Response` 先例。
 
-**待验证**：创建命令的 `geometry` 参数能否直接接收前端 `Uint8Array`。可行则走二进制参数；
-不可行则退到 `Vec<u8>`（JSON 数字数组，单笔 4096 点约 100 KB），并把 `MAX_STROKE_POINTS`
-降到 2048。这个结论要在阶段 1 内定下并写进模块文档。
+**落地结论（2026-10-20）**：`geometry` 走普通参数（`Vec<u8>`）。`Uint8Array` 能直接传给命令：
+Tauri IPC 的 JSON 序列化会把它换成数字数组，所以不必手工 `Array.from`，也不必退到二进制通道或
+把 `MAX_STROKE_POINTS` 降到 2048——单笔 4096 点约 75 KB JSON，一次命令只传一条，不值得为它另开
+通道。整板读取反过来走 `read_pin_board_strokes` 的 `ipc::Response` 二进制载荷，前端零 JSON 解析。
+结论已写进 `docs/modules/pin-board.md` 的「命令面」。
 
 **验收**：
 
@@ -288,14 +295,16 @@ Rust 侧：5000 笔批量读取 < 200 ms、批量写入 < 500 ms。
    「添加文字」的现状一致，本计划不改变。删除已有笔迹可以撤销（`deleted` 在快照内）。
 4. **形状的退化包围盒**：水平或垂直的直线高度为 0，归一化会除零。写入侧必须把包围盒按线宽
    膨胀后再存，读侧拒绝零尺寸。
-5. **0.3 出现第二次迁移**：0.3 此前只有 v4 → v5 一次迁移（`todo.md` 与归档计划均按「唯一一次」
-   表述）。本计划落地后该表述需改为「alpha3 的 v4 → v5 与 alpha5 的 v5 → v6 两次」，并同步
-   `verify-metadata.mjs` 的版本→schema 映射。
+5. **0.3 出现第二次迁移**（已落地）：0.3 此前只有 v4 → v5 一次迁移，各处按「唯一一次」表述。
+   阶段 1 已把 `todo.md`、`docs/guides/release-policy.md` 与 `verify-metadata.mjs` 的版本→schema
+   映射改为「alpha3 的 v4 → v5 与 alpha5 的 v5 → v6 两次」；`docs/planning/archive/` 下的历史计划
+   保留原文，不回改。
 
 ## 文档同步
 
-- 本计划阶段 1 落地时更新 `docs/modules/pin-board.md` 的「存储布局」「命令面」两节，写**已实现**
-  的口径，不写计划；
+- 阶段 1 的文档同步**已完成**（2026-10-20）：`docs/modules/pin-board.md` 的「上下文入口」「存储布局」
+  「命令面」「领域行为」「快速验证」按已实现的口径改写；`docs/modules/history-and-backup.md` 的
+  「仓库版本迁移」与「调度」同步第二次迁移与三列的状态；`CHANGELOG.md` 的改动写在顶部
+  `## Unreleased`，不写回带日期的版本小节；
 - 阶段 4 落地时补「图层可见性」一节；
-- `CHANGELOG.md` 的改动写入顶部 `## Unreleased`，不写回带日期的版本小节；
 - 全部阶段完成后本文件移入 `docs/planning/archive/`，并同步其 `README.md` 索引。

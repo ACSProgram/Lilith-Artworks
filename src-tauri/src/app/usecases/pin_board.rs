@@ -301,6 +301,53 @@ pub(crate) fn create_text(
     })
 }
 
+/// 新增笔迹条目。与文字同一条仓库写链路：进写闸门、由领域层校验几何后落库。
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_stroke(
+    context: &CommandContext,
+    board_id: i64,
+    tool: u8,
+    color: &str,
+    stroke_width: f64,
+    width: f64,
+    height: f64,
+    geometry: &[u8],
+    center_x: f64,
+    center_y: f64,
+    expected_revision: &str,
+) -> Result<(PinBoardView, Vec<i64>), CommandError> {
+    context.run_repository_write(|session| {
+        let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
+        repository::create_stroke(
+            &mut connection,
+            session.root(),
+            board_id,
+            tool,
+            color,
+            stroke_width,
+            width,
+            height,
+            geometry,
+            center_x,
+            center_y,
+            expected_revision,
+        )
+        .map_err(CommandError::from)
+    })
+}
+
+/// 读取整板笔迹几何的二进制载荷；布局见 `pin_board::stroke::encode_batch`。
+pub(crate) fn read_strokes(
+    context: &CommandContext,
+    board_id: i64,
+) -> Result<Vec<u8>, CommandError> {
+    let label = format!("read_pin_board_strokes board={board_id}");
+    context.run_read(&label, |session| {
+        let connection = storage::open(session.root()).map_err(CommandError::from)?;
+        repository::read_strokes(&connection, board_id).map_err(CommandError::from)
+    })
+}
+
 pub(crate) fn export_images(
     context: &CommandContext,
     board_id: i64,

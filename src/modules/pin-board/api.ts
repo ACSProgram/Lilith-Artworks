@@ -1,6 +1,7 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invokeCommand } from "../../shared/tauri";
+import type { PinBoardStrokeTool } from "./strokeGeometry";
 import type {
   PinBoardArrangeItem,
   PinBoardArrangeResult,
@@ -100,6 +101,37 @@ export const pinBoardApi = {
     centerY,
     expectedRevision,
   }),
+  /**
+   * 新增笔迹条目。`geometry` 是 `strokeGeometry.ts` 编码的 BLOB：`Uint8Array` 会被
+   * IPC 序列化成数字数组（与剪贴板图片的 `bytes` 同一条通道），不必手工 `Array.from`。
+   * 图层由原生端强制写成标注层，这里不传。
+   */
+  createPinBoardStroke: (
+    boardId: number,
+    tool: PinBoardStrokeTool,
+    color: string,
+    strokeWidth: number,
+    width: number,
+    height: number,
+    geometry: Uint8Array | number[],
+    centerX: number,
+    centerY: number,
+    expectedRevision: string,
+  ) => invokeCommand<PinBoardMutationResult>("create_pin_board_stroke", {
+    boardId,
+    tool,
+    color,
+    strokeWidth,
+    width,
+    height,
+    geometry,
+    centerX,
+    centerY,
+    expectedRevision,
+  }),
+  /** 整板笔迹几何的二进制载荷，由 `parseStrokeBatch` 一次解析。 */
+  readPinBoardStrokes: (boardId: number) =>
+    invokeCommand<Uint8Array>("read_pin_board_strokes", { boardId }),
   exportPinBoardImages: (
     boardId: number,
     itemIds: number[],

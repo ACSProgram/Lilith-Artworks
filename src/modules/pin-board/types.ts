@@ -1,5 +1,7 @@
 /** 素材板领域 DTO；`api.ts` 是本领域 Tauri 命令的唯一前端入口。 */
 
+import type { PinBoardStrokeTool } from "./strokeGeometry";
+
 export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 
 /**
@@ -74,6 +76,14 @@ interface PinBoardItemBase {
   available: boolean;
 }
 
+/** 笔迹条目：几何只存数据库，由 `read_pin_board_strokes` 的二进制通道单独读取。 */
+export interface PinBoardStrokeItem extends PinBoardItemBase {
+  kind: "stroke";
+  tool: PinBoardStrokeTool;
+  color: string;
+  strokeWidth: number;
+}
+
 /** 位图条目：纹理来自仓库内的 DDS 文件。 */
 export interface PinBoardBitmapItem extends PinBoardItemBase {
   kind: "bitmap";
@@ -89,7 +99,7 @@ export interface PinBoardTextItem extends PinBoardItemBase {
   align: PinBoardTextAlign;
 }
 
-export type PinBoardItem = PinBoardBitmapItem | PinBoardTextItem;
+export type PinBoardItem = PinBoardBitmapItem | PinBoardTextItem | PinBoardStrokeItem;
 
 export interface PinBoardView {
   boardId: number;

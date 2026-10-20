@@ -9,7 +9,7 @@
 - 版本号**滞后**于工作：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 五处版本字段始终等于最近一次切版本时的值，日常改动不改动它们。
 - `CHANGELOG.md` 顶部维护唯一的 `## Unreleased` 暂存段：当前版本落定之后的全部改动都记入该段，不写回已带日期的版本小节。带日期的小节一经建立即冻结。
 - 维护者决定切版本时的固定动作：把 `## Unreleased` 改名为 `## X.Y.Z - 日期`，并在顶部重新留出空的 `## Unreleased` 暂存段；同步上述五处版本字段；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
-- **版本与 schema 的对应关系**由 `tools/release/verify-metadata.mjs` 中的显式版本→schema 登记表维护：切版本必须在同一提交为新版本登记映射，脚本拒绝未登记或与源码 `SCHEMA_VERSION` 不一致的组合。0.2.x 与 0.3 的 alpha1 / alpha2 对应 repository schema v4；唯一一次 v4 → v5 迁移由 0.3 alpha3 落地，alpha3 及之后的 0.3 版本映射到 v5。
+- **版本与 schema 的对应关系**由 `tools/release/verify-metadata.mjs` 中的显式版本→schema 登记表维护：切版本必须在同一提交为新版本登记映射，脚本拒绝未登记或与源码 `SCHEMA_VERSION` 不一致的组合。0.2.x 与 0.3 的 alpha1 / alpha2 对应 repository schema v4；v4 → v5 迁移由 0.3 alpha3 落地（alpha3 / alpha4 映射到 v5）；v5 → v6 迁移由 0.3 alpha5 落地（素材板笔迹与备份检查元数据三列），因此 0.3 有两次迁移。schema 升级先于切版本落库时，登记表里旧版本的映射会让 `verify-metadata` 失败——这是预期信号：切到新版本并登记映射后才算一致。
 - 切版本不等于发布，也不触发任何门槛；是否打标签由维护者单独决定。一旦打上候选或正式标签，该版本即公开，必须通过「自动门槛」与「人工门槛」的全部项目。
 - 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.4`、`0.2.0-rc.3`、当前的 `0.3.0-alpha.4`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
 - 已发布的标签、安装包和版本身份不可复用或替换。标签之后的任何代码、schema、应用标识或签名声明变化都必须切到新版本并打新标签。

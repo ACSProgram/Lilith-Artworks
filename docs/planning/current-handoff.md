@@ -8,6 +8,19 @@
 
 ## 当前批次状态
 
+2026-10-20 素材板笔迹与形状（笔迹计划阶段 1：schema v6、存储层与命令面，已实现）：`SCHEMA_VERSION`
+升至 6，一次 v5 → v6 迁移完成两组改动——素材板新增第三种条目（`kind = 2` 的笔迹/形状，几何 BLOB
+只存数据库）并把 `pin_board_items` 的 kind 与 `pin_board_history` 的 layer 放宽到 0–3；`branches`
+搭车追加 `last_check_elapsed_ms` / `last_check_mode` / `quick_hit_count` 三列（只建列，调度器接线
+未排入批次，仍留在 `todo.md` 的 P3 条目里）。命令面新增 `create_pin_board_stroke`（几何走普通参数，
+`Uint8Array` 由 IPC 还原成数字数组，图层强制写标注层 3）与 `read_pin_board_strokes`（整板二进制
+载荷，前端零 JSON 解析），前端几何契约在 `strokeGeometry.ts`。**界面还看不到也画不出笔迹**——SDF
+渲染、绘制工具、图层可见性与压感是计划阶段 2–5。行为变化见 `CHANGELOG.md` 的 `## Unreleased`，
+模块口径见 `docs/modules/pin-board.md` 的「存储布局」「命令面」，迁移口径见
+`docs/modules/history-and-backup.md` 的「仓库版本迁移」。自动验证已通过（`cargo test --lib` 376
+通过、`cargo check --all-targets`、`cargo fmt --check`、`npx tsc --noEmit`、`npm test` 280 通过），
+**迁移与笔迹存储仍待人工确认**（在真实 v5 仓库上打开一次；验收项在 `todo.md`）。
+
 2026-10-20 版本切分 `0.3.0-alpha.4`（未打标签）：`CHANGELOG.md` 的 `## Unreleased` 落为带日期的
 `## 0.3.0-alpha.4 - 2026-10-20` 小节并在顶部重留空的 `## Unreleased`，五处版本字段、许可清单
 （`npm run legal`）与 `tools/release/verify-metadata.mjs` 的版本→schema 映射同步为 `0.3.0-alpha.4`
@@ -87,9 +100,12 @@
 
 ## 下一步
 
-- 本批次的界面与退出行为确认：后台任务（仓库完整性扫描等）运行期间切换作品仍即时完成；素材板
-  有未保存改动时切换不弹错、由后台写回；把仓库目录改成只读后切换会亮出「改动还没写进仓库」并
-  可重试；退出时后台队列被清空。验收项见 `todo.md`。
+- 本批次（笔迹阶段 1）的迁移确认：拿一个真实 v5 仓库打开一次，确认升级到 v6 后位图、文字与多
+  step 历史完整、笔迹表存在、位图 DDS 仍可读，关闭再打开不重复迁移。本阶段**没有可观察的界面
+  变化**，绘制相关的界面验收等阶段 3 有入口后再做。验收项见 `todo.md`。
+- 上一批（切换作品的后台结算）的界面与退出行为确认：后台任务（仓库完整性扫描等）运行期间切换
+  作品仍即时完成；素材板有未保存改动时切换不弹错、由后台写回；把仓库目录改成只读后切换会亮出
+  「改动还没写进仓库」并可重试；退出时后台队列被清空。验收项见 `todo.md`。
 - 上一批（拖放暂存清理）的退出行为确认：退出后系统临时目录里没有本次运行的拖放暂存目录，被强杀
   留下的目录在下次启动且超过 10 分钟后被清掉。验收项见 `todo.md`。
 - 缩略图格式扩展的 GUI 手工验收：选中 `.sai2` / `.procreate` / `.tga` 分支的节点，逐档确认图片、
@@ -119,9 +135,11 @@
 - 版本：`dev` 已切 `0.3.0-alpha.4`（未打标签的过渡版本，收拢 alpha3 之后的修正与补强批次），
   五处版本字段、`CHANGELOG.md` 与逐版本 schema 映射同步；日常改动写入 `CHANGELOG.md` 的
   `## Unreleased`，切版本与打标签由维护者按 `docs/guides/release-policy.md` 单独决定。
-- repository schema v5（alpha3 阶段 7 已落地）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2
-  （设置页可回退到 v1）。0.3 alpha1 与 alpha2 保持 v4；唯一一次 v4 → v5 迁移已随阶段 7 实现，
-  高于当前版本的仓库由旧程序直接拒绝。
+- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随笔迹阶段 1 落地）；ChunkFile 仓库
+  可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 alpha1 与 alpha2 保持 v4；**0.3 共有
+  两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的 v5 → v6），高于当前版本的仓库由旧程序直接
+  拒绝。切版本前 `verify-metadata` 会因登记的 `0.3.0-alpha.4 → v5` 与当前 v6 不符而失败，这是
+  预期信号（见 `docs/guides/release-policy.md`）。
 - 0.3 基线（阶段 0 一次性采集）：临时仓库副本 `D:\temp\Artworks`（3 作品 / 59 历史节点 /
   ≈9.83 GiB），采集后已按采集前状态还原。该副本是**外部临时资料**，随 0.3 发布后撤除，
   不作为本项目的长期测试夹具或门槛；后续批次的回归对照用 `stress_bench` 与 `stress_baseline`

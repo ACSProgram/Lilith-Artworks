@@ -15,7 +15,8 @@
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - 阵列排序（统一高度、阅读序、断行、落位）：`src-tauri/src/pin_board/arrange.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
-- 素材板表定义（仓库 schema v5 起为多态条目）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
+- 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
+- 素材板表定义（仓库 schema v5 起为多态条目，v6 起含笔迹）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -25,7 +26,7 @@
 
 素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
 
-整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
+整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字与笔迹条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字与笔迹条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
 前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为 controller 与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存/导入/导出状态、错误状态，并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者；`PinBoardModule.tsx` 只负责视图、弹窗与局部交互，`PinBoardRenderer` 只处理 GPU、画板装载与绘制。导入/导出/文字的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
 
@@ -46,7 +47,7 @@
 
 工作区挂载：历史/发布/识别三个窗格以 `artworkId` 为 key 整块重置，**素材板窗格不带 key**，因此跨作品保留渲染器与设备；仓库切换/关闭时工作区整体卸载，画板状态随之丢弃，卸载路径执行 renderer 的保存/结算。
 
-持久化只属于 Rust：SQLite（仓库 schema v5 起的多态条目表）保存画板、公共条目、按 kind 的载荷子表与 step 历史；位图实体存为 BC7 DDS `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，文字载荷只存数据库。不迁移 Lilith Client 的旧 `index.json` 画板库。
+持久化只属于 Rust：SQLite（仓库 schema v5 起为多态条目表，v6 起含笔迹）保存画板、公共条目、按 kind 的载荷子表与 step 历史；位图实体存为 BC7 DDS `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，文字与笔迹载荷只存数据库。不迁移 Lilith Client 的旧 `index.json` 画板库。
 
 ## 并发与锁
 
@@ -63,24 +64,29 @@
 
 ```text
 <repository>/artworks/<artwork-id>/
-  boards/<board-id>/<item-id>.dds    ← 位图条目实体（BC7）；文字条目没有文件
+  boards/<board-id>/<item-id>.dds    ← 位图条目实体（BC7）；文字与笔迹条目没有文件
 
 SQLite:
   pin_boards        id, artwork_id, name, sort_order, now_step, max_step,
                     revision, deleted_at(回收站软删除), 时间戳
-  pin_board_items   id, board_id, kind(0=位图, 1=文字), created_ms
+  pin_board_items   id, board_id, kind(0=位图, 1=文字, 2=笔迹), created_ms
   pin_board_bitmaps item_id, file_path, 逻辑宽高
   pin_board_texts   item_id, text, font_family, font_size, color, align,
                     measured_width, measured_height
+  pin_board_strokes item_id, tool(0=pen 1=line 2=arrow 3=rect 4=ellipse),
+                    color, stroke_width, 包围盒逻辑宽高, geometry(几何 BLOB)
   pin_board_history (board_id, item_id, step) → deleted, layer, sort_order,
                     transform_json(points/uv)
 ```
 
 - `revision` 每次画板内容写库（`save_pin_board`/`finalize_pin_board`）后单调更新，用于保存冲突检测；`reorder_pin_boards` 只调整 `sort_order`，`rename_pin_board` 只更新 `name` 与 `updated_ms`，都不改 `revision`，因此重排或改名不会让已打开画板的下一次保存被误判为冲突；
+- 笔迹是第三种条目（`kind = 2`）：只落数据库，不建纹理、不落实体文件，因此不进入 DDS 引用清单、清理、scrub、孤儿扫描、磁盘空间统计、画板内复制与系统剪贴板复制（系统剪贴板仍只认位图）；
+- 笔迹的 `layer` 固定为标注层 3，永远在所有图片与文字之上：`save_pin_board` 忽略前端传入的 `layer` 并强制写 3（防御性契约，配单测；同一份几何下只改 `layer` 不算改动、不产生新步骤），超出 0–3 的取值仍被拒绝，文字与图片照旧使用 0–2；
+- 笔迹几何的 BLOB 布局、长度/点数校验与批量打包口径由 `stroke.rs` 与 `strokeGeometry.ts` 两侧各持一份，任何一侧改动都要同步另一侧与各自测试；单笔点数上限 4096，超限由写入侧抽稀；形状（直线/箭头/矩形/椭圆）不带点数据，两端点由包围盒与方向位推出，退化包围盒（水平或垂直线）由前端按线宽膨胀后再存，读侧拒绝零尺寸；
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；两者都经共享 `ConfirmDialog` 确认，其中「清空回收站」的最终动作由滑动确认控件承担，单块画板的永久删除沿用点击确认；
-- 画板结算清除仍为删除状态的条目时，位图条目的 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。文字条目没有实体文件，结算只删除条目记录。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_bitmaps` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
+- 画板结算清除仍为删除状态的条目时，位图条目的 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。文字与笔迹条目没有实体文件，结算只删除条目记录。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_bitmaps` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
 - 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页「空间」页的「文件清理」区确认后入队清理（该区同时列出待清理队列并支持单条/全部重试）；`cleanup::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。设置页「空间」页的队列与扫描入口见 `docs/modules/history-and-backup.md`。
 
 ## 命令面
@@ -94,7 +100,9 @@ SQLite:
 - `load_pin_board`、`save_pin_board`（`items` 为纯变换 DTO）、`finalize_pin_board`
 - `paste_pin_board_images`、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出进度经 `CommandContext` 广播 `AppEvent.operationProgress` 回传（不再使用 `Channel`，只保留给需要传输大块载荷的通道）
 - `create_pin_board_text`（文本、字号、颜色、对齐、前端度量宽高与中心点）——文字条目只落数据库，不生成图片；创建后 0.3 不支持改字/改色/改字号
-- `export_pin_board_images`（位图条目解码为 PNG 到用户选择目录）、`write_pin_board_item_png`（前端按导出倍率栅格化并在浏览器编码 PNG，原生端校验格式、尺寸与像素预算后原子写盘）、`read_pin_board_image_png`（系统剪贴板复制，仅位图）、`read_pin_board_texture`（位图读取 DDS；文字返回“无 DDS”信号，前端栅格化）
+- `create_pin_board_stroke`（工具、颜色、线宽、包围盒、几何 BLOB、中心点与 revision）——原生端按读侧口径校验几何与包围盒后才落库，图层不由调用方决定（强制写标注层），几何走普通参数通道：`Uint8Array` 由 IPC 的 JSON 序列化还原成数字数组并落成 `Vec<u8>`，单笔 4096 点约 75 KB，不值得为此另开原始载荷通道
+- `read_pin_board_strokes`（整板笔迹几何的二进制载荷，布局见 `stroke::encode_batch`：`u32 条目数` + 每条目 `itemId / tool / color / strokeWidth / 宽高 / geometryLen / bytes`）——前端一次解析成 `Map<itemId, StrokeGeometry>`，不经 JSON；含已删除但尚未结算的条目，可见性以 `load_pin_board` 的 `deleted` 为准
+- `export_pin_board_images`（位图条目解码为 PNG 到用户选择目录）、`write_pin_board_item_png`（前端按导出倍率栅格化并在浏览器编码 PNG，原生端校验格式、尺寸与像素预算后原子写盘）、`read_pin_board_image_png`（系统剪贴板复制，仅位图）、`read_pin_board_texture`（位图读取 DDS；文字与笔迹返回「没有 DDS」信号，由前端自行绘制）
 - `read_pin_board_clipboard_paths`（Windows `CF_HDROP`）
 
 **仓库外路径的两道闸门**与认证模块同一口径，各管一件事：
@@ -122,13 +130,14 @@ SQLite:
 - 编辑自动保存：设置页「自动保存」开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。
 - 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
 - 撤销历史只存在于当前会话内存，重开画板后不能撤销。
-- 图层由 `layer`（底层/中层/顶层）与 `sort_order` 共同决定；新图片统一进入中层并占据最优先顺序；
+- 图层由 `layer` 与 `sort_order` 共同决定：图片与文字共用底层/中层/顶层（0–2），笔迹固定占标注层（3，永不与它们混层）；新图片统一进入中层并占据最优先顺序；
 - 阵列排序（`src-tauri/src/pin_board/arrange.rs`，整理与导入落位共用同一份实现）：只处理位图条目，文字条目不参与——它的四边形被拉伸时 `fontSize` 不会跟着变，字会被拉变形。算法分四步，顺序只定一次、之后不再改写：统一高度取参与图片原始高度的中位数 → 阅读序（按 y 从高到低分带，带内按 x）→ 动态规划断行（最小化各行宽度与目标行宽的偏差）→ 逐行居中并按裁剪后的外框中心平移回原位。目标行数 `round(sqrt(张数 / 长宽比))` 夹到 `1..=张数`，长宽比取图片中心按名次剔除两端各 10% 后的区间，因此一字排会排成一行、竖列会排成一列，单张离群图既不改变整体形状、也不会把整块拽向自己。间距按「统一高度的比例」计算（设置项 `arrangementGapRatio`，默认 6%，范围 0–20%，`0` 表示图片紧贴），与画布缩放无关；旧实现用屏幕像素换算间距、并在断行之后按宽度对行内与行间各做了一次排序，会把用户摆好的相对位置打乱，已移除。整理的计算经纯计算命令 `arrange_pin_board_images` 完成，前端拿到位置后仍走 `commitMutation`，撤销栈与脏标记不变；
 - 拖放导入：把图片文件拖到画布区（`.pin-board-stage`）即可导入，放置点对齐鼠标落点，多张一起拖入时按前一张的显示宽度加一个与图高成比例的间距（与阵列间距同一口径）向右排开；悬停时只描一圈渐变边并在底部显示小胶囊提示，不遮盖画布内容。窗口以 `dragDropEnabled: false` 运行（Windows 上使用 HTML5 拖放的前提），因此 webview **不暴露文件系统路径**，导入走 `import_pin_board_clipboard_image` 的字节链路，只接受可被内容嗅探识别的位图（PNG/JPEG/WebP/BMP/GIF）；需要路径的 DDS/TGA 仍通过「导入图片」选择器处理。画板锁定时不导入并提示；
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
 - “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。栅格化按字形墨迹（`actualBoundingBoxAscent/Descent`）把文字块在每个 1.3 倍行盒内垂直居中，并以此定位基线——此前用 `textBaseline = "top"` 把行高余量全留在下方，文字因此整体偏上、顶部越出纹理被裁掉；显示纹理与导出共用这条绘制路径，存量条目也会按新定位重绘。对话框提供内容预览、字号步进与内置取色器（饱和度/亮度面板、色相条、十六进制输入和预设色），不再调用系统取色器。导出时按逻辑长边的 2 倍（受 8192 与 64 MiB RGBA 像素预算约束）栅格化，由浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘——传的是压缩后的 PNG 而不是 RGBA，避免一次 IPC 搬运数千万个数字。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计和画板内复制；系统剪贴板复制只支持位图；
+- 笔迹条目（`kind = stroke`）是本批次新增的能力，目前只到存储与命令面：几何契约由 `stroke.rs` / `strokeGeometry.ts` 两侧持有，`create_pin_board_stroke` 与 `read_pin_board_strokes` 已可用，但渲染器还不会装载笔迹（SDF 渲染、绘制工具、图层可见性、压感与性能验收仍是 `docs/planning/pin-board-strokes-plan-2026-10-20.md` 的阶段 2–5），因此界面暂时看不到也画不出笔迹；笔迹的选中、移动、旋转、缩放、删除与撤销计划复用图片的条目路径；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
@@ -139,6 +148,6 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、取色器十六进制/HSV 换算、controller 生命周期注册与进度事件），不启动 Tauri；
-- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4→v5 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字条目与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、笔迹几何解析与批量载荷边界、取色器十六进制/HSV 换算、controller 生命周期注册与进度事件），不启动 Tauri；
+- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4/v5→v6 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字与笔迹条目（BLOB 边界、标注层强制、批量二进制打包、坏几何报错）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

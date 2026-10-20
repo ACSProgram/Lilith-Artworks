@@ -1,8 +1,8 @@
 //! 素材板（pin-board）领域模块：按 Artwork 的自由画布图片工作台。
 //!
 //! - 前端唯一入口为 `src/modules/pin-board/api.ts`，命令名与 DTO 以本模块为准；
-//! - 持久化见 `repository.rs`（schema v5 多态条目表），图像格式见 `dds.rs`，
-//!   阵列排序见 `arrange.rs`（整理与导入落位共用同一份实现）；
+//! - 持久化见 `repository.rs`（schema v6 多态条目表），笔迹几何契约见 `stroke.rs`，
+//!   图像格式见 `dds.rs`，阵列排序见 `arrange.rs`（整理与导入落位共用同一份实现）；
 //! - 普通浏览走共享读租约，保存/导入/粘贴/删除等变更走仓库 lease + 仓库操作锁
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
@@ -11,6 +11,7 @@ mod contracts;
 pub(crate) mod dds;
 pub(crate) mod repository;
 pub(crate) mod scrub;
+mod stroke;
 
 pub(crate) use contracts::PinBoardReferenceInventory;
 
@@ -339,6 +340,65 @@ pub(crate) async fn create_pin_board_text(
         })
         .await
         .map_err(String::from)
+}
+
+/// 新增笔迹条目：几何 BLOB 由前端编码（布局见 `stroke.rs`），原生端只校验结构与
+/// 包围盒。`geometry` 走普通参数（`Uint8Array` → JSON 数字数组），与
+/// `import_pin_board_clipboard_image` 的字节参数同一条通道——单笔 4096 点约
+/// 20 KB 原始数据、约 75 KB JSON，不值得为此另开一条原始载荷通道。
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub(crate) async fn create_pin_board_stroke(
+    coordinator: State<'_, OperationCoordinator>,
+    board_id: i64,
+    tool: u8,
+    color: String,
+    stroke_width: f64,
+    width: f64,
+    height: f64,
+    geometry: Vec<u8>,
+    center_x: f64,
+    center_y: f64,
+    expected_revision: String,
+) -> Result<PinBoardMutationResult, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::PinBoard, move |context| {
+            let (view, item_ids) = usecases::pin_board::create_stroke(
+                context,
+                board_id,
+                tool,
+                &color,
+                stroke_width,
+                width,
+                height,
+                &geometry,
+                center_x,
+                center_y,
+                &expected_revision,
+            )?;
+            Ok(PinBoardMutationResult { view, item_ids })
+        })
+        .await
+        .map_err(String::from)
+}
+
+/// 读取整板笔迹几何（二进制，布局见 `stroke::encode_batch`）：`u32 条目数` +
+/// 每条目 `(u32 itemId, u8 tool, u32 color, f32 strokeWidth, f32 width, f32 height,
+/// u32 geometryLen, bytes)`。前端一次解析成 `Map<itemId, StrokeGeometry>`，零 JSON。
+#[tauri::command]
+pub(crate) async fn read_pin_board_strokes(
+    coordinator: State<'_, OperationCoordinator>,
+    board_id: i64,
+) -> Result<Response, String> {
+    let coordinator = coordinator.inner().clone();
+    let bytes = coordinator
+        .spawn(OperationDomain::PinBoard, move |context| {
+            usecases::pin_board::read_strokes(context, board_id)
+        })
+        .await
+        .map_err(String::from)?;
+    Ok(Response::new(bytes))
 }
 
 #[tauri::command]

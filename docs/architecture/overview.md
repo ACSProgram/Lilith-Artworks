@@ -32,7 +32,7 @@ src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整�
 src-tauri/src/format/                  `.clip`/`.psd` 容器探测与结构单元定位（分块与缩略图共用）
 src-tauri/src/preview/                 历史节点派生缩略图：按来源文件格式抽取，失败只跳过预览
 src-tauri/src/authenticity/             C2PA、TrustMark、成品锁和认证记录
-src-tauri/src/pin_board/               素材板持久化、DDS/BC7 处理与纹理缓存
+src-tauri/src/pin_board/               素材板持久化、笔迹几何契约、DDS/BC7 处理与纹理缓存
 src-tauri/src/contracts/               中立契约：引用清单与灾备完整性 provider
 src-tauri/src/cleanup.rs                 文件清理账本：批量 anti-join、垃圾文件扫描与确认清理
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型

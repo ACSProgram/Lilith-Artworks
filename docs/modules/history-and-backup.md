@@ -108,7 +108,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 **磁盘实际口径**：只扫描仓库目录本身，外部首次导出路径不计入。manifest 中可识别的 snapshot / delta / 最终成品 / 认证仓库副本 / 画板 DDS 按实际文件大小归类；SQLite 主库与 WAL、仓库 `temp/`、作品 `artworks/<artwork>/temp/`（备份与恢复的暂存区，含崩溃残留的 `.tmp*`）、未识别文件合并为「其它」。分类之和等于仓库目录实际文件字节。两套口径并列显示、不静默合并；差异本身用于发现记录与磁盘不一致。
 
-**画板 DDS 分类**按「条目是否存在实体文件」判定：查询 `pin_board_bitmaps.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`。文字条目没有载荷行，不进入磁盘与记录口径。
+**画板 DDS 分类**按「条目是否存在实体文件」判定：查询 `pin_board_bitmaps.file_path` 非空并拼出 `artworks/<artwork>/boards/<board>/<file_path>`。文字条目没有位图载荷行，笔迹落在 `pin_board_strokes` 且该表没有 `file_path` 列，两者都不进入磁盘与记录口径。
 
 **压缩比分层报告**：snapshot 压缩比 = `Σ 快照节点 logical_size / Σ 快照文件字节`；delta 还原比 = `Σ 父节点 logical_size / Σ history_edges.delta_size`，不混算整仓平均。明细按作品 → 分支 → 节点展开，逐行给出 `logical_size`、`chunk_file_size`（snapshot 行为快照文件大小，其余行为重建读取量）、`chunk_count`、压缩比与 checkpoint / snapshot 标记；画板与认证输出按类别展开。
 
@@ -116,10 +116,12 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 ## 仓库版本迁移
 
-- 当前 `SCHEMA_VERSION = 5`，新建仓库直接以 v5 落库。打开旧仓库时沿 `v1 → v2 → v3 → v4 → v5` 迁移链向前升级。
-- **更新版本的仓库一律拒绝打开**：例如 0.2 线（支持到 v4）遇到 v5 仓库会直接返回“由更新版本的 Lilith Artworks 创建”并停止，不尝试读写或降级，避免旧程序按旧结构写入造成损坏；轻量版本检查同样要求精确匹配当前版本。
-- `v4 → v5` 是 0.3 唯一一次表重建：画板改为 `pin_board_items` + `pin_board_bitmaps` / `pin_board_texts` 多态结构，旧 `pin_board_images` 与 `image_id` 历史原位迁移；`history_nodes` 追加 `thumbnail`、`thumbnail_version`、`verified_ms`、`verify_error`；删除 `branches` 上 0.2 遗留的 `verified_history_id` / `verified_ms` / `verify_error`；建立 snapshot/delta/认证路径索引与 `repository_backup_runs`。
-- 迁移在 `PRAGMA foreign_keys = OFF` 下用 `BEGIN IMMEDIATE` 执行，提交前做 `PRAGMA foreign_key_check`；任一步失败整笔回滚并保留 v4 原表，提交后才恢复 `foreign_keys = ON`。
+- 当前 `SCHEMA_VERSION = 6`，新建仓库直接以 v6 落库。打开旧仓库时沿 `v1 → v2 → v3 → v4 → v5 → v6` 迁移链向前升级。
+- **更新版本的仓库一律拒绝打开**：例如 0.2 线（支持到 v4）遇到 v5 或更高的仓库会直接返回“由更新版本的 Lilith Artworks 创建”并停止，不尝试读写或降级，避免旧程序按旧结构写入造成损坏；轻量版本检查同样要求精确匹配当前版本。
+- `v4 → v5` 是 0.3 的第一次表重建：画板改为 `pin_board_items` + `pin_board_bitmaps` / `pin_board_texts` 多态结构，旧 `pin_board_images` 与 `image_id` 历史原位迁移；`history_nodes` 追加 `thumbnail`、`thumbnail_version`、`verified_ms`、`verify_error`；删除 `branches` 上 0.2 遗留的 `verified_history_id` / `verified_ms` / `verify_error`；建立 snapshot/delta/认证路径索引与 `repository_backup_runs`。
+- `v5 → v6` 是第二次，一次完成两组互不相关的改动：素材板加入笔迹条目（重建 `pin_board_items` 放开 `kind IN (0,1,2)`、重建 `pin_board_history` 放开 `layer BETWEEN 0 AND 3`，新建 `pin_board_strokes`，见 `docs/modules/pin-board.md`）；`branches` 追加 `last_check_elapsed_ms` / `last_check_mode`（`quick` / `full` / `fallback`）/ `quick_hit_count` 三列，旧行不必回填（两列取 NULL、计数取默认 0）。四张画板表必须一起重建：它们的外键指向 `pin_board_items`，只重建父表会留下指向已删除表的悬空引用。素材板结构口径见 `docs/modules/pin-board.md` 的「存储布局」。
+- **三列目前只建好位置，还没有读写它们的代码**：调度器仍按「调度」一节的现有行为在内存里记检查耗时与方式，重启即丢。接线属于备份调度的后续工作，未排入当前批次，见 `docs/planning/todo.md` 的「备份检查元数据持久化」。因此现在读这三列只会得到 NULL / 0，不能当成调度器已经持久化。
+- 迁移在 `PRAGMA foreign_keys = OFF` 下用 `BEGIN IMMEDIATE` 执行，提交前做 `PRAGMA foreign_key_check`；任一步失败整笔回滚并保留旧表，提交后才恢复 `foreign_keys = ON`（v4 → v5 与 v5 → v6 都走这条路径，失败时仓库仍以原版本打开）。
 
 ## 提交与恢复
 
@@ -139,7 +141,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 调度器在用户长操作结束后要求至少 10 秒静默才启动后台任务：所有经 `OperationCoordinator` 的用户长操作——前台长命令、普通写、素材板写、仓库切换，以及内容级只读长任务（全库校验、画板检查）——在开始与结束各刷新一次 `AppState.last_user_activity_ms`；候选扫描前与取得运行锁后各复查一次，未满足时让位且不计入失败。调度器只按剩余静默期挂起（每段最多 10 秒），用户操作**不**唤醒它，因此素材板之类的频繁保存不会反复触发候选扫描；醒来后重新计算剩余时长，连续操作期间一轮一轮往后推。这样前台放锁后后台不会立刻插进操作间隙、随后又被下一次操作取消。空闲完整性检查本身还要求仓库静默 10 分钟，因此这 10 秒只影响自动备份的启动时机。
 
-调度器还在内存里按分支记录上一次成功检查的耗时（只记完成的全量或快速检查，失败、取消、让位不计），实际间隔取 `max(用户设置的间隔, 2 × 上次耗时)`；它只影响调度节奏，不改用户设置，也不写 schema。重启后学习结果丢失，第一轮仍按名义间隔运行。该值同时用于候选选择与锁内复查，故锁内不会因为名义到期而重跑一次已被放宽的检查。
+调度器还在内存里按分支记录上一次成功检查的耗时（只记完成的全量或快速检查，失败、取消、让位不计），实际间隔取 `max(用户设置的间隔, 2 × 上次耗时)`；它只影响调度节奏，不改用户设置，也不写库——v6 已为这三项在 `branches` 上留好列，但接线未做（见「仓库版本迁移」）。重启后学习结果丢失，第一轮仍按名义间隔运行。该值同时用于候选选择与锁内复查，故锁内不会因为名义到期而重跑一次已被放宽的检查。
 
 手动提交优先于自动备份：手动提交命令在取得共享运行锁前先登记该分支的待处理标记；调度器在候选选择和取得运行锁后两处都会跳过有待处理标记的分支（延后且不计入失败）。若同分支的自动备份已在运行，手动提交会对后台任务请求取消，使自动任务以取消结果退出（不进入失败退避），随后手动提交先执行；自动备份延后到下一次调度周期，此时内容已被手动提交覆盖，通常得到"内容未变化"的结果。
 

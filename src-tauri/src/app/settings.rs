@@ -1406,6 +1406,16 @@ mod tests {
             None,
         );
         library::take_integrity_check_count();
+        // 记录当前版本，用于后面「把版本改坏再改回来」。写死 v5 会在下一次 schema
+        // 升级后变成一次真实迁移（表已在 v6 形状），这条缓存测试就不再是它要测的东西。
+        let current_version: String = crate::storage::open(&root)
+            .unwrap()
+            .query_row(
+                "SELECT value FROM repository_meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         assert_eq!(state.ready_repository_path().unwrap(), root);
         assert_eq!(state.ready_repository_path().unwrap(), root);
@@ -1425,8 +1435,8 @@ mod tests {
         crate::storage::open(&root)
             .unwrap()
             .execute(
-                "UPDATE repository_meta SET value = '5' WHERE key = 'schema_version'",
-                [],
+                "UPDATE repository_meta SET value = ?1 WHERE key = 'schema_version'",
+                [&current_version],
             )
             .unwrap();
         assert_eq!(state.ready_repository_path().unwrap(), root);

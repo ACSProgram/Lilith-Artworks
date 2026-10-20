@@ -12,8 +12,9 @@ use crate::{
 use super::repository::{board_relative_path, is_dds_name, parse_board_dds_path, BOARD_DIRECTORY};
 
 /// 画板 DDS 的引用清单。位图载荷的文件路径在 DB 里是 `<item-id>.dds`，仓库中的
-/// 完整位置由 `artworks/<artwork-id>/boards/<board-id>/` 与文件名拼出。文字条目
-/// 没有位图载荷行，自然不会进入路径清单。
+/// 完整位置由 `artworks/<artwork-id>/boards/<board-id>/` 与文件名拼出。文字与笔迹
+/// 条目没有位图载荷行（`file_path` 只存在于 `pin_board_bitmaps`），自然不会进入
+/// 路径清单。
 ///
 /// 只有规范文件名的记录参与引用；`file_path` 被改坏的记录由完整性扫描报告，不把
 /// 它声称的任意路径当作有效引用。
