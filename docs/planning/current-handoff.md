@@ -8,7 +8,15 @@
 
 ## 当前批次状态
 
-2026-10-20 校验可见性与「无法检查」状态（未提交）：历史节点的问题从「分支状态行一行小字」
+2026-10-20 版本切分 `0.3.0-alpha.4`（未打标签）：`CHANGELOG.md` 的 `## Unreleased` 落为带日期的
+`## 0.3.0-alpha.4 - 2026-10-20` 小节并在顶部重留空的 `## Unreleased`，五处版本字段、许可清单
+（`npm run legal`）与 `tools/release/verify-metadata.mjs` 的版本→schema 映射同步为 `0.3.0-alpha.4`
+（repository schema 仍为 v5），README 与 `docs/planning/` 的版本引用一并更新。该版本收拢 alpha3
+之后的全部改动——备份调度与快速检查修复、平台代码集中、缩略图格式扩展、拖放暂存清理、切换作品
+的后台结算、校验可见性。**切版本不等于发布**：不触发任何门槛，是否打 `v0.3.0-alpha.4` 标签由
+维护者单独决定，0.3 的发布前压力测试也还没有跑。
+
+2026-10-20 校验可见性与「无法检查」状态（已提交）：历史节点的问题从「分支状态行一行小字」
 改为节点级可见，并补上「没有结论」这一态。节点卡片、时间轴圆点与「节点信息」栏按归类呈现——
 文件丢失红、内容读不出来黄、连检查都做不到的灰（虚线边框、空心点）；标签区写「文件丢失」/
 「文件损坏」/「无法检查」，悬停与信息栏用同一套白话说明。分支状态行改说「N 个历史节点文件丢失
@@ -90,17 +98,18 @@
   个节点变灰、其余不受牵连。验收项见 `todo.md`。
 - 阶段 9 剩余的优先级确认（待查集合按 `created_ms` 最旧优先、失败节点退出队列、有到期备份时的
   aging 插队），验收项见 `todo.md`。
-- 0.3 发布前由维护者显式安排压力测试（含 `manual` 档），并把实测写入
-  `docs/user/stress-test-report.md`；是否切版本、打标签按 `docs/guides/release-policy.md` 单独决定。
+- 版本已切至 `0.3.0-alpha.4`（未打标签，见「当前批次状态」）；0.3 发布前仍由维护者显式安排压力
+  测试（含 `manual` 档），并把实测写入 `docs/user/stress-test-report.md`；是否打标签按
+  `docs/guides/release-policy.md` 单独决定。
 - alpha2 遗留验收与 0.3 前的补强候选同样在 `todo.md`，不在本文件累积。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 已切 `0.3.0-alpha.3`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
-  schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
-  `docs/guides/release-policy.md` 单独决定。
+- 版本：`dev` 已切 `0.3.0-alpha.4`（未打标签的过渡版本，收拢 alpha3 之后的修正与补强批次），
+  五处版本字段、`CHANGELOG.md` 与逐版本 schema 映射同步；日常改动写入 `CHANGELOG.md` 的
+  `## Unreleased`，切版本与打标签由维护者按 `docs/guides/release-policy.md` 单独决定。
 - repository schema v5（alpha3 阶段 7 已落地）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2
   （设置页可回退到 v1）。0.3 alpha1 与 alpha2 保持 v4；唯一一次 v4 → v5 迁移已随阶段 7 实现，
   高于当前版本的仓库由旧程序直接拒绝。

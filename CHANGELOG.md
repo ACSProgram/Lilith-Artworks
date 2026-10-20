@@ -15,6 +15,8 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+## 0.3.0-alpha.4 - 2026-10-20
+
 ### Added
 
 - History node previews now also come from `.sai2`, `.procreate` and `.tga`
@@ -72,10 +74,8 @@ entries for the reader; they are not a template every entry has to fill.
   cannot grow the pending table with the file; cancellation and I/O failures
   drain every stage instead of leaving a blocked thread, and progress only
   advances over the completed prefix.
-- Structural units are read through a reusable sequential buffer instead of a
-  seek plus allocation per unit, and the tile probe inside `Exta` no longer
-  seeks before every record: it consumes one read buffer and skips record
-  bodies without reading large payloads.
+- Structural units share one reusable sequential read buffer instead of a seek
+  and allocation per unit, including the `Exta` tile probe.
 - Platform-specific branches are consolidated into a single
   `src-tauri/src/platform/` module (`path` / `shell` / `clipboard` /
   `process`), so business code no longer carries `cfg` branches; call sites
