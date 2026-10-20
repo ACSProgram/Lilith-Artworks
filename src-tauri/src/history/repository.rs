@@ -1719,7 +1719,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     let mut statement = connection
         .prepare(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms
+                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND TRIM(b.source_path) <> ''
@@ -1731,6 +1731,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
         .query_map([], |row| {
             Ok(ScheduledBranch {
                 id: row.get(0)?,
+                artwork_id: row.get(6)?,
                 source_path: row.get(1)?,
                 last_check_ms: row.get(2)?,
                 interval_minutes: row.get(3)?,
@@ -1751,7 +1752,7 @@ pub(crate) fn load_scheduled(
     storage::open(root)?
         .query_row(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms
+                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
@@ -1760,6 +1761,7 @@ pub(crate) fn load_scheduled(
             |row| {
                 Ok(ScheduledBranch {
                     id: row.get(0)?,
+                    artwork_id: row.get(6)?,
                     source_path: row.get(1)?,
                     last_check_ms: row.get(2)?,
                     interval_minutes: row.get(3)?,

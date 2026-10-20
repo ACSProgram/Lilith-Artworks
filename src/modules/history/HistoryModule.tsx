@@ -157,10 +157,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   }, [readNodeFormat, selectedNode, view]);
 
   // 缩略图随节点行保存，选中时单独读取；历史刷新后重新拉取，不进入图轮询。
-  // 历史刷新可能改写缩略图（提交、检查点、手动刷新），因此缓存随之作废。
+  // 只有节点集合真的换了才作废缓存：后台检查的状态行刷新沿用同一个 `nodes`
+  // 数组，缓存继续有效。
+  const historyNodes = history?.nodes;
   useEffect(() => {
     previewCache.current.clear();
-  }, [artworkId, history]);
+  }, [artworkId, historyNodes]);
 
   useEffect(() => {
     if (!selectedNode || view !== "branch") {

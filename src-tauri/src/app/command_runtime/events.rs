@@ -42,6 +42,13 @@ pub(crate) enum AppEventKind {
         outcome: OperationOutcome,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<CommandErrorSummary>,
+        /// 后台任务完成时声明它属于哪个作品；命令事件不带该字段。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artwork_id: Option<String>,
+        /// 后台任务完成时声明本次是否新增/删除了历史节点等结构变化。
+        /// 命令事件不带该字段，前端按未知（需要完整刷新）处理。
+        #[serde(skip_serializing_if = "Option::is_none")]
+        structure_changed: Option<bool>,
     },
     RepositoryChanged,
     CleanupQueueChanged {

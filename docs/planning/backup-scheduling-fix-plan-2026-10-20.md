@@ -1,8 +1,9 @@
 # 自动备份调度与快速检查问题修复计划（2026-10-20）
 
-状态：**阶段 1 已实施（2026-10-20），等一天日志再判阶段 2**。本文件只保留马上要执行的内容
-与后续阶段的进入门槛；长期搁置项（schema 列、历史页 busy 解耦、重任务并行、per-artwork 拆库）
-已移入 `todo.md`，本文不再重复。
+状态：**阶段 1–3 已实施（2026-10-20），自动验证通过；GUI 与一天日志观察待人工**。阶段 2 的
+「观察 ≥1 天日志」门槛由维护者明确跳过，先行实施。本文件只保留马上要执行的内容与后续阶段的
+进入门槛；长期搁置项（schema 列、历史页 busy 解耦、重任务并行、per-artwork 拆库）已移入
+`todo.md`，本文不再重复。
 
 **硬约束：本计划不改数据库 schema。** 需要新列/新表的项一律不进本计划，见 `todo.md`
 「备份检查元数据持久化」。
@@ -38,8 +39,8 @@ Background 排队）、读租约（`with_repository_read` 只取 RwLock 读端�
 | 阶段 | 内容 | 进入门槛 | 涉及 |
 | --- | --- | --- | --- |
 | **1** | A1 指纹门槛 + A3 退化 warn 日志 | **已实施（2026-10-20）** | `backup/worker.rs` |
-| 2 | A4 前台静默 debounce + A2 调度器代价感知 | 阶段 1 上线，观察 ≥1 天日志 | `scheduler.rs`、`runtime.rs`、AppState |
-| 3 | A6 完成事件区分「结构变化」 + A5 让位改事件驱动 | 阶段 2 稳定，全量检查只在真实变更后出现 | `scheduler.rs`、`repository_lock.rs`、`runtime.rs`、前端 controller |
+| **2** | A4 前台静默 debounce + A2 调度器代价感知 | **已实施（2026-10-20）**；维护者明确跳过一天观察门槛 | `scheduler.rs`、`runtime.rs`、AppState |
+| **3** | A6 完成事件区分「结构变化」 + A5 让位改事件驱动 | **已实施（2026-10-20）** | `scheduler.rs`、`repository_lock.rs`、`runtime.rs`、前端 controller |
 | 4 | 全量路径去掉重复做功：打点 → 摘要前置 / 缓冲扫描 / 压缩档位 | 阶段 3 后，且拿到 release 构建下真实大文件提交的分段耗时 | `chunk_file/`、`worker.rs` |
 
 阶段 2 起每一项都只改一处行为，可独立回滚；不要求连着做完。
@@ -102,7 +103,7 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
   首次检查之后。
 - `elapsed_ms` 的分布应回到毫秒级；出现 100 秒以上即为异常，需按 A3 的新日志定位原因。
 
-## 5. 阶段 2–3 的口径（不在本阶段展开实现）
+## 5. 阶段 2–3 的实施口径（2026-10-20 已实施）
 
 | 项 | 一句话方案 | 风险/代价 |
 | --- | --- | --- |
@@ -110,6 +111,29 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
 | A2 调度器代价感知 | 内存 Map `branch_id → last_check_elapsed_ms`；`effective = max(interval, 2 × last_elapsed)`；只影响调度节奏，不改用户设置的间隔 | 重启丢学习结果，第一轮按名义间隔跑；无 schema |
 | A6 完成事件收敛 | 后台检查类任务完成时声明「本次无结构变化」，前端只刷状态行不重读整图；事件带 `artworkId` 是最小改动，完成路径加结构化标记更治本 | 需同时覆盖前端 controller 与事件定义 |
 | A5 让位改事件驱动 | `acquire_owner` 返回 `Skipped` 时挂起等「写门释放」信号，保留 ~5 秒兜底超时防信号丢失 | 改动集中在 `scheduler.rs` 与锁释放通知；行为对外一致 |
+
+### 实施记录（2026-10-20，阶段 2–3）
+
+- A4：`AppState.last_user_activity_ms` 由 `OperationCoordinator` 的所有用户长操作入口
+  （前台长命令、普通写、素材板写、仓库切换，以及内容级只读长任务）在开始/结束时刷新；
+  调度器在候选扫描前要求静默 10 秒并按剩余时长挂起，取锁后在 `run_scheduled_backup`
+  再复查一次，命中即 `UserActive` 让位，不计失败、不推进检查时间。用户活动不逐次唤醒
+  调度器，避免频繁保存反复触发候选扫描。
+- A2：`BackupState` 内存 Map 记录分支上次成功检查耗时；`due_at_ms` 取
+  `max(设置间隔, 2 × 耗时)`，候选选择与锁内复查共用。失败、取消、让位不记录；重启丢学习结果。
+- A5：`RepositoryOwnerLock` 的进程内闸门新增按仓库的释放代次与等待者；调度器在
+  `OwnerAttempt::Skipped` 时等待该信号，5 秒兜底；退出时 `wake_write_gate_waiters` 主动唤醒。
+  跨进程占用没有本进程信号可等，因此空闲完整性检查区分 `InProcessWriter`（等闸门）与
+  `CrossProcessBusy`（退回 200 ms 短退避），不空转抢锁。
+- A6：`operationFinished` 追加可选 `artworkId` / `structureChanged`；调度器为自动备份与空闲
+  校验发后台完成事件（`ScheduledBranch` 查询附带 `artwork_id`，无 schema 变更）。历史页对无结构
+  变化的当前作品完成只合并 `branches`，保留 `nodes` 引用，缩略图缓存不再随之作废；其它作品
+  的完成直接忽略，事件缺失仍完整刷新。
+- 新增用例：静默窗、耗时放宽间隔、`UserActive` 让位、写门释放唤醒/超时/退出唤醒、后台完成事件
+  字段，以及前端「只合并分支 / 结构变化完整刷新 / 忽略其它作品」三条路径。
+- 2026-10-20 结果：`cargo check --lib` 通过；`cargo test --lib` 315 passed / 1 ignored / 0
+  failed；`cargo fmt --check` 干净；`npx tsc --noEmit` 通过；`npm test` 251 passed。GUI 未验证
+  （待人工）。
 
 ## 6. 阶段 4 的前置判定：要不要把 zstd / 哈希 / 分块改成多线程
 

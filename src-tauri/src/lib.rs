@@ -384,13 +384,13 @@ pub fn run() {
             application.manage(app_state.clone());
             // 诊断模式下由原生端线程看护 WebView 主线程，冻结期间仍能留下证据。
             app::diagnostics::start_webview_watchdog(application.handle().clone());
-            let backup_state = backup::BackupState::default();
-            backup_state.start_scheduler(application.handle().clone())?;
-            application.manage(backup_state.clone());
-            sync_window_idle(application.handle());
             let event_sink = std::sync::Arc::new(app::command_runtime::TauriEventSink::new(
                 application.handle().clone(),
             ));
+            let backup_state = backup::BackupState::default();
+            backup_state.start_scheduler(application.handle().clone(), event_sink.clone())?;
+            application.manage(backup_state.clone());
+            sync_window_idle(application.handle());
             application.manage(app::OperationCoordinator::new(
                 app_state,
                 backup_state,

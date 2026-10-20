@@ -37,6 +37,10 @@ export type AppEvent =
       type: "operationFinished";
       outcome: OperationOutcome;
       error?: CommandErrorSummary;
+      /** 后台任务完成时所属的作品；命令事件不带。 */
+      artworkId?: string;
+      /** 后台任务是否改变了历史图结构；命令事件不带，按未知处理。 */
+      structureChanged?: boolean;
     })
   | (AppEventBase & { type: "repositoryChanged" })
   | (AppEventBase & { type: "cleanupQueueChanged"; pendingCount?: number });

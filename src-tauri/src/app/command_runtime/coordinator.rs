@@ -200,7 +200,12 @@ impl OperationCoordinator {
             }
         };
         let mut event = AppEvent::new(
-            AppEventKind::OperationFinished { outcome, error },
+            AppEventKind::OperationFinished {
+                outcome,
+                error,
+                artwork_id: None,
+                structure_changed: None,
+            },
             repository_key.clone(),
             Some(operation_id.as_str().to_owned()),
             Some(domain),
@@ -249,6 +254,7 @@ impl OperationCoordinator {
         branch_id: Option<&str>,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(OperationClass::Write);
         // 固定锁序的第一层：进程内闸门（排队）与跨进程 owner lock（零等待）。
         let _owner = self.acquire_interactive_owner(context, "write")?;
@@ -275,6 +281,7 @@ impl OperationCoordinator {
         branch_id: Option<&str>,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(OperationClass::Foreground);
         let mut waiting = self.inner.backup_state.begin_foreground_wait();
         let _ = self.inner.backup_state.cancel_background();
@@ -306,6 +313,7 @@ impl OperationCoordinator {
         branch_id: Option<&str>,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(OperationClass::Foreground);
         self.probe_repository_owner(context)?;
         let result = self.inner.backup_state.run_foreground_typed(branch_id, || {
@@ -356,6 +364,7 @@ impl OperationCoordinator {
         context: &CommandContext,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(OperationClass::RepositoryWrite);
         let _owner = self.acquire_interactive_owner(context, "repositoryWrite")?;
         let result = self
@@ -375,6 +384,7 @@ impl OperationCoordinator {
         context: &CommandContext,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(OperationClass::RepositoryWrite);
         let _owner = self.acquire_owner_lock(
             context,
@@ -403,6 +413,7 @@ impl OperationCoordinator {
         foreground: bool,
         operation: impl FnOnce() -> Result<T, CommandError>,
     ) -> Result<T, CommandError> {
+        let _activity = UserActivity::begin(&self.inner.app_state);
         context.set_class(if foreground {
             OperationClass::Foreground
         } else {
@@ -723,6 +734,31 @@ fn owner_lock_error(error: OwnerLockError) -> CommandError {
     }
 }
 
+/// 用户长操作的活动期守卫：写入命令与内容级只读长任务（全库校验、画板检查）
+/// 都算「用户正在动这个仓库」。
+///
+/// 进入时刷新一次活动时间，退出时再刷新一次，使后台静默窗口从命令真正结束的
+/// 时刻重新计时。调度器按剩余静默期挂起等待，因此这里不逐次唤醒它——素材板
+/// 之类的频繁保存不会反复触发候选扫描。
+struct UserActivity {
+    app_state: AppState,
+}
+
+impl UserActivity {
+    fn begin(app_state: &AppState) -> Self {
+        app_state.note_user_activity();
+        Self {
+            app_state: app_state.clone(),
+        }
+    }
+}
+
+impl Drop for UserActivity {
+    fn drop(&mut self) {
+        self.app_state.note_user_activity();
+    }
+}
+
 pub(crate) struct CommandContext {
     coordinator: OperationCoordinator,
     operation_id: OperationId,
@@ -950,6 +986,14 @@ mod tests {
                 ..
             }
         ));
+        assert!(events.iter().all(|event| match &event.kind {
+            AppEventKind::OperationFinished {
+                artwork_id,
+                structure_changed,
+                ..
+            } => artwork_id.is_none() && structure_changed.is_none(),
+            _ => true,
+        }));
         assert_eq!(events[0].version, 1);
         assert_eq!(events[0].operation_id, events[2].operation_id);
     }
@@ -967,7 +1011,7 @@ mod tests {
 
         let events = sink.events.lock().unwrap();
         match &events.last().unwrap().kind {
-            AppEventKind::OperationFinished { outcome, error } => {
+            AppEventKind::OperationFinished { outcome, error, .. } => {
                 assert_eq!(*outcome, OperationOutcome::Failed);
                 let summary = error.as_ref().unwrap();
                 assert_eq!(summary.code, "repository_busy");

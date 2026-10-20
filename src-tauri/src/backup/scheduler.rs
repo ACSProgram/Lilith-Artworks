@@ -1,16 +1,23 @@
 use std::{
     cmp::Ordering,
-    collections::BinaryHeap,
-    path::Path,
+    collections::{BinaryHeap, HashMap},
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
 use tauri::{AppHandle, Manager};
 
 use crate::{
-    app::AppState,
+    app::{
+        command_runtime::{
+            AppEvent, AppEventKind, CommandError, CommandErrorSummary, OperationDomain,
+            OperationOutcome, SharedEventSink,
+        },
+        AppState,
+    },
     cancel::CancelToken,
     history::{self, ScheduledBranch},
+    platform::path::display_path,
     repository_lock::{self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority},
     storage,
 };
@@ -24,6 +31,12 @@ const IDLE_RECHECK: Duration = Duration::from_secs(5 * 60);
 /// 有前台命令在等待共享运行锁时的让位退避。它足够短以保证前台结束后的响应性，
 /// 又足以避免调度器空转抢锁。
 const FOREGROUND_YIELD_BACKOFF: Duration = Duration::from_millis(200);
+/// 用户长操作结束后，后台任务至少还要等待的静默时长。避免前台刚放锁、后台
+/// 立刻插进操作间隙，随后又被下一次操作取消。
+const USER_ACTIVITY_SILENCE_MS: i64 = 10 * 1000;
+/// 等待进程内写门释放的兜底超时。正常路径由闸门释放信号唤醒；超时只是防
+/// 信号丢失，不让调度器变成 200 ms 轮询。
+const WRITE_GATE_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// 用户取消后台任务后的短暂退避：不把整支队列一起停 60 秒，也避免立刻重跑。
 const CANCEL_RETRY: Duration = Duration::from_secs(5);
 /// 空闲完整性检查前，仓库最近一次历史写入至少需要静默的时长（10 分钟）。
@@ -37,7 +50,7 @@ const IDLE_VERIFY_BATCH_BUDGET: Duration = Duration::from_secs(30);
 /// 一批检查插队。维护者 2026-10-18 定稿为按次数、N = 4，不引入时钟规则。
 const IDLE_VERIFY_AGING_RUNS: u32 = 4;
 
-pub(crate) fn run(state: BackupState, app: AppHandle) {
+pub(crate) fn run(state: BackupState, app: AppHandle, events: SharedEventSink) {
     let mut automatic_since_verify = 0_u32;
     let mut idle_window = IdleWindowTracker::default();
     loop {
@@ -71,6 +84,15 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                 continue;
             }
         };
+        // 用户操作结束后先静默一段时间再开后台任务。用户操作**不**唤醒调度器
+        // （素材板之类的频繁保存不该反复触发候选扫描），这里只按剩余静默期挂起，
+        // 醒来后重新计算剩余时长；连续操作期间一轮一轮往后推，不会空转。
+        if let Some(wait) = user_activity_wait(&app_state, now) {
+            if !state.wait_scheduler(wait) {
+                break;
+            }
+            continue;
+        }
         let idle_integrity_enabled = app_state.idle_integrity_check_enabled();
         let window_idle = idle_integrity_enabled && state.window_idle();
         let (window_generation, window_consumed) = idle_window.observe(window_idle);
@@ -79,9 +101,9 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
         let candidates_owner = match acquire_owner(&app_state, "backup:candidates") {
             Ok(OwnerAttempt::Owned(owner)) => owner,
             // 本进程有前台/交互写者：让位，不写分支失败、不推进退避。
-            Ok(OwnerAttempt::Skipped) => {
+            Ok(OwnerAttempt::Skipped(root)) => {
                 log::debug!("scheduler yields the candidate scan to an in-process writer");
-                if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
+                if !wait_for_write_gate(&state, &root) {
                     break;
                 }
                 continue;
@@ -128,6 +150,12 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             }
         };
         drop(candidates_owner);
+        // 完成事件需要把分支映射回作品；候选已经带有 artwork_id，这里只留一份
+        // 轻量映射，不额外查库。
+        let branch_artworks = branches
+            .iter()
+            .map(|branch| (branch.id.clone(), branch.artwork_id.clone()))
+            .collect::<HashMap<_, _>>();
         // deadline 优先：候选按 due_at、上次检查时间与分支 ID 排序；失败退避已
         // 写在分支自己的 retry_at 里，因此一个分支失败不会阻塞其它到期分支。
         let (due, next_due) = select_due_branch(branches, now, &state);
@@ -172,10 +200,29 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             // 一次尝试无论完成、失败还是被抢占，都消耗该空闲窗口的名额。
             idle_window.mark_batch_attempted(window_generation);
             match outcome {
-                Ok(()) => automatic_since_verify = 0,
+                Ok(()) => {
+                    automatic_since_verify = 0;
+                    // 校验只改写节点/分支的校验状态，不改变历史图结构。
+                    emit_background_completion(
+                        &events,
+                        &app_state,
+                        &state,
+                        None,
+                        false,
+                        OperationOutcome::Succeeded,
+                        None,
+                    );
+                }
                 Err(VerifyBatchError::ShuttingDown) => break,
-                Err(VerifyBatchError::Busy(error)) => {
-                    log::debug!("idle integrity check yielded to a repository writer: {error}");
+                Err(VerifyBatchError::InProcessWriter(root)) => {
+                    log::debug!("idle integrity check yielded to an in-process writer");
+                    if !wait_for_write_gate(&state, &root) {
+                        break;
+                    }
+                }
+                Err(VerifyBatchError::CrossProcessBusy(error)) => {
+                    // 跨进程占用等不到本进程信号，直接短退避，不空转抢锁。
+                    log::debug!("idle integrity check yielded to another process: {error}");
                     if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
                         break;
                     }
@@ -194,9 +241,9 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             let backup_owner = match acquire_owner(&app_state, "backup:automatic") {
                 Ok(OwnerAttempt::Owned(owner)) => owner,
                 // 本进程有前台/交互写者：本轮让位，不写失败也不推进退避。
-                Ok(OwnerAttempt::Skipped) => {
+                Ok(OwnerAttempt::Skipped(root)) => {
                     log::debug!("scheduler yields branch {branch_id} to an in-process writer");
-                    if !state.wait_scheduler(FOREGROUND_YIELD_BACKOFF) {
+                    if !wait_for_write_gate(&state, &root) {
                         break;
                     }
                     continue;
@@ -211,6 +258,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                     continue;
                 }
             };
+            let artwork_id = branch_artworks.get(&branch_id).cloned();
             let result = state.run_exclusive_typed(
                 Some(&branch_id),
                 BackupTaskKind::AutomaticBackup,
@@ -221,6 +269,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                                 root,
                                 &state,
                                 &branch_id,
+                                app_state.last_user_activity_ms(),
                                 app_state.chunk_write_options(),
                             ))
                         })
@@ -230,14 +279,24 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
             drop(backup_owner);
             match result {
                 // aging 只统计真正完成的自动备份；让位、跳过与失败都不推进计数。
-                Ok(_) => {
+                Ok(backup) => {
                     automatic_since_verify = automatic_since_verify.saturating_add(1);
+                    emit_background_completion(
+                        &events,
+                        &app_state,
+                        &state,
+                        artwork_id.as_deref(),
+                        backup.created,
+                        OperationOutcome::Succeeded,
+                        None,
+                    );
                 }
                 Err(ExclusiveRunError::Operation(
                     AutomaticBackupError::NotScheduled
                     | AutomaticBackupError::Skipped
                     | AutomaticBackupError::Deferred
-                    | AutomaticBackupError::ForegroundWaiting,
+                    | AutomaticBackupError::ForegroundWaiting
+                    | AutomaticBackupError::UserActive,
                 )) => {}
                 Err(ExclusiveRunError::Operation(AutomaticBackupError::Cancelled)) => {
                     if !state.wait_scheduler(CANCEL_RETRY) {
@@ -255,6 +314,15 @@ pub(crate) fn run(state: BackupState, app: AppHandle) {
                     } else {
                         log::error!("automatic backup failed for branch {branch_id}: {error}");
                     }
+                    emit_background_completion(
+                        &events,
+                        &app_state,
+                        &state,
+                        artwork_id.as_deref(),
+                        false,
+                        OperationOutcome::Failed,
+                        Some(CommandError::from_legacy(error).summary()),
+                    );
                 }
                 Err(ExclusiveRunError::Operation(AutomaticBackupError::Infrastructure(error)))
                 | Err(ExclusiveRunError::State(error)) => {
@@ -367,7 +435,7 @@ fn select_due_branch(
         if storage::unattended_source_path_rejection(&branch.source_path).is_some() {
             continue;
         }
-        let due_at = due_at_ms(&branch, now);
+        let due_at = due_at_ms(&branch, now, state);
         heap.push(DeadlineEntry {
             due_at,
             last_check_ms: branch.last_check_ms.unwrap_or(0),
@@ -453,7 +521,10 @@ fn select_idle_verify(
 #[derive(Debug)]
 enum VerifyBatchError {
     ShuttingDown,
-    Busy(String),
+    /// 本进程有前台/交互写者占住写入闸门：等那扇闸门的释放信号，不轮询。
+    InProcessWriter(PathBuf),
+    /// 其它进程占用仓库：本进程没有可等的信号，只能短退避后重试。
+    CrossProcessBusy(String),
     Infrastructure(String),
 }
 
@@ -479,13 +550,9 @@ fn run_verify_batch(
     let owner = match acquire_owner(app_state, "backup:idleVerify") {
         Ok(OwnerAttempt::Owned(owner)) => owner,
         // 本进程有前台/交互写者：整批让位，本窗口名额照常消耗。
-        Ok(OwnerAttempt::Skipped) => {
-            return Err(VerifyBatchError::Busy(
-                "本进程有写入者，空闲完整性检查已让位".to_owned(),
-            ))
-        }
+        Ok(OwnerAttempt::Skipped(root)) => return Err(VerifyBatchError::InProcessWriter(root)),
         Err(error) if error == repository_lock::BUSY_MESSAGE => {
-            return Err(VerifyBatchError::Busy(error));
+            return Err(VerifyBatchError::CrossProcessBusy(error));
         }
         Err(error) => return Err(VerifyBatchError::Infrastructure(error)),
     };
@@ -624,6 +691,8 @@ enum AutomaticBackupError {
     Deferred,
     /// 有前台命令在等待共享运行锁，本轮自动备份主动让位，不计入失败。
     ForegroundWaiting,
+    /// 用户长操作刚结束，静默窗口未满；本轮让位，不计入失败。
+    UserActive,
     Cancelled,
     Failed {
         error: String,
@@ -639,6 +708,7 @@ impl std::fmt::Display for AutomaticBackupError {
             Self::Skipped => formatter.write_str("分支工作文件不参与自动备份"),
             Self::Deferred => formatter.write_str("分支有待处理的手动提交，自动备份已延后"),
             Self::ForegroundWaiting => formatter.write_str("有前台命令在等待，自动备份已让位"),
+            Self::UserActive => formatter.write_str("用户刚操作完仓库，自动备份已延后"),
             Self::Cancelled => formatter.write_str("自动备份已取消"),
             Self::Failed { error, .. } | Self::Infrastructure(error) => error.fmt(formatter),
         }
@@ -646,9 +716,10 @@ impl std::fmt::Display for AutomaticBackupError {
 }
 
 fn run_scheduled_backup(
-    root: &std::path::Path,
+    root: &Path,
     state: &BackupState,
     branch_id: &str,
+    last_user_activity_ms: Option<i64>,
     options: ChunkWriteOptions,
 ) -> Result<BackupCommitResult, AutomaticBackupError> {
     let now = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
@@ -663,8 +734,14 @@ fn run_scheduled_backup(
             .map_err(AutomaticBackupError::Infrastructure)?;
         return Err(AutomaticBackupError::Skipped);
     }
-    if due_at_ms(&branch, now) > now {
+    if due_at_ms(&branch, now, state) > now {
         return Err(AutomaticBackupError::NotScheduled);
+    }
+    // 取锁之后复查用户静默：候选选择与加锁之间用户可能刚完成一次操作。
+    // 让位不计入失败，也不推进检查时间。
+    if last_user_activity_ms.is_some_and(|last| now.saturating_sub(last) < USER_ACTIVITY_SILENCE_MS)
+    {
+        return Err(AutomaticBackupError::UserActive);
     }
     // 取得运行锁后再次确认没有待处理的手动提交，防止手动请求在
     // 候选选择与加锁之间到达时仍被自动任务抢先。
@@ -679,6 +756,7 @@ fn run_scheduled_backup(
     // 快速检查：分支开启快速检查时，先只比较大小与修改时间；完全一致视为内容
     // 未变化，任何不一致都退回下方全量检查和备份流程。全局设置只在分支创建时
     // 提供初始值，不参与这里的判定。
+    let checked_started = Instant::now();
     if branch.quick_enabled {
         let quick_unchanged = worker::quick_check_unchanged(root, branch_id).map_err(|error| {
             AutomaticBackupError::Failed {
@@ -690,6 +768,7 @@ fn run_scheduled_backup(
             let checked_ms = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
             history::mark_unchanged(root, branch_id, checked_ms)
                 .map_err(AutomaticBackupError::Infrastructure)?;
+            state.record_check_elapsed(branch_id, checked_started.elapsed());
             log::info!("backup quick-unchanged: branch_id={branch_id}");
             return Ok(BackupCommitResult {
                 created: false,
@@ -703,7 +782,10 @@ fn run_scheduled_backup(
         move || state.cancelled()
     });
     match worker::run_backup(root, branch_id, "", "automatic", &cancel, options) {
-        Ok(result) => Ok(result),
+        Ok(result) => {
+            state.record_check_elapsed(branch_id, checked_started.elapsed());
+            Ok(result)
+        }
         Err(worker::BackupRunError::Cancelled) => Err(AutomaticBackupError::Cancelled),
         Err(worker::BackupRunError::Failed(error)) => {
             let failed_ms = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
@@ -714,11 +796,82 @@ fn run_scheduled_backup(
     }
 }
 
-fn due_at_ms(branch: &ScheduledBranch, now: i64) -> i64 {
+/// 发一条后台任务完成事件。`structure_changed` 让前端区分「历史图结构变了」
+/// 与「只改了状态行」：后者不必重建 mindmap，也不必作废缩略图缓存。
+///
+/// `completion_revision` 在任务结束之后读取，正常就是本次任务推进出的值。若期间
+/// 恰好还有别的任务完成，事件会带上更新的 revision，前端因为找不到中间 revision
+/// 的事件而退回完整刷新——不会误判成「只改了状态行」。
+fn emit_background_completion(
+    events: &SharedEventSink,
+    app_state: &AppState,
+    state: &BackupState,
+    artwork_id: Option<&str>,
+    structure_changed: bool,
+    outcome: OperationOutcome,
+    error: Option<CommandErrorSummary>,
+) {
+    let repository_key = app_state
+        .repository_path()
+        .ok()
+        .flatten()
+        .map(|path| display_path(&path));
+    let revision = state
+        .status()
+        .map(|status| status.completion_revision)
+        .unwrap_or(0);
+    let mut event = AppEvent::new(
+        AppEventKind::OperationFinished {
+            outcome,
+            error,
+            artwork_id: artwork_id.map(str::to_owned),
+            structure_changed: Some(structure_changed),
+        },
+        repository_key,
+        None,
+        Some(OperationDomain::Backup),
+        false,
+        revision,
+    );
+    event.phase = Some("backgroundComplete".to_owned());
+    events.emit(&event);
+}
+
+/// 用户长操作是否仍在冷却期；返回还需要等待的时长。
+fn user_activity_wait(app_state: &AppState, now: i64) -> Option<Duration> {
+    let last = app_state.last_user_activity_ms()?;
+    let ready_at = last.saturating_add(USER_ACTIVITY_SILENCE_MS);
+    (ready_at > now).then(|| Duration::from_millis(u64::try_from(ready_at - now).unwrap_or(0)))
+}
+
+/// 挂起等待进程内写门释放，返回 `false` 表示应用正在退出。超时后照常返回，
+/// 由调用方重新检查闸门。
+fn wait_for_write_gate(state: &BackupState, root: &Path) -> bool {
+    let cancel = CancelToken::with_source({
+        let state = state.clone();
+        move || state.shutting_down()
+    });
+    repository_lock::wait_for_write_gate_release(root, WRITE_GATE_RELEASE_TIMEOUT, &cancel);
+    state.wait_scheduler(Duration::ZERO)
+}
+
+/// 下一次自动备份的截止时刻。实际间隔取 `max(用户设置的间隔, 2 × 上次耗时)`：
+/// 一次检查比间隔还长时，等它跑完再等同样长的时间，避免连续满负荷。学习结果
+/// 只在内存里，重启后第一轮按名义间隔跑。
+fn due_at_ms(branch: &ScheduledBranch, now: i64, state: &BackupState) -> i64 {
     branch.retry_at_ms.unwrap_or_else(|| {
         branch.last_check_ms.map_or(now, |checked| {
+            let nominal = i64::from(branch.interval_minutes) * 60_000;
+            let effective = state
+                .check_elapsed(&branch.id)
+                .map(|elapsed| {
+                    let measured =
+                        i64::try_from(elapsed.as_millis().saturating_mul(2)).unwrap_or(i64::MAX);
+                    nominal.max(measured)
+                })
+                .unwrap_or(nominal);
             checked
-                .saturating_add(i64::from(branch.interval_minutes) * 60_000)
+                .saturating_add(effective)
                 .saturating_add(jitter_ms(&branch.id))
         })
     })
@@ -736,10 +889,11 @@ fn jitter_ms(branch_id: &str) -> i64 {
 /// `Skipped` 表示**本进程**已有前台/交互写者占用写入闸门：后台任务永不排队，
 /// 本轮直接让位，既不算失败也不推进分支退避。真实跨进程冲突仍走 `Err`。
 enum OwnerAttempt {
-    /// `Box` 压小枚举（`Skipped` 是空变体，而 `RepositoryOwnerLock` 内含连接与
-    /// 线程句柄），锁本身不因此改变语义。
+    /// `Box` 压小枚举（`RepositoryOwnerLock` 内含连接与线程句柄），锁本身不
+    /// 因此改变语义。
     Owned(Option<Box<RepositoryOwnerLock>>),
-    Skipped,
+    /// 本进程有前台/交互写者占位。携带仓库根目录，供等待写门释放使用。
+    Skipped(PathBuf),
 }
 
 /// 调度器每次真正写仓库前取得与命令层相同的跨进程 owner lock。未配置仓库或目录
@@ -763,7 +917,7 @@ fn acquire_owner(app_state: &AppState, operation: &str) -> Result<OwnerAttempt, 
         &CancelToken::standalone(),
     ) {
         Ok(lock) => Ok(OwnerAttempt::Owned(Some(Box::new(lock)))),
-        Err(OwnerLockError::InProcessBusy) => Ok(OwnerAttempt::Skipped),
+        Err(OwnerLockError::InProcessBusy) => Ok(OwnerAttempt::Skipped(root)),
         Err(OwnerLockError::Busy(_)) => Err(repository_lock::BUSY_MESSAGE.to_owned()),
         Err(error) => Err(error.user_message()),
     }
@@ -845,6 +999,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            None,
             ChunkWriteOptions::V1,
         )
         .unwrap();
@@ -882,6 +1037,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            None,
             ChunkWriteOptions::V1,
         )
         .unwrap();
@@ -920,6 +1076,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            None,
             ChunkWriteOptions::V1,
         )
         .unwrap();
@@ -963,6 +1120,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            None,
             ChunkWriteOptions::V1,
         )
         .unwrap();
@@ -994,7 +1152,7 @@ mod tests {
         // 且不计入失败、不推进检查时间。
         let waiting = state.begin_foreground_wait();
 
-        let yielded = run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1);
+        let yielded = run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1);
 
         assert!(
             matches!(yielded, Err(AutomaticBackupError::ForegroundWaiting)),
@@ -1010,7 +1168,7 @@ mod tests {
         assert!(branch.last_error.is_none());
 
         let result =
-            run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1).unwrap();
+            run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1).unwrap();
         assert!(result.unchanged);
     }
 
@@ -1030,12 +1188,12 @@ mod tests {
         let state = BackupState::default();
         state.begin_manual_request(&branch_id);
 
-        let deferred = run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1);
+        let deferred = run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1);
 
         assert!(matches!(deferred, Err(AutomaticBackupError::Deferred)));
         state.end_manual_request(&branch_id);
         let result =
-            run_scheduled_backup(&root, &state, &branch_id, ChunkWriteOptions::V1).unwrap();
+            run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1).unwrap();
         assert!(result.unchanged);
     }
 
@@ -1070,6 +1228,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &artwork.branch_id,
+            None,
             ChunkWriteOptions::V1,
         );
 
@@ -1083,16 +1242,149 @@ mod tests {
     }
 
     #[test]
+    fn due_time_widens_the_interval_to_twice_the_last_check() {
+        let state = BackupState::default();
+        let branch = scheduled_branch("slow", Some(1_000_000), None);
+        let nominal = 1_000_000 + 60 * 60 * 1_000 + jitter_ms("slow");
+        assert_eq!(due_at_ms(&branch, 0, &state), nominal);
+
+        // 上次检查耗时 2 小时：实际间隔放宽到 4 小时，用户设置的 60 分钟不变。
+        state.record_check_elapsed("slow", Duration::from_secs(2 * 60 * 60));
+        let widened = due_at_ms(&branch, 0, &state);
+        assert_eq!(widened, 1_000_000 + 4 * 60 * 60 * 1_000 + jitter_ms("slow"));
+        assert!(widened > nominal);
+    }
+
+    #[test]
+    fn user_activity_wait_covers_the_silence_window() {
+        let (directory, root, _source, _artwork_id, _branch_id) = fixture();
+        let app_state = app_state_for(&root, directory.path());
+        assert_eq!(user_activity_wait(&app_state, 1_000), None);
+
+        app_state.note_user_activity();
+        let now = storage::now_ms().unwrap();
+        let wait = user_activity_wait(&app_state, now).expect("刚写过应仍在冷却期");
+        assert!(wait <= Duration::from_millis(USER_ACTIVITY_SILENCE_MS as u64));
+        assert_eq!(
+            user_activity_wait(&app_state, now + USER_ACTIVITY_SILENCE_MS),
+            None
+        );
+    }
+
+    #[test]
+    fn scheduled_backup_defers_while_the_user_just_wrote() {
+        let (_directory, root, _source, artwork_id, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        make_due(&root, &branch_id);
+        let state = BackupState::default();
+        let now = storage::now_ms().unwrap();
+
+        let deferred =
+            run_scheduled_backup(&root, &state, &branch_id, Some(now), ChunkWriteOptions::V1);
+        assert!(matches!(deferred, Err(AutomaticBackupError::UserActive)));
+
+        // 让位不算失败，也不推进检查时间。
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.consecutive_backup_failures, 0);
+        assert!(branch.last_error.is_none());
+        let last_check: i64 = crate::storage::open(&root)
+            .unwrap()
+            .query_row(
+                "SELECT last_check_ms FROM branches WHERE id = ?1",
+                [&branch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(last_check, 1);
+
+        // 静默满 10 秒后正常检查，并记下本次耗时供调度器放宽间隔。
+        let result = run_scheduled_backup(
+            &root,
+            &state,
+            &branch_id,
+            Some(now - USER_ACTIVITY_SILENCE_MS),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert!(result.unchanged);
+        assert!(state.check_elapsed(&branch_id).is_some());
+    }
+
+    #[derive(Default)]
+    struct RecordingSink {
+        events: std::sync::Mutex<Vec<AppEvent>>,
+    }
+
+    impl crate::app::command_runtime::EventSink for RecordingSink {
+        fn emit(&self, event: &AppEvent) {
+            self.events.lock().unwrap().push(event.clone());
+        }
+    }
+
+    #[test]
+    fn background_completion_event_carries_artwork_and_structure_flag() {
+        let (directory, root, _source, artwork_id, _branch_id) = fixture();
+        let app_state = app_state_for(&root, directory.path());
+        let state = BackupState::default();
+        state
+            .run_exclusive(None, BackupTaskKind::UserOperation, || Ok::<_, String>(()))
+            .unwrap();
+        let sink = std::sync::Arc::new(RecordingSink::default());
+        let events: SharedEventSink = sink.clone();
+
+        emit_background_completion(
+            &events,
+            &app_state,
+            &state,
+            Some(&artwork_id),
+            true,
+            OperationOutcome::Succeeded,
+            None,
+        );
+
+        let events = sink.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        let event = &events[0];
+        assert_eq!(event.domain, Some(OperationDomain::Backup));
+        assert_eq!(event.completion_revision, 1);
+        assert_eq!(
+            event.repository_key.as_deref(),
+            Some(display_path(&root).as_str())
+        );
+        match &event.kind {
+            AppEventKind::OperationFinished {
+                outcome: OperationOutcome::Succeeded,
+                artwork_id: Some(id),
+                structure_changed: Some(true),
+                ..
+            } => assert_eq!(id, &artwork_id),
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
+
+    #[test]
     fn due_time_uses_retry_deadline_without_interval_jitter() {
         let branch = ScheduledBranch {
             id: "branch".into(),
+            artwork_id: "artwork".into(),
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms: Some(10),
             interval_minutes: 120,
             quick_enabled: false,
             retry_at_ms: Some(42),
         };
-        assert_eq!(due_at_ms(&branch, 1_000), 42);
+        assert_eq!(due_at_ms(&branch, 1_000, &BackupState::default()), 42);
     }
 
     #[test]
@@ -1121,6 +1413,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            None,
             ChunkWriteOptions::V1,
         );
 
@@ -1174,6 +1467,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &artwork.branch_id,
+            None,
             ChunkWriteOptions::V1,
         );
 
@@ -1207,6 +1501,7 @@ mod tests {
                     &root,
                     &operation_state,
                     &artwork.branch_id,
+                    None,
                     ChunkWriteOptions::V1,
                 )
             },
@@ -1374,6 +1669,7 @@ mod tests {
     ) -> ScheduledBranch {
         ScheduledBranch {
             id: id.into(),
+            artwork_id: format!("artwork-{id}"),
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms,
             interval_minutes: 60,
@@ -1845,7 +2141,7 @@ mod tests {
         assert!(
             matches!(
                 acquire_owner(&app_state, "backup:automatic"),
-                Ok(OwnerAttempt::Skipped)
+                Ok(OwnerAttempt::Skipped(_))
             ),
             "进程内写者占位时后台必须跳过，而不是等锁或报错"
         );

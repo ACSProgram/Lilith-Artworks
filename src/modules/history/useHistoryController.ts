@@ -9,6 +9,51 @@ import type {
   HistoryNode, NodePreview, RenameHistoryNodeRequest, UpdateBranchBackupRequest,
 } from "./types";
 
+/** 后台任务完成事件里与历史刷新决策有关的字段。 */
+interface BackgroundCompletion {
+  artworkId: string | null;
+  structureChanged: boolean;
+}
+
+type CompletionRefresh = "reload" | "status" | "skip";
+
+/** 完成事件只为「两次轮询之间」服务，保留最近一段足够覆盖正常节奏。 */
+const MAX_TRACKED_COMPLETIONS = 64;
+
+/**
+ * 两次轮询之间可能完成多个后台任务。只有每个完成事件都在、且都不改变结构时
+ * 才走状态行刷新；事件丢失或任意一次是结构变化时退回整图读取。
+ */
+function planCompletionRefresh(
+  previous: number,
+  next: number,
+  completions: ReadonlyMap<number, BackgroundCompletion>,
+  artworkId: string,
+): CompletionRefresh {
+  if (next <= previous) return "skip";
+  if (next - previous > MAX_TRACKED_COMPLETIONS) return "reload";
+  let refreshStatus = false;
+  for (let revision = previous + 1; revision <= next; revision += 1) {
+    const completion = completions.get(revision);
+    if (!completion) return "reload";
+    // 别的作品的完成不影响当前历史图。
+    if (completion.artworkId !== null && completion.artworkId !== artworkId) continue;
+    if (completion.structureChanged) return "reload";
+    refreshStatus = true;
+  }
+  return refreshStatus ? "status" : "skip";
+}
+
+/** 丢掉已经消费掉的完成记录：它们只服务于自己那一段轮询间隔。 */
+function forgetCompletionsThrough(
+  tracked: Map<number, BackgroundCompletion>,
+  through: number,
+): void {
+  for (const revision of [...tracked.keys()]) {
+    if (revision <= through) tracked.delete(revision);
+  }
+}
+
 const IDLE_RUNTIME: BackupRuntimeStatus = {
   busy: false,
   activeBranchId: null,
@@ -35,6 +80,8 @@ export function useHistoryController({
   onError,
 }: HistoryControllerOptions) {
   const [history, setHistory] = useState<ArtworkHistory | null>(null);
+  const historyRef = useRef<ArtworkHistory | null>(null);
+  historyRef.current = history;
   const [loading, setLoading] = useState(true);
   const { busy, run: runBusy } = useAsyncOperation();
   const [runtime, setRuntime] = useState(IDLE_RUNTIME);
@@ -45,6 +92,8 @@ export function useHistoryController({
   const { begin: beginRead, invalidate: invalidateReads, isCurrent: isCurrentRead } = useRequestEpoch();
   const lastRefresh = useRef({ artworkId, refreshVersion });
   const lastCompletionRevision = useRef<number | null>(null);
+  /** 已收到的后台完成事件，键为 `completionRevision`。 */
+  const backgroundCompletions = useRef(new Map<number, BackgroundCompletion>());
   const runtimeRequest = useRef<Promise<void> | null>(null);
   /** 在途读取期间到达的刷新请求：当前请求结束后补读一次。 */
   const runtimeRefreshQueued = useRef(false);
@@ -93,6 +142,37 @@ export function useHistoryController({
       if (isCurrentRead(requestId)) setLoading(false);
     }
   }, [artworkId, beginRead, isCurrentRead]);
+
+  /**
+   * 非结构变化的完成只刷新分支状态行：仍读取同一份历史 DTO，但只替换
+   * `branches`。保留 `nodes` 数组引用，mindmap 不重建，缩略图缓存也不作废。
+   * 这是后台检查的尽力刷新，失败不进入全局错误提示。
+   */
+  const mergeBranches = useCallback(async (): Promise<void> => {
+    const requestedArtworkId = artworkIdRef.current;
+    const requestId = beginRead();
+    try {
+      const next = await historyApi.get(requestedArtworkId);
+      if (!isCurrentRead(requestId)
+        || artworkIdRef.current !== requestedArtworkId
+        || next.artworkId !== requestedArtworkId) {
+        return;
+      }
+      const current = historyRef.current;
+      const merged = current && current.artworkId === requestedArtworkId
+        ? { ...current, branches: next.branches }
+        : next;
+      setHistory(merged);
+      onHistoryChangedRef.current(merged);
+    } catch {
+      // 状态行刷新失败时保留现有 DTO；下一次操作或轮询会补上。
+    } finally {
+      if (isCurrentRead(requestId)) setLoading(false);
+    }
+  }, [beginRead, isCurrentRead]);
+
+  const mergeBranchesRef = useRef(mergeBranches);
+  mergeBranchesRef.current = mergeBranches;
 
   /** 详情面板的格式版本按选中节点读取；文件不可读时返回 null，不进入全局错误提示。 */
   const readNodeFormat = useCallback(async (historyId: string): Promise<string | null> => {
@@ -159,7 +239,18 @@ export function useHistoryController({
           && previousRevision !== next.completionRevision;
         lastCompletionRevision.current = next.completionRevision;
         setRuntime(next);
-        if (operationCompleted) await reloadRef.current();
+        if (operationCompleted) {
+          const previous = previousRevision ?? next.completionRevision;
+          const refresh = planCompletionRefresh(
+            previous,
+            next.completionRevision,
+            backgroundCompletions.current,
+            artworkIdRef.current,
+          );
+          forgetCompletionsThrough(backgroundCompletions.current, next.completionRevision);
+          if (refresh === "reload") await reloadRef.current();
+          else if (refresh === "status") await mergeBranchesRef.current();
+        }
       } catch {
         // Commands surface repository errors; the snapshot is best-effort.
       }
@@ -183,6 +274,21 @@ export function useHistoryController({
   }, [refreshRuntime]);
 
   useRuntimeSubscription((event) => {
+    if (event.type === "operationFinished"
+      && event.domain === "backup"
+      && event.structureChanged !== undefined) {
+      // 后台自动备份/空闲校验会声明本次是否改变历史图结构。先记下再刷新
+      // 运行状态，让随后的轮询能对同一 revision 做出「只合并分支」的决定。
+      backgroundCompletions.current.set(event.completionRevision, {
+        artworkId: event.artworkId ?? null,
+        structureChanged: event.structureChanged,
+      });
+      while (backgroundCompletions.current.size > MAX_TRACKED_COMPLETIONS) {
+        const oldest = backgroundCompletions.current.keys().next().value;
+        if (oldest === undefined) break;
+        backgroundCompletions.current.delete(oldest);
+      }
+    }
     if (event.type !== "operationFinished" && event.type !== "repositoryChanged") return;
     if (event.domain === "history" || event.domain === "backup" || event.domain === "authenticity") {
       void refreshRuntime();

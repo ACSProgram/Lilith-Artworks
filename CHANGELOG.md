@@ -17,6 +17,23 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- Automatic backups wait ten seconds after the last user activity (write
+  commands and content-level read scans alike) before starting, and the
+  scheduler learns each branch's last successful check duration and stretches
+  the effective interval to `max(configured interval, 2 × duration)`. The
+  learned value lives in memory only, so a restart starts at the nominal
+  interval; user-configured intervals are never rewritten.
+- When an in-process writer holds the repository write gate, the scheduler now
+  waits for that gate's release signal with a five-second fallback instead of
+  logging and retrying every 200 ms, and shutdown wakes the waiter so it can
+  join promptly. A cross-process holder still falls back to the short retry,
+  because there is no in-process signal to wait for.
+- Background automatic-backup and idle-integrity completions emit
+  `operationFinished` with optional `artworkId` and `structureChanged` fields.
+  The history page merges only branch status for a non-structural completion of
+  the current artwork, keeping the node array and thumbnail cache intact;
+  completions for other artworks are ignored, while missing or unmarked events
+  still trigger a full refresh.
 - Platform-specific branches are consolidated into a single
   `src-tauri/src/platform/` module (`path` / `shell` / `clipboard` /
   `process`), so business code no longer carries `cfg` branches; call sites

@@ -135,8 +135,10 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 - `AppEvent` v1 信封字段（repository key、operation id、domain、phase、current/total、
   cancellable、completion revision）与首批事件（`operationStarted` / `operationProgress` /
   `operationFinished` / `repositoryChanged` / `cleanupQueueChanged`）已冻结；阶段 3 只补订阅与
-  轮询降级，不重定义事件。进度事件按阶段变化、完成或 100 ms 间隔节流，headless 的 marker
-  观察者不节流。
+  轮询降级，不重定义事件。`operationFinished` 追加了两个可选字段：后台调度任务用
+  `artworkId` 声明完成所属作品，用 `structureChanged` 声明本次是否改变了历史图结构；命令事件
+  不带这两个字段，前端按未知处理。旧客户端忽略未知字段，v1 信封本身不变。进度事件按阶段变化、
+  完成或 100 ms 间隔节流，headless 的 marker 观察者不节流。
 - 命令注册表集中在 `app/command_registry.rs` 的 `handler()` 中按领域分组列出全部命令，`lib.rs`
   只把它交给 `invoke_handler`；Tauri 的 `generate_handler!` 需要编译期函数列表，因此这里是一张
   静态表，不是运行时注册。
@@ -166,8 +168,10 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 事件只做即时唤醒，命令响应仍是最终状态。运行态与历史刷新保留 3 秒快照轮询作为兜底：
 事件丢失、进程启动恢复以及不经过 coordinator 的后台调度任务都由它收敛；设置页与维护操作
 在收到进度事件时以 150 ms 合并读取一次运行状态。作品树另保留 30 秒刷新，用于后台自动备份
-失败告警这类没有事件的写库。订阅失败与订阅者异常只写 `[runtime]` 诊断，不改变业务路径；
-事件的开始/结束、耗时与失败仍由原生 `operation` 日志记录，不重复一套通道。
+失败告警这类没有事件的写库。历史页对后台完成的 `structureChanged: false` 只合并分支状态行，
+保留节点数组引用；其它情况或事件丢失时仍完整刷新。订阅失败与订阅者异常只写 `[runtime]`
+诊断，不改变业务路径；事件的开始/结束、耗时与失败仍由原生 `operation` 日志记录，不重复一套
+通道。
 
 素材板导入/导出的进度不再使用 `Channel`：命令在 `CommandContext` 上报告进度并广播
 `operationProgress`，controller 按 `domain = pinBoard` 消费；`Channel` 只保留给需要传输

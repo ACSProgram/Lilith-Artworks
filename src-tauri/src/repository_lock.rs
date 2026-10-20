@@ -203,6 +203,12 @@ struct GateState {
     holding: bool,
     waiters: BinaryHeap<Waiting>,
     next_ticket: u64,
+    /// 每次持有者释放时递增。后台等待者据此区分「等到了一次释放」与「被其它
+    /// 唤醒但闸门仍被占用」。
+    release_generation: u64,
+    /// 正在 [`wait_for_write_gate_release`] 里挂起的线程数，仅用于测试确认等待
+    /// 已经开始。
+    release_waiters: usize,
 }
 
 struct Gate {
@@ -317,6 +323,79 @@ fn unmark_held(key: &Path) {
 
 static GATES: OnceLock<Mutex<HashMap<PathBuf, Arc<Gate>>>> = OnceLock::new();
 
+/// 等待该仓库的进程内写入闸门被释放，最多等待 `timeout`。返回 `true` 表示
+/// 观测到一次释放（或等待开始时闸门已经空闲），`false` 表示超时或被取消。
+/// 超时只是防信号丢失，调用方仍应重新检查闸门。
+pub(crate) fn wait_for_write_gate_release(
+    root: &Path,
+    timeout: Duration,
+    cancel: &CancelToken,
+) -> bool {
+    let gate = {
+        let registry = gate_registry()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        registry.get(&gate_key(root)).cloned()
+    };
+    // 闸门已经回收：没有本进程写者占用，按「已释放」处理。
+    let Some(gate) = gate else {
+        return true;
+    };
+    let deadline = Instant::now() + timeout;
+    let mut state = gate.lock_state();
+    let start = state.release_generation;
+    if !state.holding {
+        return true;
+    }
+    state.release_waiters += 1;
+    let observed = loop {
+        if !state.holding || state.release_generation != start {
+            break true;
+        }
+        if cancel.is_cancelled() {
+            break false;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            break false;
+        }
+        let (next, _) = gate
+            .wake
+            .wait_timeout(state, deadline - now)
+            .unwrap_or_else(|poison| poison.into_inner());
+        state = next;
+    };
+    state.release_waiters -= 1;
+    observed
+}
+
+/// 只在测试里使用：确认某个线程已经真正进入等待，避免「通知早于等待」造成
+/// 假阴性。
+#[cfg(test)]
+pub(crate) fn gate_release_waiter_count(root: &Path) -> usize {
+    let gate = {
+        let registry = gate_registry()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        registry.get(&gate_key(root)).cloned()
+    };
+    gate.map_or(0, |gate| gate.lock_state().release_waiters)
+}
+
+/// 唤醒所有等待闸门释放的后台任务。应用退出时调用，避免调度线程在兜底超时前
+/// 无法被 join。
+pub(crate) fn wake_write_gate_waiters() {
+    let gates = {
+        let registry = gate_registry()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        registry.values().cloned().collect::<Vec<_>>()
+    };
+    for gate in gates {
+        gate.wake.notify_all();
+    }
+}
+
 fn gate_registry() -> &'static Mutex<HashMap<PathBuf, Arc<Gate>>> {
     GATES.get_or_init(|| Mutex::new(HashMap::new()))
 }
@@ -416,6 +495,7 @@ impl Drop for WriteGateGuard {
         {
             let mut state = self.gate.lock_state();
             state.holding = false;
+            state.release_generation = state.release_generation.wrapping_add(1);
         }
         self.gate.wake.notify_all();
         // 空闲闸门从注册表移除：切仓库后不泄漏，内存也不会随仓库数增长。
@@ -1100,6 +1180,77 @@ mod tests {
 
         drop(writer);
         assert!(probe(root).is_ok());
+    }
+
+    #[test]
+    fn waiting_for_a_gate_release_is_woken_by_the_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let holder = acquire_write_gate(
+            root,
+            WritePriority::Interactive,
+            WaitPolicy::Try,
+            &CancelToken::standalone(),
+        )
+        .unwrap();
+
+        let waiter_root = root.to_path_buf();
+        let waiter = thread::spawn(move || {
+            wait_for_write_gate_release(&waiter_root, TEST_WAIT, &CancelToken::standalone())
+        });
+        wait_until(|| gate_release_waiter_count(root) == 1);
+
+        let started = Instant::now();
+        drop(holder);
+        assert!(waiter.join().unwrap(), "释放闸门必须唤醒等待者");
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn waiting_for_a_gate_release_times_out_without_a_release() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let holder = acquire_write_gate(
+            root,
+            WritePriority::Interactive,
+            WaitPolicy::Try,
+            &CancelToken::standalone(),
+        )
+        .unwrap();
+
+        let started = Instant::now();
+        assert!(!wait_for_write_gate_release(
+            root,
+            Duration::from_millis(30),
+            &CancelToken::standalone(),
+        ));
+        assert!(started.elapsed() >= Duration::from_millis(25));
+        drop(holder);
+    }
+
+    #[test]
+    fn waiting_for_a_gate_release_stops_when_the_app_shuts_down() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let holder = acquire_write_gate(
+            root,
+            WritePriority::Interactive,
+            WaitPolicy::Try,
+            &CancelToken::standalone(),
+        )
+        .unwrap();
+        let cancel = CancelToken::standalone();
+        let waiter_cancel = cancel.clone();
+        let waiter_root = root.to_path_buf();
+        let waiter = thread::spawn(move || {
+            wait_for_write_gate_release(&waiter_root, TEST_WAIT, &waiter_cancel)
+        });
+        wait_until(|| gate_release_waiter_count(root) == 1);
+
+        cancel.cancel();
+        wake_write_gate_waiters();
+        assert!(!waiter.join().unwrap(), "退出流程不得被 5 秒兜底拖住");
+        drop(holder);
     }
 
     #[test]

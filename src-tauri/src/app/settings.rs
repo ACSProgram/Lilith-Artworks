@@ -3,7 +3,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicI64, Ordering},
         Arc, Mutex, RwLock,
     },
 };
@@ -261,6 +261,10 @@ pub(crate) struct AppState {
     /// 诊断模式开关。决定生效日志等级，以及前端桥接是否写入 info 级事件。
     /// 只存活于当前进程，不写入设置文件，因此正常使用不受影响。
     diagnostics: Arc<DiagnosticsState>,
+    /// 最近一次用户长操作开始或结束的时刻。写入命令与内容级只读长任务都会刷新
+    /// 它，调度器据此要求后台任务在用户停手后静默一段时间才启动；`0` 表示本
+    /// 进程还没有用户长操作。
+    last_user_activity_ms: Arc<AtomicI64>,
 }
 
 impl AppState {
@@ -295,6 +299,22 @@ impl AppState {
             shutdown_handshake_started: Arc::new(AtomicBool::new(false)),
             shutdown_confirmed: Arc::new(AtomicBool::new(false)),
             diagnostics: Arc::new(DiagnosticsState::new(diagnostics::default_enabled())),
+            last_user_activity_ms: Arc::new(AtomicI64::new(0)),
+        }
+    }
+
+    /// 刷新用户长操作的活动时间。命令开始与结束都要调用：开始让调度器知道
+    /// 用户正在操作，结束让冷却从最后一刻重新计时。
+    pub(crate) fn note_user_activity(&self) {
+        if let Ok(now) = crate::storage::now_ms() {
+            self.last_user_activity_ms.store(now, Ordering::SeqCst);
+        }
+    }
+
+    pub(crate) fn last_user_activity_ms(&self) -> Option<i64> {
+        match self.last_user_activity_ms.load(Ordering::SeqCst) {
+            0 => None,
+            value => Some(value),
         }
     }
 

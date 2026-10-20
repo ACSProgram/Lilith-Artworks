@@ -5,7 +5,7 @@ import {
   dispatchRuntimeEvent,
   resetRuntimeEventBridgeForTests,
 } from "../../shared/useRuntimeSubscription";
-import type { ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
 
 const historyApi = vi.hoisted(() => ({
   get: vi.fn(),
@@ -51,6 +51,38 @@ const node = (id: string): HistoryNode => ({
   sha256: "a".repeat(64),
   chunkCount: 1,
 });
+
+const branch = (lastSuccessMs: number): ArtworkBranch => ({
+  id: "branch-1",
+  title: "Main",
+  sourcePath: "C:\\work\\artwork.psd",
+  headHistoryId: "n1",
+  createdFromHistoryId: null,
+  backupEnabled: true,
+  backupIntervalMinutes: 30,
+  backupQuickEnabled: true,
+  lastCheckMs: lastSuccessMs,
+  lastSuccessMs,
+  lastError: null,
+  consecutiveBackupFailures: 0,
+  backupRetryAtMs: null,
+  backupDisableNoticePending: false,
+  finalArtifactLocked: false,
+  publishedCount: 0,
+  verifyError: null,
+  verifiedMs: null,
+});
+
+const historyAt = (lastSuccessMs: number, withSecondNode = false): ArtworkHistory => ({
+  artworkId: "artwork-1",
+  artworkTitle: "Artwork",
+  branches: [branch(lastSuccessMs)],
+  nodes: withSecondNode ? [node("n1"), node("n2")] : [node("n1")],
+});
+
+const flush = async () => {
+  for (let index = 0; index < 8; index += 1) await Promise.resolve();
+};
 
 const onError = vi.fn();
 const onHistoryChanged = vi.fn();
@@ -150,6 +182,108 @@ describe("useHistoryController runtime polling", () => {
     });
 
     expect(historyApi.get).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("useHistoryController background completion refresh", () => {
+  afterEach(() => {
+    cleanup();
+    resetRuntimeEventBridgeForTests();
+    vi.useRealTimers();
+    vi.clearAllMocks();
+    latest = null;
+  });
+
+  async function setup() {
+    vi.useFakeTimers();
+    let currentRuntime = runtime(0);
+    let currentHistory = historyAt(1);
+    historyApi.get.mockImplementation(async () => currentHistory);
+    historyApi.runtime.mockImplementation(async () => currentRuntime);
+    render(<Harness />);
+    await act(async () => {
+      await flush();
+    });
+    return {
+      publishRuntime: (value: BackupRuntimeStatus) => { currentRuntime = value; },
+      publishHistory: (value: ArtworkHistory) => { currentHistory = value; },
+    };
+  }
+
+  it("merges only branches for a non-structural completion", async () => {
+    const state = await setup();
+    const nodesBefore = latest!.history!.nodes;
+
+    state.publishRuntime(runtime(1));
+    state.publishHistory(historyAt(2));
+    await act(async () => {
+      dispatchRuntimeEvent({
+        version: APP_EVENT_VERSION,
+        type: "operationFinished",
+        outcome: "succeeded",
+        domain: "backup",
+        artworkId: "artwork-1",
+        structureChanged: false,
+        cancellable: false,
+        completionRevision: 1,
+        timestampMs: 10,
+      } as AppEvent);
+      await flush();
+    });
+
+    expect(historyApi.get).toHaveBeenCalledTimes(2);
+    expect(latest!.history!.branches[0].lastSuccessMs).toBe(2);
+    // 节点数组保持同一引用：mindmap 不重建，缩略图缓存也不作废。
+    expect(latest!.history!.nodes).toBe(nodesBefore);
+  });
+
+  it("reloads the whole history when the completion created a node", async () => {
+    const state = await setup();
+    const nodesBefore = latest!.history!.nodes;
+
+    state.publishRuntime(runtime(1));
+    state.publishHistory(historyAt(2, true));
+    await act(async () => {
+      dispatchRuntimeEvent({
+        version: APP_EVENT_VERSION,
+        type: "operationFinished",
+        outcome: "succeeded",
+        domain: "backup",
+        artworkId: "artwork-1",
+        structureChanged: true,
+        cancellable: false,
+        completionRevision: 1,
+        timestampMs: 10,
+      } as AppEvent);
+      await flush();
+    });
+
+    expect(historyApi.get).toHaveBeenCalledTimes(2);
+    expect(latest!.history!.nodes).not.toBe(nodesBefore);
+    expect(latest!.history!.nodes).toHaveLength(2);
+  });
+
+  it("ignores a non-structural completion belonging to another artwork", async () => {
+    const state = await setup();
+
+    state.publishRuntime(runtime(1));
+    state.publishHistory(historyAt(2));
+    await act(async () => {
+      dispatchRuntimeEvent({
+        version: APP_EVENT_VERSION,
+        type: "operationFinished",
+        outcome: "succeeded",
+        domain: "backup",
+        artworkId: "artwork-2",
+        structureChanged: false,
+        cancellable: false,
+        completionRevision: 1,
+        timestampMs: 10,
+      } as AppEvent);
+      await flush();
+    });
+
+    expect(historyApi.get).toHaveBeenCalledTimes(1);
   });
 });
 

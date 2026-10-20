@@ -1,5 +1,5 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Condvar, Mutex,
@@ -11,7 +11,10 @@ use std::{
 use serde::Serialize;
 use tauri::AppHandle;
 
-use crate::{app::command_runtime::OperationId, cancel::CancelToken};
+use crate::{
+    app::command_runtime::{OperationId, SharedEventSink},
+    cancel::CancelToken,
+};
 
 use super::BackupRuntimeStatus;
 
@@ -78,6 +81,10 @@ struct Inner {
     /// 正在等待共享运行锁的前台长命令数量。调度器据此在候选选择与取得运行锁后
     /// 让位，避免后台任务在前台意图到达后仍抢先取锁。
     foreground_waiting: AtomicUsize,
+    /// 每条分支上一次成功检查的耗时。调度器据此把实际间隔放宽到
+    /// `max(设置的间隔, 2 × 上次耗时)`，避免一次检查比间隔还长时连续满负荷。
+    /// 只存在内存里：重启后第一轮按名义间隔跑。
+    check_elapsed: Mutex<HashMap<String, Duration>>,
     scheduler_signal: Mutex<SchedulerSignal>,
     scheduler_wake: Condvar,
     scheduler_handle: Mutex<Option<JoinHandle<()>>>,
@@ -147,6 +154,22 @@ impl BackupState {
 
     pub(crate) fn foreground_waiting(&self) -> usize {
         self.inner.foreground_waiting.load(Ordering::SeqCst)
+    }
+
+    /// 记录一次成功检查的耗时。失败、取消与让位不计入：失败走分支自己的
+    /// 退避，让位与取消没有产生一次真正的检查。
+    pub(crate) fn record_check_elapsed(&self, branch_id: &str, elapsed: Duration) {
+        if let Ok(mut costs) = self.inner.check_elapsed.lock() {
+            costs.insert(branch_id.to_owned(), elapsed);
+        }
+    }
+
+    pub(crate) fn check_elapsed(&self, branch_id: &str) -> Option<Duration> {
+        self.inner
+            .check_elapsed
+            .lock()
+            .ok()
+            .and_then(|costs| costs.get(branch_id).copied())
     }
 
     /// 低优先级后台任务（空闲校验）的让位判定：有前台命令在等锁或有待处理的
@@ -392,7 +415,11 @@ impl BackupState {
         self.inner.window_idle.load(Ordering::SeqCst)
     }
 
-    pub(crate) fn start_scheduler(&self, app: AppHandle) -> Result<(), String> {
+    pub(crate) fn start_scheduler(
+        &self,
+        app: AppHandle,
+        events: SharedEventSink,
+    ) -> Result<(), String> {
         let mut handle = self
             .inner
             .scheduler_handle
@@ -409,7 +436,7 @@ impl BackupState {
         self.set_automatic_scheduling(true);
         let state = self.clone();
         *handle = Some(std::thread::spawn(move || {
-            super::scheduler::run(state, app)
+            super::scheduler::run(state, app, events)
         }));
         Ok(())
     }
@@ -450,6 +477,8 @@ impl BackupState {
             signal.generation = signal.generation.wrapping_add(1);
             self.inner.scheduler_wake.notify_all();
         }
+        // 调度器可能正挂在「等进程内写门释放」上，一并唤醒以便及时 join。
+        crate::repository_lock::wake_write_gate_waiters();
         if let Some(handle) = self
             .inner
             .scheduler_handle
