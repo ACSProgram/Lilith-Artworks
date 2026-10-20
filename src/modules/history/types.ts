@@ -24,9 +24,27 @@ export interface ArtworkBranch {
   publishedCount: number;
   /** 历史链上任一节点校验失败的摘要；与备份失败 `lastError` 相互独立。 */
   verifyError: string | null;
+  /** 链上确认出问题的节点数（文件丢失或损坏）；不含「无法检查」。 */
+  verifyFailureCount: number;
+  /** 链上连检查都做不到的节点数：文件未必坏，只是恢复链被更深的坏节点挡住。 */
+  verifyUnverifiableCount: number;
+  /** 链上节点里最严重的一类：丢失 > 损坏 > 无法检查。 */
+  verifyIssue: NodeVerifyIssue | null;
   /** 整条链全部通过校验时取最旧的通过时间；任一节点未验证为 null。 */
   verifiedMs: number | null;
 }
+
+/**
+ * 节点校验状态的归类。前两类是「确认出问题」：恢复所需的仓库文件不在了
+ * （`missing`），或文件还在但内容读不出来、与记录不符（`damaged`）。
+ *
+ * `unverifiable` 是**没有结论**：这个节点自己的文件可能完好，但它的还原起点在更
+ * 深的节点上，那段链已经断了，谁也无法判断它还能不能恢复。既不能说它坏了，也
+ * 不能像正常节点那样打勾。
+ *
+ * 后端从完整文案派生，前端只按它上色与选文案，不再解析错误文本。
+ */
+export type NodeVerifyIssue = "missing" | "damaged" | "unverifiable";
 
 export interface HistoryNode {
   id: string;
@@ -41,6 +59,12 @@ export interface HistoryNode {
   chunkFileSize: number;
   sha256: string;
   chunkCount: number;
+  /** 最近一次通过校验的时间；失败或尚未校验为 null。 */
+  verifiedMs: number | null;
+  /** 校验失败的完整文案，只在详情里展示；通过或尚未校验为 null。 */
+  verifyError: string | null;
+  /** 校验失败归类；通过或尚未校验为 null。 */
+  verifyIssue: NodeVerifyIssue | null;
 }
 
 /**

@@ -1,4 +1,4 @@
-import type { ArtworkBranch, ArtworkHistory, HistoryNode } from "./types";
+import type { ArtworkBranch, ArtworkHistory, HistoryNode, NodeVerifyIssue } from "./types";
 
 export interface HistoryTreeNode {
   node: HistoryNode;
@@ -98,4 +98,59 @@ export function suggestedRestorePath(node: HistoryNode, branch: ArtworkBranch | 
   const extension = filename.match(/\.[^.]+$/)?.[0] ?? "";
   const stem = extension ? filename.slice(0, -extension.length) : filename;
   return `${match?.[1] ?? ""}${stem}_restored${extension}`;
+}
+
+/**
+ * 后台检查只改节点的校验状态，不改历史图结构。把新状态并回现有节点，且在没有
+ * 变化时原样返回旧数组：上游据此保留 `nodes` 引用，mindmap 不重建、缩略图缓存
+ * 也不作废。结构变化另有整图读取的路径，不走这里。
+ */
+export function mergeNodeVerifyStates(
+  current: HistoryNode[],
+  next: HistoryNode[],
+): HistoryNode[] {
+  if (current.length !== next.length) return next;
+  const previous = new Map(current.map((node) => [node.id, node]));
+  let changed = false;
+  const merged = next.map((node) => {
+    const before = previous.get(node.id);
+    if (!before) {
+      changed = true;
+      return node;
+    }
+    if (before.verifiedMs === node.verifiedMs
+      && before.verifyError === node.verifyError
+      && before.verifyIssue === node.verifyIssue) {
+      return before;
+    }
+    changed = true;
+    return node;
+  });
+  return changed ? merged : current;
+}
+
+/**
+ * 校验状态的标签用词。卡片、时间轴、节点信息栏与分支详情共用一套，避免同一个
+ * 状态在不同地方有两种说法。
+ */
+export function verifyIssueLabel(issue: NodeVerifyIssue): string {
+  switch (issue) {
+    case "missing": return "文件丢失";
+    case "damaged": return "文件损坏";
+    case "unverifiable": return "无法检查";
+  }
+}
+
+/**
+ * 悬停与详情里的一句话说明。两个字段都只说后果，不用「校验」「摘要」这类术语。
+ *
+ * 「无法检查」的原因是**后续版本**的文件坏了：一个节点是由更新版本的快照一路
+ * 回溯还原出来的，往回走的路断了就无从判断，而不是这个节点自己一定有问题。
+ */
+export function verifyIssueNotice(issue: NodeVerifyIssue): string {
+  switch (issue) {
+    case "missing": return "该节点文件丢失，这个历史版本可能无法恢复";
+    case "damaged": return "该节点文件损坏，这个历史版本可能无法恢复";
+    case "unverifiable": return "后续版本的文件已丢失或损坏，无法确认这个历史版本是否完好";
+  }
 }

@@ -4,6 +4,7 @@ import { useAsyncOperation } from "../../shared/useAsyncOperation";
 import { useRequestEpoch } from "../../shared/useRequestEpoch";
 import { useRuntimeSubscription } from "../../shared/useRuntimeSubscription";
 import { historyApi } from "./api";
+import { mergeNodeVerifyStates } from "./historyModel";
 import type {
   ArtworkHistory, BackupCommitResult, BackupRuntimeStatus, ForkBranchRequest,
   HistoryNode, NodePreview, RenameHistoryNodeRequest, UpdateBranchBackupRequest,
@@ -144,9 +145,10 @@ export function useHistoryController({
   }, [artworkId, beginRead, isCurrentRead]);
 
   /**
-   * 非结构变化的完成只刷新分支状态行：仍读取同一份历史 DTO，但只替换
-   * `branches`。保留 `nodes` 数组引用，mindmap 不重建，缩略图缓存也不作废。
-   * 这是后台检查的尽力刷新，失败不进入全局错误提示。
+   * 非结构变化的完成只刷新分支状态行与节点校验状态：仍读取同一份历史 DTO，
+   * 但只替换 `branches` 和节点的校验字段。节点没有变化时保留 `nodes` 数组引用，
+   * mindmap 不重建，缩略图缓存也不作废。这是后台检查的尽力刷新，失败不进入
+   * 全局错误提示。
    */
   const mergeBranches = useCallback(async (): Promise<void> => {
     const requestedArtworkId = artworkIdRef.current;
@@ -160,7 +162,11 @@ export function useHistoryController({
       }
       const current = historyRef.current;
       const merged = current && current.artworkId === requestedArtworkId
-        ? { ...current, branches: next.branches }
+        ? {
+          ...current,
+          branches: next.branches,
+          nodes: mergeNodeVerifyStates(current.nodes, next.nodes),
+        }
         : next;
       setHistory(merged);
       onHistoryChangedRef.current(merged);

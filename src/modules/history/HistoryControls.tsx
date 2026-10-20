@@ -1,6 +1,6 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
-  AlertTriangle, Ban, Check, ChevronDown, Copy, Eraser, FileOutput, FilePenLine,
+  AlertTriangle, Ban, Check, ChevronDown, CircleHelp, Copy, Eraser, FileOutput, FilePenLine,
   FolderOpen, GitBranch, GitFork, LoaderCircle, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -44,6 +44,16 @@ export function BranchScheduleStatus({
           ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
           : "自动备份已关闭";
 
+  // 两类问题分开数：确认坏掉的和没有结论的不能混成一句，否则用户会以为都坏了。
+  const verifySummary = [
+    branch.verifyFailureCount > 0
+      ? `${branch.verifyFailureCount} 个历史节点文件丢失或损坏`
+      : null,
+    branch.verifyUnverifiableCount > 0
+      ? `${branch.verifyUnverifiableCount} 个无法检查`
+      : null,
+  ].filter(Boolean).join(" · ");
+
   return <>
     <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
       {branch.finalArtifactLocked
@@ -78,37 +88,42 @@ export function BranchScheduleStatus({
     </div>
     {!branch.verifyError && branch.verifiedMs != null && <div className="branch-schedule verify-ok">
       <Check aria-hidden="true" size={16} />
-      <span className="branch-schedule-summary">历史校验通过：{new Date(branch.verifiedMs).toLocaleString()}</span>
+      <span className="branch-schedule-summary">历史节点全部正常 · {new Date(branch.verifiedMs).toLocaleString()}</span>
     </div>}
-    {branch.verifyError && <div className="branch-schedule verify-error">
-      <AlertTriangle aria-hidden="true" size={16} />
-      <span className="branch-schedule-summary">历史校验失败</span>
+    {branch.verifyError && <div className={`branch-schedule verify-error ${branch.verifyIssue ?? "damaged"}`}>
+      {branch.verifyIssue === "unverifiable"
+        ? <CircleHelp aria-hidden="true" size={16} />
+        : <AlertTriangle aria-hidden="true" size={16} />}
+      <span className="branch-schedule-summary">{verifySummary}</span>
       <details className="branch-error-details">
-        <summary className="icon-button" role="button" aria-label="查看历史校验失败详情" title="查看历史校验失败详情">
+        <summary className="icon-button" role="button" aria-label="查看历史节点问题" title="查看历史节点问题">
           <ChevronDown aria-hidden="true" size={14} />
         </summary>
         <div className="branch-error-popover">
           <header>
-            <strong>历史校验失败详情</strong>
+            <strong>历史节点问题</strong>
             <button
               className="icon-button"
               type="button"
-              aria-label="复制历史校验失败详情"
-              title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
+              aria-label="复制历史节点问题详情"
+              title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择文本" : "复制详细信息"}
               onClick={() => void copyText(branch.verifyError, setVerifyCopyState)}
             >
               {verifyCopyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
             </button>
           </header>
-          <pre>{branch.verifyError}</pre>
+          <details className="branch-verify-details" open>
+            <summary>详情信息</summary>
+            <pre>{branch.verifyError}</pre>
+          </details>
           {verifyCopyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
           <div className="branch-verify-actions">
-            <small>自动检查不会重试失败节点；可立即重新校验此分支，或在设置页运行“仓库完整性”扫描做全量排查。</small>
+            <small>自动检查不会反复重试出问题的节点，需要你主动再查一次。</small>
             {onReverify && <button
               className="secondary-button"
               type="button"
               onClick={() => void onReverify(branch.id)}
-            >重新校验此分支</button>}
+            >重新检查此分支</button>}
           </div>
         </div>
       </details>

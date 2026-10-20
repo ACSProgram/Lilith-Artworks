@@ -34,6 +34,9 @@ function node(id: string, title: string, parentId: string | null, branchId: stri
     chunkFileSize: 50,
     sha256: "a".repeat(64),
     chunkCount: 1,
+    verifiedMs: null,
+    verifyError: null,
+    verifyIssue: null,
   };
 }
 
@@ -56,6 +59,9 @@ const branches: ArtworkBranch[] = [
     finalArtifactLocked: false,
     publishedCount: 0,
     verifyError: null,
+    verifyFailureCount: 0,
+    verifyUnverifiableCount: 0,
+    verifyIssue: null,
     verifiedMs: null,
   },
   {
@@ -76,6 +82,9 @@ const branches: ArtworkBranch[] = [
     finalArtifactLocked: false,
     publishedCount: 0,
     verifyError: null,
+    verifyFailureCount: 0,
+    verifyUnverifiableCount: 0,
+    verifyIssue: null,
     verifiedMs: null,
   },
 ];
@@ -295,6 +304,8 @@ describe("HistoryModule overview interactions", () => {
     const failedBranch = {
       ...branches[0],
       verifyError: "历史节点 ab12 完整性校验失败：snapshot 摘要与历史数据库不匹配",
+      verifyFailureCount: 1,
+      verifyUnverifiableCount: 0,
       verifiedMs: null,
     };
     controller.useHistoryController.mockReturnValue(controllerReturn({
@@ -310,9 +321,9 @@ describe("HistoryModule overview interactions", () => {
       onError={vi.fn()}
     />);
 
-    expect(screen.getByText("历史校验失败")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "查看历史校验失败详情" }));
-    fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
+    expect(screen.getByText("1 个历史节点文件丢失或损坏")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "查看历史节点问题" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新检查此分支" }));
     expect(reverifyBranch).toHaveBeenCalledWith("main");
   });
 });
@@ -341,6 +352,81 @@ describe("HistoryModule node inspector", () => {
 
     expect(await screen.findByText("ChunkFile v2")).toBeTruthy();
     expect(readNodeFormat).toHaveBeenCalledWith("main-head");
+  });
+
+  it("tints unreadable nodes and explains what happened in the inspector", () => {
+    const broken: ArtworkHistory = {
+      ...history,
+      nodes: history.nodes.map((node) => node.id === "main-head"
+        ? {
+          ...node,
+          verifyIssue: "missing" as const,
+          verifyError: "历史节点 main-head 完整性校验失败：文件缺失：恢复链起点 snapshot 无法打开（系统找不到指定的文件。 (os error 2)）",
+        }
+        : node),
+    };
+    controller.useHistoryController.mockReturnValue(controllerReturn({ history: broken }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    // 概览卡片整块染色，并在标签区直接说「文件丢失」，不再出现校验术语。
+    const card = screen.getByRole("button", { name: /Main head/ });
+    expect(card.classList.contains("verify-missing")).toBe(true);
+    expect(within(card).getByText("文件丢失")).toBeTruthy();
+    expect(card.getAttribute("title")).toContain("该节点文件丢失");
+    expect(screen.getByRole("button", { name: /Middle/ }).classList.contains("verify-missing")).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    // 节点信息栏给出同一结论，并把技术原文留在下面一行。
+    expect(screen.getAllByText("文件丢失").length).toBeGreaterThan(1);
+    expect(screen.getByText(/文件缺失：恢复链起点 snapshot 无法打开/)).toBeTruthy();
+  });
+
+  /// 被更深的坏节点挡住时既不能判坏也不能判好：灰底、虚线、「无法检查」，
+  /// 并且说明里点明问题出在后续版本，而不是这个版本自己。
+  it("marks a node that could not be checked as unknown instead of broken", () => {
+    const blocked: ArtworkHistory = {
+      ...history,
+      nodes: history.nodes.map((node) => node.id === "middle"
+        ? {
+          ...node,
+          verifyIssue: "unverifiable" as const,
+          verifyError: "无法检查：历史节点 main-head 的备份文件（恢复链 delta）已丢失（系统找不到指定的文件。 (os error 2)），因此无法确认这个版本是否完好",
+        }
+        : node),
+    };
+    controller.useHistoryController.mockReturnValue(controllerReturn({ history: blocked }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    const card = screen.getByRole("button", { name: /Middle/ });
+    expect(card.classList.contains("verify-unverifiable")).toBe(true);
+    expect(card.classList.contains("verify-missing")).toBe(false);
+    expect(within(card).getByText("无法检查")).toBeTruthy();
+    expect(card.getAttribute("title")).toContain("后续版本的文件已丢失或损坏");
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    // 切换视图会重建卡片，必须重新取一次。
+    fireEvent.click(screen.getByRole("button", { name: /Middle/ }));
+
+    // 信息栏与卡片同一套说法，并保留可以复制的原文。
+    expect(document.querySelector(".history-verify-state.unverifiable")?.textContent).toBe("无法检查");
+    expect(screen.getByText(/后续版本的文件已丢失或损坏，无法确认这个历史版本是否完好/)).toBeTruthy();
+    expect(screen.getByText(/无法检查：历史节点 main-head/)).toBeTruthy();
   });
 
   it("shows the selected node's stored thumbnail in branch view", async () => {

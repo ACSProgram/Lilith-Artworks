@@ -593,6 +593,7 @@ fn run_verify_batch_locked(
     let mut checked = 0_u64;
     let mut verified = 0_u64;
     let mut failed = 0_u64;
+    let mut blocked = 0_u64;
     state.report_progress("verify", "正在校验历史节点", 0, total);
     log::info!("idle integrity batch started: nodes={total}");
     for target in &targets {
@@ -620,7 +621,7 @@ fn run_verify_batch_locked(
                 history::mark_node_verified(root, &target.history_id, verified_ms)?;
                 verified += 1;
             }
-            Err(error) => {
+            Err(failure) => {
                 if cancel.is_cancelled() || state.cancelled() {
                     log::debug!(
                         "idle integrity batch preempted during node: history_id={}",
@@ -628,12 +629,23 @@ fn run_verify_batch_locked(
                     );
                     break;
                 }
-                history::mark_node_verify_error(root, &target.history_id, &error)?;
-                failed += 1;
-                log::warn!(
-                    "idle integrity check failed: history_id={}, error={error}",
-                    target.history_id
-                );
+                // 真正坏掉的可能是更深的节点：只有它算「校验失败」，被它挡住的
+                // 那些节点写入「无法检查」，不再重复记成同一个故障。
+                let message = failure.message_for(&target.history_id);
+                history::mark_node_verify_error(root, &target.history_id, &message)?;
+                if failure.blames(&target.history_id) {
+                    failed += 1;
+                    log::warn!(
+                        "idle integrity check failed: history_id={}, error={message}",
+                        target.history_id
+                    );
+                } else {
+                    blocked += 1;
+                    log::warn!(
+                        "idle integrity check could not verify: history_id={}, reason={message}",
+                        target.history_id
+                    );
+                }
             }
         }
         checked += 1;
@@ -644,7 +656,7 @@ fn run_verify_batch_locked(
         }
     }
     log::info!(
-        "idle integrity batch finished: checked={checked}, verified={verified}, failed={failed}, elapsed_ms={}",
+        "idle integrity batch finished: checked={checked}, verified={verified}, failed={failed}, blocked={blocked}, elapsed_ms={}",
         started.elapsed().as_millis()
     );
     Ok(())
@@ -2063,6 +2075,158 @@ mod tests {
         let second = errors.iter().find(|(id, _, _)| id == &second_id).unwrap();
         assert!(first.1.is_none() && first.2.is_some());
         assert!(second.1.is_some() && second.2.is_none());
+    }
+
+    /// 校验失败的两类必须能分开：文件被删掉算「丢失」，内容被改动算「损坏」。
+    /// 归类是节点级 DTO 的派生字段，前端只按它上色。
+    #[test]
+    fn repository_scrub_separates_missing_files_from_damaged_content() {
+        let (_directory, root, source, artwork_id, branch_id) = fixture();
+        let missing_id = commit_node(&root, &branch_id, "First");
+        fs::write(&source, b"changed content").unwrap();
+        let damaged_id = commit_node(&root, &branch_id, "Second");
+        fs::write(&source, b"third content").unwrap();
+        let head_id = commit_node(&root, &branch_id, "Third");
+
+        // 中间节点改为检查点后持有自己的 snapshot：删掉这份文件，就是「文件不在了」。
+        crate::backup::ensure_checkpoint(
+            &root,
+            &damaged_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let record = history::load_node(&root, &damaged_id).unwrap();
+        let snapshot =
+            storage::resolve_path(&root, record.snapshot_path.as_deref().unwrap()).unwrap();
+        fs::remove_file(&snapshot).unwrap();
+
+        // head 的 snapshot 被改坏：内容级校验能读出来但摘要对不上。
+        let head = history::load_node(&root, &head_id).unwrap();
+        let head_snapshot =
+            storage::resolve_path(&root, head.snapshot_path.as_deref().unwrap()).unwrap();
+        let mut bytes = fs::read(&head_snapshot).unwrap();
+        *bytes.last_mut().unwrap() ^= 0xff;
+        fs::write(&head_snapshot, bytes).unwrap();
+
+        crate::backup::scrub_history(&root, &CancelToken::standalone(), |_, _| {}).unwrap_err();
+
+        let listing = history::list(&root, &artwork_id).unwrap();
+        let node = |id: &str| {
+            listing
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .expect("节点应当仍在列表里")
+        };
+        assert_eq!(
+            node(&damaged_id).verify_issue,
+            Some(history::NodeVerifyIssue::Missing)
+        );
+        assert_eq!(
+            node(&head_id).verify_issue,
+            Some(history::NodeVerifyIssue::Damaged)
+        );
+        // 第一个节点自己的文件未必坏：它的物化起点是上一步的检查点，而那份 snapshot
+        // 已经不在了，谁也无法下结论——不能说它坏了，也不能说它好。
+        assert_eq!(
+            node(&missing_id).verify_issue,
+            Some(history::NodeVerifyIssue::Unverifiable)
+        );
+        assert!(node(&missing_id).verify_error.is_some());
+        assert!(node(&missing_id).verified_ms.is_none());
+        // 被挡住的文案必须点名挡住它的节点，用户才知道先修哪个。
+        let blocked = node(&missing_id).verify_error.as_deref().unwrap();
+        assert!(
+            blocked.starts_with(history::VERIFY_UNVERIFIABLE_MARKER),
+            "{blocked}"
+        );
+        assert!(blocked.contains(&damaged_id), "{blocked}");
+
+        // 分支状态行按最严重的一类呈现：「无法检查」单独计数，不混进「无法读取」。
+        let branch = listing.branches.first().unwrap();
+        assert_eq!(branch.verify_issue, Some(history::NodeVerifyIssue::Missing));
+        assert_eq!(branch.verify_failure_count, 2);
+        assert_eq!(branch.verify_unverifiable_count, 1);
+        assert!(branch.verify_error.is_some());
+    }
+
+    /// 一条分支坏掉不该牵连另一条：只有真的读不回来的那个节点被标成丢失，
+    /// 它更早的祖先里没有旁路的那个才「无法检查」，其余节点照常确认完好。
+    #[test]
+    fn repository_scrub_keeps_the_other_branch_healthy_when_one_breaks() {
+        let (directory, root, source, artwork_id, branch_id) = fixture();
+        let first_id = commit_node(&root, &branch_id, "A");
+        fs::write(&source, b"B content").unwrap();
+        let second_id = commit_node(&root, &branch_id, "B");
+        fs::write(&source, b"C content").unwrap();
+        let third_id = commit_node(&root, &branch_id, "C");
+        fs::write(&source, b"D content").unwrap();
+        let head_id = commit_node(&root, &branch_id, "D");
+
+        // 从 B 分叉出 A-B-E-F，两条分支共同持有 A、B。分叉先把 B 立为检查点
+        // （与 `fork_branch` 用例同一条路径），B 因此有自己的物化起点。
+        crate::backup::ensure_checkpoint(
+            &root,
+            &second_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let fork_source = directory.path().join("fork.bin");
+        fs::write(&fork_source, b"E content").unwrap();
+        let fork_branch =
+            history::create_branch(&root, &artwork_id, &second_id, "Fork", &fork_source, true)
+                .unwrap();
+        let fork_first_id = commit_node(&root, &fork_branch, "E");
+        fs::write(&fork_source, b"F content").unwrap();
+        let fork_head_id = commit_node(&root, &fork_branch, "F");
+
+        // 只删掉 D 自己的 snapshot：A、B、C 的文件都还在。
+        let record = history::load_node(&root, &head_id).unwrap();
+        let snapshot =
+            storage::resolve_path(&root, record.snapshot_path.as_deref().unwrap()).unwrap();
+        fs::remove_file(&snapshot).unwrap();
+
+        crate::backup::scrub_history(&root, &CancelToken::standalone(), |_, _| {}).unwrap_err();
+
+        let listing = history::list(&root, &artwork_id).unwrap();
+        let issue = |id: &str| {
+            listing
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .and_then(|node| node.verify_issue)
+        };
+        assert_eq!(issue(&head_id), Some(history::NodeVerifyIssue::Missing));
+        // C 只能从 D 还原，D 的 snapshot 没了就没有第二条路。
+        assert_eq!(
+            issue(&third_id),
+            Some(history::NodeVerifyIssue::Unverifiable)
+        );
+        // A、B 经 E 那一侧仍可还原，因此确认完好，而不是跟着 D 一起被判死。
+        for id in [&first_id, &second_id, &fork_first_id, &fork_head_id] {
+            assert_eq!(issue(id), None);
+        }
+        let verified = |id: &str| {
+            listing
+                .nodes
+                .iter()
+                .find(|node| node.id == id)
+                .and_then(|node| node.verified_ms)
+                .is_some()
+        };
+        assert!(verified(&first_id) && verified(&second_id));
+        assert!(verified(&fork_first_id) && verified(&fork_head_id));
+
+        let branch = |id: &str| listing.branches.iter().find(|item| item.id == id).unwrap();
+        let broken = branch(&branch_id);
+        assert_eq!(broken.verify_issue, Some(history::NodeVerifyIssue::Missing));
+        assert_eq!(broken.verify_failure_count, 1);
+        assert_eq!(broken.verify_unverifiable_count, 1);
+        let fork = branch(&fork_branch);
+        assert!(fork.verify_error.is_none());
+        assert!(fork.verified_ms.is_some());
     }
 
     #[test]

@@ -50,6 +50,9 @@ const node = (id: string): HistoryNode => ({
   chunkFileSize: 1,
   sha256: "a".repeat(64),
   chunkCount: 1,
+  verifiedMs: null,
+  verifyError: null,
+  verifyIssue: null,
 });
 
 const branch = (lastSuccessMs: number): ArtworkBranch => ({
@@ -70,6 +73,9 @@ const branch = (lastSuccessMs: number): ArtworkBranch => ({
   finalArtifactLocked: false,
   publishedCount: 0,
   verifyError: null,
+  verifyFailureCount: 0,
+  verifyUnverifiableCount: 0,
+  verifyIssue: null,
   verifiedMs: null,
 });
 

@@ -138,10 +138,19 @@
 .branch-error-popover .icon-button { width: 26px; height: 26px; color: var(--muted); }
 .branch-error-popover pre { max-height: 180px; margin: 8px 0 0; overflow: auto; padding: 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--surface-subtle); font-family: Consolas, monospace; font-size: 10px; line-height: 1.55; overflow-wrap: anywhere; white-space: pre-wrap; user-select: text; }
 .branch-error-popover > small { display: block; margin-top: 7px; color: var(--danger); font-size: 9px; }
-/* 历史校验失败与备份失败分区显示：同一行样式，改用警示色并与备份失败语义独立。 */
-.branch-schedule.verify-error { color: var(--warning); }
+/* 历史节点问题与备份失败分区显示：同一行样式，改用各自的语义色。 */
+.branch-schedule.verify-error { color: var(--warning); font-weight: 600; }
 .branch-schedule.verify-error svg { color: var(--warning); }
 .branch-schedule.verify-error .branch-error-details > summary { color: var(--warning); }
+/* 有节点丢了文件时整行转红：与节点卡片的红色是同一个意思，不让两处说法打架。 */
+.branch-schedule.verify-error.missing { color: var(--danger); }
+.branch-schedule.verify-error.missing svg { color: var(--danger); }
+.branch-schedule.verify-error.missing .branch-error-details > summary { color: var(--danger); }
+.branch-schedule.verify-error.missing .branch-error-popover { border-color: color-mix(in srgb, var(--danger) 42%, var(--border)); }
+/* 只有「无法检查」时整行转灰：没有结论就不该用警示色吓人。 */
+.branch-schedule.verify-error.unverifiable { color: var(--muted); }
+.branch-schedule.verify-error.unverifiable svg { color: var(--muted); }
+.branch-schedule.verify-error.unverifiable .branch-error-details > summary { color: var(--muted); }
 .branch-schedule.verify-error .branch-error-popover { border-color: color-mix(in srgb, var(--warning) 42%, var(--border)); }
 .branch-schedule.verify-error .branch-error-popover > small { color: var(--warning); }
 /* 整条链通过校验时只作提示：不跟随备份失败的错误色，也不抢备份状态的注意力。 */
@@ -150,6 +159,13 @@
 .branch-verify-actions { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 8px; }
 .branch-verify-actions > small { min-width: 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
 .branch-verify-actions > .secondary-button { flex: 0 0 auto; }
+/* 详情直接摊开：默认折叠会让人以为「没有更多信息」，而这里正是要看的东西。 */
+.branch-verify-details { margin-top: 8px; }
+.branch-verify-details > summary { color: var(--muted); font-size: 9px; cursor: pointer; list-style: none; }
+.branch-verify-details > summary::-webkit-details-marker { display: none; }
+.branch-verify-details > summary::before { content: "▾ "; }
+.branch-verify-details:not([open]) > summary::before { content: "▸ "; }
+.branch-verify-details pre { margin-top: 6px; }
 
 .history-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 20px; border-bottom: 1px solid var(--border); background: var(--surface); }
 .commit-block { display: grid; gap: 5px; width: min(560px, 62%); }
@@ -214,6 +230,10 @@
 .history-timeline-group time { font-size: 9px; font-variant-numeric: tabular-nums; text-align: right; }
 .history-timeline-group i { position: relative; z-index: 1; width: 7px; height: 7px; border: 1px solid var(--muted); border-radius: 50%; background: var(--surface); }
 .history-timeline-group button.active i { border-color: var(--accent); background: var(--accent); }
+.history-timeline-group button.verify-missing i { border-color: var(--danger); background: var(--danger); }
+.history-timeline-group button.verify-damaged i { border-color: var(--warning); background: var(--warning); }
+/* 「无法检查」用空心点：既不是好的，也不是坏的，是一个问号。 */
+.history-timeline-group button.verify-unverifiable i { border-color: var(--muted); background: var(--surface); }
 .history-timeline-group button span { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
 
 .history-node-card { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: start; gap: 9px; width: 100%; min-height: 68px; padding: 10px 12px; border: 0; border-bottom: 1px solid var(--border); color: inherit; background: transparent; text-align: left; cursor: pointer; }
@@ -273,6 +293,83 @@
 .history-node-card.compact-selected { background: color-mix(in srgb, var(--accent) 15%, var(--surface)); }
 .history-workspace.compacting .history-node-card:not(.compactable) { cursor: default; }
 .history-labels .selected-label { color: var(--surface); background: var(--accent); }
+
+/* 出问题的节点整块染色，不再让用户去读术语：丢文件=红，读不出来=黄，
+   没结论=灰。选择态与所在分支态都会被这里覆盖，因为「这个版本能不能恢复」比
+   高亮更重要。 */
+.history-node-card.verify-missing,
+.mindmap-root .history-node-card.verify-missing {
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  border-color: color-mix(in srgb, var(--danger) 52%, var(--border));
+  box-shadow: inset 3px 0 0 var(--danger);
+}
+.history-node-card.verify-damaged,
+.mindmap-root .history-node-card.verify-damaged {
+  background: color-mix(in srgb, var(--warning) 14%, var(--surface));
+  border-color: color-mix(in srgb, var(--warning) 52%, var(--border));
+  box-shadow: inset 3px 0 0 var(--warning);
+}
+.history-node-card.verify-unverifiable,
+.mindmap-root .history-node-card.verify-unverifiable {
+  background: color-mix(in srgb, var(--muted) 8%, var(--surface));
+  border-style: dashed;
+  border-color: color-mix(in srgb, var(--muted) 46%, var(--border));
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--muted) 55%, transparent);
+}
+.history-node-card.verify-missing:hover,
+.mindmap-root .history-node-card.verify-missing:hover { background: color-mix(in srgb, var(--danger) 15%, var(--surface)); }
+.history-node-card.verify-damaged:hover,
+.mindmap-root .history-node-card.verify-damaged:hover { background: color-mix(in srgb, var(--warning) 20%, var(--surface)); }
+.history-node-card.verify-unverifiable:hover,
+.mindmap-root .history-node-card.verify-unverifiable:hover { background: color-mix(in srgb, var(--muted) 13%, var(--surface)); }
+.history-node-card.verify-missing.selected,
+.mindmap-root .history-node-card.verify-missing.selected {
+  background: color-mix(in srgb, var(--danger) 18%, var(--surface));
+  border-color: var(--danger);
+  box-shadow: inset 3px 0 0 var(--danger), 0 0 0 2px color-mix(in srgb, var(--danger) 26%, transparent);
+}
+.history-node-card.verify-damaged.selected,
+.mindmap-root .history-node-card.verify-damaged.selected {
+  background: color-mix(in srgb, var(--warning) 22%, var(--surface));
+  border-color: var(--warning);
+  box-shadow: inset 3px 0 0 var(--warning), 0 0 0 2px color-mix(in srgb, var(--warning) 26%, transparent);
+}
+.history-node-card.verify-unverifiable.selected,
+.mindmap-root .history-node-card.verify-unverifiable.selected {
+  background: color-mix(in srgb, var(--muted) 15%, var(--surface));
+  border-style: dashed;
+  border-color: var(--muted);
+  box-shadow: inset 3px 0 0 var(--muted), 0 0 0 2px color-mix(in srgb, var(--muted) 22%, transparent);
+}
+.history-node-card.verify-missing > svg { color: var(--danger); }
+.history-node-card.verify-damaged > svg { color: var(--warning); }
+.history-node-card.verify-unverifiable > svg { color: var(--muted); }
+.history-labels i.verify-issue-label { font-weight: 650; }
+.history-labels i.verify-issue-label.missing {
+  color: var(--surface);
+  border-color: var(--danger);
+  background: var(--danger);
+}
+.history-labels i.verify-issue-label.damaged {
+  color: var(--surface);
+  border-color: var(--warning);
+  background: var(--warning);
+}
+.history-labels i.verify-issue-label.unverifiable {
+  color: var(--surface);
+  border-color: var(--muted);
+  background: var(--muted);
+}
+
+/* 节点信息栏里的文件状态：与节点卡片同一套颜色，附带一行可读的原因。 */
+.history-verify-state { font-weight: 650; }
+.history-verify-state.missing { color: var(--danger); }
+.history-verify-state.damaged { color: var(--warning); }
+.history-verify-state.unverifiable { color: var(--muted); }
+.history-verify-state.ok { color: var(--accent); }
+.history-verify-time { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; }
+.history-verify-note { margin: 4px 0 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.history-inspector .history-verify-detail { margin: 6px 0 0; padding: 7px 8px; border: 1px solid var(--border); border-radius: 5px; color: var(--muted); background: var(--surface-subtle); font-family: Consolas, monospace; font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
 .history-context { width: 230px; max-height: min(470px, calc(100vh - 24px)); overflow: auto; }
 .history-context button:disabled { opacity: .45; cursor: default; }
 

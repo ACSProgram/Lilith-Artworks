@@ -9,9 +9,9 @@ use rusqlite::{params, OptionalExtension};
 use crate::{cleanup, storage};
 
 use super::{
-    ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget, BranchDeletion, BranchRecord,
-    CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode, HistoryRecord, ScheduledBranch,
-    VerifyNodeTarget,
+    classify_verify_failure, ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget,
+    BranchDeletion, BranchRecord, CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode,
+    HistoryRecord, NodeVerifyIssue, ScheduledBranch, VerifyChainNode, VerifyNodeTarget,
 };
 
 pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, String> {
@@ -59,6 +59,9 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 published_count: row.get(14)?,
                 backup_quick_enabled: row.get::<_, i64>(15)? != 0,
                 verify_error: None,
+                verify_failure_count: 0,
+                verify_unverifiable_count: 0,
+                verify_issue: None,
                 verified_ms: None,
             })
         })
@@ -71,10 +74,12 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
     // verified_ms 时取最旧的通过时间，任一节点未验证则为 NULL。
     let verification = node_verification_states(&connection, artwork_id)?;
     for branch in &mut branches {
-        let (verify_error, verified_ms) =
-            derive_branch_verification(branch.head_history_id.as_deref(), &verification);
-        branch.verify_error = verify_error;
-        branch.verified_ms = verified_ms;
+        let derived = derive_branch_verification(branch.head_history_id.as_deref(), &verification);
+        branch.verify_error = derived.error;
+        branch.verify_failure_count = derived.failure_count;
+        branch.verify_unverifiable_count = derived.unverifiable_count;
+        branch.verify_issue = derived.issue;
+        branch.verified_ms = derived.verified_ms;
     }
 
     let mut node_statement = connection
@@ -83,12 +88,17 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                     (node.is_checkpoint <> 0
                       OR EXISTS(SELECT 1 FROM branches b WHERE b.head_history_id = node.id OR b.created_from_history_id = node.id)
                       OR (SELECT COUNT(*) FROM history_nodes child WHERE child.parent_id = node.id) > 1),
-                    node.created_ms, node.logical_size, node.chunk_file_size, node.sha256, node.chunk_count
+                    node.created_ms, node.logical_size, node.chunk_file_size, node.sha256, node.chunk_count,
+                    node.verified_ms, node.verify_error
              FROM history_nodes node WHERE node.artwork_id = ?1 ORDER BY node.created_ms, node.id",
         )
         .map_err(storage::database_error)?;
     let nodes = node_statement
         .query_map([artwork_id], |row| {
+            let verify_error: Option<String> = row.get(13)?;
+            // 失败归类从已有文案派生，不单独建列：写入与读取共用同一个标记常量。
+            let verify_issue: Option<NodeVerifyIssue> =
+                verify_error.as_deref().map(classify_verify_failure);
             Ok(HistoryNode {
                 id: row.get(0)?,
                 created_on_branch_id: row.get(1)?,
@@ -102,6 +112,9 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 chunk_file_size: row.get(9)?,
                 sha256: row.get(10)?,
                 chunk_count: row.get(11)?,
+                verified_ms: row.get(12)?,
+                verify_error,
+                verify_issue,
             })
         })
         .map_err(storage::database_error)?
@@ -418,17 +431,39 @@ pub(crate) fn store_thumbnail(
     Ok(())
 }
 
-pub(crate) fn all_node_ids(root: &Path) -> Result<Vec<String>, String> {
+/// 全库扫描一次读出所有节点的链元数据，之后沿链走完整个仓库不再查库。
+///
+/// `delta_path` 取自节点的入边（`history_edges.child_history_id = id`），与
+/// `materialization_chain` 的口径一致：它是「本节点的内容还原出父节点」的反向
+/// 增量。空串按「没有增量」处理（检查点父节点名下的合法记账），兼容列只在没有
+/// 边记录时兜底。
+pub(crate) fn verification_inventory(root: &Path) -> Result<Vec<VerifyChainNode>, String> {
     let connection = storage::open(root)?;
     let mut statement = connection
-        .prepare("SELECT id FROM history_nodes ORDER BY created_ms, id")
+        .prepare(
+            "SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
+                    COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
+                    node.created_ms
+             FROM history_nodes node
+             LEFT JOIN history_edges edge ON edge.child_history_id = node.id
+             ORDER BY node.created_ms, node.id",
+        )
         .map_err(storage::database_error)?;
-    let ids = statement
-        .query_map([], |row| row.get(0))
+    let nodes = statement
+        .query_map([], |row| {
+            Ok(VerifyChainNode {
+                id: row.get(0)?,
+                parent_id: row.get(1)?,
+                sha256: row.get(2)?,
+                snapshot_path: row.get(3)?,
+                delta_path: row.get(4)?,
+                created_ms: row.get(5)?,
+            })
+        })
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
-    Ok(ids)
+    Ok(nodes)
 }
 
 /// 读取单个历史节点。
@@ -1969,23 +2004,58 @@ fn node_verification_states(
     Ok(states)
 }
 
-/// 从 head 沿父链派生分支的第三态：任一节点 `verify_error` 非空 = 失败；否则
+/// 从 head 沿父链派生的分支校验状态。
+struct BranchVerification {
+    /// 链上第一个「有问题」节点的文案；全部正常时为空。
+    error: Option<String>,
+    /// 链上确认出问题的节点数（丢失/损坏）。摘要只说「无法读取」，计数让界面能说清
+    /// 「有几个」。
+    failure_count: u32,
+    /// 链上「无法检查」的节点数。它们自己的文件未必坏，只是链被更深的坏节点挡住。
+    unverifiable_count: u32,
+    /// 链上节点里最严重的一类，供界面统一配色。
+    issue: Option<NodeVerifyIssue>,
+    /// 链上全部节点都通过校验时取最旧的通过时间。
+    verified_ms: Option<i64>,
+}
+
+/// 从 head 沿父链派生分支的第三态：任一节点 `verify_error` 非空即有问题；否则
 /// 全部节点都有 `verified_ms` 时取最旧的通过时间，任一节点未验证则为 NULL。
 fn derive_branch_verification(
     head_history_id: Option<&str>,
     nodes: &HashMap<String, NodeVerificationState>,
-) -> (Option<String>, Option<i64>) {
+) -> BranchVerification {
     let Some(mut current) = head_history_id else {
-        return (None, None);
+        return BranchVerification {
+            error: None,
+            failure_count: 0,
+            unverifiable_count: 0,
+            issue: None,
+            verified_ms: None,
+        };
     };
     let mut error = None;
+    let mut blocked_error = None;
+    let mut failure_count = 0_u32;
+    let mut unverifiable_count = 0_u32;
+    let mut issue: Option<NodeVerifyIssue> = None;
     let mut oldest_verified: Option<i64> = None;
     let mut all_verified = true;
     let mut seen = false;
     while let Some(state) = nodes.get(current) {
         seen = true;
-        if error.is_none() && state.verify_error.is_some() {
-            error = state.verify_error.clone();
+        if let Some(message) = state.verify_error.as_deref() {
+            let classified = classify_verify_failure(message);
+            // 「无法检查」不是这个节点自己的问题，单独计数：把它算进「无法读取」
+            // 会让用户以为坏了 N 个，而实际上可能有 N-1 个只是被别人挡住。
+            if classified == NodeVerifyIssue::Unverifiable {
+                unverifiable_count += 1;
+                blocked_error.get_or_insert_with(|| message.to_owned());
+            } else {
+                failure_count += 1;
+                error.get_or_insert_with(|| message.to_owned());
+            }
+            issue = Some(classified.worst(issue));
         }
         if let Some(verified_ms) = state.verified_ms {
             oldest_verified = Some(match oldest_verified {
@@ -2005,7 +2075,15 @@ fn derive_branch_verification(
     } else {
         None
     };
-    (error, verified_ms)
+    BranchVerification {
+        // 优先给出「确认有问题」的那条：被挡住的文案引用的正是它的原因，用户据此
+        // 知道先修哪个节点；只有全链都无法检查时才退回到被挡住的文案。
+        error: error.or(blocked_error),
+        failure_count,
+        unverifiable_count,
+        issue,
+        verified_ms,
+    }
 }
 
 /// 按作品粗粒度失效校验状态：链文件被改写后，这些节点必须重新物化校验。

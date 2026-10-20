@@ -28,6 +28,9 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
   finalArtifactLocked: false,
   publishedCount: 0,
   verifyError: null,
+  verifyFailureCount: 0,
+  verifyUnverifiableCount: 0,
+  verifyIssue: null,
   verifiedMs: null,
 });
 
@@ -44,6 +47,9 @@ const historyNode: HistoryNode = {
   chunkFileSize: 1,
   sha256: "b".repeat(64),
   chunkCount: 1,
+  verifiedMs: null,
+  verifyError: null,
+  verifyIssue: null,
 };
 
 describe("ConfirmDialog views", () => {
@@ -245,10 +251,10 @@ describe("BranchScheduleStatus", () => {
   it("shows the oldest chain verification time when no node failed", () => {
     render(<BranchScheduleStatus branch={{ ...branch(true), verifiedMs: Date.UTC(2026, 9, 19, 8, 0, 0) }} />);
 
-    expect(screen.getByText(/历史校验通过：/)).toBeTruthy();
+    expect(screen.getByText(/历史节点全部正常 · /)).toBeTruthy();
   });
 
-  it("shows a chain verification failure separately and re-queues it", async () => {
+  it("describes unreadable nodes in plain words and re-queues them", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       configurable: true,
@@ -258,21 +264,65 @@ describe("BranchScheduleStatus", () => {
     const verifyFailedBranch = {
       ...branch(true),
       verifyError: "历史节点 ab12 完整性校验失败：snapshot 摘要与历史数据库不匹配",
+      verifyFailureCount: 2,
+      verifyUnverifiableCount: 0,
+      verifyIssue: "missing" as const,
       verifiedMs: null,
     };
 
     render(<BranchScheduleStatus branch={verifyFailedBranch} onReverify={onReverify} />);
 
-    // 备份状态正常时仍独立显示校验失败。
+    // 备份状态正常时仍独立显示节点问题，并且只说「有几个节点出了问题」。
     expect(screen.getByText(/每 10 分钟自动备份/)).toBeTruthy();
-    expect(screen.getByText("历史校验失败")).toBeTruthy();
+    expect(screen.getByText("2 个历史节点文件丢失或损坏")).toBeTruthy();
+    // 链上有文件丢失时整行转红，和节点卡片同一个意思。
+    expect(screen.getByText("2 个历史节点文件丢失或损坏").closest(".branch-schedule")?.classList.contains("missing")).toBe(true);
 
-    fireEvent.click(screen.getByRole("button", { name: "查看历史校验失败详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看历史节点问题" }));
+    // 详情直接展开：默认折叠会让人以为「没有更多信息」。
+    const details = screen.getByText("详情信息").closest("details");
+    expect(details?.hasAttribute("open")).toBe(true);
     expect(screen.getByText(verifyFailedBranch.verifyError)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "复制历史校验失败详情" }));
+    fireEvent.click(screen.getByRole("button", { name: "复制历史节点问题详情" }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(verifyFailedBranch.verifyError));
 
-    fireEvent.click(screen.getByRole("button", { name: "重新校验此分支" }));
+    fireEvent.click(screen.getByRole("button", { name: "重新检查此分支" }));
     expect(onReverify).toHaveBeenCalledWith("branch-1");
+  });
+
+  /// 「无法检查」是第三种结论：既不能说坏了，也不能像正常节点那样打勾。它要
+  /// 用自己的计数、自己的灰色，而不是混进「丢失或损坏」那一条。
+  it("separates nodes that could not be checked from confirmed damage", () => {
+    const blockedBranch = {
+      ...branch(true),
+      verifyError: "无法检查：历史节点 ab12 的备份文件（恢复链 delta）已丢失",
+      verifyFailureCount: 1,
+      verifyUnverifiableCount: 2,
+      verifyIssue: "missing" as const,
+      verifiedMs: null,
+    };
+
+    render(<BranchScheduleStatus branch={blockedBranch} />);
+
+    expect(screen.getByText("1 个历史节点文件丢失或损坏 · 2 个无法检查")).toBeTruthy();
+    // 有确认损坏时仍按最严重的一类上色，不会被灰色拉平。
+    const row = screen.getByText("1 个历史节点文件丢失或损坏 · 2 个无法检查").closest(".branch-schedule");
+    expect(row?.classList.contains("missing")).toBe(true);
+  });
+
+  it("keeps a chain that only lacks conclusions in grey", () => {
+    const unverifiableBranch = {
+      ...branch(true),
+      verifyError: "无法检查：历史节点 ab12 的备份文件（恢复链 delta）已丢失",
+      verifyFailureCount: 0,
+      verifyUnverifiableCount: 2,
+      verifyIssue: "unverifiable" as const,
+      verifiedMs: null,
+    };
+
+    render(<BranchScheduleStatus branch={unverifiableBranch} />);
+
+    const row = screen.getByText("2 个无法检查").closest(".branch-schedule");
+    expect(row?.classList.contains("unverifiable")).toBe(true);
   });
 });

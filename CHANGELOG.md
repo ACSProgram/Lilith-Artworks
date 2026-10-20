@@ -85,9 +85,39 @@ entries for the reader; they are not a template every entry has to fill.
   `normalizeRepositoryKey` sync requirement) and the per-platform capability
   table, and Windows CI now fails when a platform `cfg` branch appears outside
   `platform/` or the registered exceptions.
+- A failed integrity check now shows on the node itself, not only in a branch
+  status line. Node cards, timeline dots and the node inspector are tinted by
+  cause — red when the files a node needs are gone, amber when they are still
+  there but unreadable, grey when the chain is broken deeper and no conclusion is
+  possible — and carry a `文件丢失` / `文件损坏` / `无法检查` label whose tooltip
+  says what that means for the version. The branch row counts the nodes it
+  cannot read and keeps the raw error in a `详情信息` section that is open by
+  default, since that text is what the user came to read. The cause is derived
+  from a marker the verify kernel puts in front of missing-file errors, so no
+  schema change is involved; records written before the marker fall back to
+  `os error 2`. The node DTO now carries `verifiedMs`, `verifyError` and
+  `verifyIssue`, the branch DTO adds `verifyFailureCount`, `verifyUnverifiableCount`
+  and `verifyIssue`, and a non-structural background completion patches only
+  those fields, keeping the node array and thumbnail cache intact.
+- The backup settings page no longer explains the idle check with `snapshot` /
+  `delta` / batch-size wording. The `运行方式` hint now says only that versions
+  are checked in small batches while the app is idle and that anything found is
+  marked on the matching history node, so the setting describes behavior rather
+  than the implementation behind it.
 
 ### Fixed
 
+- One damaged node no longer condemns the whole chain. A node's content is
+  rebuilt from a newer snapshot plus reverse deltas, so every later node used to
+  fail with the same message and none of them was actually at fault. The kernel
+  now reports which node the broken step belonged to: only that node is marked
+  missing or damaged, the earlier versions it blocks become a third, grey
+  `无法检查` state with the blocking node named in the detail, and a version that
+  is still reachable through another branch is confirmed healthy instead. The
+  full scan walks each chain once from its snapshot instead of re-resolving from
+  the snapshot for every node, so a shared trunk is parsed once per branch
+  rather than once per node, and a block that is only corrupt in its own payload
+  no longer stops the walk to its ancestors.
 - The unattended quick check accepts a second-precision modification time now, so
   branches whose work files are saved with a whole-second `mtime` (every `.clip`
   file in practice) stop recording an empty baseline and stop falling back to a

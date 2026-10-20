@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fs::{self, File},
     path::{Path, PathBuf},
     time::Instant,
@@ -314,64 +315,241 @@ pub(crate) fn ensure_checkpoint(
     ensure_checkpoint_with_progress(root, history_id, cancel, options, |_, _, _| {})
 }
 
+/// 链解析失败的归因。
+///
+/// `culprit` 是真正读不出来的那个节点。链上每一步的反向增量表示的都是**这一步要
+/// 还原出来的节点**（它把子节点的内容还原成父节点的内容），所以某一步失败时坏掉
+/// 的是目标节点的祖先，而不是发起解析的那个节点。这个区分是「无法检查」成立的
+/// 前提：目标节点自己的文件可能完好，只是它依赖的链断了。
+#[derive(Debug, Clone)]
+struct ChainFailure {
+    culprit: Option<String>,
+    issue: history::NodeVerifyIssue,
+    /// 跟在节点 id 后面的一句说明，例如「的备份文件（恢复链 delta）已丢失（…）」。
+    detail: String,
+}
+
+impl ChainFailure {
+    fn confirmed(
+        node_id: &str,
+        issue: history::NodeVerifyIssue,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            culprit: Some(node_id.to_owned()),
+            issue,
+            detail: detail.into(),
+        }
+    }
+
+    /// 链本身不成立（数据结构问题），归不到具体节点。
+    fn unknown(detail: impl Into<String>) -> Self {
+        Self {
+            culprit: None,
+            issue: history::NodeVerifyIssue::Damaged,
+            detail: detail.into(),
+        }
+    }
+
+    fn describe(&self) -> String {
+        describe_failure(self.culprit.as_deref(), &self.detail)
+    }
+}
+
+/// 把「哪个节点、坏在哪」拼成人读的一句；`culprit` 为空表示链本身不成立。
+fn describe_failure(culprit: Option<&str>, detail: &str) -> String {
+    match culprit {
+        Some(id) => format!("历史节点 {id} {detail}"),
+        None => detail.to_owned(),
+    }
+}
+
+/// 恢复、精简、检查点只关心「为什么读不出来」，因此直接当文案用。
+impl From<ChainFailure> for String {
+    fn from(failure: ChainFailure) -> String {
+        failure.describe()
+    }
+}
+
+/// 单节点校验失败：`culprit` 指向真正坏掉的节点，`detail` 是它可以对外的说明。
+#[derive(Debug, Clone)]
+pub(crate) struct VerifyFailure {
+    culprit: Option<String>,
+    issue: history::NodeVerifyIssue,
+    detail: String,
+}
+
+impl From<ChainFailure> for VerifyFailure {
+    fn from(failure: ChainFailure) -> Self {
+        Self {
+            culprit: failure.culprit,
+            issue: failure.issue,
+            detail: failure.detail,
+        }
+    }
+}
+
+impl VerifyFailure {
+    /// 这次失败算在 `target` 自己头上，还是「被更深的节点挡住」。
+    ///
+    /// 链本身不成立（`culprit` 为空）时也算在目标头上：没有别的节点可以指认。
+    pub(crate) fn blames(&self, target: &str) -> bool {
+        match self.culprit.as_deref() {
+            Some(id) => id == target,
+            None => true,
+        }
+    }
+
+    /// 写入 `target` 的 `verify_error`。三种情况分开写，读取侧靠前缀分类：
+    ///
+    /// - 目标自己坏了 → 直接说坏在哪；
+    /// - 目标被更深的节点挡住 → 「无法检查」，并点名那个节点。这里只带「无法检查」
+    ///   一个标记：被挡住的说明里已经写明原因，再补一个归类标记既重复又难读；
+    /// - 链本身不成立 → 只能说这次检查没做成。
+    pub(crate) fn message_for(&self, target: &str) -> String {
+        let marker = match self.issue {
+            history::NodeVerifyIssue::Missing => history::VERIFY_MISSING_MARKER,
+            _ => "",
+        };
+        match self.culprit.as_deref() {
+            Some(id) if id == target => format!("{marker}历史节点 {id} {}", self.detail),
+            Some(_) => format!(
+                "{}{}，因此无法确认这个版本是否完好",
+                history::VERIFY_UNVERIFIABLE_MARKER,
+                describe_failure(self.culprit.as_deref(), &self.detail),
+            ),
+            None => format!("{marker}检查历史节点 {target} 失败：{}", self.detail),
+        }
+    }
+}
+
 /// 物化单个历史节点并校验其完整性：沿链解析、与数据库摘要比对、逐块验哈希。
 ///
-/// 这是全库扫描、空闲增量批次与手动重查共用的唯一校验内核。只读，不写任何状态；
-/// 调用方负责把结果写入节点级校验列。
+/// 这是空闲增量批次与手动重查使用的单节点内核，只读、不写任何状态；调用方负责
+/// 用 [`VerifyFailure::message_for`] 把结果写入节点级校验列。全库扫描不走这里，
+/// 它按链一次走完（见 [`scrub_history`]）。
 pub(crate) fn verify_history_node(
     root: &Path,
     history_id: &str,
     cancel: &CancelToken,
-) -> Result<(), String> {
-    ensure_not_cancelled(cancel)?;
+) -> Result<(), VerifyFailure> {
+    ensure_not_cancelled(cancel).map_err(ChainFailure::unknown)?;
     // Resolving the chain already proves that every delta links to the
     // digest recorded in the database. Streaming the result into the sink
     // then verifies each chunk payload and the assembled file without
     // writing any temporary snapshot.
     let ResolvedChain {
         layout, mut store, ..
-    } = resolve_chain(root, history_id, "正在校验历史", cancel, &|_, _, _| {})
-        .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))?;
-    ensure_not_cancelled(cancel)?;
+    } = resolve_chain(root, history_id, "正在校验历史", cancel, &|_, _, _| {})?;
+    ensure_not_cancelled(cancel).map_err(ChainFailure::unknown)?;
     let task = ChunkTask::cancel(cancel);
     let mut reader = store.reader();
     layout
         .copy_original(&mut reader, &mut std::io::sink(), &task)
-        .map_err(|error| format!("历史节点 {history_id} 完整性校验失败：{error}"))
+        .map_err(|error| {
+            ChainFailure::confirmed(
+                history_id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件读取失败：{error}"),
+            )
+        })?;
+    Ok(())
 }
 
-/// 全库扫描：逐节点物化并验证，同时刷新节点级校验状态。
+/// 一次全库扫描内单个节点的结论。
+#[derive(Debug, Clone)]
+enum ScrubOutcome {
+    Verified,
+    /// 确认出问题：失败里带着真正坏掉的节点。
+    Failed(VerifyFailure),
+    /// 没有结论：文件未必坏，只是恢复链在更深的节点上断了。
+    Blocked(VerifyFailure),
+}
+
+impl ScrubOutcome {
+    fn settled(&self) -> bool {
+        !matches!(self, Self::Blocked(_))
+    }
+}
+
+/// 全库扫描：把整个仓库的恢复链一次走完，逐个节点写入校验结论。
 ///
-/// 单个节点失败不会中止扫描——否则失败节点之后的节点永远拿不到新的校验状态。
-/// 全部分块流式读取，不写临时快照；至少一个节点失败时汇总为错误返回。
+/// 与 [`verify_history_node`] 结果等价，但**按链走**而不是按节点走。一个节点的
+/// 内容是由「更新的节点 + 一路反向增量」还原出来的，因此从每个持有 snapshot 的
+/// 节点出发沿父链往上走一次，就覆盖了整条链；共享的前缀只解析一遍，多分支在共同
+/// 祖先处也只走一次，不必让每个节点都从 snapshot 重新回溯。
+///
+/// 某一步失败时，坏掉的是这一步要还原的节点：只有它被标成丢失/损坏，它更早的祖先
+/// 先记为「无法检查」。若某个祖先还能经另一条分支到达（例如分叉后的另一支），
+/// 那条链会把它校验通过并覆盖掉「无法检查」——这正是多分支的价值。
+///
+/// 单个节点失败不会中止扫描，全部分块流式读取、不写临时快照；至少一个节点失败时
+/// 汇总为错误返回。
 pub(crate) fn scrub_history(
     root: &Path,
     cancel: &CancelToken,
     mut progress: impl FnMut(u64, u64),
 ) -> Result<u64, String> {
-    let node_ids = history::all_node_ids(root)?;
-    let total = node_ids.len() as u64;
-    let mut first_error: Option<String> = None;
-    let mut failures = 0_u64;
-    for (index, history_id) in node_ids.iter().enumerate() {
-        ensure_not_cancelled(cancel)?;
-        match verify_history_node(root, history_id, cancel) {
-            Ok(()) => {
-                let verified_ms = storage::now_ms()?;
-                history::mark_node_verified(root, history_id, verified_ms)?;
-            }
-            Err(error) => {
-                if cancel.is_cancelled() {
-                    return Err("操作已取消".into());
-                }
-                log::warn!("repository scrub failed for history node {history_id}: {error}");
-                history::mark_node_verify_error(root, history_id, &error)?;
-                failures += 1;
-                first_error.get_or_insert(error);
-            }
-        }
-        progress(index as u64 + 1, total);
+    let inventory = history::verification_inventory(root)?;
+    let total = inventory.len() as u64;
+    if total == 0 {
+        return Ok(0);
     }
+    let nodes: HashMap<&str, &history::VerifyChainNode> = inventory
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    let mut outcomes: HashMap<String, ScrubOutcome> = HashMap::with_capacity(inventory.len());
+
+    // 新的起点先走：一条新链一次覆盖它的整条祖先链，老检查点随后只剩自己要走。
+    let mut starts: Vec<&history::VerifyChainNode> = inventory
+        .iter()
+        .filter(|node| node.has_snapshot())
+        .collect();
+    starts.sort_by(|left, right| {
+        right
+            .created_ms
+            .cmp(&left.created_ms)
+            .then_with(|| right.id.cmp(&left.id))
+    });
+
+    let mut failures = 0_u64;
+    let mut first_error: Option<String> = None;
+
+    for start in starts {
+        ensure_not_cancelled(cancel)?;
+        let walked = walk_chain(root, start, &nodes, &outcomes, cancel)?;
+        for (history_id, outcome) in walked {
+            let known = outcomes.contains_key(&history_id);
+            // 「无法检查」让位于任何已确认的结论：另一条分支可能已经把它验证通过。
+            if known && !outcome.settled() {
+                continue;
+            }
+            ensure_not_cancelled(cancel)?;
+            record_scrub_outcome(root, &history_id, &outcome, &mut failures, &mut first_error)?;
+            outcomes.insert(history_id, outcome);
+            // 进度按「已有确定结论的节点数」报：被更深的链推翻过一次的灰色节点不会
+            // 让进度倒退，也不会把同一节点算两遍。
+            progress(outcomes.len() as u64, total);
+        }
+    }
+
+    // 剩下的节点没有任何可达的 snapshot（分支删除、精简残留之类的图异常）：退回
+    // 单节点内核，至少让归因仍然准确。
+    for node in &inventory {
+        if outcomes.contains_key(&node.id) {
+            continue;
+        }
+        ensure_not_cancelled(cancel)?;
+        let outcome = match verify_history_node(root, &node.id, cancel) {
+            Ok(()) => ScrubOutcome::Verified,
+            Err(failure) => ScrubOutcome::Failed(failure),
+        };
+        record_scrub_outcome(root, &node.id, &outcome, &mut failures, &mut first_error)?;
+        outcomes.insert(node.id.clone(), outcome);
+        progress(outcomes.len() as u64, total);
+    }
+
     match first_error {
         None => Ok(total),
         Some(error) if failures == 1 => Err(error),
@@ -380,6 +558,274 @@ pub(crate) fn scrub_history(
             failures - 1
         )),
     }
+}
+
+fn record_scrub_outcome(
+    root: &Path,
+    history_id: &str,
+    outcome: &ScrubOutcome,
+    failures: &mut u64,
+    first_error: &mut Option<String>,
+) -> Result<(), String> {
+    match outcome {
+        ScrubOutcome::Verified => {
+            let verified_ms = storage::now_ms()?;
+            history::mark_node_verified(root, history_id, verified_ms)
+        }
+        ScrubOutcome::Failed(failure) => {
+            let message = failure.message_for(history_id);
+            log::warn!("repository scrub failed for history node {history_id}: {message}");
+            *failures += 1;
+            first_error.get_or_insert_with(|| message.clone());
+            history::mark_node_verify_error(root, history_id, &message)
+        }
+        ScrubOutcome::Blocked(failure) => {
+            let message = failure.message_for(history_id);
+            log::warn!("repository scrub could not verify history node {history_id}: {message}");
+            history::mark_node_verify_error(root, history_id, &message)
+        }
+    }
+}
+
+/// 沿链还原出来的一份布局。
+///
+/// `payload` 是「块表已经对上、但载荷读不出来」时给出的失败：链本身还能继续往上
+/// 回溯（父节点未必引用那个坏块），只是这个节点的内容确实读不回来。
+struct WalkedLayout {
+    layout: ChunkFile,
+    payload: Option<ChainFailure>,
+}
+
+/// 从 `start` 的 snapshot 出发，沿父链一路还原并逐节点校验。
+///
+/// 返回本次走到的全部结论（起点在前）。走到已有确定结论的节点、或走到自带 snapshot
+/// 的祖先就停下：后者有独立的物化起点，由它自己那趟遍历负责。
+fn walk_chain(
+    root: &Path,
+    start: &history::VerifyChainNode,
+    nodes: &HashMap<&str, &history::VerifyChainNode>,
+    settled: &HashMap<String, ScrubOutcome>,
+    cancel: &CancelToken,
+) -> Result<Vec<(String, ScrubOutcome)>, String> {
+    let mut results = Vec::new();
+    let mut store = ChunkStore::new();
+    let temp_directory = root.join("temp");
+    let task = ChunkTask::cancel(cancel);
+    let snapshot_relative = start
+        .snapshot_path
+        .as_deref()
+        .ok_or_else(|| format!("历史节点 {} 的校验起点缺少 snapshot", start.id))?;
+    let mut walked = match open_snapshot_content(root, start, snapshot_relative, &mut store, &task)
+    {
+        Ok(walked) => walked,
+        Err(failure) => {
+            let failure = VerifyFailure::from(failure);
+            let blocked = blocked_ancestors(start, nodes, settled, &failure);
+            results.push((start.id.clone(), ScrubOutcome::Failed(failure)));
+            results.extend(blocked);
+            return Ok(results);
+        }
+    };
+    results.push((start.id.clone(), outcome_of(&walked)));
+    let mut current = start;
+    loop {
+        ensure_not_cancelled(cancel)?;
+        let Some(parent_id) = current.parent_id.as_deref() else {
+            break;
+        };
+        if settled.get(parent_id).is_some_and(ScrubOutcome::settled) {
+            break;
+        }
+        let Some(parent) = nodes.get(parent_id).copied() else {
+            break;
+        };
+        // 祖先自己持有 snapshot 时，这条反向增量按设计不会被任何读取路径消费。
+        if parent.has_snapshot() {
+            break;
+        }
+        walked = match resolve_parent_content(
+            root,
+            current,
+            parent,
+            &mut store,
+            &temp_directory,
+            walked.layout,
+            &task,
+        ) {
+            Ok(walked) => walked,
+            Err(failure) => {
+                let failure = VerifyFailure::from(failure);
+                let blocked = blocked_ancestors(parent, nodes, settled, &failure);
+                results.push((parent.id.clone(), ScrubOutcome::Failed(failure)));
+                results.extend(blocked);
+                return Ok(results);
+            }
+        };
+        results.push((parent.id.clone(), outcome_of(&walked)));
+        current = parent;
+    }
+    Ok(results)
+}
+
+/// 本次还原出来的节点自身结论：载荷读不出来就是它自己坏了，与链无关。
+fn outcome_of(walked: &WalkedLayout) -> ScrubOutcome {
+    match &walked.payload {
+        Some(failure) => ScrubOutcome::Failed((*failure).clone().into()),
+        None => ScrubOutcome::Verified,
+    }
+}
+
+/// 把 `from` 更早的祖先记为「无法检查」：恢复链已经在这里断了，再往上不可能
+/// 还有路径。自带 snapshot 的祖先不算——它有独立的物化起点，会自己校验。
+fn blocked_ancestors(
+    from: &history::VerifyChainNode,
+    nodes: &HashMap<&str, &history::VerifyChainNode>,
+    settled: &HashMap<String, ScrubOutcome>,
+    blocker: &VerifyFailure,
+) -> Vec<(String, ScrubOutcome)> {
+    let mut blocked = Vec::new();
+    let mut cursor = from.parent_id.as_deref();
+    while let Some(id) = cursor {
+        if settled.get(id).is_some_and(ScrubOutcome::settled) {
+            break;
+        }
+        let Some(node) = nodes.get(id).copied() else {
+            break;
+        };
+        if node.has_snapshot() {
+            break;
+        }
+        blocked.push((id.to_owned(), ScrubOutcome::Blocked(blocker.clone())));
+        cursor = node.parent_id.as_deref();
+    }
+    blocked
+}
+
+/// 校验一个节点自己持有的 snapshot，并把它当作后续回溯的基础布局返回。
+///
+/// 块表与摘要决定「这份布局还能不能当基础用」：对不上就没有任何后续可走。载荷的
+/// 哈希只有整份读完才知道，而它只影响这个节点本身——单块损坏不必阻止回溯到祖先，
+/// 祖先可能根本不引用那个坏块。
+fn open_snapshot_content(
+    root: &Path,
+    node: &history::VerifyChainNode,
+    snapshot_relative: &str,
+    store: &mut ChunkStore<'static>,
+    task: &ChunkTask<'_>,
+) -> Result<WalkedLayout, ChainFailure> {
+    let path = storage::resolve_path(root, snapshot_relative).map_err(ChainFailure::unknown)?;
+    let file = open_chain_file(&path, &node.id, "备份文件（起点 snapshot）")?;
+    store.append_file(file).map_err(|error| {
+        ChainFailure::confirmed(
+            &node.id,
+            history::NodeVerifyIssue::Damaged,
+            format!("的备份文件（起点 snapshot）无法读取：{error}"),
+        )
+    })?;
+    let layout = {
+        let mut reader = store.reader();
+        ChunkFile::open(&mut reader).map_err(|error| {
+            ChainFailure::confirmed(
+                &node.id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件（起点 snapshot）无法读取：{error}"),
+            )
+        })?
+    };
+    if !layout
+        .file_digest()
+        .to_hex()
+        .eq_ignore_ascii_case(&node.sha256)
+    {
+        return Err(ChainFailure::confirmed(
+            &node.id,
+            history::NodeVerifyIssue::Damaged,
+            "的备份文件（起点 snapshot）与历史数据库记录不符",
+        ));
+    }
+    let payload = read_payload(store, &layout, task).err().map(|error| {
+        ChainFailure::confirmed(
+            &node.id,
+            history::NodeVerifyIssue::Damaged,
+            format!("的备份文件读取失败：{error}"),
+        )
+    });
+    Ok(WalkedLayout { layout, payload })
+}
+
+/// 用 `current` 的反向增量还原出父节点 `parent` 的内容并校验。
+///
+/// 这条增量是「`parent` 的内容」的唯一表示，因此打开、解压、回溯与摘要比对任何
+/// 一步失败，坏掉都是 `parent`，与 `current` 无关。
+fn resolve_parent_content(
+    root: &Path,
+    current: &history::VerifyChainNode,
+    parent: &history::VerifyChainNode,
+    store: &mut ChunkStore<'static>,
+    temp_directory: &Path,
+    layout: ChunkFile,
+    task: &ChunkTask<'_>,
+) -> Result<WalkedLayout, ChainFailure> {
+    let delta_relative = current
+        .delta_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| {
+            ChainFailure::confirmed(
+                &parent.id,
+                history::NodeVerifyIssue::Damaged,
+                "缺少指向本节点的反向增量",
+            )
+        })?;
+    let path = storage::resolve_path(root, delta_relative).map_err(ChainFailure::unknown)?;
+    let mut delta_file = open_chain_file(&path, &parent.id, "备份文件（恢复链 delta）")?;
+    let delta =
+        ChunkFileDelta::open_in(&mut delta_file, temp_directory, task).map_err(|error| {
+            ChainFailure::confirmed(
+                &parent.id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件（恢复链 delta）无法读取：{error}"),
+            )
+        })?;
+    let resolved = delta.resolve(&layout, store, task).map_err(|error| {
+        ChainFailure::confirmed(
+            &parent.id,
+            history::NodeVerifyIssue::Damaged,
+            format!("的备份文件（恢复链 delta）无法回溯：{error}"),
+        )
+    })?;
+    if !resolved
+        .file_digest()
+        .to_hex()
+        .eq_ignore_ascii_case(&parent.sha256)
+    {
+        return Err(ChainFailure::confirmed(
+            &parent.id,
+            history::NodeVerifyIssue::Damaged,
+            "的内容与历史数据库记录不符",
+        ));
+    }
+    let payload = read_payload(store, &resolved, task).err().map(|error| {
+        ChainFailure::confirmed(
+            &parent.id,
+            history::NodeVerifyIssue::Damaged,
+            format!("的备份文件读取失败：{error}"),
+        )
+    });
+    Ok(WalkedLayout {
+        layout: resolved,
+        payload,
+    })
+}
+
+/// 把布局的原始内容整份流式读出（不落盘），逐块验哈希并核对整文件摘要。
+fn read_payload(
+    store: &mut ChunkStore<'static>,
+    layout: &ChunkFile,
+    task: &ChunkTask<'_>,
+) -> Result<(), super::chunk_file::ChunkFileError> {
+    let mut reader = store.reader();
+    layout.copy_original(&mut reader, &mut std::io::sink(), task)
 }
 
 pub(crate) fn ensure_checkpoint_with_progress(
@@ -459,41 +905,66 @@ pub(crate) fn ensure_checkpoint_with_progress(
 }
 
 /// Resolves the reverse delta chain of `history_id` into a chunk store.
+///
+/// 失败时带回真正坏掉的节点：链上每一步的反向增量都是「这一步要还原出来的节点」
+/// 的唯一表示，因此哪一步失败，坏的正是那一步的父节点。
 fn resolve_chain(
     root: &Path,
     history_id: &str,
     step_label: &str,
     cancel: &CancelToken,
     progress: &impl Fn(&str, u64, u64),
-) -> Result<ResolvedChain, String> {
-    ensure_not_cancelled(cancel)?;
-    let chain = history::materialization_chain(root, history_id)?;
-    let first = chain.first().ok_or("恢复链为空")?;
+) -> Result<ResolvedChain, ChainFailure> {
+    ensure_not_cancelled(cancel).map_err(ChainFailure::unknown)?;
+    let chain = history::materialization_chain(root, history_id).map_err(ChainFailure::unknown)?;
+    let first = chain
+        .first()
+        .ok_or_else(|| ChainFailure::unknown("恢复链为空"))?;
     let snapshot_path = storage::resolve_path(
         root,
-        first
-            .snapshot_path
-            .as_deref()
-            .ok_or("恢复链起点缺少 snapshot")?,
-    )?;
+        first.snapshot_path.as_deref().ok_or_else(|| {
+            ChainFailure::confirmed(
+                &first.id,
+                history::NodeVerifyIssue::Damaged,
+                "的恢复链起点缺少 snapshot 记录",
+            )
+        })?,
+    )
+    .map_err(ChainFailure::unknown)?;
     let mut store = ChunkStore::new();
     store
-        .append_file(
-            File::open(&snapshot_path)
-                .map_err(|error| format!("无法打开恢复链起点 snapshot：{error}"))?,
-        )
-        .map_err(|error| format!("无法读取恢复链起点 snapshot：{error}"))?;
+        .append_file(open_chain_file(
+            &snapshot_path,
+            &first.id,
+            "备份文件（起点 snapshot）",
+        )?)
+        .map_err(|error| {
+            ChainFailure::confirmed(
+                &first.id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件（起点 snapshot）无法读取：{error}"),
+            )
+        })?;
     let mut layout = {
         let mut reader = store.reader();
-        ChunkFile::open(&mut reader)
-            .map_err(|error| format!("无法读取恢复链起点 snapshot：{error}"))?
+        ChunkFile::open(&mut reader).map_err(|error| {
+            ChainFailure::confirmed(
+                &first.id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件（起点 snapshot）无法读取：{error}"),
+            )
+        })?
     };
     if !layout
         .file_digest()
         .to_hex()
         .eq_ignore_ascii_case(&first.sha256)
     {
-        return Err("恢复链起点 snapshot 摘要与历史数据库不匹配".into());
+        return Err(ChainFailure::confirmed(
+            &first.id,
+            history::NodeVerifyIssue::Damaged,
+            "的备份文件（起点 snapshot）与历史数据库记录不符",
+        ));
     }
 
     let total = chain.len() as u64;
@@ -501,26 +972,48 @@ fn resolve_chain(
     let task = ChunkTask::cancel(cancel);
     let mut steps = 1_u64;
     for (index, node) in chain.iter().take(chain.len().saturating_sub(1)).enumerate() {
-        ensure_not_cancelled(cancel)?;
+        ensure_not_cancelled(cancel).map_err(ChainFailure::unknown)?;
+        // 这一步要还原出来的节点：这条反向增量就是它的唯一表示。
+        let expected = &chain[index + 1];
         let delta_path = node
             .delta_path
             .as_deref()
             .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| format!("历史节点 {} 缺少指向父节点的反向增量", node.id))?;
-        let mut delta_file = File::open(storage::resolve_path(root, delta_path)?)
-            .map_err(|error| format!("无法打开恢复链 delta：{error}"))?;
-        let delta = ChunkFileDelta::open_in(&mut delta_file, &temp_directory, &task)
-            .map_err(|error| format!("无法读取恢复链 delta：{error}"))?;
-        layout = delta
-            .resolve(&layout, &mut store, &task)
-            .map_err(|error| format!("无法回溯历史链：{error}"))?;
-        let expected = &chain[index + 1];
+            .ok_or_else(|| {
+                ChainFailure::confirmed(
+                    &expected.id,
+                    history::NodeVerifyIssue::Damaged,
+                    "缺少指向本节点的反向增量",
+                )
+            })?;
+        let delta_path = storage::resolve_path(root, delta_path).map_err(ChainFailure::unknown)?;
+        let mut delta_file =
+            open_chain_file(&delta_path, &expected.id, "备份文件（恢复链 delta）")?;
+        let delta =
+            ChunkFileDelta::open_in(&mut delta_file, &temp_directory, &task).map_err(|error| {
+                ChainFailure::confirmed(
+                    &expected.id,
+                    history::NodeVerifyIssue::Damaged,
+                    format!("的备份文件（恢复链 delta）无法读取：{error}"),
+                )
+            })?;
+        layout = delta.resolve(&layout, &mut store, &task).map_err(|error| {
+            ChainFailure::confirmed(
+                &expected.id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件（恢复链 delta）无法回溯：{error}"),
+            )
+        })?;
         if !layout
             .file_digest()
             .to_hex()
             .eq_ignore_ascii_case(&expected.sha256)
         {
-            return Err(format!("历史节点 {} 的摘要与历史数据库不匹配", expected.id));
+            return Err(ChainFailure::confirmed(
+                &expected.id,
+                history::NodeVerifyIssue::Damaged,
+                "的内容与历史数据库记录不符",
+            ));
         }
         steps += 1;
         progress(step_label, index as u64 + 1, total);
@@ -558,6 +1051,27 @@ fn validate_snapshot(
     snapshot
         .copy_original(&mut file, &mut std::io::sink(), &task)
         .map_err(|error| format!("{label} snapshot 完整性校验失败：{error}"))
+}
+
+/// 打开历史链上的受控文件，并把它归到「用这份文件还原谁」名下。
+///
+/// 归类只判断 `ErrorKind::NotFound`，不解析系统错误文本：读取侧（
+/// `history::classify_verify_failure`）因此不必认识 Windows 的本地化文案。其余
+/// 打不开的原因（权限、占用、路径无效）都留在「损坏」一类，因为文件还在。
+fn open_chain_file(path: &Path, culprit_id: &str, label: &str) -> Result<File, ChainFailure> {
+    match File::open(path) {
+        Ok(file) => Ok(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Err(ChainFailure::confirmed(
+            culprit_id,
+            history::NodeVerifyIssue::Missing,
+            format!("的{label}已丢失（{error}）"),
+        )),
+        Err(error) => Err(ChainFailure::confirmed(
+            culprit_id,
+            history::NodeVerifyIssue::Damaged,
+            format!("的{label}无法打开（{error}）"),
+        )),
+    }
 }
 
 fn ensure_not_cancelled(cancel: &CancelToken) -> Result<(), String> {

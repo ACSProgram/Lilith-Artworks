@@ -210,8 +210,9 @@ pub(crate) fn delete_branch(
 
 /// 手动重查分支：前台立即校验整条链，而不是只清错误等空闲调度。
 ///
-/// 低频率的自动节奏下，手动入口必须即时；单节点失败只写入该节点的
-/// `verify_error`，不中止后续节点，最终返回刷新后的历史让状态行展示派生结果。
+/// 低频率的自动节奏下，手动入口必须即时；出问题的节点写入自己的
+/// `verify_error`，被它挡住的上游节点写入「无法检查」，两者都不中止后续节点，
+/// 最终返回刷新后的历史让状态行展示派生结果。
 pub(crate) fn reverify_branch(
     context: &CommandContext,
     branch_id: &str,
@@ -236,9 +237,10 @@ pub(crate) fn reverify_branch(
                     history::mark_node_verified(root, history_id, verified_ms)
                         .map_err(CommandError::from)?;
                 }
-                Err(error) => {
-                    log::warn!("branch reverify failed for history node {history_id}: {error}");
-                    history::mark_node_verify_error(root, history_id, &error)
+                Err(failure) => {
+                    let message = failure.message_for(history_id);
+                    log::warn!("branch reverify failed for history node {history_id}: {message}");
+                    history::mark_node_verify_error(root, history_id, &message)
                         .map_err(CommandError::from)?;
                 }
             }

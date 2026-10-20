@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ArtworkBranch, HistoryNode } from "./types";
 import {
-  buildBranchLine, canCompact, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
+  buildBranchLine, canCompact, isRenamedNode, mergeNodeVerifyStates,
+  needsCompactSecondConfirm, suggestedRestorePath,
 } from "./historyModel";
 
 const node = (
@@ -22,6 +23,9 @@ const node = (
   chunkFileSize: 1,
   sha256: id.padEnd(64, "0"),
   chunkCount: 1,
+  verifiedMs: null,
+  verifyError: null,
+  verifyIssue: null,
   ...overrides,
 });
 
@@ -43,6 +47,9 @@ const branch: ArtworkBranch = {
   finalArtifactLocked: false,
   publishedCount: 0,
   verifyError: null,
+  verifyFailureCount: 0,
+  verifyUnverifiableCount: 0,
+  verifyIssue: null,
   verifiedMs: null,
 };
 
@@ -72,6 +79,25 @@ describe("history model", () => {
     expect(isRenamedNode(manual)).toBe(false);
     expect(isRenamedNode({ ...manual, note: "改肤色", title: "改肤色" })).toBe(false);
     expect(isRenamedNode({ ...manual, note: "改肤色", title: "改肤色 v2" })).toBe(true);
+  });
+
+  it("keeps the node array identity when a background check changed nothing", () => {
+    const current = [node("a", null, 1, { verifiedMs: 100 }), node("b", "a", 2)];
+    // 后台检查通过：只有带时间戳的字段变了，其余字段沿用旧对象。
+    const next = [node("a", null, 1, { verifiedMs: 200 }), node("b", "a", 2)];
+    const merged = mergeNodeVerifyStates(current, next);
+    expect(merged).not.toBe(current);
+    expect(merged[0]).toBe(next[0]);
+    expect(merged[1]).toBe(current[1]);
+
+    // 完全没变时必须原样返回，调用方据此保住 mindmap 与缩略图缓存。
+    expect(mergeNodeVerifyStates(current, current.map((item) => ({ ...item })))).toBe(current);
+  });
+
+  it("takes the whole array when the node set changed", () => {
+    const current = [node("a", null, 1)];
+    const next = [node("a", null, 1), node("b", "a", 2)];
+    expect(mergeNodeVerifyStates(current, next)).toBe(next);
   });
 
   it("asks for a stronger confirmation for manual or renamed nodes", () => {

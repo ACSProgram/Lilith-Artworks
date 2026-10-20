@@ -1,6 +1,7 @@
 import { CalendarDays } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
+import { verifyIssueLabel } from "./historyModel";
 import type { HistoryTreeNode } from "./historyModel";
 import type { ArtworkBranch, HistoryNode } from "./types";
 
@@ -54,8 +55,10 @@ export function HistoryTimeline({ branches, nodes, selectedNodeId, onJump }: His
           {group.nodes.map((node) => {
             const branchTitle = branchTitles.get(node.createdOnBranchId);
             const label = branchTitle ? `${branchTitle} - ${node.title}` : node.title;
+            // 时间轴只是导航，用同一个颜色点提示「这个版本有问题」即可。
+            const issueHint = node.verifyIssue ? `（${verifyIssueLabel(node.verifyIssue)}）` : "";
             return <li key={node.id}>
-              <button className={selectedNodeId === node.id ? "active" : ""} type="button" onClick={() => onJump(node.id)} title={label}>
+              <button className={`${selectedNodeId === node.id ? "active" : ""}${node.verifyIssue ? ` verify-${node.verifyIssue}` : ""}`} type="button" onClick={() => onJump(node.id)} title={`${label}${issueHint}`}>
                 <time>{new Date(node.createdMs).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</time>
                 <i aria-hidden="true" />
                 <span>{label}</span>

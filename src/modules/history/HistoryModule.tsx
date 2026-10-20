@@ -14,6 +14,7 @@ import { HistoryTimeline, Mindmap } from "./HistoryGraph";
 import {
   branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
   isForcedCheckpoint, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
+  verifyIssueLabel, verifyIssueNotice,
 } from "./historyModel";
 import { HoverPreview, InspectorPreview } from "./NodePreview";
 import type { PreviewAnchor } from "./NodePreview";
@@ -157,12 +158,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   }, [readNodeFormat, selectedNode, view]);
 
   // 缩略图随节点行保存，选中时单独读取；历史刷新后重新拉取，不进入图轮询。
-  // 只有节点集合真的换了才作废缓存：后台检查的状态行刷新沿用同一个 `nodes`
-  // 数组，缓存继续有效。
-  const historyNodes = history?.nodes;
+  // 只有节点集合真的换了才作废缓存：后台检查的刷新会替换节点的校验字段，那
+  // 不该让已取到的缩略图重读一次。
+  const nodeIdKey = history?.nodes.map((node) => node.id).join("|");
   useEffect(() => {
     previewCache.current.clear();
-  }, [artworkId, historyNodes]);
+  }, [artworkId, nodeIdKey]);
 
   useEffect(() => {
     if (!selectedNode || view !== "branch") {
@@ -368,14 +369,18 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     const selectedForCompact = compactSelection.has(node.id);
     const selected = selectedNodeId === node.id;
     const onSelectedBranch = Boolean(selectedBranch && branchNodeIds.has(node.id));
+    // 问题只讲后果：文件不在了、读不出来了，或者被后续版本挡住而没有结论。
+    // 归类由后端给出，这里不再解析错误文本，也不用「校验失败」这类术语。
+    const verifyNotice = node.verifyIssue ? verifyIssueNotice(node.verifyIssue) : null;
     return <button
       key={node.id}
       ref={(element) => {
         if (element) nodeElements.current.set(node.id, element);
         else nodeElements.current.delete(node.id);
       }}
-      className={`history-node-card${selected ? " selected" : ""}${onSelectedBranch ? " on-selected-branch" : ""}${selectable ? " compactable" : ""}${selectedForCompact ? " compact-selected" : ""}`}
+      className={`history-node-card${selected ? " selected" : ""}${onSelectedBranch ? " on-selected-branch" : ""}${selectable ? " compactable" : ""}${selectedForCompact ? " compact-selected" : ""}${node.verifyIssue ? ` verify-${node.verifyIssue}` : ""}`}
       type="button"
+      title={verifyNotice ?? undefined}
       aria-pressed={selected}
       onClick={() => {
         if (compactMode) {
@@ -410,6 +415,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         <code>{node.sha256}</code>
       </span>
       <span className="history-labels">
+        {node.verifyIssue && <i className={`verify-issue-label ${node.verifyIssue}`}>{verifyIssueLabel(node.verifyIssue)}</i>}
         {heads.map((branch) => <i className={branch.id === selectedBranchId ? "current-branch-label" : undefined} key={branch.id}>{branch.title} HEAD</i>)}
         {forks.map((branch) => <i className="fork-label" key={branch.id}>{branch.title} 分支起点</i>)}
         {node.isCheckpoint && <i>检查点</i>}
@@ -523,6 +529,19 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
             <div><dt>原文件</dt><dd>{formatBytes(selectedNode.logicalSize)}</dd></div>
             <div><dt>当前存储</dt><dd>{formatBytes(selectedNode.chunkFileSize)}</dd></div>
             <div><dt>数据块</dt><dd>{selectedNode.chunkCount}</dd></div>
+            <div className="history-verify-row">
+              <dt>文件状态</dt>
+              <dd>
+                {selectedNode.verifyIssue
+                  ? <span className={`history-verify-state ${selectedNode.verifyIssue}`}>{verifyIssueLabel(selectedNode.verifyIssue)}</span>
+                  : selectedNode.verifiedMs != null
+                    ? <span className="history-verify-state ok">正常</span>
+                    : <span className="history-format-muted">尚未检查</span>}
+                {selectedNode.verifiedMs != null && !selectedNode.verifyIssue && <small className="history-verify-time">{new Date(selectedNode.verifiedMs).toLocaleString()}</small>}
+              </dd>
+              {selectedNode.verifyIssue && <dd className="history-verify-note">{verifyIssueNotice(selectedNode.verifyIssue)}</dd>}
+              {selectedNode.verifyError && <dd className="history-verify-detail">{selectedNode.verifyError}</dd>}
+            </div>
             <div><dt>SHA-256</dt><dd><code>{selectedNode.sha256}</code></dd></div>
           </dl>
         </> : <p>左键选择节点查看信息；右键打开节点操作。进入分支只在节点唯一属于一个分支时提供。</p>}
