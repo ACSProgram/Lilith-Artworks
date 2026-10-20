@@ -1,0 +1,92 @@
+import { ChevronUp, Eye, EyeOff, Layers3 } from "lucide-react";
+import { Fragment, useState } from "react";
+import { STROKE_LAYER, isLayerVisible, type PinBoardLayerVisibility } from "./layers";
+
+/**
+ * 图层顺序按「从上到下」列：标注层（笔迹）永远在最上，随后是顶层、中层、底层。
+ * `layer` 即条目的 layer 值，0–2 由图片与文字共用，3 是笔迹的固定层。
+ */
+const LAYER_ROWS: { layer: number; label: string; swatch: string }[] = [
+  { layer: STROKE_LAYER, label: "标注层", swatch: "annotation" },
+  { layer: 2, label: "顶层", swatch: "top" },
+  { layer: 1, label: "中层", swatch: "middle" },
+  { layer: 0, label: "底层", swatch: "bottom" },
+];
+
+/**
+ * 画布左上角的图层浮层：收起后只剩一个按钮，展开是四个可见性开关。
+ *
+ * 与标注工具条同属画布内的浮动控件，不占主工具栏：主工具栏已有二十来个按钮，
+ * 再排四个会被横向滚动藏掉；全屏时工具栏整体隐藏，浮层仍然可用。
+ *
+ * 显隐是纯视图状态：不改模型、不标记 dirty，因此这里只回调 `onToggle`，
+ * 由渲染器决定重绘与选中清理。
+ */
+export function PinBoardLayersPanel({
+  visibility,
+  onToggle,
+  disabled,
+}: {
+  visibility: PinBoardLayerVisibility;
+  onToggle: (layer: number, visible: boolean) => void;
+  disabled: boolean;
+}) {
+  const [open, setOpen] = useState(true);
+  /** 有任一层被隐藏时按钮高亮，否则隐藏了图层却看不出来。 */
+  const filtering = visibility.some((visible) => !visible);
+
+  return (
+    <div className="pin-board-layers">
+      {open ? (
+        <section className="pin-board-layers-panel" aria-label="图层可见性">
+          <header className="pin-board-layers-head">
+            <Layers3 size={15} aria-hidden="true" />
+            <span>图层</span>
+            <button
+              type="button"
+              className="icon-button"
+              disabled={disabled}
+              onClick={() => setOpen(false)}
+              title="收起图层"
+              aria-label="收起图层"
+            >
+              <ChevronUp size={15} />
+            </button>
+          </header>
+          {LAYER_ROWS.map((row, index) => {
+            const visible = isLayerVisible(visibility, row.layer);
+            return (
+              <Fragment key={row.layer}>
+                {index === 1 && <span className="pin-board-layers-divider" aria-hidden="true" />}
+                <button
+                  type="button"
+                  className={`pin-board-layer-row${visible ? "" : " hidden"}`}
+                  aria-pressed={visible}
+                  disabled={disabled}
+                  onClick={() => onToggle(row.layer, !visible)}
+                  title={`${visible ? "隐藏" : "显示"}${row.label}`}
+                >
+                  {visible ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
+                  <span className={`pin-board-layer-swatch ${row.swatch}`} />
+                  <span className="pin-board-layer-name">{row.label}</span>
+                </button>
+              </Fragment>
+            );
+          })}
+        </section>
+      ) : (
+        <button
+          type="button"
+          className={`pin-board-layers-toggle${filtering ? " filtering" : ""}`}
+          disabled={disabled}
+          onClick={() => setOpen(true)}
+          title={filtering ? "图层（有图层被隐藏）" : "图层可见性"}
+          aria-label="图层可见性"
+          aria-expanded={false}
+        >
+          <Layers3 size={18} />
+        </button>
+      )}
+    </div>
+  );
+}

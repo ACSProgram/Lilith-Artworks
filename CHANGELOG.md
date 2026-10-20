@@ -17,9 +17,10 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Added
 
-- Pin-board layers can be switched off one at a time: a layer button in the
-  toolbar opens four checkboxes for the bottom, middle, top and annotation
-  layers, and text follows the 0–2 layer it sits on. The four switches are view
+- Pin-board layers can be switched off one at a time: a floating panel in the
+  canvas's top-left corner lists the bottom, middle, top and annotation layers
+  with an eye toggle each, and collapses to a single button when not in use.
+  Text follows the 0–2 layer it sits on. The switches are view
   state only — per board, held in the in-process session, never written to the
   repository and never marking the board dirty, so hiding a layer to look at the
   artwork underneath does not become a write. Every path that decides what can
@@ -30,8 +31,8 @@ entries for the reader; they are not a template every entry has to fill.
   annotation layer keeps the reset from fitting the view to empty space. Hiding
   a layer also drops its items from the selection. Drawing tools turn the
   annotation layer back on, and a newly created item reveals its own layer, so
-  "added" never means "added somewhere you cannot see". The button is
-  highlighted while any layer is hidden. A stroke selection greys out the
+  "added" never means "added somewhere you cannot see". The collapsed button
+  is highlighted while any layer is hidden. A stroke selection greys out the
   context menu's layer items — the annotation layer is fixed — and a mixed
   selection refuses the move outright rather than silently moving only the
   images. Bringing an item to the front now promotes it within its own group,

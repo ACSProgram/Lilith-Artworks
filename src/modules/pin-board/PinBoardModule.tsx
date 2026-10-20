@@ -69,7 +69,7 @@ import {
   type PinBoardInteractionState,
 } from "./renderer";
 import { textureBudgetsForLevel, type PinBoardTextureBudgets } from "./texturePolicy";
-import { PinBoardLayersMenu } from "./PinBoardLayersMenu";
+import { PinBoardLayersPanel } from "./PinBoardLayersPanel";
 import {
   getBoardSession,
   getSidebarVisible,
@@ -1189,11 +1189,6 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <span className="pin-board-zoom">{interaction.zoomPercent}%</span>
             <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.zoomIn())} title="放大视图" aria-label="放大视图"><ZoomIn size={17} /></button>
             <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.resetViewport())} title="重置视图" aria-label="重置视图"><LocateFixed size={17} /></button>
-            <PinBoardLayersMenu
-              visibility={interaction.visibleLayers}
-              onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
-              disabled={!renderer}
-            />
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1 / 1.1))} title="缩小图片" aria-label="缩小图片"><Shrink size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1.1))} title="放大图片" aria-label="放大图片"><Expand size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.rotateSelected(-5))} title="逆时针旋转" aria-label="逆时针旋转"><RotateCcw size={17} /></button>
@@ -1272,6 +1267,13 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             onContextMenu={handleRendererContextMenu}
             onStrokeCommit={commitStroke}
           />
+          {view && !unavailable && (
+            <PinBoardLayersPanel
+              visibility={interaction.visibleLayers}
+              onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
+              disabled={!renderer}
+            />
+          )}
           {unavailable ? (
             <div className="pin-board-stage-overlay pin-board-unavailable" role="alert">
               <div className="pin-board-stage-hint">
