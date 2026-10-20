@@ -9,6 +9,7 @@ import {
   pickPinBoardImagePaths,
 } from "./api";
 import { reorderBoardIds, type BoardDropPosition } from "./boardOrder";
+import { normalizeLayerVisibility } from "./layers";
 import { registerPinBoardLifecycleParticipant } from "./lifecycle";
 import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
 import { getBoardSession, getSelectedBoardId, setSelectedBoardId } from "./session";
@@ -48,6 +49,7 @@ const DEFAULT_INTERACTION: PinBoardInteractionState = {
   locked: true,
   zoomPercent: 100,
   tool: "select",
+  visibleLayers: normalizeLayerVisibility(null),
 };
 
 async function clipboardImageBytes(): Promise<number[] | null> {

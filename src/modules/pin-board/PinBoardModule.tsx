@@ -69,6 +69,7 @@ import {
   type PinBoardInteractionState,
 } from "./renderer";
 import { textureBudgetsForLevel, type PinBoardTextureBudgets } from "./texturePolicy";
+import { PinBoardLayersMenu } from "./PinBoardLayersMenu";
 import {
   getBoardSession,
   getSidebarVisible,
@@ -576,6 +577,9 @@ function PinBoardTextDialog({
   );
 }
 
+/** 图层菜单在选中含笔迹时的置灰说明：笔迹固定在标注层，原生端保存时也会强制写 3。 */
+const STROKE_LAYER_LOCKED_TITLE = "笔迹固定在标注层，取消选中笔迹后再改图层";
+
 function PinBoardContextMenu({
   request,
   renderer,
@@ -616,9 +620,9 @@ function PinBoardContextMenu({
         { key: "arrange", label: "阵列排序", icon: <LayoutGrid size={16} />, disabled: request.arrangeableCount < 2, onClick: () => void renderer.arrangeSelected() },
         { key: "sep-layer", divider: true },
         { key: "layer-label", heading: true, label: "图层", icon: <Layers3 size={15} /> },
-        { key: "layer-top", label: "顶层", icon: <span className="pin-board-layer-swatch top" />, onClick: () => renderer.setSelectedLayer(2) },
-        { key: "layer-middle", label: "中层", icon: <span className="pin-board-layer-swatch middle" />, onClick: () => renderer.setSelectedLayer(1) },
-        { key: "layer-bottom", label: "底层", icon: <span className="pin-board-layer-swatch bottom" />, onClick: () => renderer.setSelectedLayer(0) },
+        { key: "layer-top", label: "顶层", icon: <span className="pin-board-layer-swatch top" />, disabled: request.selectionHasStroke, disabledTitle: STROKE_LAYER_LOCKED_TITLE, onClick: () => renderer.setSelectedLayer(2) },
+        { key: "layer-middle", label: "中层", icon: <span className="pin-board-layer-swatch middle" />, disabled: request.selectionHasStroke, disabledTitle: STROKE_LAYER_LOCKED_TITLE, onClick: () => renderer.setSelectedLayer(1) },
+        { key: "layer-bottom", label: "底层", icon: <span className="pin-board-layer-swatch bottom" />, disabled: request.selectionHasStroke, disabledTitle: STROKE_LAYER_LOCKED_TITLE, onClick: () => renderer.setSelectedLayer(0) },
         { key: "sep-delete", divider: true },
         { key: "delete", label: "删除图片", icon: <Trash2 size={16} />, danger: true, onClick: onDelete },
       ]
@@ -1185,6 +1189,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <span className="pin-board-zoom">{interaction.zoomPercent}%</span>
             <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.zoomIn())} title="放大视图" aria-label="放大视图"><ZoomIn size={17} /></button>
             <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.resetViewport())} title="重置视图" aria-label="重置视图"><LocateFixed size={17} /></button>
+            <PinBoardLayersMenu
+              visibility={interaction.visibleLayers}
+              onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
+              disabled={!renderer}
+            />
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1 / 1.1))} title="缩小图片" aria-label="缩小图片"><Shrink size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1.1))} title="放大图片" aria-label="放大图片"><Expand size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.rotateSelected(-5))} title="逆时针旋转" aria-label="逆时针旋转"><RotateCcw size={17} /></button>

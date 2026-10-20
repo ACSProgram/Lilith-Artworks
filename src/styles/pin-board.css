@@ -450,6 +450,46 @@
 .pin-board-layer-swatch { display: block; width: 14px; height: 3px; border-radius: 1px; background: var(--pb-text-faint); box-shadow: 0 -4px 0 var(--pb-border-strong), 0 4px 0 var(--pb-border-strong); }
 .pin-board-layer-swatch.top { transform: translateY(-2px); }
 .pin-board-layer-swatch.bottom { transform: translateY(2px); }
+/* 标注层用强调色，与 0–2 三个图片/文字层区分开。 */
+.pin-board-layer-swatch.annotation { background: var(--pb-accent-text); }
+
+/* 图层可见性浮层：工具栏自身 overflow: hidden，浮层挂到页面根部并按视口定位。 */
+.pin-board-layer-menu {
+  position: fixed;
+  z-index: 2200;
+  display: grid;
+  width: 208px;
+  box-sizing: border-box;
+  gap: 2px;
+  padding: 8px;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--pb-shadow-modal);
+}
+.pin-board-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.pin-board-layer-row:hover { background: var(--pb-accent-soft); }
+.pin-board-layer-row input { flex: none; margin: 0; accent-color: var(--accent); }
+.pin-board-layer-row .pin-board-layer-swatch { flex: none; }
+.pin-board-layer-name { flex: 1; }
+.pin-board-layer-row small { color: var(--pb-text-faint); font-size: 11px; }
+.pin-board-layer-note {
+  margin: 4px 2px 0;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+  color: var(--pb-text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
 
 .pin-board-text-backdrop { z-index: 2300; }
 .pin-board-text-dialog { width: min(560px, 100%); }

@@ -1,9 +1,16 @@
+import {
+  normalizeLayerVisibility,
+  type PinBoardLayerVisibility,
+} from "./layers";
+
 export interface PinBoardViewSession {
   centerX: number;
   centerY: number;
   worldUnitsPerCssPixel: number;
   locked: boolean;
   selectedImageIds: number[];
+  /** 图层可见性：纯视图状态，随会话保留，不进 schema、不写库。 */
+  visibleLayers: PinBoardLayerVisibility;
 }
 
 /**
@@ -42,6 +49,7 @@ export function getBoardSession(artworkId: string, boardId: number): PinBoardVie
     worldUnitsPerCssPixel: session.worldUnitsPerCssPixel,
     locked: session.locked,
     selectedImageIds: [...session.selectedImageIds],
+    visibleLayers: normalizeLayerVisibility(session.visibleLayers),
   } : null;
 }
 
@@ -56,6 +64,7 @@ export function setBoardSession(
     worldUnitsPerCssPixel: session.worldUnitsPerCssPixel,
     locked: session.locked,
     selectedImageIds: [...session.selectedImageIds],
+    visibleLayers: normalizeLayerVisibility(session.visibleLayers),
   });
 }
 

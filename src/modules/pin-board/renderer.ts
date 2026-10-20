@@ -65,6 +65,15 @@ import {
 } from "./geometry";
 import type { PinBoardViewSession } from "./session";
 import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
+import {
+  DEFAULT_LAYER_VISIBILITY,
+  PIN_BOARD_LAYER_COUNT,
+  STROKE_LAYER,
+  hiddenSelectionIds,
+  isLayerVisible,
+  normalizeLayerVisibility,
+  type PinBoardLayerVisibility,
+} from "./layers";
 import { shortcutCanHandle } from "./shortcuts";
 import {
   estimatedTextureLoadBytes,
@@ -172,6 +181,8 @@ export interface PinBoardInteractionState {
   zoomPercent: number;
   /** 当前工具：`select` 走选中/变换，其余五个进入绘制分支。 */
   tool: PinBoardTool;
+  /** 图层可见性（下标 = layer）：界面据此渲染四个开关。 */
+  visibleLayers: PinBoardLayerVisibility;
 }
 
 export interface PinBoardContextMenuRequest {
@@ -179,6 +190,8 @@ export interface PinBoardContextMenuRequest {
   clientY: number;
   selectedCount: number;
   arrangeableCount: number;
+  /** 选中里含笔迹：图层菜单据此置灰（笔迹固定在标注层，不能被改层）。 */
+  selectionHasStroke: boolean;
   targetImage: boolean;
   canEditBoard: boolean;
   canEditSelection: boolean;
@@ -860,6 +873,12 @@ export class PinBoardRenderer {
   private readonly strokeOutlineIndex = new Map<number, number>();
   /** 当前工具：绘制工具下指针按下进入绘制分支，不触发选中/框选。 */
   private tool: PinBoardTool = "select";
+  /**
+   * 图层可见性：纯视图状态，随画板会话恢复，不写库也不标记 dirty。
+   * 所有「哪些条目可画、可选、可点」的判断都经过它，少接一处就会出现
+   * 「看不见但能选中」。
+   */
+  private visibleLayers: PinBoardLayerVisibility = normalizeLayerVisibility(DEFAULT_LAYER_VISIBILITY);
   /** 绘制样式由工具栏推入，落库与预览共用同一份值。 */
   private strokeColor = DEFAULT_STROKE_COLOR;
   private strokeWidthValue = DEFAULT_STROKE_WIDTH;
@@ -1311,6 +1330,9 @@ export class PinBoardRenderer {
     this.pendingViewportFit = false;
     this.locked = false;
     this.selectedIds.clear();
+    // 图层可见性要先于选中与视图适配恢复：`contentBounds` 与选中过滤都依赖它，
+    // 否则「打开画板 → 按隐藏层里的图片适配视图」会把视图缩放到看不见的内容上。
+    this.visibleLayers = normalizeLayerVisibility(session?.visibleLayers);
     // 笔迹几何随画板重新读取：`releaseBoardResources` 已释放旧缓冲，这里再兜一次，
     // 保证直接 `activateBoard`（未经 detach）时也不会画出上一块画板的笔迹。
     this.releaseStrokeResources();
@@ -1323,7 +1345,11 @@ export class PinBoardRenderer {
       this.locked = session.locked;
       if (!this.locked) {
         for (const itemId of session.selectedImageIds) {
-          if (this.imageById.has(itemId)) this.selectedIds.add(itemId);
+          const item = this.imageById.get(itemId);
+          // 隐藏层里的条目不能被恢复成选中：会话存的是当时的选择，图层开关是之后改的。
+          if (item && isLayerVisible(this.visibleLayers, item.layer)) {
+            this.selectedIds.add(itemId);
+          }
         }
       }
     } else {
@@ -1355,6 +1381,7 @@ export class PinBoardRenderer {
       worldUnitsPerCssPixel: this.worldUnitsPerCssPixel(),
       locked: this.locked,
       selectedImageIds: this.locked ? [] : this.selectedImageIds(),
+      visibleLayers: normalizeLayerVisibility(this.visibleLayers),
     });
   }
 
@@ -1474,7 +1501,33 @@ export class PinBoardRenderer {
     this.marqueeBaseIds.clear();
     this.updateMarqueeOverlay(null);
     if (isStrokeTool(tool)) this.selectedIds.clear();
+    // 选绘制工具时自动打开标注层：隐藏着还让人画，画完什么也看不见。
+    if (isStrokeTool(tool) && !isLayerVisible(this.visibleLayers, STROKE_LAYER)) {
+      this.setLayerVisible(STROKE_LAYER, true);
+    }
     this.refreshSelectionVisuals();
+  }
+
+  /**
+   * 开关一个图层。纯视图状态：不写库、不标记 dirty、不进撤销栈。
+   *
+   * 隐藏某层时把该层里正被选中的条目一起踢出选中，否则它们看不见却还能被删除、
+   * 导出或改图层。
+   */
+  setLayerVisible(layer: number, visible: boolean) {
+    if (!this.loaded) return;
+    const next = normalizeLayerVisibility(this.visibleLayers);
+    if (!Number.isInteger(layer) || layer < 0 || layer >= PIN_BOARD_LAYER_COUNT) return;
+    if (next[layer] === visible) return;
+    next[layer] = visible;
+    this.visibleLayers = next;
+    if (!visible) {
+      for (const itemId of hiddenSelectionIds(this.selectedIds, this.images, next)) {
+        this.selectedIds.delete(itemId);
+      }
+    }
+    this.refreshViewport(0);
+    this.emitState();
   }
 
   /** 绘制样式：只影响之后画出的笔迹，不改已有条目。 */
@@ -1533,6 +1586,7 @@ export class PinBoardRenderer {
         this.defaultWorldUnitsPerCssPixel / this.worldUnitsPerCssPixel()
       ) * 100),
       tool: this.tool,
+      visibleLayers: normalizeLayerVisibility(this.visibleLayers),
     };
   }
 
@@ -1578,7 +1632,9 @@ export class PinBoardRenderer {
     this.finishActiveInteraction();
     this.selectedIds.clear();
     for (const image of this.images) {
-      if (!image.deleted) this.selectedIds.add(image.itemId);
+      // 隐藏图层里的条目不能被全选：看不见却被选中，之后的删除/导出会莫名其妙地作用到它们。
+      if (image.deleted || !isLayerVisible(this.visibleLayers, image.layer)) continue;
+      this.selectedIds.add(image.itemId);
     }
     this.refreshSelectionVisuals();
   }
@@ -1629,6 +1685,18 @@ export class PinBoardRenderer {
       points: cloneQuad(image.points),
       uv: cloneQuad(image.uv),
     }));
+    // 新条目落进隐藏图层会让「添加成功」看起来像什么都没发生（文字、粘贴、导入
+    // 都会撞上），因此把它们所在的层一并打开——刚创建的内容应该看得见。
+    const hiddenLayers = new Set(
+      added
+        .map((image) => image.layer)
+        .filter((layer) => !isLayerVisible(this.visibleLayers, layer)),
+    );
+    if (hiddenLayers.size > 0) {
+      const next = normalizeLayerVisibility(this.visibleLayers);
+      for (const layer of hiddenLayers) next[layer] = true;
+      this.visibleLayers = next;
+    }
     for (const image of added) {
       const copy = cloneImage(image);
       this.images.push(copy);
@@ -1724,10 +1792,11 @@ export class PinBoardRenderer {
   }
 
   setSelectedLayer(layer: 0 | 1 | 2) {
+    // 笔迹固定落在标注层，保存时原生端会忽略前端发来的 layer；本地跟着改只会
+    // 变成「改完重开又回去」。混选时整组拒绝而不是「只改图片」——半执行的图层
+    // 切换没有可见反馈，用户会以为笔迹也跟着走了。
+    if (this.selectedImages().some((image) => image.kind === "stroke")) return;
     this.commitMutation((image) => {
-      // 笔迹固定落在标注层，保存时原生端会忽略前端发来的 layer；本地跟着改只会
-      // 变成「改完重开又回去」，因此直接跳过。
-      if (image.kind === "stroke") return;
       image.layer = layer;
     });
   }
@@ -2204,8 +2273,12 @@ export class PinBoardRenderer {
         this.marqueeWorld = world;
         const bounds = this.boundsBetween(this.dragWorld, world);
         // 累加式框选：以 marqueeBaseIds 为基底并入框到的图片，因此可连续多次框选，
-        // 已选中的不会消失，框到的新图加入。
-        const next = marqueeSelection(this.images, bounds, this.marqueeBaseIds);
+        // 已选中的不会消失，框到的新图加入。隐藏图层先剔掉，否则「框不到却选得上」。
+        const next = marqueeSelection(
+          this.images.filter((image) => isLayerVisible(this.visibleLayers, image.layer)),
+          bounds,
+          this.marqueeBaseIds,
+        );
         // 框选矩形是独立的 DOM 叠加层，每个指针事件都要跟随；但选中集合未变时
         // （例如拖过空白区域或已选中的图片）无需重排、重绘与广播状态。
         this.updateMarqueeOverlay(bounds);
@@ -2472,6 +2545,7 @@ export class PinBoardRenderer {
       clientY: event.clientY,
       selectedCount: this.selectedImages().length,
       arrangeableCount: this.selectedImages().filter((image) => image.kind === "bitmap").length,
+      selectionHasStroke: this.selectedImages().some((image) => image.kind === "stroke"),
       targetImage: Boolean(hit && !this.locked),
       canEditBoard: !this.locked,
       canEditSelection: !this.locked && this.selectedIds.size > 0,
@@ -2600,9 +2674,11 @@ export class PinBoardRenderer {
     return Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, height));
   }
 
-  /** 画板内全部未删除图片的轴对齐最小包围框（旋转图片按外接矩形计算）。 */
+  /** 画板内全部未删除、且所在图层可见的条目轴对齐最小包围框（旋转条目按外接矩形计算）。 */
   private contentBounds(): Bounds | null {
-    return imagesBounds(this.images.filter((image) => !image.deleted));
+    return imagesBounds(this.images.filter((image) => (
+      !image.deleted && isLayerVisible(this.visibleLayers, image.layer)
+    )));
   }
 
   /** 按图片包围框适配视图；画板内没有图片时回落到默认视图。 */
@@ -2624,7 +2700,12 @@ export class PinBoardRenderer {
   }
 
   private selectedImages(): PinBoardItem[] {
-    return this.images.filter((image) => !image.deleted && this.selectedIds.has(image.itemId));
+    // 隐藏层里的条目不算选中：删除、导出、变换、图层切换都从这里取条目。
+    return this.images.filter((image) => (
+      !image.deleted
+      && isLayerVisible(this.visibleLayers, image.layer)
+      && this.selectedIds.has(image.itemId)
+    ));
   }
 
   private bringToFront(itemIds: number[]) {
@@ -2633,15 +2714,25 @@ export class PinBoardRenderer {
     const ordered = [...this.images].sort((left, right) => (
       left.order - right.order || left.itemId - right.itemId
     ));
-    const next = [
-      ...ordered.filter((image) => promotedIds.has(image.itemId)),
-      ...ordered.filter((image) => !promotedIds.has(image.itemId)),
+    // 笔迹固定占标注层，**只在笔迹内部**提前：跨层先后关系由 layer 决定，
+    // 把笔迹提到整板最前只会白白改写每个条目的 sort_order（一次点击就脏整块画板）。
+    const groups = [
+      ordered.filter((image) => image.kind !== "stroke"),
+      ordered.filter((image) => image.kind === "stroke"),
     ];
     let changed = false;
-    next.forEach((image, order) => {
-      changed ||= image.order !== order;
-      image.order = order;
-    });
+    for (const group of groups) {
+      const promoted = group.filter((image) => promotedIds.has(image.itemId));
+      if (promoted.length === 0) continue;
+      const rest = group.filter((image) => !promotedIds.has(image.itemId));
+      // 只重排本组自己的 order 值（同一个多重集换个顺序），不与另一组抢号，
+      // 因此另一组的条目一个字段都不会动。
+      const slots = group.map((image) => image.order).sort((left, right) => left - right);
+      [...promoted, ...rest].forEach((image, index) => {
+        changed ||= image.order !== slots[index];
+        image.order = slots[index];
+      });
+    }
     if (changed) {
       this.dirty = this.stateKey() !== this.savedStateKey;
       if (this.dirty) this.scheduleAutosave();
@@ -2788,7 +2879,10 @@ export class PinBoardRenderer {
     this.generation += 1;
     const bounds = viewportBounds(this.viewport, this.canvas.width, this.canvas.height);
     this.visibleImages = this.images.filter((image) => (
-      !image.deleted && image.available && intersects(imageBounds(image), bounds)
+      !image.deleted
+      && image.available
+      && isLayerVisible(this.visibleLayers, image.layer)
+      && intersects(imageBounds(image), bounds)
     ));
     this.sortVisibleImages();
     const now = performance.now();

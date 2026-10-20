@@ -12,6 +12,7 @@ import type { PinBoardItem, PinBoardView } from "./types";
 import { STROKE_TOOL, decodeStrokeHeader, type PinBoardStrokeGeometry } from "./strokeGeometry";
 import { encodeStrokeGeometry } from "./strokeRender";
 import { beginStrokeDraft, extendStrokeDraft } from "./strokeDrawing";
+import { normalizeLayerVisibility, type PinBoardLayerVisibility } from "./layers";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -56,6 +57,8 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     strokeSignature: "",
     strokeLoadToken: 0,
     strokeIndexCount: 0,
+    // 图层可见性：类字段初始化不会在替身对象上执行，这里补一份「全部显示」。
+    visibleLayers: normalizeLayerVisibility(null),
     // 基准预算（低档）：与历史常量一致，预算相关的断言依赖这些值。
     textureBudgetBytes: PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES,
     previewTextureBudgetBytes: PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -740,6 +743,211 @@ describe("pin-board renderer select-all", () => {
 
     expect([...(renderer as unknown as SelectionTestRenderer).selectedIds]).toEqual([]);
     expect(refreshSelectionVisuals).not.toHaveBeenCalled();
+  });
+});
+
+type LayerTestRenderer = {
+  images: PinBoardItem[];
+  selectedIds: Set<number>;
+  visibleLayers: PinBoardLayerVisibility;
+  visibleImages: PinBoardItem[];
+  viewport: Viewport;
+  pendingViewportFit: boolean;
+  selectAll: () => void;
+  selectedImages: () => PinBoardItem[];
+  setLayerVisible: (layer: number, visible: boolean) => void;
+  setSelectedLayer: (layer: 0 | 1 | 2) => void;
+  bringToFront: (itemIds: number[]) => void;
+  applyContentFit: (cssWidth: number, cssHeight: number) => void;
+};
+
+function layerItem(
+  itemId: number,
+  kind: "bitmap" | "stroke",
+  layer: number,
+  order: number,
+  points: PinBoardItem["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]],
+): PinBoardItem {
+  const base = {
+    boardId: 1,
+    itemId,
+    width: 10,
+    height: 10,
+    order,
+    layer,
+    deleted: false,
+    points,
+    uv: [[0, 0], [1, 0], [1, 1], [0, 1]] as PinBoardItem["uv"],
+    available: true,
+  };
+  return kind === "stroke"
+    ? { ...base, kind, tool: STROKE_TOOL.pen, color: "#ff0000", strokeWidth: 4 }
+    : { ...base, kind };
+}
+
+function layerRenderer(options: Record<string, unknown>): LayerTestRenderer {
+  const images = (options.images as PinBoardItem[] | undefined) ?? [];
+  return rendererWith({
+    loaded: true,
+    locked: false,
+    destroyed: false,
+    images,
+    imageById: new Map(images.map((image) => [image.itemId, image])),
+    selectedIds: new Set<number>(),
+    visibleLayers: normalizeLayerVisibility(null),
+    visibleImages: [],
+    dirty: false,
+    savedStateKey: "",
+    autosaveEnabled: false,
+    defaultWorldUnitsPerCssPixel: 5,
+    viewport: { centerX: 0, centerY: 0, height: 100 },
+    refreshViewport: vi.fn(),
+    emitState: vi.fn(),
+    scheduleAutosave: vi.fn(),
+    sortVisibleImages: vi.fn(),
+    draw: vi.fn(),
+    ...options,
+  }) as unknown as LayerTestRenderer;
+}
+
+describe("pin-board layer visibility", () => {
+  it("drops the items of a hidden layer from the selection", () => {
+    const images = [layerItem(1, "bitmap", 1, 0), layerItem(2, "stroke", 3, 1)];
+    const renderer = layerRenderer({
+      images,
+      selectedIds: new Set<number>([1, 2]),
+    });
+
+    renderer.setLayerVisible(3, false);
+
+    expect([...renderer.selectedIds]).toEqual([1]);
+    expect(renderer.visibleLayers).toEqual([true, true, true, false]);
+  });
+
+  it("keeps the selection when a layer is turned back on", () => {
+    const renderer = layerRenderer({
+      images: [layerItem(1, "bitmap", 1, 0)],
+      selectedIds: new Set<number>([1]),
+      visibleLayers: normalizeLayerVisibility([true, false, true, true]),
+    });
+
+    renderer.setLayerVisible(1, true);
+
+    expect([...renderer.selectedIds]).toEqual([1]);
+  });
+
+  it("ignores toggles that would not change anything or are out of range", () => {
+    const refreshViewport = vi.fn();
+    const renderer = layerRenderer({ images: [], refreshViewport });
+
+    renderer.setLayerVisible(1, true);
+    renderer.setLayerVisible(9, false);
+
+    expect(refreshViewport).not.toHaveBeenCalled();
+  });
+
+  it("leaves hidden layers out of select-all", () => {
+    const renderer = layerRenderer({
+      images: [
+        layerItem(1, "bitmap", 1, 0),
+        layerItem(2, "bitmap", 0, 1),
+        layerItem(3, "stroke", 3, 2),
+      ],
+      visibleLayers: normalizeLayerVisibility([true, true, true, false]),
+    });
+
+    renderer.selectAll();
+
+    expect([...renderer.selectedIds].sort((left, right) => left - right)).toEqual([1, 2]);
+  });
+
+  it("does not count hidden items as selected", () => {
+    const renderer = layerRenderer({
+      images: [layerItem(1, "bitmap", 1, 0), layerItem(2, "bitmap", 0, 1)],
+      selectedIds: new Set<number>([1, 2]),
+      visibleLayers: normalizeLayerVisibility([true, true, true, true]),
+    });
+
+    expect(renderer.selectedImages().map((image) => image.itemId)).toEqual([1, 2]);
+
+    (renderer as unknown as { visibleLayers: PinBoardLayerVisibility }).visibleLayers =
+      normalizeLayerVisibility([false, true, true, true]);
+    expect(renderer.selectedImages().map((image) => image.itemId)).toEqual([1]);
+  });
+
+  it("fits the view without the hidden layers", () => {
+    const renderer = layerRenderer({
+      images: [
+        layerItem(1, "bitmap", 1, 0, [[0, 300], [400, 300], [400, 0], [0, 0]]),
+        // 隐藏层里的条目必须排除，否则「隐藏标注层 → 重置视图」会缩放到一片空白。
+        layerItem(2, "stroke", 3, 1, [[9000, 9300], [9400, 9300], [9400, 9000], [9000, 9000]]),
+      ],
+      visibleLayers: normalizeLayerVisibility([true, true, true, false]),
+      pendingViewportFit: true,
+    });
+
+    renderer.applyContentFit(1000, 600);
+
+    expect(renderer.pendingViewportFit).toBe(false);
+    expect(renderer.viewport.centerX).toBe(200);
+    expect(renderer.viewport.centerY).toBe(150);
+  });
+
+  it("refuses to move a mixed selection to another layer", () => {
+    const images = [layerItem(1, "bitmap", 1, 0), layerItem(2, "stroke", 3, 1)];
+    const renderer = layerRenderer({ images, selectedIds: new Set<number>([1, 2]) });
+
+    renderer.setSelectedLayer(2);
+
+    // 混选整组拒绝：只改图片会让用户以为笔迹也跟着换了层。
+    expect(renderer.images.map((image) => image.layer)).toEqual([1, 3]);
+  });
+});
+
+describe("pin-board stroke ordering", () => {
+  it("promotes a stroke only among strokes", () => {
+    const images = [
+      layerItem(1, "bitmap", 1, 0),
+      layerItem(2, "bitmap", 1, 1),
+      layerItem(3, "stroke", 3, 2),
+      layerItem(4, "stroke", 3, 3),
+    ];
+    const renderer = layerRenderer({ images });
+
+    renderer.bringToFront([3]);
+
+    // 图片的 sort_order 一个都不动：跨层先后由 layer 决定，改它只是脏整块画板。
+    expect(images.map((image) => [image.itemId, image.order])).toEqual([
+      [1, 0],
+      [2, 1],
+      [3, 2],
+      [4, 3],
+    ]);
+
+    renderer.bringToFront([4]);
+    expect(images.map((image) => [image.itemId, image.order])).toEqual([
+      [1, 0],
+      [2, 1],
+      [3, 3],
+      [4, 2],
+    ]);
+  });
+
+  it("still promotes an image above the other images", () => {
+    const images = [
+      layerItem(1, "bitmap", 1, 0),
+      layerItem(2, "bitmap", 1, 1),
+      layerItem(3, "stroke", 3, 2),
+    ];
+    const renderer = layerRenderer({ images });
+
+    renderer.bringToFront([2]);
+
+    expect(images.map((image) => [image.itemId, image.order])).toEqual([
+      [1, 1],
+      [2, 0],
+      [3, 2],
+    ]);
   });
 });
 
