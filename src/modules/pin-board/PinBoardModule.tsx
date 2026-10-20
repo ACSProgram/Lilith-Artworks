@@ -1,5 +1,6 @@
 import {
   AlertTriangle,
+  Circle,
   ClipboardCopy,
   ClipboardPaste,
   Copy,
@@ -16,6 +17,8 @@ import {
   LocateFixed,
   Minimize2,
   Minus,
+  MousePointer2,
+  MoveUpRight,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -25,6 +28,8 @@ import {
   RotateCw,
   Save,
   Shrink,
+  Slash,
+  Square,
   Trash2,
   Type,
   Unlock,
@@ -33,6 +38,7 @@ import {
   X,
   ZoomIn,
   ZoomOut,
+  type LucideIcon,
 } from "lucide-react";
 import {
   useCallback,
@@ -70,6 +76,15 @@ import {
   setSidebarVisible,
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
+import {
+  DEFAULT_STROKE_COLOR,
+  DEFAULT_STROKE_WIDTH,
+  MAX_STROKE_WIDTH,
+  MIN_STROKE_WIDTH,
+  clampStrokeWidth,
+  type PinBoardTool,
+  type StrokeCommitRequest,
+} from "./strokeDrawing";
 import { usePinBoardController } from "./usePinBoardController";
 import { usePendingSettle } from "./usePendingSettle";
 import { retryPendingSettle } from "./pendingSettle";
@@ -82,6 +97,13 @@ import { PinBoardColorPicker } from "./PinBoardColorPicker";
  */
 export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+R";
 export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
+/**
+ * 标注工具条的显示/隐藏快捷键。
+ *
+ * 工具条收起后自身不可见，任何放在工具条上的按钮都无法再把它叫回来，因此显隐只由这一个
+ * 对称的快捷键负责，主工具栏与浮动条本身都不放按钮。
+ */
+export const PIN_BOARD_TOOLBAR_SHORTCUT = "T";
 
 /**
  * 阵列间距的默认值与上下限，单位是「统一图片高度的比例」。
@@ -135,6 +157,109 @@ export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
 /** 侧栏画板拖放排序使用的自定义 dataTransfer 类型。 */
 const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
 
+/**
+ * 标注工具条：选择与五种绘制工具。快捷键与 `strokeDrawing.toolForShortcut` 同源，
+ * 提示里的字母必须与那里一致。
+ */
+const STROKE_TOOL_BUTTONS: Array<{
+  tool: PinBoardTool;
+  label: string;
+  shortcut: string;
+  icon: LucideIcon;
+}> = [
+  { tool: "select", label: "选择", shortcut: "V", icon: MousePointer2 },
+  { tool: "pen", label: "画笔", shortcut: "P", icon: Pencil },
+  { tool: "line", label: "直线", shortcut: "L", icon: Slash },
+  { tool: "arrow", label: "箭头", shortcut: "A", icon: MoveUpRight },
+  { tool: "rect", label: "矩形", shortcut: "R", icon: Square },
+  { tool: "ellipse", label: "椭圆", shortcut: "O", icon: Circle },
+];
+
+/** 工具按钮组：工具选择即交互模式，没有额外的模式开关。 */
+function StrokeToolGroup({ tool, disabled, onSelect }: {
+  tool: PinBoardTool;
+  disabled: boolean;
+  onSelect: (tool: PinBoardTool) => void;
+}) {
+  return (
+    <div className="pin-board-tools" role="group" aria-label="工具">
+      {STROKE_TOOL_BUTTONS.map(({ tool: value, label, shortcut, icon: Icon }) => (
+        <button
+          key={value}
+          type="button"
+          className={`icon-button${tool === value ? " active" : ""}`}
+          aria-pressed={tool === value}
+          disabled={disabled}
+          title={`${label} (${shortcut})`}
+          aria-label={label}
+          onClick={() => onSelect(value)}
+        >
+          <Icon size={17} />
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * 标注样式控件：取色器 + 线宽滑条与数值输入。
+ *
+ * 滑条负责快速调粗细，数值框负责精确值：两者写同一份状态，滑条拖动时数值框
+ * 实时跟随；数值框在失焦或回车时才收敛，输入过程中允许暂时不合法。
+ */
+function StrokeStyleControls({
+  color,
+  width,
+  widthText,
+  onColorChange,
+  onWidthInput,
+  onWidthTextChange,
+  onWidthCommit,
+}: {
+  color: string;
+  width: number;
+  widthText: string;
+  onColorChange: (color: string) => void;
+  onWidthInput: (width: number) => void;
+  onWidthTextChange: (raw: string) => void;
+  onWidthCommit: (raw: string) => void;
+}) {
+  return (
+    <div className="pin-board-stroke-style">
+      <PinBoardColorPicker value={color} onChange={onColorChange} />
+      <label className="pin-board-stroke-width">
+        <span>线宽</span>
+        <input
+          type="range"
+          className="pin-board-stroke-width-range"
+          min={MIN_STROKE_WIDTH}
+          max={MAX_STROKE_WIDTH}
+          step={1}
+          value={width}
+          aria-label="笔迹线宽滑条"
+          onChange={(event) => onWidthInput(Number(event.target.value))}
+        />
+        <input
+          type="number"
+          min={MIN_STROKE_WIDTH}
+          max={MAX_STROKE_WIDTH}
+          step={1}
+          value={widthText}
+          aria-label="笔迹线宽"
+          onChange={(event) => onWidthTextChange(event.target.value)}
+          onBlur={(event) => onWidthCommit(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter") return;
+            event.preventDefault();
+            onWidthCommit(event.currentTarget.value);
+            event.currentTarget.blur();
+          }}
+        />
+      </label>
+    </div>
+  );
+}
+
 function afterLayoutSettles(): Promise<void> {
   return new Promise((resolve) => {
     requestAnimationFrame(() => requestAnimationFrame(() => resolve()));
@@ -153,6 +278,7 @@ function GpuCanvas({
   onRenderer,
   onState,
   onContextMenu,
+  onStrokeCommit,
 }: {
   view: PinBoardView | null;
   artworkId: string;
@@ -166,12 +292,15 @@ function GpuCanvas({
   onRenderer: (renderer: PinBoardRenderer | null) => void;
   onState: (state: PinBoardInteractionState) => void;
   onContextMenu: (request: PinBoardContextMenuRequest | null) => void;
+  onStrokeCommit: (request: StrokeCommitRequest) => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const selectionRef = useRef<HTMLDivElement>(null);
   const marqueeRef = useRef<HTMLDivElement>(null);
   /** 纹理未就绪图片的占位层：由渲染器按视口同步填充。 */
   const placeholderRef = useRef<HTMLDivElement>(null);
+  /** 绘制预览层：渲染器按当前草稿重绘，不进 GPU 缓冲。 */
+  const drawOverlayRef = useRef<HTMLCanvasElement>(null);
   /** 渲染器实例常驻：创建 effect 只随画布生命周期运行一次。 */
   const rendererRef = useRef<PinBoardRenderer | null>(null);
   const bootRef = useRef<Promise<PinBoardRenderer | null> | null>(null);
@@ -200,6 +329,8 @@ function GpuCanvas({
   onStateRef.current = onState;
   const onContextMenuRef = useRef(onContextMenu);
   onContextMenuRef.current = onContextMenu;
+  const onStrokeCommitRef = useRef(onStrokeCommit);
+  onStrokeCommitRef.current = onStrokeCommit;
 
   // 创建 effect 幂等化：StrictMode 的「挂载 → 清理 → 再挂载」复用同一次创建，
   // 因此每次挂载只创建一个 GPU 设备。真正的销毁推迟到模块卸载时执行。
@@ -213,7 +344,8 @@ function GpuCanvas({
     const selection = selectionRef.current;
     const marquee = marqueeRef.current;
     const placeholder = placeholderRef.current;
-    if (!canvas || !selection || !marquee || !placeholder) return undefined;
+    const drawOverlay = drawOverlayRef.current;
+    if (!canvas || !selection || !marquee || !placeholder || !drawOverlay) return undefined;
 
     if (!bootRef.current) {
       bootRef.current = PinBoardRenderer.create(
@@ -221,6 +353,7 @@ function GpuCanvas({
         selection,
         marquee,
         placeholder,
+        drawOverlay,
         gapRef.current,
         autosaveRef.current,
         (message) => setStatusRef.current(message),
@@ -233,6 +366,7 @@ function GpuCanvas({
           }
         },
         (request) => onContextMenuRef.current(request),
+        (request) => onStrokeCommitRef.current(request),
         cacheBudgetsRef.current,
       )
         .then((created) => {
@@ -293,6 +427,7 @@ function GpuCanvas({
     <div className="pin-board-canvas-shell">
       <canvas ref={canvasRef} className="pin-board-canvas" tabIndex={0} />
       <div ref={placeholderRef} className="pin-board-placeholder-layer" aria-hidden="true" />
+      <canvas ref={drawOverlayRef} className="pin-board-draw-overlay" aria-hidden="true" />
       <div ref={marqueeRef} className="pin-board-marquee" hidden />
       <div ref={selectionRef} className="pin-board-selection" hidden>
         <span className="pin-board-rotation-stem" />
@@ -543,6 +678,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     importImages,
     importDroppedFiles,
     addText,
+    setTool,
+    commitStroke,
     deleteImages,
     exportImages,
   } = usePinBoardController({ artworkId, active, settings });
@@ -559,6 +696,14 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [fullscreen, setFullscreen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
   const [textOptions, setTextOptions] = useState({ fontSize: 48, color: "#000000" });
+  /** 标注样式：工具栏的取色器与线宽输入共同决定下一笔的外观。 */
+  const [strokeStyle, setStrokeStyle] = useState({
+    color: DEFAULT_STROKE_COLOR,
+    width: DEFAULT_STROKE_WIDTH,
+  });
+  const [strokeWidthText, setStrokeWidthText] = useState(String(DEFAULT_STROKE_WIDTH));
+  /** 标注工具条的显隐，只由快捷键 `T` 切换。 */
+  const [drawbarVisible, setDrawbarVisible] = useState(true);
   /** 统一的命名输入对话框状态，替代原生 `window.prompt`。 */
   const [labelPrompt, setLabelPrompt] = useState<
     { kind: "create" } | { kind: "rename"; board: PinBoardSummary } | null
@@ -591,6 +736,35 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     setListContextMenu(null);
     setContextMenu(request);
   }, []);
+
+  // 绘制样式推给渲染器：预览层与落库都用渲染器里那一份，避免两处各存一个值。
+  useEffect(() => {
+    renderer?.setStrokeStyle(strokeStyle.color, strokeStyle.width);
+  }, [renderer, strokeStyle]);
+
+  /** 滑条直接写入线宽：非法值忽略，合法值取整并夹到前后端共同接受的范围。 */
+  const applyStrokeWidth = useCallback((width: number) => {
+    if (!Number.isFinite(width)) return;
+    const clamped = clampStrokeWidth(Math.round(width));
+    setStrokeWidthText(String(clamped));
+    setStrokeStyle((current) => (
+      current.width === clamped ? current : { ...current, width: clamped }
+    ));
+  }, []);
+
+  /** 线宽输入在失焦或回车时收敛到合法范围，输入过程中允许暂时不合法。 */
+  const commitStrokeWidth = useCallback((raw: string) => {
+    if (raw.trim() === "" || !Number.isFinite(Number(raw))) {
+      setStrokeWidthText(String(strokeStyle.width));
+      return;
+    }
+    applyStrokeWidth(Number(raw));
+  }, [applyStrokeWidth, strokeStyle.width]);
+
+  const toggleDrawbar = useCallback(() => {
+    if (!renderer || !view || unavailable !== null) return;
+    setDrawbarVisible((visible) => !visible);
+  }, [renderer, view, unavailable]);
 
   useEffect(() => {
     if (!active) {
@@ -783,6 +957,21 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
+      if (!active || !shortcutCanHandle(event)) return;
+      // 单键开关：带修饰键的组合留给应用与系统，不与工具键位抢。
+      if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
+      if (event.key.toLowerCase() !== PIN_BOARD_TOOLBAR_SHORTCUT.toLowerCase()) return;
+      if (!renderer || !view || unavailable !== null) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      toggleDrawbar();
+    };
+    window.addEventListener("keydown", keyDown, true);
+    return () => window.removeEventListener("keydown", keyDown, true);
+  }, [active, renderer, view, unavailable, toggleDrawbar]);
+
+  useEffect(() => {
+    const keyDown = (event: KeyboardEvent) => {
       if (!active) return;
       if (!shortcutCanHandle(event) || !(event.ctrlKey || event.metaKey)) return;
       const key = event.key.toLowerCase();
@@ -968,7 +1157,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           </div>
         </div>
       </aside>
-      <div ref={workspaceRef} className={`pin-board-workspace${fullscreen ? " fullscreen" : ""}`}>
+      <div
+        ref={workspaceRef}
+        className={`pin-board-workspace${fullscreen ? " fullscreen" : ""}`}
+      >
         <header className="pin-board-toolbar">
           <button
             className="icon-button"
@@ -1069,6 +1261,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             onRenderer={setRenderer}
             onState={setInteraction}
             onContextMenu={handleRendererContextMenu}
+            onStrokeCommit={commitStroke}
           />
           {unavailable ? (
             <div className="pin-board-stage-overlay pin-board-unavailable" role="alert">
@@ -1105,6 +1298,25 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <div className="pin-board-drop-hint" role="status">
               <Upload size={15} />
               <span>松开以导入图片</span>
+            </div>
+          )}
+          {drawbarVisible && view && !unavailable && (
+            <div className="pin-board-drawbar" role="toolbar" aria-label="标注工具">
+              <StrokeToolGroup
+                tool={interaction.tool}
+                disabled={!renderer || interaction.locked}
+                onSelect={setTool}
+              />
+              <span className="pin-board-divider" />
+              <StrokeStyleControls
+                color={strokeStyle.color}
+                width={strokeStyle.width}
+                widthText={strokeWidthText}
+                onColorChange={(color) => setStrokeStyle((current) => ({ ...current, color }))}
+                onWidthInput={applyStrokeWidth}
+                onWidthTextChange={setStrokeWidthText}
+                onWidthCommit={commitStrokeWidth}
+              />
             </div>
           )}
         </div>

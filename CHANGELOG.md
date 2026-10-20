@@ -17,6 +17,36 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Added
 
+- The pin board can now be annotated: a floating pill docked near the bottom of
+  the canvas offers a pointer and five drawing tools — freehand pen, line, arrow,
+  rectangle and ellipse — with a colour picker, a stroke-width slider and a
+  numeric width field, and the keys `V` / `P` / `L` / `A` / `R` / `O` switch tools
+  without leaving the canvas. `T` collapses and restores the pill, which stays
+  available in fullscreen as well. The pill carries no visibility button: a
+  button that hides its own container leaves the shortcut as the only way back,
+  so hiding and showing share one symmetric control. Selecting a tool is itself
+  the mode — the pointer selects and every drawing tool draws. The colour
+  popover is portalled to the page root and
+  placed from the trigger's viewport rect, because the pill scrolls horizontally
+  and clipped an inline popover. While a drawing tool is
+  active, pressing the pointer starts a stroke instead of selecting or marqueeing,
+  and picking a tool drops the current selection, the drag snapshot and the
+  marquee base so no leftover handles or half-finished selection follow the
+  pointer. The stroke under construction is painted on a 2D canvas overlay in
+  world units — so its width and shape already match what the renderer will
+  produce — and the GPU stroke buffer is rebuilt only once, after the stroke is
+  stored; holding shift constrains a pen stroke to a straight line, a rectangle
+  to a square, an ellipse to a circle and a line or arrow to 45° steps. Releasing
+  the pointer encodes the bounding box and geometry blob and hands them to the
+  controller, which saves pending edits first and then creates the item through a
+  serial queue: two strokes committing at once would carry the same revision and
+  the second would be rejected. The preview stays on screen until the new stroke
+  reaches the buffer, so a stroke does not blink out for the length of a save and
+  a re-read, and it is dropped when the commit fails or the board is switched
+  away. A drag shorter than three CSS pixels counts as a misclick and creates
+  nothing, and a cancelled pointer event is treated as a cancellation rather
+  than a commit. Drawing tools are disabled while the board is locked, and
+  locking returns the tool to the pointer.
 - Pin-board items gain a third kind: annotations drawn with a pen, line, arrow,
   rectangle or ellipse. A stroke lives only in the database — `pin_board_strokes`
   holds the tool, colour, stroke width, bounding box and a compact geometry blob,
@@ -100,6 +130,19 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
+- Pin-board saves no longer fail with "画板已被其他窗口修改" after the first
+  stroke, and drawing no longer stops accepting new strokes afterwards. The
+  create commands advance the backend revision, but the renderer updated only
+  its own copy and left the shared revision ledger at the value of the last
+  save, so every later save sent a stale revision; once it failed, each new
+  stroke was dropped because the save before the create failed too. Applying a
+  mutation result now advances the ledger as well, and loading a board records
+  the revision it was loaded with.
+- Creating an item through a create command no longer selects it while a
+  drawing tool is active. The selection box could not be dragged in tool mode —
+  the pointer went straight to the next stroke — so it just sat on the canvas
+  and covered the next mark. Switching back to the pointer still selects items
+  created in select mode.
 - The arrange path's common height is the median of the source heights instead
   of the maximum, so one oversized image no longer scales every other image up
   to its height.

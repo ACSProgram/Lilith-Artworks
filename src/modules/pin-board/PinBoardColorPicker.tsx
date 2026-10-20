@@ -1,5 +1,6 @@
 import { ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import type {
   KeyboardEvent as ReactKeyboardEvent,
   PointerEvent as ReactPointerEvent,
@@ -88,8 +89,27 @@ export function hsvToHex({ hue, saturation, value }: Hsv): string {
 }
 
 /**
- * 添加文字对话框内置的取色器：饱和/亮度面板 + 色相条 + 十六进制输入 + 预设色。
- * 不调用系统取色器，主题与对话框一致，且拖动过程中实时回传颜色。
+ * 浮层的宽度、与触发按钮的间距和视口边距，单位都是 CSS 像素。
+ * 宽度必须与 `.pin-board-color-popover` 的 `width` 一致，右侧对齐靠它反推左边。
+ */
+const POPOVER_WIDTH = 272;
+const POPOVER_GAP = 8;
+const VIEWPORT_MARGIN = 8;
+
+interface PopoverAnchor {
+  left: number;
+  top?: number;
+  bottom?: number;
+  maxHeight: number;
+}
+
+/**
+ * 添加文字对话框与标注工具条共用的取色器：饱和/亮度面板 + 色相条 + 十六进制输入 +
+ * 预设色。不调用系统取色器，主题与应用一致，且拖动过程中实时回传颜色。
+ *
+ * 浮层挂到 `document.body`：标注工具条为了在窄窗口里横向滚动开了 `overflow`，内联的
+ * 绝对定位会被胶囊裁掉（对话框的 `overflow` 则是另一套规则）。挂到页面根部后按触发
+ * 按钮的视口位置固定，两处入口走同一条路径，也不受祖先的 `transform` 影响。
  */
 export function PinBoardColorPicker({
   value,
@@ -98,12 +118,15 @@ export function PinBoardColorPicker({
   value: string;
   onChange: (color: string) => void;
 }) {
-  const [open, setOpen] = useState(false);
+  const [anchor, setAnchor] = useState<PopoverAnchor | null>(null);
+  const open = anchor !== null;
   const [hsv, setHsv] = useState<Hsv>(() => (
     hexToHsv(value) ?? { hue: 0, saturation: 0, value: 0 }
   ));
   const [hexDraft, setHexDraft] = useState(() => hexInputDraft(value));
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const popoverRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (hsvToHex(hsv) === normaliseHexColor(value)) return;
@@ -119,11 +142,48 @@ export function PinBoardColorPicker({
   useEffect(() => {
     if (!open) return undefined;
     const close = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+      const target = event.target as Node;
+      if (rootRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setAnchor(null);
+    };
+    const onViewportChange = () => setAnchor(null);
+    const onScroll = (event: Event) => {
+      if (event.target instanceof Node && popoverRef.current?.contains(event.target)) return;
+      setAnchor(null);
     };
     window.addEventListener("pointerdown", close);
-    return () => window.removeEventListener("pointerdown", close);
+    window.addEventListener("resize", onViewportChange);
+    window.addEventListener("scroll", onScroll, true);
+    return () => {
+      window.removeEventListener("pointerdown", close);
+      window.removeEventListener("resize", onViewportChange);
+      window.removeEventListener("scroll", onScroll, true);
+    };
   }, [open]);
+
+  /** 打开时按触发按钮的视口位置选空间更大的一侧，高度按该侧可用空间收敛。 */
+  const openPopover = () => {
+    const trigger = triggerRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const spaceAbove = rect.top - VIEWPORT_MARGIN;
+    const spaceBelow = window.innerHeight - rect.bottom - VIEWPORT_MARGIN;
+    const left = Math.min(
+      Math.max(VIEWPORT_MARGIN, rect.right - POPOVER_WIDTH),
+      Math.max(VIEWPORT_MARGIN, window.innerWidth - POPOVER_WIDTH - VIEWPORT_MARGIN),
+    );
+    setAnchor(spaceAbove >= spaceBelow
+      ? {
+        left,
+        bottom: window.innerHeight - rect.top + POPOVER_GAP,
+        maxHeight: Math.max(spaceAbove - POPOVER_GAP, 0),
+      }
+      : {
+        left,
+        top: rect.bottom + POPOVER_GAP,
+        maxHeight: Math.max(spaceBelow - POPOVER_GAP, 0),
+      });
+  };
 
   const apply = (patch: Partial<Hsv>) => {
     const next = { ...hsv, ...patch };
@@ -183,16 +243,17 @@ export function PinBoardColorPicker({
         if (event.key === "Escape" && open) {
           event.preventDefault();
           event.stopPropagation();
-          setOpen(false);
+          setAnchor(null);
         }
       }}
     >
       <button
+        ref={triggerRef}
         type="button"
         className="pin-board-color-trigger"
         aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => (open ? setAnchor(null) : openPopover())}
       >
         <span
           className="pin-board-color-swatch"
@@ -202,8 +263,19 @@ export function PinBoardColorPicker({
         <span className="pin-board-color-hex">{value.toUpperCase()}</span>
         <ChevronDown size={14} aria-hidden="true" />
       </button>
-      {open && (
-        <div className="pin-board-color-popover" role="dialog" aria-label="选择文字颜色">
+      {anchor && createPortal(
+        <div
+          ref={popoverRef}
+          className="pin-board-color-popover"
+          role="dialog"
+          aria-label="选择颜色"
+          style={{
+            left: anchor.left,
+            top: anchor.top,
+            bottom: anchor.bottom,
+            maxHeight: anchor.maxHeight,
+          }}
+        >
           <div
             className="pin-board-color-area"
             role="slider"
@@ -302,7 +374,8 @@ export function PinBoardColorPicker({
               />
             ))}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   );

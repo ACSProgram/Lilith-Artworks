@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
+  PIN_BOARD_TOOLBAR_SHORTCUT,
   pinBoardLockIndicatorVisible,
   pinBoardUnavailableNotice,
 } from "./PinBoardModule";
 import { shortcutMatches } from "./shortcuts";
+import { toolForShortcut } from "./strokeDrawing";
 
 describe("pin-board module entry", () => {
   it("loads through its public React entry without starting native work", async () => {
@@ -24,6 +26,15 @@ describe("pin-board default shortcuts", () => {
       PIN_BOARD_LOCK_SHORTCUT,
     )).toBe(true);
     expect(PIN_BOARD_FULLSCREEN_SHORTCUT).toBe("F11");
+  });
+
+  it("toggles the floating annotation toolbar on an unmodified T", () => {
+    expect(PIN_BOARD_TOOLBAR_SHORTCUT).toBe("T");
+    expect(toolForShortcut(PIN_BOARD_TOOLBAR_SHORTCUT)).toBeNull();
+    expect(shortcutMatches(
+      { key: "t", code: "KeyT", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false } as KeyboardEvent,
+      PIN_BOARD_TOOLBAR_SHORTCUT,
+    )).toBe(true);
   });
 });
 

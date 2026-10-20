@@ -6,10 +6,12 @@ import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./
 import {
   pendingSettleState,
   resetPendingSettleForTests,
+  resolveBoardRevision,
 } from "./pendingSettle";
 import type { PinBoardItem, PinBoardView } from "./types";
 import { STROKE_TOOL, decodeStrokeHeader, type PinBoardStrokeGeometry } from "./strokeGeometry";
 import { encodeStrokeGeometry } from "./strokeRender";
+import { beginStrokeDraft, extendStrokeDraft } from "./strokeDrawing";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -888,6 +890,65 @@ describe("pin-board renderer board switch", () => {
   });
 });
 
+describe("pin-board renderer mutation results", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetPendingSettleForTests();
+  });
+
+  function mutationRenderer(tool: "select" | "pen") {
+    const item = boardImage(9, [[0, 0], [10, 0], [10, -10], [0, -10]]);
+    const view: PinBoardView = {
+      boardId: 1,
+      name: "Board",
+      items: [item],
+      missingTextures: 0,
+      revision: "r2",
+      nowStep: 1,
+    };
+    const renderer = rendererWith({
+      loaded: true,
+      boardId: 1,
+      revision: "r1",
+      tool,
+      images: [],
+      imageById: new Map(),
+      selectedIds: new Set<number>(),
+      pushHistory: vi.fn(),
+      afterModelChange: vi.fn(),
+      stateKey: () => "state",
+    });
+    return { renderer, view, item };
+  }
+
+  it("advances the shared revision ledger with the mutation result", () => {
+    const { renderer, view, item } = mutationRenderer("pen");
+
+    renderer.applyMutationResult(view, [item.itemId]);
+
+    // 新建命令推进了后端 revision：账本必须跟上，否则下一次保存会拿旧值撞冲突。
+    expect(renderer.boardRevision).toBe("r2");
+    expect(resolveBoardRevision(1, "r1")).toBe("r2");
+  });
+
+  it("does not select the created item while a drawing tool is active", () => {
+    const { renderer, view, item } = mutationRenderer("pen");
+
+    renderer.applyMutationResult(view, [item.itemId]);
+
+    // 工具模式的指针只走绘制分支，自动选中只会留下一个拖不动、还挡下一笔的包围框。
+    expect([...(renderer as unknown as { selectedIds: Set<number> }).selectedIds]).toEqual([]);
+  });
+
+  it("selects the created item when the select tool is active", () => {
+    const { renderer, view, item } = mutationRenderer("select");
+
+    renderer.applyMutationResult(view, [item.itemId]);
+
+    expect([...(renderer as unknown as { selectedIds: Set<number> }).selectedIds]).toEqual([9]);
+  });
+});
+
 describe("pin-board arrangement", () => {
   const textItem = (itemId: number): PinBoardItem => ({
     boardId: 1,
@@ -957,5 +1018,128 @@ describe("pin-board arrangement", () => {
 
     expect(arrange).not.toHaveBeenCalled();
     arrange.mockRestore();
+  });
+});
+
+describe("pin-board drawing interaction", () => {
+  /** 绘制路径只碰这几样 DOM：画布类名、指针捕获与预览层清理。 */
+  function fakeCanvas() {
+    return {
+      classList: { add: vi.fn(), remove: vi.fn() },
+      hasPointerCapture: () => false,
+      releasePointerCapture: vi.fn(),
+      getBoundingClientRect: () => ({ width: 100, height: 100, left: 0, top: 0 }),
+    };
+  }
+
+  function drawingRenderer(options: Record<string, unknown> = {}) {
+    return rendererWith({
+      loaded: true,
+      destroyed: false,
+      locked: false,
+      tool: "select",
+      images: [],
+      selectedIds: new Set<number>(),
+      dragBefore: [],
+      marqueeBaseIds: new Set<number>(),
+      history: [],
+      historyIndex: 0,
+      canvas: fakeCanvas(),
+      viewport: { centerX: 0, centerY: 0, height: 100 },
+      cssHeight: 100,
+      defaultWorldUnitsPerCssPixel: 1,
+      strokeColor: "#ff0000",
+      strokeWidthValue: 6,
+      clearStrokePreview: vi.fn(),
+      emitState: vi.fn(),
+      refreshSelectionVisuals: vi.fn(),
+      updateMarqueeOverlay: vi.fn(),
+      onStrokeCommit: vi.fn(),
+      ...options,
+    });
+  }
+
+  it("refuses to switch tools while the board is locked", () => {
+    const renderer = drawingRenderer({ locked: true });
+    renderer.setTool("pen");
+    expect((renderer as unknown as { tool: string }).tool).toBe("select");
+  });
+
+  it("drops selection and marquee state when a drawing tool is picked", () => {
+    const selectedIds = new Set([3]);
+    const marqueeBaseIds = new Set([3]);
+    const renderer = drawingRenderer({ selectedIds, marqueeBaseIds });
+
+    renderer.setTool("pen");
+
+    expect((renderer as unknown as { tool: string }).tool).toBe("pen");
+    expect(selectedIds.size).toBe(0);
+    expect(marqueeBaseIds.size).toBe(0);
+  });
+
+  it("cancels an in-flight drawing instead of committing it", () => {
+    const onStrokeCommit = vi.fn();
+    const draft = beginStrokeDraft("pen", [0, 0]);
+    extendStrokeDraft(draft, [50, 50], false);
+    const renderer = drawingRenderer({
+      draft,
+      dragMode: "draw",
+      dragPointerId: null,
+      onStrokeCommit,
+    });
+
+    (renderer as unknown as { finishInteraction: () => void }).finishInteraction();
+
+    // 锁定、切画板、失焦都走 finishActiveInteraction：没有落库就什么也不该发生。
+    expect(onStrokeCommit).not.toHaveBeenCalled();
+    expect((renderer as unknown as { draft: unknown }).draft).toBeNull();
+    expect((renderer as unknown as { dragMode: unknown }).dragMode).toBeNull();
+  });
+
+  it("hands the encoded stroke to the controller and keeps the preview until it lands", () => {
+    const onStrokeCommit = vi.fn();
+    const draft = beginStrokeDraft("pen", [0, 0]);
+    extendStrokeDraft(draft, [100, 50], false);
+    const renderer = drawingRenderer({ draft, dragMode: "draw", onStrokeCommit });
+
+    (renderer as unknown as { commitDrawing: () => void }).commitDrawing();
+
+    expect(onStrokeCommit).toHaveBeenCalledTimes(1);
+    const request = onStrokeCommit.mock.calls[0][0];
+    expect(request.tool).toBe("pen");
+    expect(request.color).toBe("#ff0000");
+    expect(request.strokeWidth).toBe(6);
+    // 墨迹外框：点中心极值 ± 半个线宽。
+    expect(request.width).toBeCloseTo(106, 6);
+    expect(request.height).toBeCloseTo(56, 6);
+    expect(decodeStrokeHeader(request.geometry).tool).toBe(STROKE_TOOL.pen);
+    // 落库要几个往返：预览留到新笔迹进缓冲，避免中途闪一下空白。
+    expect((renderer as unknown as { dragMode: unknown }).dragMode).toBeNull();
+    expect((renderer as unknown as { draft: unknown }).draft).not.toBeNull();
+
+    renderer.clearPendingStrokePreview();
+    expect((renderer as unknown as { draft: unknown }).draft).toBeNull();
+  });
+
+  it("keeps a new drawing's preview when the previous commit lands", () => {
+    const draft = beginStrokeDraft("pen", [0, 0]);
+    const renderer = drawingRenderer({ draft, dragMode: "draw" });
+
+    renderer.clearPendingStrokePreview();
+
+    // 正在画下一笔时不动：那一笔的预览已经取代了上一条。
+    expect((renderer as unknown as { draft: unknown }).draft).toBe(draft);
+  });
+
+  it("treats a click without a drag as a cancelled stroke", () => {
+    const onStrokeCommit = vi.fn();
+    const draft = beginStrokeDraft("rect", [0, 0]);
+    extendStrokeDraft(draft, [1, 1], false);
+    const renderer = drawingRenderer({ draft, dragMode: "draw", onStrokeCommit });
+
+    (renderer as unknown as { commitDrawing: () => void }).commitDrawing();
+
+    // 1 个世界单位 = 1 CSS 像素，低于 3 像素的最小拖拽距离。
+    expect(onStrokeCommit).not.toHaveBeenCalled();
   });
 });

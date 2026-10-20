@@ -12,6 +12,7 @@ import { reorderBoardIds, type BoardDropPosition } from "./boardOrder";
 import { registerPinBoardLifecycleParticipant } from "./lifecycle";
 import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
 import { getBoardSession, getSelectedBoardId, setSelectedBoardId } from "./session";
+import { strokeToolId, type PinBoardTool, type StrokeCommitRequest } from "./strokeDrawing";
 import { textureBudgetsForLevel } from "./texturePolicy";
 import {
   exportTextMaxDimension,
@@ -46,6 +47,7 @@ const DEFAULT_INTERACTION: PinBoardInteractionState = {
   saving: false,
   locked: true,
   zoomPercent: 100,
+  tool: "select",
 };
 
 async function clipboardImageBytes(): Promise<number[] | null> {
@@ -101,6 +103,9 @@ export interface PinBoardController {
   importImages: () => Promise<void>;
   importDroppedFiles: (files: FileList, clientX: number, clientY: number) => Promise<void>;
   addText: (text: string, fontSize: number, color: string, placement: [number, number]) => Promise<void>;
+  setTool: (tool: PinBoardTool) => void;
+  /** 提交一笔刚画完的笔迹：先落地未保存的改动，再创建条目。 */
+  commitStroke: (request: StrokeCommitRequest) => void;
   deleteImages: () => void;
   exportImages: () => Promise<void>;
 }
@@ -142,6 +147,11 @@ export function usePinBoardController({
    */
   const artworkIdRef = useRef(artworkId);
   artworkIdRef.current = artworkId;
+  /** 笔迹创建的串行队列：两笔并发落库会撞上同一个 revision。 */
+  const strokeQueueRef = useRef<Promise<void>>(Promise.resolve());
+  /** 当前选中的画板：排队中的提交按入队时的画板写，切走之后不再动旧画板。 */
+  const selectedBoardRef = useRef<number | null>(selected);
+  selectedBoardRef.current = selected;
 
   const applyRenderer = useCallback((next: PinBoardRenderer | null) => {
     rendererRef.current = next;
@@ -664,6 +674,65 @@ export function usePinBoardController({
     }
   }, [replaceAfterImageMutation, selected]);
 
+  const setTool = useCallback((tool: PinBoardTool) => {
+    const current = rendererRef.current;
+    if (!current) return;
+    current.setTool(tool);
+    setInteraction(current.interactionState);
+  }, []);
+
+  /**
+   * 提交一笔刚画完的笔迹。
+   *
+   * 与文字条目同一条写入链路，但不复用 `replaceAfterImageMutation`：它会在成功后
+   * 写一条状态栏文案，而画板状态栏是 34px 的独立一行——每画一笔弹一次会让画布
+   * 上下跳动。失败仍然走状态栏。
+   *
+   * 串行化是必需的：`create_pin_board_stroke` 带 revision 校验，两笔并发落库会
+   * 拿着同一个 revision，后一笔被判成「画板已被其他窗口修改」。
+   */
+  const commitStroke = useCallback((request: StrokeCommitRequest) => {
+    const boardId = selectedBoardRef.current;
+    if (boardId === null) return;
+    strokeQueueRef.current = strokeQueueRef.current.then(async () => {
+      const current = rendererRef.current;
+      if (!current || current.currentBoardId !== boardId || current.interactionState.locked) {
+        current?.clearPendingStrokePreview();
+        return;
+      }
+      // 先落地未保存的变换：创建命令会推进 revision，若把内存里未写库的改动一起
+      // 记成「已保存」，切换画板时它们就会被丢掉。
+      if (!await current.save()) {
+        current.clearPendingStrokePreview();
+        return;
+      }
+      if (current.currentBoardId !== boardId) return;
+      try {
+        const result = await pinBoardApi.createPinBoardStroke(
+          boardId,
+          strokeToolId(request.tool),
+          request.color,
+          request.strokeWidth,
+          request.width,
+          request.height,
+          request.geometry,
+          request.centerX,
+          request.centerY,
+          current.boardRevision,
+        );
+        if (current.currentBoardId !== boardId) return;
+        current.applyMutationResult(result.view, result.itemIds);
+        setInteraction(current.interactionState);
+      } catch (error) {
+        if (current.currentBoardId === boardId) {
+          // 提交失败就把预览撤掉，别在画布上留一条不存在的笔迹。
+          current.clearPendingStrokePreview();
+          setStatus(errorMessage(error));
+        }
+      }
+    }).catch((error) => setStatus(errorMessage(error)));
+  }, []);
+
   const deleteImages = useCallback(() => {
     rendererRef.current?.deleteSelected();
   }, []);
@@ -735,6 +804,8 @@ export function usePinBoardController({
     importImages,
     importDroppedFiles,
     addText,
+    setTool,
+    commitStroke,
     deleteImages,
     exportImages,
   };

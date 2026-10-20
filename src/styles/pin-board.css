@@ -129,6 +129,76 @@
 .pin-board-divider { width: 1px; height: 20px; margin: 0 5px; background: var(--border); flex: none; }
 .pin-board-zoom { min-width: 42px; color: var(--pb-text-soft); font-size: 11px; text-align: center; }
 
+/* 标注工具条：浮在画布内、靠下居中的一条胶囊，不再占固定行。 */
+.pin-board-drawbar {
+  position: absolute;
+  z-index: 4;
+  bottom: 16px;
+  left: 50%;
+  display: flex;
+  max-width: calc(100% - 24px);
+  box-sizing: border-box;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
+  padding: 5px 10px;
+  border: 1px solid var(--pb-border-strong);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pb-surface-raised) 94%, transparent);
+  box-shadow: var(--pb-shadow-modal);
+  transform: translateX(-50%);
+}
+/* 工具条收起后自身不可见，显隐只由快捷键 T 负责，条上不放显隐按钮。 */
+.pin-board-drawbar::-webkit-scrollbar { display: none; }
+.pin-board-tools { display: flex; align-items: center; gap: 2px; }
+.pin-board-tools .icon-button.active {
+  color: var(--pb-accent-text);
+  background: var(--pb-accent-soft);
+}
+.pin-board-stroke-style { display: flex; align-items: center; gap: 8px; }
+.pin-board-drawbar .pin-board-color-field { width: 146px; }
+.pin-board-drawbar .pin-board-color-trigger { height: 30px; gap: 7px; padding: 0 8px; border-radius: 7px; }
+.pin-board-drawbar .pin-board-color-swatch { width: 16px; height: 16px; border-radius: 4px; }
+.pin-board-drawbar .pin-board-color-hex { font-size: 11px; }
+.pin-board-stroke-width {
+  display: flex;
+  height: 30px;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 1px solid var(--control-border);
+  border-radius: 7px;
+  color: var(--pb-text-soft);
+  background: var(--control-bg);
+  font-size: 11px;
+}
+/* 文字必须单行：滑条与数值框会挤占宽度，换行后「线宽」会竖排。 */
+.pin-board-stroke-width > span { flex: none; white-space: nowrap; }
+.pin-board-stroke-width input[type="number"] {
+  width: 44px;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+  outline: none;
+  appearance: textfield;
+}
+.pin-board-stroke-width input[type="number"]::-webkit-outer-spin-button,
+.pin-board-stroke-width input[type="number"]::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+.pin-board-stroke-width-range {
+  width: 84px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+  cursor: pointer;
+}
+
 .pin-board-status {
   display: flex;
   height: 34px;
@@ -219,11 +289,11 @@
   animation: pin-board-drop-frame-in 140ms ease-out;
 }
 .pin-board-stage.drop-active { box-shadow: inset 0 0 26px color-mix(in srgb, var(--accent) 10%, transparent); }
-/* 投放提示贴在底部中央的小胶囊里，避免遮挡画布。 */
+/* 投放提示贴在底部中央的小胶囊里，抬到浮动工具条之上，避免两者重叠。 */
 .pin-board-drop-hint {
   position: absolute;
   z-index: 3;
-  bottom: 18px;
+  bottom: 76px;
   left: 50%;
   display: flex;
   align-items: center;
@@ -287,7 +357,18 @@
 .pin-board-canvas.scaling-image,
 .pin-board-canvas.over-resize-nwse { cursor: nwse-resize; }
 .pin-board-canvas.over-resize-nesw { cursor: nesw-resize; }
-.pin-board-canvas.selecting { cursor: crosshair; }
+.pin-board-canvas.selecting,
+.pin-board-canvas.drawing { cursor: crosshair; }
+
+/* 绘制预览层：只画当前这一笔，压在画布与占位层之上、选中框与框选矩形之下。 */
+.pin-board-draw-overlay {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
 
 /* 纹理未就绪时的图片占位：灰底方框标示图片范围，中心一个动态加载图标。 */
 .pin-board-placeholder-layer {
@@ -530,14 +611,13 @@
 }
 .pin-board-color-hex { flex: 1; text-align: left; font-size: 12px; font-variant-numeric: tabular-nums; }
 .pin-board-color-trigger svg { flex: none; color: var(--muted); }
+/* 取色浮层挂到页面根部：工具条的 overflow 会裁掉内联绝对定位的浮层。
+   z-index 要高于文字对话框（2300），它可能盖在全屏画布（2000）之上。 */
 .pin-board-color-popover {
-  position: absolute;
-  z-index: 20;
-  right: 0;
-  bottom: calc(100% + 8px);
+  position: fixed;
+  z-index: 2400;
   display: grid;
   width: 272px;
-  max-height: calc(100vh - 48px);
   gap: 12px;
   overflow-y: auto;
   padding: 12px;

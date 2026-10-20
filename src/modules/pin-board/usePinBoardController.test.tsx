@@ -77,6 +77,7 @@ function fakeRenderer(): PinBoardRenderer {
       saving: false,
       locked: false,
       zoomPercent: 100,
+      tool: "select",
     },
     save: vi.fn(async () => true),
     placementPoint: [0, 0] as [number, number],
@@ -85,6 +86,7 @@ function fakeRenderer(): PinBoardRenderer {
     setArrangementGapRatio: vi.fn(),
     setAutosaveEnabled: vi.fn(),
     setTextureCacheBudgets: vi.fn(),
+    setTool: vi.fn(),
     finishActiveInteraction: vi.fn(),
     finalize: vi.fn(async () => true),
   } as unknown as PinBoardRenderer;

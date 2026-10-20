@@ -19,6 +19,21 @@ import type {
 } from "./types";
 import { parseStrokeBatch, type PinBoardStrokeGeometry } from "./strokeGeometry";
 import {
+  DEFAULT_STROKE_COLOR,
+  DEFAULT_STROKE_WIDTH,
+  MIN_STROKE_DRAG_CSS_PIXELS,
+  beginStrokeDraft,
+  clampStrokeWidth,
+  extendStrokeDraft,
+  isStrokeTool,
+  resolveStrokeDraft,
+  strokeDraftPoints,
+  toolForShortcut,
+  type PinBoardTool,
+  type StrokeCommitRequest,
+  type StrokeDraft,
+} from "./strokeDrawing";
+import {
   STROKE_OUTLINE_VERTICES,
   STROKE_VERTEX_BYTES,
   buildStrokeBatch,
@@ -155,6 +170,8 @@ export interface PinBoardInteractionState {
   saving: boolean;
   locked: boolean;
   zoomPercent: number;
+  /** 当前工具：`select` 走选中/变换，其余五个进入绘制分支。 */
+  tool: PinBoardTool;
 }
 
 export interface PinBoardContextMenuRequest {
@@ -189,6 +206,18 @@ const GPU_RECOVERY_BACKOFF_MS = 600;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
+
+/** 指针拖拽的进行中状态；`draw` 是绘制工具下的那一支。 */
+type DragMode = "pan" | "images" | "marquee" | "rotate" | "scale" | "draw";
+/** 每种拖拽状态对应的画布光标类名。 */
+const DRAG_CURSOR_CLASS: Record<DragMode, string> = {
+  pan: "dragging",
+  images: "moving-image",
+  marquee: "selecting",
+  rotate: "rotating-image",
+  scale: "scaling-image",
+  draw: "drawing",
+};
 
 const SHADER = `
 struct Viewport { bounds: vec4f };
@@ -795,7 +824,7 @@ export class PinBoardRenderer {
   private savePromise: Promise<boolean> | null = null;
   private finalizePromise: Promise<boolean> | null = null;
   private locked = false;
-  private dragMode: "pan" | "images" | "marquee" | "rotate" | "scale" | null = null;
+  private dragMode: DragMode | null = null;
   private dragPointerId: number | null = null;
   private pointerX = 0;
   private pointerY = 0;
@@ -829,12 +858,21 @@ export class PinBoardRenderer {
   /** 可见笔迹的选中描边，按 `strokeOutlineIndex` 给出的槽位连续排布。 */
   private strokeOutlineBuffer: any = null;
   private readonly strokeOutlineIndex = new Map<number, number>();
+  /** 当前工具：绘制工具下指针按下进入绘制分支，不触发选中/框选。 */
+  private tool: PinBoardTool = "select";
+  /** 绘制样式由工具栏推入，落库与预览共用同一份值。 */
+  private strokeColor = DEFAULT_STROKE_COLOR;
+  private strokeWidthValue = DEFAULT_STROKE_WIDTH;
+  /** 正在进行的绘制草稿（世界坐标）；`null` 表示没有绘制。 */
+  private draft: StrokeDraft | null = null;
 
   private constructor(
     private readonly canvas: HTMLCanvasElement,
     private readonly selectionElement: HTMLElement,
     private readonly marqueeElement: HTMLElement,
     private readonly placeholderElement: HTMLElement,
+    /** 绘制预览层：DOM 2D canvas，只画当前草稿，不进 GPU 缓冲。 */
+    private readonly drawOverlay: HTMLCanvasElement,
     private gpu: GpuState,
     private arrangementGapRatio: number,
     private autosaveEnabled: boolean,
@@ -842,6 +880,7 @@ export class PinBoardRenderer {
     private readonly onState: (state: PinBoardInteractionState) => void,
     private readonly onSessionChange: (boardId: number, session: PinBoardViewSession) => void,
     private readonly onContextMenu: (request: PinBoardContextMenuRequest | null) => void,
+    private readonly onStrokeCommit: (request: StrokeCommitRequest) => void,
     cacheBudgets: PinBoardTextureBudgets,
   ) {
     // 构造函数只负责画布生命周期内一次性初始化；画板数据由 `loadBoard` 装载。
@@ -865,7 +904,7 @@ export class PinBoardRenderer {
     canvas.addEventListener("pointerdown", this.pointerDown);
     canvas.addEventListener("pointermove", this.pointerMove);
     canvas.addEventListener("pointerup", this.pointerUp);
-    canvas.addEventListener("pointercancel", this.pointerUp);
+    canvas.addEventListener("pointercancel", this.pointerCancel);
     canvas.addEventListener("wheel", this.wheel, { passive: false });
     canvas.addEventListener("contextmenu", this.contextMenu);
     this.resize();
@@ -966,12 +1005,14 @@ export class PinBoardRenderer {
     selectionElement: HTMLElement,
     marqueeElement: HTMLElement,
     placeholderElement: HTMLElement,
+    drawOverlay: HTMLCanvasElement,
     arrangementGapRatio: number,
     autosaveEnabled: boolean,
     onError: (message: string) => void,
     onState: (state: PinBoardInteractionState) => void,
     onSessionChange: (boardId: number, session: PinBoardViewSession) => void,
     onContextMenu: (request: PinBoardContextMenuRequest | null) => void,
+    onStrokeCommit: (request: StrokeCommitRequest) => void,
     cacheBudgets: PinBoardTextureBudgets = textureBudgetsForLevel(undefined),
   ): Promise<PinBoardRenderer> {
     const gpu = await makeGpu(canvas);
@@ -980,6 +1021,7 @@ export class PinBoardRenderer {
       selectionElement,
       marqueeElement,
       placeholderElement,
+      drawOverlay,
       gpu,
       arrangementGapRatio,
       autosaveEnabled,
@@ -987,6 +1029,7 @@ export class PinBoardRenderer {
       onState,
       onSessionChange,
       onContextMenu,
+      onStrokeCommit,
       cacheBudgets,
     );
     liveRenderers += 1;
@@ -1091,6 +1134,9 @@ export class PinBoardRenderer {
     this.failedTextureDimensions.clear();
     this.textureQualityCaps.clear();
     this.clearPlaceholderOverlay();
+    // 绘制草稿属于画板：换画板、卸载与销毁都不该留下半笔。
+    this.draft = null;
+    this.clearStrokePreview();
     this.releaseStrokeResources();
     this.visibleImages = [];
     this.history.length = 0;
@@ -1152,6 +1198,8 @@ export class PinBoardRenderer {
         `pin-board strokes loaded: boardId=${boardId}, strokes=${strokes.size}, bytes=${bytes.byteLength}`,
       );
       this.refreshViewport(0);
+      // 新笔迹已经进缓冲：等落库的预览到这一步才撤，中途不会闪空白。
+      this.clearPendingStrokePreview();
     } catch (error) {
       if (this.destroyed || this.boardId !== boardId || token !== this.strokeLoadToken) return;
       diagnosticsLog("warn", `pin-board strokes failed: boardId=${boardId}, error=${errorMessage(error)}`);
@@ -1246,6 +1294,9 @@ export class PinBoardRenderer {
     this.imageById.clear();
     for (const image of this.images) this.imageById.set(image.itemId, image);
     this.revision = resolveBoardRevision(view.boardId, pending?.revision ?? view.revision);
+    // 装载到的 revision 是仓库当前事实：记进账本，避免账本里残留的旧值在装载
+    // 之后继续压过它（例如上次保存撞了冲突、之后重新打开画板时）。
+    recordBoardRevision(view.boardId, this.revision);
     this.finalized = false;
     this.finalizePromise = null;
     this.savePromise = null;
@@ -1336,10 +1387,12 @@ export class PinBoardRenderer {
     this.canvas.removeEventListener("pointerdown", this.pointerDown);
     this.canvas.removeEventListener("pointermove", this.pointerMove);
     this.canvas.removeEventListener("pointerup", this.pointerUp);
-    this.canvas.removeEventListener("pointercancel", this.pointerUp);
+    this.canvas.removeEventListener("pointercancel", this.pointerCancel);
     this.canvas.removeEventListener("wheel", this.wheel);
     this.canvas.removeEventListener("contextmenu", this.contextMenu);
     this.clearPlaceholderOverlay();
+    this.draft = null;
+    this.clearStrokePreview();
     this.releaseStrokeResources();
     for (const loaded of this.textures.values()) destroyTexture(loaded);
     this.textures.clear();
@@ -1409,6 +1462,52 @@ export class PinBoardRenderer {
     if (this.dragMode) this.finishInteraction();
   }
 
+  /**
+   * 切换工具。切到绘制工具时清空选中与框选残留：绘制中不该继续显示变换手柄，
+   * 也不该把上一轮的拖拽快照带进来。锁定时只能停在 `select`。
+   */
+  setTool(tool: PinBoardTool) {
+    if (!this.loaded || this.locked || this.tool === tool) return;
+    this.finishActiveInteraction();
+    this.tool = tool;
+    this.dragBefore = [];
+    this.marqueeBaseIds.clear();
+    this.updateMarqueeOverlay(null);
+    if (isStrokeTool(tool)) this.selectedIds.clear();
+    this.refreshSelectionVisuals();
+  }
+
+  /** 绘制样式：只影响之后画出的笔迹，不改已有条目。 */
+  setStrokeStyle(color: string, width: number) {
+    this.strokeColor = /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_STROKE_COLOR;
+    this.strokeWidthValue = clampStrokeWidth(width);
+    if (this.draft) this.drawStrokePreview();
+  }
+
+  /**
+   * 取消进行中的绘制。不产生条目，也不留预览：锁定、切换画板与释放指针捕获
+   * 都走这一条路径。
+   */
+  cancelDrawing() {
+    if (!this.draft && this.dragMode !== "draw") return;
+    this.draft = null;
+    this.clearStrokePreview();
+    this.releaseDrawingPointer();
+  }
+
+  /**
+   * 清掉「已提交、等落库」的预览。
+   *
+   * 落库要经过保存、创建与重读几何几个往返，pointerUp 时立刻清掉预览会闪一下空白，
+   * 所以预览一直留到新笔迹真正进缓冲为止（`loadStrokes`）或提交失败为止。
+   * 正在画下一笔时不动：那一笔的预览已经取代了它。
+   */
+  clearPendingStrokePreview() {
+    if (this.dragMode === "draw" || !this.draft) return;
+    this.draft = null;
+    this.clearStrokePreview();
+  }
+
   beginViewportResize() {
     this.preservedWorldUnitsPerCssPixel = this.worldUnitsPerCssPixel();
   }
@@ -1433,6 +1532,7 @@ export class PinBoardRenderer {
       zoomPercent: Math.round((
         this.defaultWorldUnitsPerCssPixel / this.worldUnitsPerCssPixel()
       ) * 100),
+      tool: this.tool,
     };
   }
 
@@ -1533,10 +1633,15 @@ export class PinBoardRenderer {
       const copy = cloneImage(image);
       this.images.push(copy);
       this.imageById.set(copy.itemId, copy);
-      this.selectedIds.add(copy.itemId);
+      // 绘制工具下不自动选中新条目：工具模式的指针只走绘制分支，包围框既拖不动、
+      // 也挡在下一笔落笔的位置上。只有回到选择工具才让新条目可变换。
+      if (this.tool === "select") this.selectedIds.add(copy.itemId);
     }
     const after = this.snapshot(itemIds);
     this.revision = view.revision;
+    // 新建命令（笔迹/文字/粘贴/导入）会推进后端 revision。这里必须同步推进共享
+    // 账本，否则下一次保存仍从账本取旧值，被后端判成「画板已被其他窗口修改」。
+    recordBoardRevision(this.boardId, view.revision);
     this.savedStateKey = this.stateKey();
     this.pushHistory(before, after);
     this.afterModelChange(itemIds);
@@ -1551,6 +1656,9 @@ export class PinBoardRenderer {
       this.onContextMenu(null);
     }
     this.locked = !this.locked;
+    // 锁定时绘制工具一并退出：工具栏上的工具按钮此时是禁用的，停留在「笔」上
+    // 只会让人以为还能画。
+    if (this.locked) this.tool = "select";
     this.refreshSelectionVisuals();
     this.emitState();
   }
@@ -1831,7 +1939,16 @@ export class PinBoardRenderer {
       this.deleteSelected();
       return;
     }
-    if (!(event.ctrlKey || event.metaKey)) return;
+    if (!(event.ctrlKey || event.metaKey)) {
+      if (!event.altKey && !event.shiftKey) {
+        const tool = toolForShortcut(event.key);
+        if (tool) {
+          event.preventDefault();
+          this.setTool(tool);
+        }
+      }
+      return;
+    }
     const key = event.key.toLowerCase();
     if (key === "s") {
       event.preventDefault();
@@ -1911,6 +2028,9 @@ export class PinBoardRenderer {
 
     if (event.button === 1 || this.locked) {
       this.dragMode = "pan";
+    } else if (isStrokeTool(this.tool)) {
+      // 绘制分支与选中/框选互斥：工具不是 select 时，按下只可能是要画一笔。
+      if (!this.beginDrawing(this.dragWorld)) return;
     } else if (this.rotationHandleHit(event.clientX, event.clientY)) {
       const selection = this.selectionWorldQuad();
       if (!selection) return;
@@ -1985,17 +2105,7 @@ export class PinBoardRenderer {
 
     this.dragPointerId = event.pointerId;
     this.canvas.setPointerCapture(event.pointerId);
-    this.canvas.classList.add(
-      this.dragMode === "pan"
-        ? "dragging"
-        : this.dragMode === "rotate"
-          ? "rotating-image"
-          : this.dragMode === "scale"
-            ? "scaling-image"
-            : this.dragMode === "images"
-              ? "moving-image"
-              : "selecting",
-    );
+    this.canvas.classList.add(this.dragMode ? DRAG_CURSOR_CLASS[this.dragMode] : "selecting");
     this.emitState();
     event.preventDefault();
   };
@@ -2039,7 +2149,14 @@ export class PinBoardRenderer {
         this.canvas.getBoundingClientRect(),
         this.viewport,
       );
-      if (this.dragMode === "images") {
+      if (this.dragMode === "draw") {
+        // 只更新草稿与 DOM 预览层：GPU 缓冲在落库后由 `applyMutationResult` 重建，
+        // 不在每次 pointermove 重建整板笔迹。
+        if (this.draft) {
+          extendStrokeDraft(this.draft, world, event.shiftKey);
+          this.drawStrokePreview();
+        }
+      } else if (this.dragMode === "images") {
         const deltaX = world[0] - this.dragWorld[0];
         const deltaY = world[1] - this.dragWorld[1];
         for (const snapshot of this.dragBefore) {
@@ -2104,11 +2221,28 @@ export class PinBoardRenderer {
 
   private readonly pointerUp = (event: PointerEvent) => {
     if (!this.dragMode || this.dragPointerId !== event.pointerId) return;
-    this.finishInteraction();
+    if (this.dragMode === "draw") this.commitDrawing();
+    else this.finishInteraction();
+    event.preventDefault();
+  };
+
+  /**
+   * 指针被系统收回（触摸被接管、窗口失焦等）：这一笔按取消处理，
+   * 与 `pointerup` 的「落库」区分开——事件已经不可信，不该拿半条轨迹建条目。
+   */
+  private readonly pointerCancel = (event: PointerEvent) => {
+    if (!this.dragMode || this.dragPointerId !== event.pointerId) return;
+    if (this.dragMode === "draw") this.cancelDrawing();
+    else this.finishInteraction();
     event.preventDefault();
   };
 
   private finishInteraction() {
+    // 绘制的中断路径（锁定、切画板、失焦）一律按取消处理：没有落库就什么也没发生。
+    if (this.dragMode === "draw") {
+      this.cancelDrawing();
+      return;
+    }
     const pointerId = this.dragPointerId;
     if ((this.dragMode === "images" || this.dragMode === "rotate" || this.dragMode === "scale")
       && this.dragBefore.length > 0) {
@@ -2134,11 +2268,167 @@ export class PinBoardRenderer {
       "rotating-image",
       "scaling-image",
       "selecting",
+      "drawing",
       "over-rotate-handle",
       "over-resize-nwse",
       "over-resize-nesw",
     );
     this.emitState();
+  }
+
+  /**
+   * 开始绘制。选中态先清掉：绘制中不该同时显示变换手柄；落库后的新条目只在
+   * `select` 工具下自动选中（见 `applyMutationResult`），绘制工具下保持干净。
+   */
+  private beginDrawing(world: Point): boolean {
+    if (!this.loaded || !isStrokeTool(this.tool)) return false;
+    this.selectedIds.clear();
+    this.refreshSelectionVisuals();
+    this.draft = beginStrokeDraft(this.tool, world);
+    this.dragMode = "draw";
+    this.drawStrokePreview();
+    return true;
+  }
+
+  /**
+   * 结束绘制：把草稿编码成落库请求并交给控制器。
+   *
+   * 预览层**先不清理**：落库要经过保存、创建与重读几何，立刻清掉会闪一下空白；
+   * 预览留到 `clearPendingStrokePreview` 被调用（新笔迹进缓冲或提交失败）。
+   * 拖拽距离不足（误点）或编码失败时按取消处理，不产生条目。
+   */
+  private commitDrawing() {
+    const draft = this.draft;
+    const request = draft
+      ? resolveStrokeDraft(
+        draft,
+        this.strokeWidthValue,
+        MIN_STROKE_DRAG_CSS_PIXELS * this.worldUnitsPerCssPixel(),
+      )
+      : null;
+    if (!draft || !request) {
+      this.cancelDrawing();
+      return;
+    }
+    this.releaseDrawingPointer();
+    this.onStrokeCommit({ ...request, color: this.strokeColor });
+  }
+
+  /** 交还指针与光标类，保留草稿（提交路径要留着预览）。 */
+  private releaseDrawingPointer() {
+    const pointerId = this.dragPointerId;
+    this.dragMode = null;
+    this.dragPointerId = null;
+    this.canvas.classList.remove("drawing");
+    if (pointerId !== null && this.canvas.hasPointerCapture(pointerId)) {
+      this.canvas.releasePointerCapture(pointerId);
+    }
+    this.emitState();
+  }
+
+  private clearStrokePreview() {
+    const overlay = this.drawOverlay;
+    const context = overlay?.getContext("2d");
+    if (!overlay || !context) return;
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, overlay.width, overlay.height);
+  }
+
+  /**
+   * 把当前草稿画到 DOM 叠加层上。坐标直接用世界单位：把变换设成「世界 → 设备像素」
+   * 之后，线宽与形状尺寸天然与落库后的渲染一致，不必两处各写一份换算。
+   */
+  private drawStrokePreview() {
+    const overlay = this.drawOverlay;
+    if (!overlay) return;
+    const context = overlay.getContext("2d");
+    if (!context) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const cssWidth = Math.max(rect.width, 1);
+    const cssHeight = Math.max(rect.height, 1);
+    const ratio = Math.max(1, window.devicePixelRatio || 1);
+    const pixelWidth = Math.max(1, Math.round(cssWidth * ratio));
+    const pixelHeight = Math.max(1, Math.round(cssHeight * ratio));
+    if (overlay.width !== pixelWidth || overlay.height !== pixelHeight) {
+      overlay.width = pixelWidth;
+      overlay.height = pixelHeight;
+    }
+    context.setTransform(1, 0, 0, 1, 0, 0);
+    context.clearRect(0, 0, overlay.width, overlay.height);
+    const draft = this.draft;
+    if (!draft || !this.loaded) return;
+    const bounds = viewportBounds(this.viewport, cssWidth, cssHeight);
+    const scale = pixelWidth / Math.max(bounds.maxX - bounds.minX, 1e-9);
+    context.setTransform(scale, 0, 0, -scale, -bounds.minX * scale, bounds.maxY * scale);
+    context.strokeStyle = this.strokeColor;
+    context.fillStyle = this.strokeColor;
+    context.lineWidth = this.strokeWidthValue;
+    context.lineJoin = "round";
+    context.lineCap = "round";
+    const points = strokeDraftPoints(draft);
+    const [start, end] = points;
+    switch (draft.tool) {
+      case "pen": {
+        if (points.length < 2) return;
+        context.beginPath();
+        context.moveTo(points[0][0], points[0][1]);
+        for (let index = 1; index < points.length; index += 1) {
+          context.lineTo(points[index][0], points[index][1]);
+        }
+        context.stroke();
+        return;
+      }
+      case "line":
+        this.strokePreviewSegment(context, start, end);
+        return;
+      case "arrow": {
+        const deltaX = end[0] - start[0];
+        const deltaY = end[1] - start[1];
+        const length = Math.hypot(deltaX, deltaY);
+        if (length < 1e-6) return;
+        const unitX = deltaX / length;
+        const unitY = deltaY / length;
+        const headLength = Math.min(length, Math.max(this.strokeWidthValue * 4, 1e-4));
+        const halfBase = headLength * 0.5;
+        const base: Point = [end[0] - unitX * headLength, end[1] - unitY * headLength];
+        // 杆止于三角形底边，与渲染层一致：圆头藏在箭头里，不会从箭尖后面冒出来。
+        this.strokePreviewSegment(context, start, base);
+        context.beginPath();
+        context.moveTo(end[0], end[1]);
+        context.lineTo(base[0] - unitY * halfBase, base[1] + unitX * halfBase);
+        context.lineTo(base[0] + unitY * halfBase, base[1] - unitX * halfBase);
+        context.closePath();
+        context.fill();
+        return;
+      }
+      case "rect": {
+        const left = Math.min(start[0], end[0]);
+        const top = Math.max(start[1], end[1]);
+        context.strokeRect(left, top, Math.abs(end[0] - start[0]), -Math.abs(end[1] - start[1]));
+        return;
+      }
+      default: {
+        const centerX = (start[0] + end[0]) / 2;
+        const centerY = (start[1] + end[1]) / 2;
+        const radiusX = Math.abs(end[0] - start[0]) / 2;
+        const radiusY = Math.abs(end[1] - start[1]) / 2;
+        if (!(radiusX > 0) || !(radiusY > 0)) return;
+        context.beginPath();
+        context.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
+        context.stroke();
+      }
+    }
+  }
+
+  private strokePreviewSegment(
+    context: CanvasRenderingContext2D,
+    start: Point,
+    end: Point,
+  ) {
+    context.beginPath();
+    context.moveTo(start[0], start[1]);
+    context.lineTo(end[0], end[1]);
+    context.stroke();
   }
 
   private readonly wheel = (event: WheelEvent) => {
@@ -2526,6 +2816,8 @@ export class PinBoardRenderer {
     this.syncStrokeBuffers();
     this.evictTextures();
     this.draw();
+    // 视口变化时预览层要跟着重算（缩放、窗口尺寸变化都走这里）。
+    if (this.draft) this.drawStrokePreview();
     this.scheduleLoads(loadDelay);
   }
 
