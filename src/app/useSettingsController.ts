@@ -9,6 +9,7 @@ import {
 import { open } from "@tauri-apps/plugin-dialog";
 import { appApi } from "./api";
 import {
+  PIN_BOARD_ARRANGEMENT_GAP_RATIO,
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
 } from "../modules/pin-board/PinBoardModule";
@@ -84,7 +85,7 @@ export interface SettingsController {
   busy: boolean;
   diagnostics: DiagnosticsStatus | null;
   pinBoardSettings: {
-    arrangementGapPx: number;
+    arrangementGapRatio: number;
     textureCacheLevel: PinBoardTextureCacheLevel;
     autosave: boolean;
     lockShortcut: string;
@@ -164,7 +165,7 @@ export function useSettingsController(notify: Notify): SettingsController {
   }, [repository]);
 
   const pinBoardSettings = useMemo(() => ({
-    arrangementGapPx: snapshot?.settings.pinBoard?.arrangementGapPx ?? 10,
+    arrangementGapRatio: snapshot?.settings.pinBoard?.arrangementGapRatio ?? PIN_BOARD_ARRANGEMENT_GAP_RATIO,
     textureCacheLevel: snapshot?.settings.pinBoard?.textureCacheLevel ?? "medium",
     autosave: snapshot?.settings.pinBoard?.autosave ?? false,
     lockShortcut: snapshot?.settings.pinBoard?.lockShortcut ?? PIN_BOARD_LOCK_SHORTCUT,

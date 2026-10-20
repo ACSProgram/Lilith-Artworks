@@ -7,11 +7,26 @@ export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
  * 默认值由设置页与 `useSettingsController` 决定，模块只消费。
  */
 export interface PinBoardModuleSettings {
-  arrangementGapPx: number;
+  /** 阵列间距：相对统一图片高度的比例，`0` 表示图片紧贴。 */
+  arrangementGapRatio: number;
   textureCacheLevel: PinBoardTextureCacheLevel;
   autosave: boolean;
   lockShortcut: string;
   fullscreenShortcut: string;
+}
+
+/** 阵列排序的单张输入：当前显示尺寸与世界坐标下的中心点。 */
+export interface PinBoardArrangeItem {
+  itemId: number;
+  width: number;
+  height: number;
+  centerX: number;
+  centerY: number;
+}
+
+export interface PinBoardArrangeResult {
+  itemId: number;
+  points: PinBoardItem["points"];
 }
 
 /** 画板摘要：`deleted` 为 true 时条目位于画板回收站。 */

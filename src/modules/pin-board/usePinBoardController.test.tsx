@@ -35,7 +35,7 @@ vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 import { usePinBoardController } from "./usePinBoardController";
 
 const settings = {
-  arrangementGapPx: 10,
+  arrangementGapRatio: 0.06,
   textureCacheLevel: "medium" as const,
   autosave: false,
   lockShortcut: "CommandOrControl+R",
@@ -69,6 +69,7 @@ function fakeRenderer(): PinBoardRenderer {
     interactionState: {
       imageCount: 0,
       selectedCount: 0,
+      arrangeableCount: 0,
       canUndo: false,
       canRedo: false,
       dirty: false,
@@ -78,10 +79,9 @@ function fakeRenderer(): PinBoardRenderer {
     },
     save: vi.fn(async () => true),
     placementPoint: [0, 0] as [number, number],
-    placementGap: () => 10,
     applyMutationResult: vi.fn(),
     setActive: vi.fn(),
-    setArrangementGapCssPixels: vi.fn(),
+    setArrangementGapRatio: vi.fn(),
     setAutosaveEnabled: vi.fn(),
     setTextureCacheBudgets: vi.fn(),
     finishActiveInteraction: vi.fn(),

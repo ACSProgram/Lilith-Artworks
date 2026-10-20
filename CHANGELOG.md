@@ -15,6 +15,39 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- The pin board's `阵列排序` is rewritten, and the placement math now lives in a
+  single native implementation (`src-tauri/src/pin_board/arrange.rs`) shared by
+  arrange, paste and import. The old code had two defects: it derived the gap
+  from screen pixels, so the same gesture produced different spacing at
+  different zoom levels, and it sorted each row by width after wrapping, which
+  scrambled the relative positions the user had set — most visibly when the
+  last row held a single image, that lone item was lifted to the top and
+  centred. The new algorithm fixes the order before laying out and only once:
+  the common height is the median of the source heights, the order is reading
+  order (banded by y, then by x inside a band), wrapping uses dynamic
+  programming that minimises each row's deviation from the target width, and
+  the block is then translated back onto the trimmed bounding box's centre. The
+  overall aspect ratio follows the original selection and the row count is
+  `sqrt(count / aspect)`, so a single line stays one row and a column stays one
+  image per row; a lone outlier changes neither the shape nor drags the block
+  away. Arrange only handles bitmaps: text items no longer take part, because
+  stretching their quad does not change `fontSize`, so the glyphs would be
+  distorted.
+- The `阵列图片间距` setting is now a percentage of the common image height
+  (`arrangementGapRatio`, default 6%, range 0–20%); `0` makes images touch and
+  can be used for contact-sheet layouts. Arrange and import share the same
+  value. After the rename the old `arrangementGapPx` key in an existing settings
+  file is ignored silently by the container-level `#[serde(default)]`, so the
+  settings version does not need to be bumped.
+
+### Fixed
+
+- The arrange path's common height is the median of the source heights instead
+  of the maximum, so one oversized image no longer scales every other image up
+  to its height.
+
 ## 0.3.0-alpha.4 - 2026-10-20
 
 ### Added

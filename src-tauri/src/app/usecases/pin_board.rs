@@ -198,7 +198,7 @@ pub(crate) fn paste_images(
     images: &[PinBoardClipboardImage],
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: &str,
 ) -> Result<(PinBoardView, Vec<i64>), CommandError> {
     context.run_repository_write(|session| {
@@ -210,7 +210,7 @@ pub(crate) fn paste_images(
             images,
             center_x,
             center_y,
-            gap,
+            gap_ratio,
             expected_revision,
         )
         .map_err(CommandError::from)
@@ -223,7 +223,7 @@ pub(crate) fn import_images(
     paths: &[String],
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: &str,
     on_progress: impl FnMut(usize, usize),
 ) -> Result<(PinBoardView, Vec<i64>), CommandError> {
@@ -236,7 +236,7 @@ pub(crate) fn import_images(
             paths,
             center_x,
             center_y,
-            gap,
+            gap_ratio,
             expected_revision,
             on_progress,
         )

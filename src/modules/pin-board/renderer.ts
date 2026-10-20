@@ -8,6 +8,7 @@ import {
   takeBoardSettle,
 } from "./pendingSettle";
 import type {
+  PinBoardArrangeResult,
   PinBoardClipboardImage,
   PinBoardEditableItem,
   PinBoardItem,
@@ -17,7 +18,6 @@ import type {
 } from "./types";
 import {
   DEFAULT_VIEWPORT,
-  arrangeImages,
   fitViewportToBounds,
   imageBounds,
   imageDisplayMaxDimension,
@@ -134,6 +134,8 @@ type HistoryEntry = {
 export interface PinBoardInteractionState {
   imageCount: number;
   selectedCount: number;
+  /** 选中里可参与阵列排序的位图数量（文字条目不参与）。 */
+  arrangeableCount: number;
   canUndo: boolean;
   canRedo: boolean;
   dirty: boolean;
@@ -146,6 +148,7 @@ export interface PinBoardContextMenuRequest {
   clientX: number;
   clientY: number;
   selectedCount: number;
+  arrangeableCount: number;
   targetImage: boolean;
   canEditBoard: boolean;
   canEditSelection: boolean;
@@ -656,7 +659,7 @@ export class PinBoardRenderer {
     private readonly marqueeElement: HTMLElement,
     private readonly placeholderElement: HTMLElement,
     private gpu: GpuState,
-    private arrangementGapCssPixels: number,
+    private arrangementGapRatio: number,
     private autosaveEnabled: boolean,
     private readonly onError: (message: string) => void,
     private readonly onState: (state: PinBoardInteractionState) => void,
@@ -783,7 +786,7 @@ export class PinBoardRenderer {
     selectionElement: HTMLElement,
     marqueeElement: HTMLElement,
     placeholderElement: HTMLElement,
-    arrangementGapCssPixels: number,
+    arrangementGapRatio: number,
     autosaveEnabled: boolean,
     onError: (message: string) => void,
     onState: (state: PinBoardInteractionState) => void,
@@ -798,7 +801,7 @@ export class PinBoardRenderer {
       marqueeElement,
       placeholderElement,
       gpu,
-      arrangementGapCssPixels,
+      arrangementGapRatio,
       autosaveEnabled,
       onError,
       onState,
@@ -1071,8 +1074,9 @@ export class PinBoardRenderer {
     }
   }
 
-  setArrangementGapCssPixels(gap: number) {
-    this.arrangementGapCssPixels = gap;
+  /** 阵列间距：相对统一图片高度的比例，`0` 表示图片紧贴。 */
+  setArrangementGapRatio(ratio: number) {
+    this.arrangementGapRatio = ratio;
   }
 
   /** 配置的缓存等级变化时更新 GPU 缓存预算；下次淘汰/预留立即按新预算执行。 */
@@ -1099,6 +1103,7 @@ export class PinBoardRenderer {
     return {
       imageCount: this.images.filter((image) => !image.deleted).length,
       selectedCount: this.selectedImages().length,
+      arrangeableCount: this.selectedImages().filter((image) => image.kind === "bitmap").length,
       canUndo: !this.locked && this.historyIndex > 0,
       canRedo: !this.locked && this.historyIndex < this.history.length,
       dirty: this.dirty,
@@ -1116,10 +1121,6 @@ export class PinBoardRenderer {
 
   get placementPoint(): Point {
     return this.cursorWorld ? [...this.cursorWorld] as Point : [this.viewport.centerX, this.viewport.centerY];
-  }
-
-  placementGap(cssPixels: number): number {
-    return this.worldUnitsPerCssPixel() * cssPixels;
   }
 
   copySelection(): PinBoardClipboardImage[] {
@@ -1297,15 +1298,39 @@ export class PinBoardRenderer {
     });
   }
 
-  arrangeSelected() {
-    const selected = this.selectedImages();
-    if (selected.length < 2 || this.locked) return;
-    const center = imagesCenter(selected);
-    const gap = this.worldUnitsPerCssPixel() * this.arrangementGapCssPixels;
-    const arranged = arrangeImages(selected, center, gap);
+  /**
+   * 阵列排序：只处理位图条目。
+   *
+   * 几何计算统一在 Rust 侧完成（`arrange_pin_board_images` 是纯计算命令，不写库），
+   * 这里只负责收集输入、把结果交回 `commitMutation`。撤销栈、脏标记与自动保存因此
+   * 与其它几何操作完全一致。文字条目被排除：它的 quad 被拉伸时 `fontSize` 不会跟着
+   * 变，字会被拉变形。
+   */
+  async arrangeSelected(): Promise<void> {
+    if (this.locked) return;
+    this.finishActiveInteraction();
+    const bitmaps = this.selectedImages().filter((image) => image.kind === "bitmap");
+    if (bitmaps.length < 2) return;
+    const items = bitmaps.map((image) => {
+      const [width, height] = imageSize(image);
+      const [centerX, centerY] = quadCenter(image.points);
+      return { itemId: image.itemId, width, height, centerX, centerY };
+    });
+    const boardId = this.boardId;
+    let arranged: PinBoardArrangeResult[];
+    try {
+      arranged = await pinBoardApi.arrangePinBoardImages(items, this.arrangementGapRatio);
+    } catch (error) {
+      diagnosticsLog("error", `pin-board arrange failed: ${errorMessage(error)}`);
+      this.onError(errorMessage(error));
+      return;
+    }
+    // 计算是异步的：结果回来时画板可能已经切换，落位必须丢弃。
+    if (this.boardId !== boardId || this.destroyed || this.locked) return;
+    const points = new Map(arranged.map((entry) => [entry.itemId, entry.points]));
     this.commitMutation((image) => {
-      const points = arranged.get(image.itemId);
-      if (points) image.points = points;
+      const next = points.get(image.itemId);
+      if (next) image.points = next;
     });
   }
 
@@ -1830,6 +1855,7 @@ export class PinBoardRenderer {
       clientX: event.clientX,
       clientY: event.clientY,
       selectedCount: this.selectedImages().length,
+      arrangeableCount: this.selectedImages().filter((image) => image.kind === "bitmap").length,
       targetImage: Boolean(hit && !this.locked),
       canEditBoard: !this.locked,
       canEditSelection: !this.locked && this.selectedIds.size > 0,

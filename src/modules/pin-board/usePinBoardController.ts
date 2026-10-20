@@ -38,6 +38,7 @@ const DROP_IMAGE_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif)$/i;
 const DEFAULT_INTERACTION: PinBoardInteractionState = {
   imageCount: 0,
   selectedCount: 0,
+  arrangeableCount: 0,
   canUndo: false,
   canRedo: false,
   dirty: false,
@@ -169,8 +170,8 @@ export function usePinBoardController({
   }, [active]);
 
   useEffect(() => {
-    rendererRef.current?.setArrangementGapCssPixels(settings.arrangementGapPx);
-  }, [settings.arrangementGapPx]);
+    rendererRef.current?.setArrangementGapRatio(settings.arrangementGapRatio);
+  }, [settings.arrangementGapRatio]);
 
   useEffect(() => {
     rendererRef.current?.setAutosaveEnabled(settings.autosave);
@@ -501,11 +502,11 @@ export function usePinBoardController({
         clipboardRef.current,
         centerX,
         centerY,
-        current.placementGap(settings.arrangementGapPx),
+        settings.arrangementGapRatio,
         revision,
       );
     }, (count) => `已粘贴 ${count} 张图片`);
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
+  }, [replaceAfterImageMutation, selected, settings.arrangementGapRatio]);
 
   const importImages = useCallback(async () => {
     const current = rendererRef.current;
@@ -551,7 +552,7 @@ export function usePinBoardController({
           paths,
           centerX,
           centerY,
-          renderer.placementGap(settings.arrangementGapPx),
+          settings.arrangementGapRatio,
           revision,
         );
       }, (count) => `已导入 ${count} 张图片`);
@@ -561,7 +562,7 @@ export function usePinBoardController({
       setTransferProgress(null);
       transferBusyRef.current = false;
     }
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
+  }, [replaceAfterImageMutation, selected, settings.arrangementGapRatio]);
 
   const importDroppedFiles = useCallback(async (
     files: FileList,
@@ -582,7 +583,6 @@ export function usePinBoardController({
     transferBusyRef.current = true;
     transferOperationId.current = null;
     current.setPlacementFromClient(clientX, clientY);
-    const gap = current.placementGap(settings.arrangementGapPx);
     let [centerX, centerY] = current.placementPoint;
     try {
       let imported = 0;
@@ -604,10 +604,16 @@ export function usePinBoardController({
         imported += result.itemIds.length;
         const placed = result.view.items.find((image) => result.itemIds.includes(image.itemId));
         if (placed) {
-          centerX += Math.hypot(
+          // 逐张落位时按「图高的比例」递进，与阵列间距同一口径。
+          const placedWidth = Math.hypot(
             placed.points[1][0] - placed.points[0][0],
             placed.points[1][1] - placed.points[0][1],
-          ) + gap;
+          );
+          const placedHeight = Math.hypot(
+            placed.points[0][0] - placed.points[3][0],
+            placed.points[0][1] - placed.points[3][1],
+          );
+          centerX += placedWidth + placedHeight * settings.arrangementGapRatio;
         }
       }
       if (imported > 0) setStatus(`已导入 ${imported} 张图片`);
@@ -617,7 +623,7 @@ export function usePinBoardController({
       setTransferProgress(null);
       transferBusyRef.current = false;
     }
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapPx]);
+  }, [replaceAfterImageMutation, selected, settings.arrangementGapRatio]);
 
   const addText = useCallback(async (
     text: string,

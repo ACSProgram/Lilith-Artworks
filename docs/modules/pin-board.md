@@ -13,6 +13,7 @@
 - 添加文字对话框与内置取色器：`PinBoardModule.tsx`、`PinBoardColorPicker.tsx`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
+- 阵列排序（统一高度、阅读序、断行、落位）：`src-tauri/src/pin_board/arrange.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 素材板表定义（仓库 schema v5 起为多态条目）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
 
@@ -122,8 +123,8 @@ SQLite:
 - 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
 - 撤销历史只存在于当前会话内存，重开画板后不能撤销。
 - 图层由 `layer`（底层/中层/顶层）与 `sort_order` 共同决定；新图片统一进入中层并占据最优先顺序；
-- 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；
-- 拖放导入：把图片文件拖到画布区（`.pin-board-stage`）即可导入，放置点对齐鼠标落点，多张一起拖入时按前一张的显示宽度向右排开；悬停时只描一圈渐变边并在底部显示小胶囊提示，不遮盖画布内容。窗口以 `dragDropEnabled: false` 运行（Windows 上使用 HTML5 拖放的前提），因此 webview **不暴露文件系统路径**，导入走 `import_pin_board_clipboard_image` 的字节链路，只接受可被内容嗅探识别的位图（PNG/JPEG/WebP/BMP/GIF）；需要路径的 DDS/TGA 仍通过「导入图片」选择器处理。画板锁定时不导入并提示；
+- 阵列排序（`src-tauri/src/pin_board/arrange.rs`，整理与导入落位共用同一份实现）：只处理位图条目，文字条目不参与——它的四边形被拉伸时 `fontSize` 不会跟着变，字会被拉变形。算法分四步，顺序只定一次、之后不再改写：统一高度取参与图片原始高度的中位数 → 阅读序（按 y 从高到低分带，带内按 x）→ 动态规划断行（最小化各行宽度与目标行宽的偏差）→ 逐行居中并按裁剪后的外框中心平移回原位。目标行数 `round(sqrt(张数 / 长宽比))` 夹到 `1..=张数`，长宽比取图片中心按名次剔除两端各 10% 后的区间，因此一字排会排成一行、竖列会排成一列，单张离群图既不改变整体形状、也不会把整块拽向自己。间距按「统一高度的比例」计算（设置项 `arrangementGapRatio`，默认 6%，范围 0–20%，`0` 表示图片紧贴），与画布缩放无关；旧实现用屏幕像素换算间距、并在断行之后按宽度对行内与行间各做了一次排序，会把用户摆好的相对位置打乱，已移除。整理的计算经纯计算命令 `arrange_pin_board_images` 完成，前端拿到位置后仍走 `commitMutation`，撤销栈与脏标记不变；
+- 拖放导入：把图片文件拖到画布区（`.pin-board-stage`）即可导入，放置点对齐鼠标落点，多张一起拖入时按前一张的显示宽度加一个与图高成比例的间距（与阵列间距同一口径）向右排开；悬停时只描一圈渐变边并在底部显示小胶囊提示，不遮盖画布内容。窗口以 `dragDropEnabled: false` 运行（Windows 上使用 HTML5 拖放的前提），因此 webview **不暴露文件系统路径**，导入走 `import_pin_board_clipboard_image` 的字节链路，只接受可被内容嗅探识别的位图（PNG/JPEG/WebP/BMP/GIF）；需要路径的 DDS/TGA 仍通过「导入图片」选择器处理。画板锁定时不导入并提示；
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；

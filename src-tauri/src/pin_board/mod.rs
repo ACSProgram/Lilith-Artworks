@@ -1,10 +1,12 @@
 //! 素材板（pin-board）领域模块：按 Artwork 的自由画布图片工作台。
 //!
 //! - 前端唯一入口为 `src/modules/pin-board/api.ts`，命令名与 DTO 以本模块为准；
-//! - 持久化见 `repository.rs`（schema v5 多态条目表），图像格式见 `dds.rs`；
+//! - 持久化见 `repository.rs`（schema v5 多态条目表），图像格式见 `dds.rs`，
+//!   阵列排序见 `arrange.rs`（整理与导入落位共用同一份实现）；
 //! - 普通浏览走共享读租约，保存/导入/粘贴/删除等变更走仓库 lease + 仓库操作锁
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
+pub(crate) mod arrange;
 mod contracts;
 pub(crate) mod dds;
 pub(crate) mod repository;
@@ -14,7 +16,7 @@ pub(crate) use contracts::PinBoardReferenceInventory;
 
 use std::path::Path;
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{ipc::Response, State};
 use tauri_plugin_fs::FsExt;
 
@@ -23,6 +25,7 @@ use crate::{
     cleanup, path_scope,
     platform::clipboard,
 };
+use arrange::{ArrangeItem, ArrangeOptions, HeightPolicy, ItemOrder};
 use repository::{
     EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView, SavePinBoardResult,
 };
@@ -213,7 +216,7 @@ pub(crate) async fn paste_pin_board_images(
     images: Vec<PinBoardClipboardImage>,
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: String,
 ) -> Result<PinBoardMutationResult, String> {
     let coordinator = coordinator.inner().clone();
@@ -225,7 +228,7 @@ pub(crate) async fn paste_pin_board_images(
                 &images,
                 center_x,
                 center_y,
-                gap,
+                gap_ratio,
                 &expected_revision,
             )?;
             Ok(PinBoardMutationResult { view, item_ids })
@@ -242,7 +245,7 @@ pub(crate) async fn import_pin_board_images(
     paths: Vec<String>,
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: String,
 ) -> Result<PinBoardMutationResult, String> {
     // 源图路径必须由文件选择器（或剪贴板读取命令）写入文件系统 scope；仓库边界校验
@@ -260,7 +263,7 @@ pub(crate) async fn import_pin_board_images(
                 &paths,
                 center_x,
                 center_y,
-                gap,
+                gap_ratio,
                 &expected_revision,
                 |current, total| {
                     context.report_progress("正在导入图片", current as u64, total as u64)
@@ -465,4 +468,66 @@ pub(crate) fn read_pin_board_clipboard_paths(
         }
     }
     Ok(paths)
+}
+
+/// 阵列排序的单张输入：当前显示尺寸与世界坐标下的中心点。
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PinBoardArrangeInput {
+    item_id: i64,
+    width: f64,
+    height: f64,
+    center_x: f64,
+    center_y: f64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PinBoardArrangeResult {
+    item_id: i64,
+    points: [[f64; 2]; 4],
+}
+
+/// 计算阵列排序后的位置，不写数据库。
+///
+/// 这是纯计算命令，因此刻意不经过 `OperationCoordinator`：没有仓库访问、没有
+/// 共享租约，前端拿到 points 后仍走既有的 `commitMutation`，撤销栈、脏标记和
+/// 自动保存的行为完全不变。间距按「统一高度的比例」传入，与画布缩放无关。
+#[tauri::command]
+pub(crate) fn arrange_pin_board_images(
+    items: Vec<PinBoardArrangeInput>,
+    gap_ratio: f64,
+) -> Result<Vec<PinBoardArrangeResult>, String> {
+    if items.len() < 2 {
+        return Err("至少需要两张图片才能阵列排序".into());
+    }
+    if !gap_ratio.is_finite() || !(0.0..=arrange::MAX_GAP_RATIO).contains(&gap_ratio) {
+        return Err("阵列间距超出允许范围".into());
+    }
+    let inputs = items
+        .iter()
+        .map(|item| ArrangeItem {
+            item_id: item.item_id,
+            width: item.width,
+            height: item.height,
+            center_x: item.center_x,
+            center_y: item.center_y,
+        })
+        .collect::<Vec<_>>();
+    let arranged = arrange::arrange(
+        &inputs,
+        ArrangeOptions {
+            order: ItemOrder::Reading,
+            height: HeightPolicy::Median,
+            gap_ratio,
+        },
+    );
+    // 尺寸退化的条目会被 `arrange` 跳过；少一张就少排一张，不因此让整个操作失败。
+    if arranged.len() < 2 {
+        return Err("可参与阵列排序的图片不足两张".into());
+    }
+    Ok(arranged
+        .into_iter()
+        .map(|(item_id, points)| PinBoardArrangeResult { item_id, points })
+        .collect())
 }

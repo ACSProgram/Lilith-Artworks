@@ -83,6 +83,16 @@ import { PinBoardColorPicker } from "./PinBoardColorPicker";
 export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+R";
 export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
 
+/**
+ * 阵列间距的默认值与上下限，单位是「统一图片高度的比例」。
+ *
+ * 与 Rust 侧 `pin_board::arrange::{DEFAULT_GAP_RATIO, MAX_GAP_RATIO}` 保持一致：
+ * 间距必须随图片大小走，不能按屏幕像素算，否则同一个操作在不同缩放下结果不同。
+ * 下限允许 `0`（图片紧贴，用于联络表式的拼接）；上限 20% 之后再大就看不出是阵列了。
+ */
+export const PIN_BOARD_ARRANGEMENT_GAP_RATIO = 0.06;
+export const PIN_BOARD_ARRANGEMENT_GAP_RATIO_MAX = 0.2;
+
 interface PinBoardModuleProps {
   artworkId: string;
   /** 工作区 keep-mounted 语义：非活跃时暂停全局键盘交互与在途纹理任务。 */
@@ -134,7 +144,7 @@ function afterLayoutSettles(): Promise<void> {
 function GpuCanvas({
   view,
   artworkId,
-  arrangementGapCssPixels,
+  arrangementGapRatio,
   autosaveEnabled,
   cacheBudgets,
   active,
@@ -146,7 +156,7 @@ function GpuCanvas({
 }: {
   view: PinBoardView | null;
   artworkId: string;
-  arrangementGapCssPixels: number;
+  arrangementGapRatio: number;
   autosaveEnabled: boolean;
   cacheBudgets: PinBoardTextureBudgets;
   active: boolean;
@@ -174,8 +184,8 @@ function GpuCanvas({
   activeRef.current = active;
   const artworkIdRef = useRef(artworkId);
   artworkIdRef.current = artworkId;
-  const gapRef = useRef(arrangementGapCssPixels);
-  gapRef.current = arrangementGapCssPixels;
+  const gapRef = useRef(arrangementGapRatio);
+  gapRef.current = arrangementGapRatio;
   const autosaveRef = useRef(autosaveEnabled);
   autosaveRef.current = autosaveEnabled;
   const cacheBudgetsRef = useRef(cacheBudgets);
@@ -230,7 +240,7 @@ function GpuCanvas({
             created.destroy(false);
             return null;
           }
-          created.setArrangementGapCssPixels(gapRef.current);
+          created.setArrangementGapRatio(gapRef.current);
           created.setAutosaveEnabled(autosaveRef.current);
           created.setTextureCacheBudgets(cacheBudgetsRef.current);
           created.setActive(activeRef.current);
@@ -468,7 +478,7 @@ function PinBoardContextMenu({
         { key: "sep-flip", divider: true },
         { key: "flip-h", label: "水平翻转", icon: <FlipHorizontal2 size={16} />, onClick: () => renderer.flipSelected(true) },
         { key: "flip-v", label: "垂直翻转", icon: <FlipVertical2 size={16} />, onClick: () => renderer.flipSelected(false) },
-        { key: "arrange", label: "阵列排序", icon: <LayoutGrid size={16} />, disabled: request.selectedCount < 2, onClick: () => renderer.arrangeSelected() },
+        { key: "arrange", label: "阵列排序", icon: <LayoutGrid size={16} />, disabled: request.arrangeableCount < 2, onClick: () => void renderer.arrangeSelected() },
         { key: "sep-layer", divider: true },
         { key: "layer-label", heading: true, label: "图层", icon: <Layers3 size={15} /> },
         { key: "layer-top", label: "顶层", icon: <span className="pin-board-layer-swatch top" />, onClick: () => renderer.setSelectedLayer(2) },
@@ -989,7 +999,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.rotateSelected(5))} title="顺时针旋转" aria-label="顺时针旋转"><RotateCw size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(true))} title="水平翻转" aria-label="水平翻转"><FlipHorizontal2 size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(false))} title="垂直翻转" aria-label="垂直翻转"><FlipVertical2 size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount < 2 || interaction.locked} onClick={() => run(() => renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.arrangeableCount < 2 || interaction.locked} onClick={() => run(() => void renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={copyImages} title="复制画板图片" aria-label="复制画板图片"><Copy size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.locked} onClick={() => void copyImageToClipboard()} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
             <button className="icon-button" disabled={!renderer || clipboardCount === 0 || interaction.locked} onClick={pasteImages} title="粘贴画板图片" aria-label="粘贴画板图片"><ClipboardPaste size={17} /></button>
@@ -1050,7 +1060,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           <GpuCanvas
             view={view}
             artworkId={artworkId}
-            arrangementGapCssPixels={settings.arrangementGapPx}
+            arrangementGapRatio={settings.arrangementGapRatio}
             autosaveEnabled={settings.autosave}
             cacheBudgets={textureBudgetsForLevel(settings.textureCacheLevel)}
             active={active}

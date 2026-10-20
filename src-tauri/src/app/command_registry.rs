@@ -104,5 +104,6 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::pin_board::read_pin_board_image_png,
         crate::pin_board::read_pin_board_texture,
         crate::pin_board::read_pin_board_clipboard_paths,
+        crate::pin_board::arrange_pin_board_images,
     ]
 }

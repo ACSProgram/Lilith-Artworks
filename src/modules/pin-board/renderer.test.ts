@@ -758,3 +758,75 @@ describe("pin-board renderer board switch", () => {
     expect(renderer.interactionState.dirty).toBe(true);
   });
 });
+
+describe("pin-board arrangement", () => {
+  const textItem = (itemId: number): PinBoardItem => ({
+    boardId: 1,
+    itemId,
+    kind: "text",
+    width: 10,
+    height: 10,
+    order: itemId,
+    layer: 1,
+    deleted: false,
+    points: [[0, 0], [80, 0], [80, -20], [0, -20]],
+    uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+    available: true,
+    text: "备注",
+    fontFamily: "sans-serif",
+    fontSize: 14,
+    color: "#ffffff",
+    align: "left",
+  });
+
+  it("sends only bitmap items to the native command and applies the result", async () => {
+    const bitmaps = [
+      boardImage(1, [[0, 0], [100, 0], [100, -50], [0, -50]]),
+      boardImage(2, [[200, 0], [260, 0], [260, -40], [200, -40]]),
+    ];
+    const commitMutation = vi.fn();
+    const renderer = rendererWith({
+      images: [...bitmaps, textItem(3)],
+      selectedIds: new Set([1, 2, 3]),
+      locked: false,
+      boardId: 1,
+      arrangementGapRatio: 0.06,
+      finishActiveInteraction: vi.fn(),
+      commitMutation,
+    });
+    const arrange = vi.spyOn(pinBoardApi, "arrangePinBoardImages").mockResolvedValue([
+      { itemId: 1, points: [[0, 0], [100, 0], [100, -50], [0, -50]] },
+      { itemId: 2, points: [[106, 0], [166, 0], [166, -40], [106, -40]] },
+    ]);
+
+    await renderer.arrangeSelected();
+
+    expect(arrange).toHaveBeenCalledTimes(1);
+    const [items, ratio] = arrange.mock.calls[0];
+    // 文字条目被排除：它的 quad 被拉伸时 fontSize 不会跟着变，字会被拉变形。
+    expect(items.map((item) => item.itemId)).toEqual([1, 2]);
+    expect(items[0]).toEqual({ itemId: 1, width: 100, height: 50, centerX: 50, centerY: -25 });
+    expect(ratio).toBe(0.06);
+    // 结果交给 commitMutation，撤销栈与脏标记因此与其它几何操作一致。
+    expect(commitMutation).toHaveBeenCalledTimes(1);
+    arrange.mockRestore();
+  });
+
+  it("does nothing when fewer than two bitmaps are selected", async () => {
+    const renderer = rendererWith({
+      images: [boardImage(1, [[0, 0], [100, 0], [100, -50], [0, -50]]), textItem(2)],
+      selectedIds: new Set([1, 2]),
+      locked: false,
+      boardId: 1,
+      arrangementGapRatio: 0.06,
+      finishActiveInteraction: vi.fn(),
+      commitMutation: vi.fn(),
+    });
+    const arrange = vi.spyOn(pinBoardApi, "arrangePinBoardImages").mockResolvedValue([]);
+
+    await renderer.arrangeSelected();
+
+    expect(arrange).not.toHaveBeenCalled();
+    arrange.mockRestore();
+  });
+});

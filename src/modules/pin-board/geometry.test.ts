@@ -1,11 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { PinBoardItem } from "./types";
 import {
-  arrangeImages,
   fitViewportToBounds,
   imageDisplayMaxDimension,
-  imageSize,
-  imagesCenter,
   pointInQuad,
   quadIntersectsBounds,
   rotateQuad,
@@ -92,23 +89,6 @@ describe("pin-board geometry", () => {
     );
 
     expect((angle * 180) / Math.PI).toBeCloseTo(15, 6);
-  });
-
-  it("arranges images at a common height around the requested center", () => {
-    const images = [
-      image(1, [[0, 50], [100, 50], [100, 0], [0, 0]]),
-      image(2, [[0, 25], [50, 25], [50, 0], [0, 0]]),
-    ];
-    const arranged = arrangeImages(images, [500, -250], 10);
-    const result = images.map((source) => ({
-      ...source,
-      points: arranged.get(source.itemId) ?? source.points,
-    }));
-
-    expect(imageSize(result[0])[1]).toBeCloseTo(50);
-    expect(imageSize(result[1])[1]).toBeCloseTo(50);
-    expect(imagesCenter(result)[0]).toBeCloseTo(500);
-    expect(imagesCenter(result)[1]).toBeCloseTo(-250);
   });
 
   it("fits the viewport to the minimal bounding box of every image", () => {

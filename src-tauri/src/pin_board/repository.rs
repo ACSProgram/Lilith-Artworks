@@ -1286,6 +1286,11 @@ fn source_dds_path(
     Ok(canonical)
 }
 
+/// 阵列间距比例校验：上限与设置项、排列命令共用 `arrange::MAX_GAP_RATIO`。
+fn arrange_gap_ratio_is_valid(ratio: f64) -> bool {
+    ratio.is_finite() && (0.0..=super::arrange::MAX_GAP_RATIO).contains(&ratio)
+}
+
 /// 粘贴画板图片：从源画板复制 DDS，按导入归一化后写入目标画板。
 pub(crate) fn paste_images(
     connection: &mut Connection,
@@ -1294,7 +1299,7 @@ pub(crate) fn paste_images(
     images: &[PinBoardClipboardImage],
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: &str,
 ) -> Result<(PinBoardView, Vec<i64>), String> {
     if images.is_empty() {
@@ -1312,7 +1317,7 @@ pub(crate) fn paste_images(
     }) {
         return Err("粘贴图片尺寸或像素数超过限制".into());
     }
-    if !center_x.is_finite() || !center_y.is_finite() || !gap.is_finite() {
+    if !center_x.is_finite() || !center_y.is_finite() || !arrange_gap_ratio_is_valid(gap_ratio) {
         return Err("粘贴位置无效".into());
     }
 
@@ -1347,7 +1352,7 @@ pub(crate) fn paste_images(
         .iter()
         .map(|(_, width, height, _)| (*width as f64, *height as f64))
         .collect::<Vec<_>>();
-    let points = dds::imported_points(&sizes, center_x, center_y, gap.max(0.0));
+    let points = dds::imported_points(&sizes, center_x, center_y, gap_ratio);
     let mut item_ids = Vec::with_capacity(prepared.len());
     for (index, ((item_id, points), (dds_bytes, width, height, uv))) in
         setup.item_ids.iter().zip(points).zip(prepared).enumerate()
@@ -1390,14 +1395,14 @@ pub(crate) fn import_images(
     paths: &[String],
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
     expected_revision: &str,
     mut on_progress: impl FnMut(usize, usize),
 ) -> Result<(PinBoardView, Vec<i64>), String> {
     if paths.is_empty() || paths.len() > dds::MAX_IMPORT_FILES {
         return Err("导入文件数量无效".into());
     }
-    if !center_x.is_finite() || !center_y.is_finite() || !gap.is_finite() {
+    if !center_x.is_finite() || !center_y.is_finite() || !arrange_gap_ratio_is_valid(gap_ratio) {
         return Err("导入位置无效".into());
     }
     // 仓库边界在这里兜底，而不是只在命令层：GUI 与无头入口都会经过本函数，素材板
@@ -1445,7 +1450,7 @@ pub(crate) fn import_images(
         .iter()
         .map(|(_, width, height)| (*width as f64, *height as f64))
         .collect::<Vec<_>>();
-    let points = dds::imported_points(&sizes, center_x, center_y, gap.max(0.0));
+    let points = dds::imported_points(&sizes, center_x, center_y, gap_ratio);
     let mut item_ids = Vec::with_capacity(imported.len());
     for (index, ((item_id, width, height), points)) in imported.into_iter().zip(points).enumerate()
     {

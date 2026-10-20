@@ -19,7 +19,7 @@ vi.mock("../modules/authenticity/AuthenticityModule", () => ({
 }));
 
 const pinBoardSettings = {
-  arrangementGapPx: 10,
+  arrangementGapRatio: 0.06,
   textureCacheLevel: "medium" as const,
   autosave: false,
   lockShortcut: "CommandOrControl+R",

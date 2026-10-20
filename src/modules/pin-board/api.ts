@@ -2,6 +2,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { invokeCommand } from "../../shared/tauri";
 import type {
+  PinBoardArrangeItem,
+  PinBoardArrangeResult,
   PinBoardClipboardImage,
   PinBoardEditableItem,
   PinBoardMutationResult,
@@ -51,20 +53,20 @@ export const pinBoardApi = {
     images: PinBoardClipboardImage[],
     centerX: number,
     centerY: number,
-    gap: number,
+    gapRatio: number,
     expectedRevision: string,
   ) => invokeCommand<PinBoardMutationResult>("paste_pin_board_images", {
-    boardId, images, centerX, centerY, gap, expectedRevision,
+    boardId, images, centerX, centerY, gapRatio, expectedRevision,
   }),
   importPinBoardImages: (
     boardId: number,
     paths: string[],
     centerX: number,
     centerY: number,
-    gap: number,
+    gapRatio: number,
     expectedRevision: string,
   ) => invokeCommand<PinBoardMutationResult>("import_pin_board_images", {
-    boardId, paths, centerX, centerY, gap, expectedRevision,
+    boardId, paths, centerX, centerY, gapRatio, expectedRevision,
   }),
   importPinBoardClipboardImage: (
     boardId: number,
@@ -115,6 +117,12 @@ export const pinBoardApi = {
     boardId, itemId, outputDirectory, bytes,
   }),
   readPinBoardClipboardPaths: () => invokeCommand<string[]>("read_pin_board_clipboard_paths"),
+  /**
+   * 计算阵列排序后的位置。纯计算命令，不写数据库：结果由调用方交给
+   * `commitMutation`，撤销栈与脏标记因此与其它几何操作一致。
+   */
+  arrangePinBoardImages: (items: PinBoardArrangeItem[], gapRatio: number) =>
+    invokeCommand<PinBoardArrangeResult[]>("arrange_pin_board_images", { items, gapRatio }),
   readPinBoardImagePng: (boardId: number, itemId: number) =>
     invokeCommand<Uint8Array>("read_pin_board_image_png", { boardId, itemId }),
   readPinBoardTexture: (boardId: number, itemId: number, maxDimension: number) =>

@@ -94,7 +94,10 @@ impl Default for AppSettings {
 #[serde(default, rename_all = "camelCase")]
 struct PinBoardSettings {
     texture_cache_level: String,
-    arrangement_gap_px: f64,
+    /// 阵列间距：相对统一图片高度的比例，`0.0` 表示图片紧贴。整理与导入共用。
+    /// 旧字段 `arrangementGapPx` 已被容器级 `#[serde(default)]` 静默忽略，不需要
+    /// 提升设置版本。
+    arrangement_gap_ratio: f64,
     /// 编辑停顿后的防抖自动保存（前端行为），默认关闭。
     autosave: bool,
     /// 退出应用前结算并保存素材板（关闭握手），默认开启。
@@ -107,7 +110,7 @@ impl Default for PinBoardSettings {
     fn default() -> Self {
         Self {
             texture_cache_level: "medium".into(),
-            arrangement_gap_px: 10.0,
+            arrangement_gap_ratio: crate::pin_board::arrange::DEFAULT_GAP_RATIO,
             autosave: false,
             save_on_exit: true,
             lock_shortcut: "CommandOrControl+R".into(),
@@ -679,8 +682,10 @@ fn sanitize_settings(settings: &mut AppSettings) -> bool {
         settings.pin_board.texture_cache_level = fallback.pin_board.texture_cache_level;
         repaired = true;
     }
-    if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
-        settings.pin_board.arrangement_gap_px = fallback.pin_board.arrangement_gap_px;
+    if !(0.0..=crate::pin_board::arrange::MAX_GAP_RATIO)
+        .contains(&settings.pin_board.arrangement_gap_ratio)
+    {
+        settings.pin_board.arrangement_gap_ratio = fallback.pin_board.arrangement_gap_ratio;
         repaired = true;
     }
     if !shortcut_is_well_formed(&settings.pin_board.lock_shortcut) {
@@ -1099,7 +1104,9 @@ pub(crate) fn validate_settings(settings: &AppSettings) -> Result<(), String> {
     ) {
         return Err("素材板纹理缓存等级无效".into());
     }
-    if !(1.0..=200.0).contains(&settings.pin_board.arrangement_gap_px) {
+    if !(0.0..=crate::pin_board::arrange::MAX_GAP_RATIO)
+        .contains(&settings.pin_board.arrangement_gap_ratio)
+    {
         return Err("素材板阵列间距超出允许范围".into());
     }
     for (label, shortcut) in [
@@ -1567,7 +1574,7 @@ mod tests {
         let path = directory.path().join("settings.json");
         let mut broken = AppSettings::default();
         broken.repository_path = "F:\\LilithData\\Artworks".into();
-        broken.pin_board.arrangement_gap_px = 3.0;
+        broken.pin_board.arrangement_gap_ratio = 0.12;
         broken.pin_board.fullscreen_shortcut = "Escape".into();
         broken.window.width = 237;
         broken.window.height = 39;
@@ -1576,7 +1583,7 @@ mod tests {
         let (loaded, warning) = load_settings(&path);
         assert!(warning.is_none());
         assert_eq!(loaded.repository_path, "F:\\LilithData\\Artworks");
-        assert_eq!(loaded.pin_board.arrangement_gap_px, 3.0);
+        assert_eq!(loaded.pin_board.arrangement_gap_ratio, 0.12);
         assert_eq!(loaded.pin_board.fullscreen_shortcut, "Escape");
         // 越界尺寸被夹回可用范围，窗口仍然可见、可拖动。
         assert_eq!(loaded.window.width, MIN_WINDOW_WIDTH);
@@ -1641,13 +1648,16 @@ mod tests {
         let mut settings = AppSettings::default();
         settings.repository_path = "F:\\LilithData\\Artworks".into();
         settings.theme = "neon".into();
-        settings.pin_board.arrangement_gap_px = 0.0;
+        settings.pin_board.arrangement_gap_ratio = 0.5;
         settings.window.width = 237;
 
         assert!(sanitize_settings(&mut settings));
         assert_eq!(settings.repository_path, "F:\\LilithData\\Artworks");
         assert_eq!(settings.theme, "system");
-        assert_eq!(settings.pin_board.arrangement_gap_px, 10.0);
+        assert_eq!(
+            settings.pin_board.arrangement_gap_ratio,
+            crate::pin_board::arrange::DEFAULT_GAP_RATIO
+        );
         assert_eq!(settings.window.width, MIN_WINDOW_WIDTH);
         // 修正后的设置已经合法，再次加载不再触发修正。
         assert!(!sanitize_settings(&mut settings));

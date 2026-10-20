@@ -17,6 +17,8 @@ use std::{
 
 use tempfile::NamedTempFile;
 
+use super::arrange::{arrange, ArrangeItem, ArrangeOptions, HeightPolicy, ItemOrder};
+
 pub(crate) const MAX_DDS_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_TEXTURE_DIMENSION: u32 = 8192;
 pub(crate) const MIN_TEXTURE_DIMENSION: u32 = 64;
@@ -544,86 +546,65 @@ pub(crate) fn persist_dds_file(destination: &Path, bytes: &[u8], kind: &str) -> 
     Ok(())
 }
 
-/// 粘贴/导入图片以指针位置为中心做阵列排序；总宽度使用平方根估算。
+/// 粘贴/导入图片以指针位置为中心做阵列排序。
+///
+/// 排版数学统一由 [`crate::pin_board::arrange`] 提供，这里只负责把「一批自然尺寸」
+/// 转成排列输入并保持返回顺序与 `sizes` 一致。导入的新图还没有位置，所以用
+/// [`ItemOrder::Input`] 保留调用方给的顺序；间距与整理路径同一口径——按统一高度
+/// 的比例传入，不随画布缩放变化。
 pub(crate) fn imported_points(
     sizes: &[(f64, f64)],
     center_x: f64,
     center_y: f64,
-    gap: f64,
+    gap_ratio: f64,
 ) -> Vec<[[f64; 2]; 4]> {
     if sizes.is_empty() {
         return Vec::new();
     }
-    let max_height = sizes.iter().map(|(_, height)| *height).fold(0.0, f64::max);
-    if max_height <= f64::EPSILON {
-        return vec![
+    // 尺寸由上游（`repository` 的导入/粘贴校验）保证为正有限值；这里只兜住退化输入，
+    // 让每个条目都拿到一个位于中心的零面积四边形，避免调用方按索引 zip 时错位。
+    let degenerate = || {
+        vec![
             [
                 [center_x, center_y],
                 [center_x, center_y],
                 [center_x, center_y],
-                [center_x, center_y]
+                [center_x, center_y],
             ];
             sizes.len()
-        ];
+        ]
+    };
+    let usable = |value: f64| value.is_finite() && value > f64::EPSILON;
+    if !sizes
+        .iter()
+        .all(|(width, height)| usable(*width) && usable(*height))
+    {
+        return degenerate();
     }
-    let nodes = sizes
+
+    let items = sizes
         .iter()
         .enumerate()
-        .map(|(index, (width, height))| (index, *width * max_height / *height, max_height))
-        .collect::<Vec<_>>();
-    let line_width =
-        |line: &[(usize, f64, f64)]| line.iter().map(|(_, width, _)| *width + gap).sum::<f64>();
-    let total_width = line_width(&nodes);
-    let max_width = (total_width * (max_height + gap)).sqrt();
-    let mut lines: Vec<Vec<(usize, f64, f64)>> = Vec::new();
-    let mut current = Vec::new();
-    for node in nodes {
-        current.push(node);
-        if line_width(&current) > max_width {
-            current.sort_by(|left, right| right.1.total_cmp(&left.1));
-            lines.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        lines.push(current);
-    }
-    lines.sort_by(|left, right| line_width(left).total_cmp(&line_width(right)));
-
-    let mut arranged: Vec<Option<[[f64; 2]; 4]>> = vec![None; sizes.len()];
-    let mut y = 0.0;
-    let mut all_center = [0.0, 0.0];
-    let mut count: f64 = 0.0;
-    for line in lines {
-        let width = line_width(&line);
-        let mut x = (max_width - width) / 2.0;
-        for (index, node_width, node_height) in line {
-            arranged[index] = Some([
-                [x, y],
-                [x + node_width, y],
-                [x + node_width, y - node_height],
-                [x, y - node_height],
-            ]);
-            all_center[0] += x + node_width / 2.0;
-            all_center[1] += y - node_height / 2.0;
-            count += 1.0;
-            x += node_width + gap;
-        }
-        y += max_height + gap;
-    }
-    all_center[0] /= count.max(1.0);
-    all_center[1] /= count.max(1.0);
-    arranged
-        .into_iter()
-        .map(|points| {
-            let points = points.expect("arrangement should cover every image");
-            points.map(|point| {
-                [
-                    point[0] + center_x - all_center[0],
-                    point[1] + center_y - all_center[1],
-                ]
-            })
+        .map(|(index, (width, height))| ArrangeItem {
+            item_id: index as i64,
+            width: *width,
+            height: *height,
+            center_x,
+            center_y,
         })
-        .collect()
+        .collect::<Vec<_>>();
+    let arranged = arrange(
+        &items,
+        ArrangeOptions {
+            order: ItemOrder::Input,
+            height: HeightPolicy::Max,
+            gap_ratio: gap_ratio.max(0.0),
+        },
+    );
+    if arranged.len() != sizes.len() {
+        return degenerate();
+    }
+    arranged.into_iter().map(|(_, points)| points).collect()
 }
 
 #[cfg(test)]

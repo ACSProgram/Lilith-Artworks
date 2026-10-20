@@ -33,6 +33,9 @@ import { appApi } from "./api";
 import { useAppRuntime } from "./AppRuntimeProvider";
 import { useNotice } from "./NoticeCenter";
 import { SETTINGS_PAGES } from "./useSettingsController";
+import {
+  PIN_BOARD_ARRANGEMENT_GAP_RATIO_MAX,
+} from "../modules/pin-board/PinBoardModule";
 import { shortcutFromEvent, shortcutLabel } from "./settingsShortcuts";
 import { errorMessage } from "../shared/errors";
 import { ConfirmDialog } from "../shared/ConfirmDialog";
@@ -580,17 +583,25 @@ export function SettingsDialog() {
                     <span className="settings-row-icon"><MoveHorizontal aria-hidden="true" size={17} /></span>
                     <span className="settings-row-copy is-descriptive">
                       <label htmlFor="pin-board-arrangement-gap"><strong>阵列图片间距</strong></label>
-                      <small>阵列排序时图片之间的屏幕间距，范围 1–200 像素。</small>
+                      <small>按图片高度的百分比计算，与画布缩放无关；0 表示图片紧贴。整理与导入共用。</small>
                     </span>
                     <input
                       id="pin-board-arrangement-gap"
                       className="number-control"
                       type="number"
-                      min={1}
-                      max={200}
+                      min={0}
+                      max={Math.round(PIN_BOARD_ARRANGEMENT_GAP_RATIO_MAX * 100)}
                       step={1}
-                      value={draft.pinBoard.arrangementGapPx}
-                      onChange={(event) => update({ pinBoard: { ...draft.pinBoard, arrangementGapPx: Math.min(200, Math.max(1, Number(event.target.value) || 1)) } })}
+                      value={Math.round(draft.pinBoard.arrangementGapRatio * 100)}
+                      onChange={(event) => update({
+                        pinBoard: {
+                          ...draft.pinBoard,
+                          arrangementGapRatio: Math.min(
+                            PIN_BOARD_ARRANGEMENT_GAP_RATIO_MAX,
+                            Math.max(0, Number(event.target.value) || 0) / 100,
+                          ),
+                        },
+                      })}
                     />
                   </div>
                   <label className="settings-preference-row">
