@@ -20,7 +20,7 @@
 //! not implemented until the layout is reverse-engineered; callers fall back to
 //! CDC for them.
 
-use std::io::{Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
 
 const CSFC_MAGIC: &[u8; 8] = b"CSFCHUNK";
 const PSD_MAGIC: &[u8; 4] = b"8BPS";
@@ -36,6 +36,9 @@ const TILE_NAME_LEN: u32 = TILE_BEGIN.len() as u32;
 const TILE_NAME_BYTES: u64 = TILE_NAME_LEN as u64 * 2;
 const MAX_TILE_COUNT: u64 = 10_000_000;
 const CANCEL_CHECK_INTERVAL: u64 = 4096;
+/// 单个 `Exta` 载荷内的记录是连续铺开的，按顺序缓冲读取；容量取 128 KiB，
+/// 让每条 tile 的头部探测都落在同一块读缓冲里。
+const EXTA_READ_BUFFER: usize = 128 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ContainerKind {
@@ -268,8 +271,11 @@ fn push_exta_units<R: Read + Seek>(
     source
         .seek(SeekFrom::Start(payload_start))
         .map_err(|error| ContainerError::Invalid(format!("无法定位 Exta 载荷：{error}")))?;
+    // 记录在 payload 内连续铺开，缓冲顺序读与逐条 seek 等价，但把每条记录的
+    // 4 次 syscall 收成一次大块读；丢弃记录体也优先消费缓冲。
+    let mut records = BufReader::with_capacity(EXTA_READ_BUFFER, &mut *source);
     let mut header = [0_u8; EXTA_PROBE_LEN];
-    read_exact(source, &mut header, "Exta 载荷头")?;
+    read_exact(&mut records, &mut header, "Exta 载荷头")?;
     if &header[8..16] != EXTA_TAG {
         units.push(StructuralUnit {
             start: block_start,
@@ -289,11 +295,8 @@ fn push_exta_units<R: Read + Seek>(
         }
         tick = tick.saturating_add(1);
 
-        source
-            .seek(SeekFrom::Start(position))
-            .map_err(|error| ContainerError::Invalid(format!("无法定位 tile 记录：{error}")))?;
         let mut node = [0_u8; TILE_NODE_HEADER as usize];
-        read_exact(source, &mut node, "tile 记录头")?;
+        read_exact(&mut records, &mut node, "tile 记录头")?;
         let size = u64::from(be_u32(&node, 0));
         let name_len = be_u32(&node, 4);
         if name_len != TILE_NAME_LEN {
@@ -310,10 +313,7 @@ fn push_exta_units<R: Read + Seek>(
             return Err(ContainerError::Invalid("tile 名称越过载荷末尾".into()));
         }
         let mut name = [0_u8; TILE_NAME_BYTES as usize];
-        source
-            .seek(SeekFrom::Start(name_start))
-            .map_err(|error| ContainerError::Invalid(format!("无法读取 tile 名称：{error}")))?;
-        read_exact(source, &mut name, "tile 名称")?;
+        read_exact(&mut records, &mut name, "tile 名称")?;
         if name != want.as_slice() {
             return Err(ContainerError::Invalid("tile 节点名称不匹配".into()));
         }
@@ -322,6 +322,11 @@ fn push_exta_units<R: Read + Seek>(
                 "位置 {position} 的 tile 记录长度 {size} 无效"
             )));
         }
+        skip_exact(
+            &mut records,
+            size - TILE_NODE_HEADER - TILE_NAME_BYTES,
+            "tile 记录内容",
+        )?;
         tiles.push(StructuralUnit {
             start: position,
             end: position + size,
@@ -399,6 +404,37 @@ fn read_exact<R: Read>(
     source
         .read_exact(buffer)
         .map_err(|error| ContainerError::Invalid(format!("无法读取{label}：{error}")))
+}
+
+/// 顺序跳过一个记录体。已缓冲的部分直接 `consume`；缓冲耗尽后直接定位到剩余
+/// 长度之后，避免为了探测记录边界而把大 tile 的载荷整段读进来。
+fn skip_exact<R: BufRead + Seek>(
+    source: &mut R,
+    mut length: u64,
+    label: &str,
+) -> Result<(), ContainerError> {
+    while length > 0 {
+        let available = source
+            .fill_buf()
+            .map_err(|error| ContainerError::Invalid(format!("无法跳过{label}：{error}")))?
+            .len();
+        if available == 0 {
+            return Err(ContainerError::Invalid(format!("{label}越过载荷末尾")));
+        }
+        let take = usize::try_from(length.min(available as u64))
+            .expect("skip length is bounded by the buffered slice");
+        source.consume(take);
+        length -= take as u64;
+        if length > 0 {
+            let remaining = i64::try_from(length)
+                .map_err(|_| ContainerError::Invalid(format!("{label}长度超出可定位范围")))?;
+            source
+                .seek(SeekFrom::Current(remaining))
+                .map_err(|error| ContainerError::Invalid(format!("无法跳过{label}：{error}")))?;
+            length = 0;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

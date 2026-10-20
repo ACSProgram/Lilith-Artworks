@@ -1,14 +1,15 @@
 # 自动备份调度与快速检查问题修复计划（2026-10-20）
 
-状态：**阶段 1–3 已实施并通过自动验证；阶段 4–5 已按 release 实测重新定范围，尚未实施**。
-阶段 2 的「观察 ≥1 天日志」门槛由维护者明确跳过；GUI 与日志观察仍在 `todo.md` 待人工。
-长期搁置项（schema 列、历史页 busy 解耦、per-artwork 拆库）仍在 `todo.md`，本文不重复。
+状态：**已实施并归档**（2026-10-20）。阶段 1–5 全部落地并通过自动验证；阶段 4–5 的 release
+复测、GUI 手工验收与日志观察仍待人工，只在 `../todo.md` 追踪。阶段 2 的「观察 ≥1 天日志」
+门槛由维护者明确跳过。长期搁置项（schema 列、历史页 busy 解耦、per-artwork 拆库）仍在
+`../todo.md`，本文不重复。本文件自此只作为计划、实测依据与落实口径的历史快照。
 
 **为什么重写阶段 4（2026-10-20）：** 原计划依据的「单次全量检查 100–161 秒」是 debug 未优化
 档的观测，已被维护者否定，不能作为依据。release 实测 1.378 GB 提交 5.9 秒、恢复 4.2 秒，
 量级完全不同，原来的排序（摘要前置 → 去重复校验 → 缓冲读 → 压缩档位）随之作废。实测见 §6。
 
-**硬约束：本计划不改数据库 schema。** 需要新列/新表的项一律不进本计划，见 `todo.md`
+**硬约束：本计划不改数据库 schema。** 需要新列/新表的项一律不进本计划，见 `../todo.md`
 「备份检查元数据持久化」。
 
 ## 1. 一句话结论
@@ -31,7 +32,7 @@
 | P4 | 前台结束后无冷却，后台立刻插进操作间隙 | 前台清零即抢锁开跑，下一操作又取消它 | 阶段 2（A4） |
 | P5 | 让位是 200 ms 轮询而非事件驱动 | 14 秒内 70 次 `scheduler yields the candidate scan` | 阶段 3（A5） |
 | P6 | 后台完成推进全局 revision，历史页整图重读 | `runtime.rs:233`；`useHistoryController.ts` 收到即 `reload()` | 阶段 3（A6） |
-| P7 | 历史页 `disabled={busy \|\| runtime.busy}` 一刀切 | `HistoryModule.tsx:447+` | 移出，见 `todo.md` |
+| P7 | 历史页 `disabled={busy \|\| runtime.busy}` 一刀切 | `HistoryModule.tsx:447+` | 移出，见 `../todo.md` |
 | P8 | 重任务内部全单线程 | 见 §6.1：提交 71%、恢复 53% 花在单条串行流水上 | 阶段 5（流水线并行） |
 
 补充事实：0.3 的「每个 artwork 单独读进程」**未以进程形式实现**（代码中无子进程架构）。
@@ -46,8 +47,8 @@ Background 排队）、读租约（`with_repository_read` 只取 RwLock 读端�
 | **1** | A1 指纹门槛 + A3 退化 warn 日志 | **已实施（2026-10-20）** | `backup/worker.rs` |
 | **2** | A4 前台静默 debounce + A2 调度器代价感知 | **已实施（2026-10-20）**；维护者明确跳过一天观察门槛 | `scheduler.rs`、`runtime.rs`、AppState |
 | **3** | A6 完成事件区分「结构变化」 + A5 让位改事件驱动 | **已实施（2026-10-20）** | `scheduler.rs`、`repository_lock.rs`、`runtime.rs`、前端 controller |
-| 4 | 两件便宜的减法：删掉提交路径的 HEAD 快照整份复检、结构单元改缓冲顺序读 | **分段打点已落地（`c4f0192`），release 实测已到手** | `worker.rs`、`format/container.rs`、`chunk_file/` |
-| 5 | 提交与恢复的串行流水改有界管道（多线程块哈希 + 保序写） | 阶段 4 的缓冲读先落地：它改变瓶颈构成，收益要重算 | `chunk_file/snapshot.rs`、`worker.rs`、`restore.rs` |
+| 4 | 两件便宜的减法：删掉提交路径的 HEAD 快照整份复检、结构单元改缓冲顺序读 | **已实施（2026-10-20）**；release 复测待人工 | `worker.rs`、`format/container.rs`、`chunk_file/` |
+| 5 | 提交与恢复的串行流水改有界管道（多线程块哈希 + 保序写） | **已实施（2026-10-20）**；前提已满足，release 复测待人工 | `chunk_file/snapshot.rs`、`worker.rs`、`restore.rs` |
 
 阶段 2 起每一项都只改一处行为，可独立回滚；不要求连着做完。
 
@@ -61,7 +62,7 @@ Background 排队）、读租约（`with_repository_read` 只取 RwLock 读端�
   `SOURCE_FINGERPRINT_VERSION` 递增到 2，旧基线取值域与新算法不同，自然重写一次。
 - 盲区：理论上漏检「同一秒内、同尺寸、且与基线 mtime 完全相同」的中间改写。实际保存必然
   更新 mtime，基线只在成功检查后写入，三个条件同时成立的窗口极窄，接受该风险。原设想的
-  「每 N 次快速命中强制全量」需要计数列，已移入 `todo.md`，不实施。
+  「每 N 次快速命中强制全量」需要计数列，已移入 `../todo.md`，不实施。
 
 ### A3. 退化可见性（修 P3，缩水版）
 
@@ -81,7 +82,7 @@ Background 排队）、读租约（`with_repository_read` 只取 RwLock 读端�
 | `size mismatch` | info | 大小变了，内容可能变化 |
 | `fingerprint mismatch` | info | mtime 或采样变了，内容可能变化 |
 
-- 不做：分支状态行显示「检查方式/耗时」——需要持久化列，见 `todo.md`。任务进行中显示
+- 不做：分支状态行显示「检查方式/耗时」——需要持久化列，见 `../todo.md`。任务进行中显示
   任务类型现状已支持。
 
 ### 实施记录（2026-10-20）
@@ -97,7 +98,7 @@ Background 排队）、读租约（`with_repository_read` 只取 RwLock 读端�
 
 ### 验收口径
 
-按 `docs/guides/validation.md`：`cargo check --lib`、`cargo test --lib`、`cargo fmt
+按 `../guides/validation.md`：`cargo check --lib`、`cargo test --lib`、`cargo fmt
 --check`、`git diff --check`；GUI 与大文件场景由维护者安排。
 
 2026-10-20 结果：`cargo check --lib` 通过；`cargo test --lib` 308 passed / 1 ignored / 0
@@ -210,7 +211,7 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
 「提交变慢了」的现场取证（读法：`delta_input_bytes / delta_ms` 得吞吐，几十 MB/s 才是压缩
 问题；1 GB/s 级说明卡在读写+哈希）。
 
-## 7. 阶段 4：两件便宜的减法（待实施）
+## 7. 阶段 4：两件便宜的减法（已实施）
 
 ### A7. 删掉提交路径的 HEAD 快照整份复检
 
@@ -233,10 +234,24 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
 - 预期：吃掉 §6.1 推论 1 里那约 2 秒 syscall/分配开销的大部分。单独可回滚。
 - 不动：分块边界、记录格式、整文件摘要。
 
-## 8. 阶段 5：提交与恢复的串行流水改有界管道（待实施）
+### 实施记录（2026-10-20）
+
+- A7：`run_backup` 的「摘要与 HEAD 相同」分支不再读回旧 snapshot；`validate_head_snapshot`、
+  `repair_head_snapshot` 与 `backup unchanged` 行的 `validate_ms` 一并删除。同步改写
+  `worker.rs` 的两个修复用例、`scheduler.rs` 的两个期望与 `stress_damage` R1：现在断言内容
+  未变化的提交不替换损坏文件，损坏继续由 scrub 与恢复拒绝暴露。
+- A8：结构单元改为按顺序的 `BufReader` 读取，单元缓冲跨单元复用；`Exta` 内部的 tile 头部
+  探测与记录体跳过共用同一块 128 KiB 缓冲，不再逐 tile seek。
+- 未改分块边界、记录格式与整文件摘要。
+
+2026-10-20 验证：`cargo check --lib` 通过；`cargo test --lib` 321 passed / 1 ignored / 0
+failed；`cargo fmt --check` 与 `git diff --check` 干净。release 复测与 GUI 未验证（待人工）。
+
+## 8. 阶段 5：提交与恢复的串行流水改有界管道（已实施）
 
 维护者 2026-10-20 决定按实测收益推进（三成上下），并接受 200–400 行改动与取消语义重验。
-**前提：A8 先落地并重测**——缓冲读会改变瓶颈构成，届时「并行还值多少」才是真数字。
+**前提：A8 先落地**（已完成）；release 下用同一分支复测提交/恢复、与 §6.1 逐项对照仍待人工，
+届时才能确认「并行还值多少」。
 
 1. **提交侧块哈希并行**：把 `ChunkFile::create` 的「读 → 哈希 → 写」拆成有界管道：读线程
    按单元切块 → N 个 worker 算块 SHA-256 → 主线程按序写记录与载荷。整文件摘要仍是串行
@@ -259,6 +274,25 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
 验证：`cargo test --lib` 全通过；新增「并行与串行产物逐字节一致」「取消不留下发布文件」
 「进度单调不倒退」用例；release 下用同一 1.378 GB 分支复测提交与恢复，与 §6.1 逐项对比。
 
+### 实施记录（2026-10-20）
+
+- 提交侧：`ChunkFile::create` 在大于 4 MiB 且可用并行度 > 1 时改为三段管道（读线程切块 →
+  至多 4 个 worker 计算块摘要 → 调用线程按序写记录与载荷）；小于阈值或单核保留原串行路径。
+  整文件摘要与 v2 去重仍在写线程按序推进。
+- 恢复侧：经维护者确认采用「单读线程 + 并行哈希 + 保序写」。`ChunkStore` 仍只有单个可变
+  游标，真正的多线程读块需要平台层定位读与 store 重构，本阶段不做；`copy_original` 在大于
+  4 MiB 时走管道，块摘要比对下沉到 worker，主线程按序写输出。
+- 读线程按「已写前缀 + 约 16 MiB」的信用窗口生产，队列按同一窗口限长；乱序完成的块
+  进入待写表后也不会让内存随文件增长。极小块配置另加 1024 条消息上限。取消、读错与写错
+  都通过共享停止标志让三段退出；写线程在失败后继续排空结果队列，避免 worker 阻塞。
+  进度只由保序写线程上报已完成前缀。
+- 新增用例：并行创建与串行产物逐字节一致、并行创建/导出的进度单调、并行导出拒绝损坏块、
+  已取消的并行管道、并行创建的磁盘写满路径，以及恢复取消后不发布输出。
+
+2026-10-20 验证：`cargo check --lib` 通过；`cargo test --lib` 321 passed / 1 ignored / 0
+failed；`cargo fmt --check` 干净；`stress_damage` R1 已按新语义改写。release 下 1.378 GB
+分支的提交/恢复复测待维护者安排。
+
 ## 9. 明确不做
 
 - **zstd 档位与 `zstdmt`**：载荷实测 1.01x 压缩率、压缩只占提交 7%，收益不到 0.5 秒。
@@ -268,5 +302,5 @@ failed；`cargo fmt --check` 与 `git diff --check` 干净。GUI 未验证（待
 - **CDC 并行**：边界一旦与串行不同，去重命中与存量快照全部失效，chunker id 写在文件头，
   等于新格式。
 - **整文件摘要并行**：见 §6.2，属格式语义。
-- **schema 相关三项**（检查耗时 / 检查方式 / 快速命中计数）→ 见 `todo.md`「备份检查元数据
+- **schema 相关三项**（检查耗时 / 检查方式 / 快速命中计数）→ 见 `../todo.md`「备份检查元数据
   持久化」；历史页 busy 一刀切（P7）→ 见 todo 同名条目；per-artwork 拆库 → 见 todo。

@@ -39,6 +39,24 @@ entries for the reader; they are not a template every entry has to fill.
   the current artwork, keeping the node array and thumbnail cache intact;
   completions for other artworks are ignored, while missing or unmarked events
   still trigger a full refresh.
+- Backup commits no longer re-read and repair the head snapshot when the
+  work-file digest is unchanged; they record the unchanged result immediately.
+  Integrity of old snapshots now belongs to recovery, full-history scrub and
+  idle verification, and the idle check remains off by default — the accepted
+  trade-off for removing a 1.28 GB / 2,020 ms re-check from this path.
+- Snapshot creation and restore export use a bounded three-stage pipeline for
+  inputs above 4 MiB: one reader cuts or reads chunks in order, up to four
+  workers hash or verify them, and the calling thread writes records and
+  payloads in order (restore still writes one output file sequentially). The
+  serial path remains for small inputs and single-core machines. The reader may
+  stay at most 16 MiB ahead of the written prefix, so out-of-order completions
+  cannot grow the pending table with the file; cancellation and I/O failures
+  drain every stage instead of leaving a blocked thread, and progress only
+  advances over the completed prefix.
+- Structural units are read through a reusable sequential buffer instead of a
+  seek plus allocation per unit, and the tile probe inside `Exta` no longer
+  seeks before every record: it consumes one read buffer and skips record
+  bodies without reading large payloads.
 - Platform-specific branches are consolidated into a single
   `src-tauri/src/platform/` module (`path` / `shell` / `clipboard` /
   `process`), so business code no longer carries `cfg` branches; call sites

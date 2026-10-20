@@ -17,7 +17,7 @@ use super::{
     *,
 };
 
-fn v1_create<R: Read + Seek, W: Write + Seek>(
+fn v1_create<R: Read + Seek + Send, W: Write + Seek>(
     source: &mut R,
     snapshot: &mut W,
     config: ChunkingConfig,
@@ -26,7 +26,7 @@ fn v1_create<R: Read + Seek, W: Write + Seek>(
     ChunkFile::create(source, snapshot, config, ChunkWriteOptions::V1, &task)
 }
 
-fn v2_create<R: Read + Seek, W: Write + Seek>(
+fn v2_create<R: Read + Seek + Send, W: Write + Seek>(
     source: &mut R,
     snapshot: &mut W,
     config: ChunkingConfig,
@@ -892,6 +892,239 @@ fn fuzzed_delta_containers_are_rejected_without_panicking() {
         ChunkFileDelta::open(&mut Cursor::new(extended)).is_err(),
         "续写字节的增量必须被拒绝"
     );
+}
+
+/// 并行管道只改变块摘要的计算位置，不改变布局：同一输入下与串行路径逐字节一致。
+#[test]
+fn parallel_snapshot_creation_matches_the_serial_layout() {
+    let task = ChunkTask::untracked();
+    let config = ChunkingConfig::default();
+    let cases = [
+        (
+            "v1-cdc",
+            ChunkWriteOptions::V1,
+            random_bytes(0x51, 512 * 1024),
+        ),
+        (
+            "v2-cdc",
+            ChunkWriteOptions {
+                format: FormatVersion::V2,
+                chunking: ChunkingStrategy::Cdc,
+            },
+            random_bytes(0x52, 512 * 1024),
+        ),
+        ("v2-structural", ChunkWriteOptions::V2, synthetic_clip()),
+    ];
+    for (label, options, bytes) in cases {
+        let mut serial = Cursor::new(Vec::new());
+        let serial_layout = ChunkFile::create_serially(
+            &mut Cursor::new(&bytes),
+            &mut serial,
+            config,
+            options,
+            &task,
+        )
+        .unwrap();
+        let mut parallel = Cursor::new(Vec::new());
+        let parallel_layout = ChunkFile::create_with_workers(
+            &mut Cursor::new(&bytes),
+            &mut parallel,
+            config,
+            options,
+            &task,
+            4,
+        )
+        .unwrap();
+        let serial_bytes = serial.into_inner();
+        let parallel_bytes = parallel.into_inner();
+
+        assert_eq!(serial_bytes, parallel_bytes, "{label}：产物字节不一致");
+        assert_eq!(
+            serial_layout.file_digest(),
+            parallel_layout.file_digest(),
+            "{label}"
+        );
+        assert_eq!(
+            serial_layout.chunk_count(),
+            parallel_layout.chunk_count(),
+            "{label}"
+        );
+        assert_eq!(
+            serial_layout.logical_size(),
+            parallel_layout.logical_size(),
+            "{label}"
+        );
+
+        let mut restored = Vec::new();
+        parallel_layout
+            .copy_original_with_workers(&mut Cursor::new(parallel_bytes), &mut restored, &task, 4)
+            .unwrap();
+        assert_eq!(restored, bytes, "{label}：并行导出未能还原输入");
+    }
+}
+
+/// 并行创建与并行导出都只上报「已完成前缀」：进度单调不减，终点等于逻辑大小。
+#[test]
+fn parallel_pipelines_report_only_the_completed_prefix() {
+    let bytes = random_bytes(0xA7, 512 * 1024);
+    let token = CancelToken::standalone();
+
+    let mut snapshot = Cursor::new(Vec::new());
+    let created = {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |processed: u64| seen.borrow_mut().push(processed);
+        let task = ChunkTask::new(&token, Some(&progress));
+        let layout = ChunkFile::create_with_workers(
+            &mut Cursor::new(&bytes),
+            &mut snapshot,
+            ChunkingConfig::default(),
+            ChunkWriteOptions::V2,
+            &task,
+            4,
+        )
+        .unwrap();
+        (layout, seen.into_inner())
+    };
+    let (layout, created_seen) = created;
+    assert!(
+        created_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "创建进度不得回退：{created_seen:?}"
+    );
+    assert_eq!(
+        created_seen.last().copied(),
+        Some(layout.logical_size()),
+        "创建进度终点必须等于逻辑大小"
+    );
+
+    let encoded = snapshot.into_inner();
+    let mut restored = Vec::new();
+    let restored_seen = {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |processed: u64| seen.borrow_mut().push(processed);
+        let task = ChunkTask::new(&token, Some(&progress));
+        layout
+            .copy_original_with_workers(&mut Cursor::new(encoded), &mut restored, &task, 4)
+            .unwrap();
+        seen.into_inner()
+    };
+    assert_eq!(restored, bytes);
+    assert!(
+        restored_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "导出进度不得回退：{restored_seen:?}"
+    );
+    assert_eq!(
+        restored_seen.last().copied(),
+        Some(layout.logical_size()),
+        "导出进度终点必须等于逻辑大小"
+    );
+
+    // 小文件与单核机器走串行兜底；它同样按累计已写字节上报。
+    let mut serial = Cursor::new(Vec::new());
+    let serial_seen = {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let progress = |processed: u64| seen.borrow_mut().push(processed);
+        let task = ChunkTask::new(&token, Some(&progress));
+        ChunkFile::create_serially(
+            &mut Cursor::new(&bytes),
+            &mut serial,
+            ChunkingConfig::default(),
+            ChunkWriteOptions::V1,
+            &task,
+        )
+        .unwrap();
+        seen.into_inner()
+    };
+    assert!(
+        serial_seen.windows(2).all(|pair| pair[0] <= pair[1]),
+        "串行创建进度不得回退：{serial_seen:?}"
+    );
+    assert_eq!(
+        serial_seen.last().copied(),
+        Some(bytes.len() as u64),
+        "串行创建进度终点必须等于输入大小"
+    );
+}
+
+/// 块摘要校验在执行块的线程里完成；并行导出仍必须定位到具体块并报告损坏。
+#[test]
+fn parallel_restore_rejects_a_corrupt_chunk() {
+    let bytes = random_bytes(0xC3, 512 * 1024);
+    let mut encoded = encode_v2_snapshot(&bytes);
+    let payload = V2_SNAPSHOT_HEADER_SIZE + V2_RECORD_HEADER_SIZE;
+    encoded[payload] ^= 0xff;
+
+    let layout = ChunkFile::open(&mut Cursor::new(encoded.clone())).unwrap();
+    let error = layout
+        .copy_original_with_workers(
+            &mut Cursor::new(encoded),
+            &mut std::io::sink(),
+            &ChunkTask::untracked(),
+            4,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ChunkFileError::Integrity(ErrorDimension::Chunk, _)
+    ));
+    assert!(error.to_string().contains("第 1 个块"), "{error}");
+}
+
+/// 取消在管道每一段都可见：已取消的令牌不会让线程挂起或 panic。
+#[test]
+fn cancelled_parallel_pipelines_stop_cleanly() {
+    let token = CancelToken::standalone();
+    token.cancel();
+    let task = ChunkTask::cancel(&token);
+
+    let mut output = Cursor::new(Vec::new());
+    let error = ChunkFile::create_with_workers(
+        &mut Cursor::new(random_bytes(0x61, 512 * 1024)),
+        &mut output,
+        ChunkingConfig::default(),
+        ChunkWriteOptions::V1,
+        &task,
+        4,
+    )
+    .unwrap_err();
+    assert!(matches!(error, ChunkFileError::Cancelled), "{error}");
+
+    let bytes = random_bytes(0x62, 512 * 1024);
+    let encoded = encode_v2_snapshot(&bytes);
+    let layout = ChunkFile::open(&mut Cursor::new(encoded.clone())).unwrap();
+    let error = layout
+        .copy_original_with_workers(
+            &mut Cursor::new(encoded),
+            &mut Cursor::new(Vec::new()),
+            &task,
+            4,
+        )
+        .unwrap_err();
+    assert!(matches!(error, ChunkFileError::Cancelled), "{error}");
+}
+
+/// 管道写到一半遇到磁盘写满：返回真实 I/O 错误，其余段退出而不是阻塞。
+#[test]
+fn parallel_snapshot_creation_reports_a_full_disk_cleanly() {
+    let bytes = random_bytes(0x71, 512 * 1024);
+    let quota = 16 * 1024;
+    let mut writer = QuotaWriter::new(Cursor::new(Vec::new()), quota);
+
+    let error = ChunkFile::create_with_workers(
+        &mut Cursor::new(&bytes),
+        &mut writer,
+        ChunkingConfig::default(),
+        ChunkWriteOptions::V1,
+        &ChunkTask::untracked(),
+        4,
+    )
+    .unwrap_err();
+
+    let ChunkFileError::Io(io_error) = &error else {
+        panic!("预期 I/O 错误，实际为 {error}");
+    };
+    assert_eq!(io_error.kind(), io::ErrorKind::StorageFull, "{io_error}");
+    assert!(writer.written() > 0 && writer.written() <= quota);
 }
 
 fn synthetic_clip() -> Vec<u8> {

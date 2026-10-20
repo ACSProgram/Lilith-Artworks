@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     fs::File,
-    io::{self, Read, Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::Path,
     sync::{Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -348,28 +348,15 @@ pub(crate) fn run_backup(
         .as_ref()
         .filter(|node| node.sha256.eq_ignore_ascii_case(&digest))
     {
-        let validate_started = Instant::now();
-        if let Err(validation_error) = validate_head_snapshot(root, head, cancel) {
-            ensure_not_cancelled(cancel)?;
-            log::warn!(
-                "HEAD snapshot {} failed validation and will be rebuilt: {validation_error}",
-                head.id
-            );
-            // 被替换的旧 snapshot 已在登记事务内入队，这里单遍重放；失败只留
-            // 队列可重试，不改变"内容未变化"的成功语义。
-            let cleanup_ids = repair_head_snapshot(root, &artwork_directory, head, snapshot_temp)?;
-            cleanup::replay(root, &cleanup_ids);
-        }
         history::mark_unchanged(root, branch_id, checked_ms)?;
         // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
         record_source_metadata(root, branch_id, &after_snapshot);
         log::info!(
-            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}, prepare_ms={prepare_ms}, snapshot_ms={snapshot_ms}, snapshot_sync_ms={snapshot_sync_ms}, validate_ms={}",
+            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}, prepare_ms={prepare_ms}, snapshot_ms={snapshot_ms}, snapshot_sync_ms={snapshot_sync_ms}",
             head.id,
             snapshot.logical_size(),
             options.format,
-            started.elapsed().as_millis(),
-            validate_started.elapsed().as_millis()
+            started.elapsed().as_millis()
         );
         return Ok(BackupCommitResult {
             created: false,
@@ -529,65 +516,6 @@ pub(crate) fn run_backup(
         unchanged: false,
         history_id: Some(history_id),
     })
-}
-
-fn validate_head_snapshot(
-    root: &Path,
-    head: &history::HistoryRecord,
-    cancel: &CancelToken,
-) -> Result<(), String> {
-    let relative = head
-        .snapshot_path
-        .as_deref()
-        .ok_or("当前 HEAD 缺少完整 snapshot")?;
-    let path = storage::resolve_path(root, relative)?;
-    let mut file =
-        File::open(&path).map_err(|error| format!("无法打开当前 HEAD snapshot：{error}"))?;
-    let snapshot = ChunkFile::open(&mut file)
-        .map_err(|error| format!("无法读取当前 HEAD snapshot：{error}"))?;
-    if !snapshot
-        .file_digest()
-        .to_hex()
-        .eq_ignore_ascii_case(&head.sha256)
-    {
-        return Err("当前 HEAD snapshot 摘要与历史数据库不匹配".into());
-    }
-    let task = ChunkTask::cancel(cancel);
-    snapshot
-        .copy_original(&mut file, &mut io::sink(), &task)
-        .map_err(|error| format!("当前 HEAD snapshot 完整性校验失败：{error}"))
-}
-
-/// 修复 head 的 snapshot：发布新文件并登记到历史节点。
-///
-/// 被替换的旧 snapshot 不再由本函数在提交后直接删除，而是由 `set_snapshot`
-/// 在同一事务内入队 `pending_file_cleanup`；返回的 cleanup id 由调用方在成功后
-/// 重放（引用复查与摘要校验仍在重放时执行）。
-fn repair_head_snapshot(
-    root: &Path,
-    artwork_directory: &Path,
-    head: &history::HistoryRecord,
-    snapshot_temp: NamedTempFile,
-) -> Result<Vec<String>, String> {
-    let repaired_path = artwork_directory.join("snapshots").join(format!(
-        "{}-repair-{}.lbc",
-        head.id,
-        storage::new_id()
-    ));
-    let repaired_relative = storage::relative_path(root, &repaired_path)?;
-    let repaired_size = snapshot_temp
-        .as_file()
-        .metadata()
-        .map_err(|error| format!("无法读取修复 snapshot 大小：{error}"))?
-        .len();
-    publish_temp(snapshot_temp, &repaired_path, "修复 snapshot")?;
-    match history::set_snapshot(root, &head.id, &repaired_relative, repaired_size, true) {
-        Ok(cleanup_ids) => Ok(cleanup_ids),
-        Err(error) => {
-            let _ = fs::remove_file(&repaired_path);
-            Err(format!("无法登记修复 snapshot：{error}"))
-        }
-    }
 }
 
 fn ensure_not_cancelled(cancel: &CancelToken) -> Result<(), BackupRunError> {
@@ -1259,99 +1187,6 @@ mod tests {
         assert_eq!(
             history::load_node(&root, &first_id).unwrap().snapshot_path,
             original_path
-        );
-    }
-
-    #[test]
-    fn unchanged_backup_repairs_a_missing_head_snapshot() {
-        let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(
-            &root,
-            &branch_id,
-            "First",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap();
-        let first_id = first.history_id.unwrap();
-        let original_relative = history::load_node(&root, &first_id)
-            .unwrap()
-            .snapshot_path
-            .unwrap();
-        fs::remove_file(storage::resolve_path(&root, &original_relative).unwrap()).unwrap();
-
-        let second = run_backup(
-            &root,
-            &branch_id,
-            "Second",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap();
-        let repaired = history::load_node(&root, &first_id).unwrap();
-
-        assert!(!second.created);
-        assert!(second.unchanged);
-        assert_ne!(
-            repaired.snapshot_path.as_deref(),
-            Some(original_relative.as_str())
-        );
-        assert!(
-            storage::resolve_path(&root, repaired.snapshot_path.as_deref().unwrap())
-                .unwrap()
-                .is_file()
-        );
-        assert_eq!(
-            restore_and_read(&root, directory.path(), &first_id),
-            vec![b'A'; 96 * 1024]
-        );
-    }
-
-    #[test]
-    fn unchanged_backup_repairs_a_corrupt_head_snapshot() {
-        let (directory, root, _source, _artwork_id, branch_id) = create_fixture();
-        let first = run_backup(
-            &root,
-            &branch_id,
-            "First",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap();
-        let first_id = first.history_id.unwrap();
-        let original_relative = history::load_node(&root, &first_id)
-            .unwrap()
-            .snapshot_path
-            .unwrap();
-        let original_path = storage::resolve_path(&root, &original_relative).unwrap();
-        let mut damaged = fs::read(&original_path).unwrap();
-        *damaged.last_mut().unwrap() ^= 0xff;
-        fs::write(&original_path, damaged).unwrap();
-
-        let second = run_backup(
-            &root,
-            &branch_id,
-            "Second",
-            "manual",
-            &CancelToken::standalone(),
-            ChunkWriteOptions::V1,
-        )
-        .unwrap();
-        let repaired = history::load_node(&root, &first_id).unwrap();
-
-        assert!(!second.created);
-        assert!(second.unchanged);
-        assert_ne!(
-            repaired.snapshot_path.as_deref(),
-            Some(original_relative.as_str())
-        );
-        assert!(!original_path.exists());
-        assert_eq!(
-            restore_and_read(&root, directory.path(), &first_id),
-            vec![b'A'; 96 * 1024]
         );
     }
 

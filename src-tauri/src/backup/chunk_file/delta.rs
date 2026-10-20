@@ -380,7 +380,7 @@ impl ChunkFileDelta {
         target_snapshot: &mut W,
     ) -> ChunkFileResult<ChunkFile>
     where
-        RB: Read + Seek,
+        RB: Read + Seek + Send,
         W: Write + Seek,
     {
         let task = ChunkTask::untracked();

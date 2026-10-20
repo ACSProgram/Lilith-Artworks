@@ -1061,7 +1061,8 @@ mod tests {
         .history_id
         .unwrap();
         history::update_branch(&root, &branch_id, "Main", true, true, 10, true, None).unwrap();
-        // 破坏 head snapshot：全量路径会核对并修复，快速路径应完全跳过校验。
+        // 破坏 head snapshot：提交路径不再读回旧快照复检，快速路径更不会打开它；
+        // 这里只确认快速路径给出「内容未变化」且不改写节点。
         let original_relative = history::load_node(&root, &first_id)
             .unwrap()
             .snapshot_path
@@ -1090,9 +1091,11 @@ mod tests {
     }
 
     #[test]
-    fn quick_disabled_branch_runs_full_check_even_when_content_is_unchanged() {
-        let (_directory, root, _source, _artwork_id, branch_id) = fixture();
-        let first_id = worker::run_backup(
+    fn quick_disabled_branch_runs_the_full_check() {
+        let (_directory, root, source, artwork_id, branch_id) = fixture();
+        let bytes: Vec<u8> = (0..256 * 1024).map(|index| (index % 251) as u8).collect();
+        fs::write(&source, &bytes).unwrap();
+        worker::run_backup(
             &root,
             &branch_id,
             "First",
@@ -1100,23 +1103,38 @@ mod tests {
             &CancelToken::standalone(),
             ChunkWriteOptions::V1,
         )
-        .unwrap()
-        .history_id
         .unwrap();
-        // 分支显式关闭快速检查：即使创建时的全局默认是快速，内容未变化也必须
-        // 走全量路径核对并修复损坏的 head snapshot。
-        history::update_branch(&root, &branch_id, "Main", true, true, 10, false, None).unwrap();
-        let original_relative = history::load_node(&root, &first_id)
-            .unwrap()
-            .snapshot_path
-            .unwrap();
-        let original_path = crate::storage::resolve_path(&root, &original_relative).unwrap();
-        let mut damaged = fs::read(&original_path).unwrap();
-        *damaged.last_mut().unwrap() ^= 0xff;
-        fs::write(&original_path, damaged).unwrap();
-        make_due(&root, &branch_id);
+        history::update_branch(&root, &branch_id, "Main", true, true, 10, true, None).unwrap();
 
-        let result = run_scheduled_backup(
+        // 改动落在首尾各 64 KiB 的采样之外，并把 mtime 拨回原值：快速检查会把它
+        // 误判为未变化（已记录的盲区），关闭快速检查后的全量路径则必须读到它。
+        let modified = fs::metadata(&source).unwrap().modified().unwrap();
+        let mut changed = bytes;
+        let middle = changed.len() / 2;
+        changed[middle] ^= 0xff;
+        fs::write(&source, &changed).unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        make_due(&root, &branch_id);
+        let quick = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert!(!quick.created);
+        assert!(quick.unchanged);
+
+        history::update_branch(&root, &branch_id, "Main", true, true, 10, false, None).unwrap();
+        make_due(&root, &branch_id);
+        let full = run_scheduled_backup(
             &root,
             &BackupState::default(),
             &branch_id,
@@ -1125,13 +1143,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(!result.created);
-        assert!(result.unchanged);
-        // 修复以新路径发布 head snapshot，与被破坏的原路径不同。
-        assert_ne!(
-            history::load_node(&root, &first_id).unwrap().snapshot_path,
-            Some(original_relative)
-        );
+        assert!(full.created, "关闭快速检查后必须走全量并发现改动");
+        assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 2);
     }
 
     #[test]

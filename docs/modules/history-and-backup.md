@@ -39,13 +39,15 @@
 
 ChunkFile v1 的字节布局保持只读兼容：76 B snapshot 头、116 B delta 头、36 B 块记录。v2 默认用于**新写出的节点**（设置项 `chunkFileFormatV2`，默认开启，设置页可关闭后回退到 v1），头部为 80 B snapshot / 120 B delta，显式记录 `version/chunker/hash/codec/adapter`，块记录扩为 44 B（`stored_len/logical_len/codec/recipe/flags`）。reader 按文件头分派，因此同一仓库可长期混存 v1/v2；关闭开关只影响此后新生成的 snapshot/delta，不重写既有文件、不做仓库级迁移。无头入口另以 `--chunk-format v1|v2` 在**进程级**覆盖该开关（缺省跟随设置默认值），供 `stress_format` M4 在同一仓库内构造 v1/v2 混存历史；该选项只影响本进程新写入的节点，既有文件与读取路径不受影响。v2 快照对内容相同的块写 `stored_len=0` 的引用而不是重复 payload（tile 级去重），打开时按先出现的同摘要块解析引用；delta 仍只用外层 zstd 包装，不做逐块转码。块长度校验按布局分派：`min_size` 只约束 CDC 布局，容器对齐产生的结构单元（24 B 文件头、56 B `Exta` 头）只受 `max_size` 约束，超出时才交给 CDC 切分。成功提交、检查点与精简的日志都会记录本次写入的 `format`/`chunking`，便于解释仓库内的版本分布。
 
-v2 的容器感知分块由 `format/container.rs` 提供结构单元：`.clip` 按 CSFC 块、tile 与 Exta 记录边界切块，超出 `max` 的结构单元再交给 CDC 切分；`.psd` 当前只做 `8BPS` 探测（适配器结构待逆向确认），探测到但取不到结构单元时与解析失败一样回退 CDC。`.clip` 解析只校验头部与块边界、跳过 payload，不在内存里保留整份文件。
+v2 的容器感知分块由 `format/container.rs` 提供结构单元：`.clip` 按 CSFC 块、tile 与 Exta 记录边界切块，超出 `max` 的结构单元再交给 CDC 切分；`.psd` 当前只做 `8BPS` 探测（适配器结构待逆向确认），探测到但取不到结构单元时与解析失败一样回退 CDC。`.clip` 解析只校验头部与块边界、跳过 payload，不在内存里保留整份文件。结构单元在文件中连续铺开，创建快照时按顺序缓冲读取（不再逐单元 seek、逐块分配），`Exta` 内部的 tile 记录探测也改为在单个读缓冲内完成，只按需跳过记录体。
 
 `ChunkStore` 把基础 snapshot 与各条 delta 的解压 payload 追加为同一段虚拟偏移空间中的分段。v2 在此基础上维护按虚拟偏移排序的 segment 起点索引：顺序读取命中 reader 缓存段，跳跃读取用二分查找定位，跨段读取在一次 `read` 内完成，因此读取成本不再随段数线性增长。错误按 O5 的两轴分类：`InvalidFormat`（帧/布局损坏）、`Integrity`（块摘要或整文件摘要不符）、`Incompatible`（未知版本或能力缺口），并附带 container/format/chunker/hash/codec/recipe/adapter/chunk/file 维度，便于 UI 决定重试还是报告损坏。
 
 delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或旧版未压缩 payload 都流式写入仓库 `temp/` 中的自动删除文件；允许的解压字节数由 delta 头声明的目标逻辑大小、数据记录数和操作数推导，超出声明范围按格式错误拒绝。该边界随真实工作文件大小增长，不对 PSD 或其它工作文件设置固定总字节上限；4 GiB 目标的回归测试用于防止安全校验误伤正常大文件。恢复应用阶段只在内存中保存块索引和操作元数据，块内容从临时 payload 或基础 snapshot 流式复制并逐块验哈希。
 
-在同一段虚拟偏移空间上，`ChunkFileDelta::resolve` 只重写块布局、不写 payload 字节；`write_snapshot`、`copy_original` 在导出或校验时才按虚拟偏移流式读取并逐块验哈希。因此物化一条链的成本取决于链上变化的字节数，而不是"链长 × 文件大小"。`ChunkFileDelta::apply`（物化成完整 snapshot 文件）由 resolve + write_snapshot 组合实现，chunk 格式单测在 `cargo test --lib` 内运行，不依赖 GUI。创建、反向 delta、payload 复制、链解析、导出和 scrub 都直接消费 crate 根部的 `CancelToken`，并按取消观察的两层分开使用：结构单元（每个 tile）与 CDC 块只做**静默观察**（`CancelToken::observed`，不写 marker、不阻塞），显式边界（提交、恢复、精简、检查点的链与发布边界）才发**交互检查点**（`CancelToken::is_cancelled`，无头闸门在那里写一行 marker 并在 `--cancel-on-stdin` 下阻塞等判定）。因此检查点数量由边界决定、与文件分成多少块无关；边界判定的取消会被热循环在下一次静默查询时立刻看到。进度按**累计**已处理的逻辑字节报告：`ChunkTask::report` 每块只累加本步字节，回调拿到的就是可直接当作进度条 `current` 的累计值，同一阶段内单调不减；反向增量阶段的总量取本次真正要复制的 DATA 载荷字节（`delta_payload_bytes`），而不是父文件大小，否则百分比永远停在低位。取消返回 typed `Cancelled`，未发布的临时输出由 guard 清理。
+在同一段虚拟偏移空间上，`ChunkFileDelta::resolve` 只重写块布局、不写 payload 字节；`write_snapshot`、`copy_original` 在导出或校验时才按虚拟偏移流式读取并逐块验哈希。因此物化一条链的成本取决于链上变化的字节数，而不是"链长 × 文件大小"。`ChunkFileDelta::apply`（物化成完整 snapshot 文件）由 resolve + write_snapshot 组合实现，chunk 格式单测在 `cargo test --lib` 内运行，不依赖 GUI。创建、反向 delta、payload 复制、链解析、导出和 scrub 都直接消费 crate 根部的 `CancelToken`，并按取消观察的两层分开使用：结构单元（每个 tile）与 CDC 块只做**静默观察**（`CancelToken::observed`，不写 marker、不阻塞），显式边界（提交、恢复、精简、检查点的链与发布边界）才发**交互检查点**（`CancelToken::is_cancelled`，无头闸门在那里写一行 marker 并在 `--cancel-on-stdin` 下阻塞等判定）。因此检查点数量由边界决定、与文件分成多少块无关；边界判定的取消会被热循环在下一次静默查询时立刻看到。进度按**已完成前缀**报告：串行路径每写完一块累加本步字节；并行路径只由保序写线程上报，worker 完成的乱序块不会提前推进进度条。回调拿到的就是可直接当作进度条 `current` 的累计值，同一阶段内单调不减；反向增量阶段的总量取本次真正要复制的 DATA 载荷字节（`delta_payload_bytes`），而不是父文件大小，否则百分比永远停在低位。取消返回 typed `Cancelled`，未发布的临时输出由 guard 清理。
+
+大于 4 MiB 的快照创建与恢复导出走同一条三段式有界管道：一个读线程按顺序切块（创建）或读块（导出），至多 4 个 worker 计算或校验块 SHA-256，主线程按序写记录与载荷（导出时顺序写输出文件）。整文件摘要与 v2 去重仍在主线程按序进行，因此产物与串行路径逐字节一致；小于该阈值或只有单核时保留原来的串行路径。读线程最多领先「已按序写出」的前缀约 16 MiB，两个在途队列按同一窗口限长，因此乱序完成的块进入待写表也不会让内存随文件增长；取消、读错与写错都会让所有段退出并汇入同一个错误，不会留下阻塞在队列上的线程。导出失败或取消时已写入的字节只存在于临时文件，调用方不会发布它。
 
 创建分支后同一父节点允许多个子节点，因此 `history_edges` 让每条 `child_history_id -> parent_history_id` 边分别拥有 delta 文件；不复用线性历史的单一后继假设。每个分支 head 保留完整 snapshot，旧 head 没有其他分支引用时才释放 snapshot。
 
@@ -76,7 +78,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 - png / jpg / webp / tiff / bmp / gif：在同一解码预算内直接解码并按最长边缩放。
 - 其它格式、解析失败或损坏头部：无预览，详情区显示占位。
 
-内容未变化的快速检查不打开工作文件，沿用 head 已有缩略图；完整检查确认内容未变化时也不改写。检查点、fork 与 snapshot 修复作用于同一节点或复用原节点，不重新抽取；存量节点不回填。历史图与列表查询继续使用显式列名，不把 BLOB 带出；详情区选中节点时通过只读命令 `get_history_node_thumbnail` 单独拉取 data URL。读取只服务当前 `thumbnail_version` 的载荷，未知版本按「无预览」处理，避免把不认识的编码当作 WebP 发给前端。
+内容未变化的快速检查不打开工作文件，沿用 head 已有缩略图；完整检查确认内容未变化时也不改写。检查点与 fork 作用于同一节点或复用原节点的预览，不重新抽取；存量节点不回填。历史图与列表查询继续使用显式列名，不把 BLOB 带出；详情区选中节点时通过只读命令 `get_history_node_thumbnail` 单独拉取 data URL。读取只服务当前 `thumbnail_version` 的载荷，未知版本按「无预览」处理，避免把不认识的编码当作 WebP 发给前端。
 
 **格式是否支持缩略图**由节点所属分支当前工作文件的扩展名判断（`preview::supports_preview`：`.clip`、`.psd`/`.psb` 与 png/jpg/webp/tiff/bmp/gif 支持，其余格式与没有工作文件的分支一律不支持）。节点自身只保存 ChunkFile 容器，读不出原始格式，因此这条判断只能跟着分支的工作文件走——分支事后改指到另一种格式的文件时，老节点也按新扩展名回答。`get_history_node_thumbnail` 因此返回 `{ dataUrl, supported }`：`dataUrl` 是已存缩略图（没有时为 null），`supported` 只表示该格式有没有抽取器。两者相互独立：已有缩略图的节点即使分支改指到不支持的格式，也照常显示图片。
 
@@ -116,7 +118,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 ## 提交与恢复
 
-提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件（回滚路径上文件本就未被数据库引用，直接删失败只留泄漏、不留不一致，由清理扫描兜底）。父节点是检查点时 worker 不生成反向增量，事务只为这条边登记空路径（原因见「检查点只留 snapshot」）；其余情况下缺少增量会让父节点失去唯一表示，提交直接拒绝。提交释放的父 snapshot（父节点不再是 head 或检查点、且无其它分支引用时）在同一事务内入队 `pending_file_cleanup`（原因 `history_commit_release`），提交成功后由 worker 单遍重放删除；删除失败只留队列可重试，不影响已成功的提交结果。head 校验失败触发 snapshot 修复时，被替换的旧文件同样由登记事务入队（原因 `history_snapshot_replaced`）。工作文件与 head 的 SHA-256 相同时，worker 仍会打开受控 snapshot、核对数据库摘要并逐块验证内容；文件缺失、格式损坏、块损坏或摘要不匹配时，使用本次已经生成的 snapshot 以新路径发布并更新原 head 节点，验证通过后才把任务记为内容未变化。有效 snapshot 不重写，修复也不创建新历史节点。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
+提交顺序沿用 LilithClient：读取前后比较源文件元数据，临时生成 snapshot/delta，`sync_all`，以不覆盖方式发布文件，最后在 SQLite 事务中切换 head。数据库失败会清理本次新文件（回滚路径上文件本就未被数据库引用，直接删失败只留泄漏、不留不一致，由清理扫描兜底）。父节点是检查点时 worker 不生成反向增量，事务只为这条边登记空路径（原因见「检查点只留 snapshot」）；其余情况下缺少增量会让父节点失去唯一表示，提交直接拒绝。提交释放的父 snapshot（父节点不再是 head 或检查点、且无其它分支引用时）在同一事务内入队 `pending_file_cleanup`（原因 `history_commit_release`），提交成功后由 worker 单遍重放删除；删除失败只留队列可重试，不影响已成功的提交结果。工作文件与 head 的 SHA-256 相同时，worker 直接记为内容未变化并写入快速检查基线，不再读回旧 snapshot 复检或自动修复（release 实测 1.28 GB 复检 2,020 ms，占这类检查 31%）。旧 snapshot 的完整性由恢复路径的链校验、`verify_history_node` / `scrub_history` 与整仓备份承担；空闲完整性检查默认关闭，关闭时提交路径不会主动发现这份损坏。内容未变化的提交不创建新历史节点，也不改写现有 snapshot。主动提交备注可为空并生成“主动提交”节点；调度器使用独立的 automatic 类型和空备注，不会覆盖主动提交备注。
 
 恢复从目标节点向下寻找最近可用 snapshot，再沿父链逐条 `resolve` 反向 delta（惰性，不产生中间 snapshot 文件），最后一次性把结果流式导出为临时文件并禁止覆盖；链起点与每步结果都会与数据库摘要比对，导出时逐块验哈希并核对整文件摘要。`history::materialization_chain` 用一次递归 CTE 同时选出最近 snapshot、父链节点与每步使用的 delta 路径，不再按节点逐条查库；目标自身持有 snapshot 时仍直接返回该节点。恢复、精简和检查点共用同一条惰性解析路径：精简只物化被移除节点的父链，子链只取块索引，然后从父链的虚拟存储中按需读取变化的块重建反向 delta，改接事务内把被移除节点与旧边占用的文件入队 `pending_file_cleanup`（原因 `history_compaction`）；检查点把解析结果一次性写成 snapshot 文件并 `sync_all` 后发布；取消普通检查点时先在事务外重建「唯一子节点到该节点」的反向增量（`restore::build_reverse_delta`，复用同一物化内核），再在一个事务里把边换成真实路径、清掉 `snapshot_path`；建立、取消或替换检查点释放的旧 snapshot 在同一事务内入队（原因 `history_checkpoint_release` / `history_snapshot_replaced`）；全库 scrub 走同一条链但把结果流入 sink，只校验不写临时文件，并刷新节点级校验状态。上述入队均由调用方在提交成功后单遍重放，删除失败只留队列可重试。所有长操作经 `OperationCoordinator` 记录开始、结束、耗时与 typed 错误字段（`code`/`kind`/`retryable`/operation id）。
 
@@ -128,7 +130,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 每个分支保存独立开关与 1 到 10080 分钟的检查间隔。调度线程随 Tauri 应用启动，主窗口隐藏到托盘时继续运行；显式退出时先进入 `shutting_down`、请求取消，再等待调度线程和共享操作锁结束。已经排队但尚未取得锁的任务不会在退出过程中重新清除取消标志或开始备份。分支绑定最终成品后会自动从调度查询排除。分支起点、分支 head 和显式设置的节点会保留完整 snapshot 作为 checkpoint。调度优先级固定为前台等待 > 手动提交 > 到期自动备份 > 空闲完整性检查；候选按 `due_at`、上次检查时间与分支 ID 组成最小堆，`due_at` 已把失败退避写入分支自己的 `retry_at_ms`，因此一条分支失败不会把整支队列停 60 秒。
 
-自动备份支持快速检查与全量检查两种方式，由分支级 `backup_quick_enabled` 逐分支决定，调度器只读该标志。全局设置 `automaticBackupCheckMode`（`quick` / `full`，默认 `quick`）只是"默认检查方式"：在创建 Artwork 与创建分支时写入 `backup_quick_enabled` 作为初始值，此后不参与运行时判定，用户可在分支设置里独立开关。快速检查比较工作文件的大小与上次全量检查成功后记录的 cheap fingerprint（`last_source_size` / `last_source_modified_ms`，由 `run_backup` 在提交或确认内容未变化时写入）：指纹算法版本为 2，内容是 SHA-256 覆盖版本字节、大小、修改时间（按文件系统实际精度参与，只有整秒也接受）、首 64 KiB 与尾 64 KiB 采样，取摘要前 8 字节并把最高位清零后复用 `last_source_modified_ms` 的整数列存储（不新增 schema）。一致时直接记为内容未变化并推进检查时间，不打开工作文件；缺少基线（如尚无任何提交）、旧数据里保存的是裸 mtime（与新指纹必然不等，因此自然退回一次全量并重写基线）、源文件元数据不可用或不是普通文件、首尾采样读取失败、大小或指纹不一致时，退回完整流程。退化原因按分支去重记录：缺少基线、元数据不可用、不是普通文件、采样读取失败是 `warn`（快速检查在这些分支上系统性不可用）；大小或指纹不一致是 `info`（保存文件本来就会改变它们）；快速检查恢复命中后清空记录。手动提交始终走全量检查。快速检查不校验 head snapshot 的完整性，该职责仍属于内容变化后的全量路径与全库完整性扫描。
+自动备份支持快速检查与全量检查两种方式，由分支级 `backup_quick_enabled` 逐分支决定，调度器只读该标志。全局设置 `automaticBackupCheckMode`（`quick` / `full`，默认 `quick`）只是"默认检查方式"：在创建 Artwork 与创建分支时写入 `backup_quick_enabled` 作为初始值，此后不参与运行时判定，用户可在分支设置里独立开关。快速检查比较工作文件的大小与上次全量检查成功后记录的 cheap fingerprint（`last_source_size` / `last_source_modified_ms`，由 `run_backup` 在提交或确认内容未变化时写入）：指纹算法版本为 2，内容是 SHA-256 覆盖版本字节、大小、修改时间（按文件系统实际精度参与，只有整秒也接受）、首 64 KiB 与尾 64 KiB 采样，取摘要前 8 字节并把最高位清零后复用 `last_source_modified_ms` 的整数列存储（不新增 schema）。一致时直接记为内容未变化并推进检查时间，不打开工作文件；缺少基线（如尚无任何提交）、旧数据里保存的是裸 mtime（与新指纹必然不等，因此自然退回一次全量并重写基线）、源文件元数据不可用或不是普通文件、首尾采样读取失败、大小或指纹不一致时，退回完整流程。退化原因按分支去重记录：缺少基线、元数据不可用、不是普通文件、采样读取失败是 `warn`（快速检查在这些分支上系统性不可用）；大小或指纹不一致是 `info`（保存文件本来就会改变它们）；快速检查恢复命中后清空记录。手动提交始终走全量检查。快速检查不校验 head snapshot 的完整性；提交路径也不再复检旧 snapshot，损坏由恢复拒绝、全库扫描与空闲完整性检查（默认关闭）暴露。
 
 调度器在用户长操作结束后要求至少 10 秒静默才启动后台任务：所有经 `OperationCoordinator` 的用户长操作——前台长命令、普通写、素材板写、仓库切换，以及内容级只读长任务（全库校验、画板检查）——在开始与结束各刷新一次 `AppState.last_user_activity_ms`；候选扫描前与取得运行锁后各复查一次，未满足时让位且不计入失败。调度器只按剩余静默期挂起（每段最多 10 秒），用户操作**不**唤醒它，因此素材板之类的频繁保存不会反复触发候选扫描；醒来后重新计算剩余时长，连续操作期间一轮一轮往后推。这样前台放锁后后台不会立刻插进操作间隙、随后又被下一次操作取消。空闲完整性检查本身还要求仓库静默 10 分钟，因此这 10 秒只影响自动备份的启动时机。
 
@@ -251,7 +253,7 @@ scan_repository_storage_disk
 | 单作品 300 次提交的深链、约 20 条分支的历史图、约 400 个 Artwork 的库：计数、搜索、移动、删除与恢复均正确 | `stress_scale` D1–D3 |
 | 整仓灾备副本可独立打开并通过完整性与链路校验，树结构与源仓库一致 | `stress_scale` E1 |
 | 越界输入（备注/标题/搜索超长、非法提交类型、不存在的历史节点、已存在的输出路径、非法移动目标）被明确拒绝而非崩溃 | `stress_scale` F1 |
-| 损坏的 snapshot/delta 被内容级校验（`scrub`）发现；数据库级校验（`verify`）不读取文件内容因此仍通过；head snapshot 损坏后一次内容未变化的提交可修复；恢复损坏节点被拒绝且不留半成品 | `stress_damage` R1–R2（另有 `backup/worker.rs`、`backup/restore.rs` 单测） |
+| 损坏的 snapshot/delta 被内容级校验（`scrub`）发现；数据库级校验（`verify`）不读取文件内容因此仍通过；head snapshot 损坏后，内容未变化的提交直接返回「内容未变化」且不改写该文件；恢复损坏节点被拒绝且不留半成品 | `stress_damage` R1–R2（另有 `backup/worker.rs`、`backup/restore.rs` 单测） |
 | GUI、无头与维护入口的每次写操作先在同一进程的写入闸门里按优先级排队、再取跨进程 owner lock：同进程的第二个写者排队等待而不是与前者竞态，跨进程则仍拿到明确拒绝；锁由内核在句柄关闭时释放，因此强杀不残留，随后仍能取得锁。锁库与 owner 元数据不参与数据库发现、灾备复制或未引用文件判定 | `stress_concurrency` I1、I2；`repository_lock` 与 `library::repository` 单测 |
 | 写进程持 owner lock 期间只读命令仍作答并看到一致状态（含「快照已发布、事务未提交」的窗口）；并发读互不阻塞 | `stress_concurrency` J1、J2（跨进程）；`app/settings.rs` 单测（进程内长写持锁时的读租约） |
 | 主库文件本身（`lilith-artworks.sqlite3`）被误写或清空时，两层校验都干净失败并给出可行动的错误，且失败的打开不会把空文件重建为空仓库 | `stress_damage` R3–R4 |

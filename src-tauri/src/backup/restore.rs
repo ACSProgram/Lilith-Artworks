@@ -597,10 +597,20 @@ fn validate_output_path(root: &Path, value: &str) -> Result<PathBuf, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
+    use std::{
+        fs,
+        io::Cursor,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        },
+    };
 
     use super::*;
-    use crate::backup::chunk_file::{ChunkWriteOptions, ChunkingConfig};
+    use crate::{
+        backup::chunk_file::{ChunkWriteOptions, ChunkingConfig},
+        library,
+    };
 
     /// 生成一个合法 snapshot 文件的内容与它记录在数据库里的 `sha256`。
     fn snapshot_bytes(bytes: &[u8]) -> (Vec<u8>, String) {
@@ -666,5 +676,52 @@ mod tests {
         let error = validate_snapshot(&path, &record(digest), "检查点", &CancelToken::standalone())
             .unwrap_err();
         assert!(error.contains("snapshot"), "{error}");
+    }
+
+    /// 导出管道在取消后不得发布半成品：输出路径要么完整存在，要么完全不存在。
+    ///
+    /// 取消由导出进度回调触发，覆盖的是「已经写出一部分临时文件」的那一刻；
+    /// 这里断言调用方拿到取消错误，且最终路径没有被创建。
+    #[test]
+    fn cancelled_export_does_not_publish_the_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.bin");
+        let bytes: Vec<u8> = (0..5 * 1024 * 1024).map(|index| index as u8).collect();
+        fs::write(&source, &bytes).unwrap();
+        library::initialize(&root).unwrap();
+        let artwork =
+            library::create_artwork(&root, None, "Artwork", "Main", &source, false).unwrap();
+        let commit = super::super::worker::run_backup(
+            &root,
+            &artwork.branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let token = CancelToken::with_source({
+            let cancelled = cancelled.clone();
+            move || cancelled.load(Ordering::SeqCst)
+        });
+        let output = directory.path().join("restored.bin");
+        let error = super::restore(
+            &root,
+            commit.history_id.as_deref().unwrap(),
+            output.to_str().unwrap(),
+            &token,
+            |_, processed, _| {
+                if processed > 0 {
+                    cancelled.store(true, Ordering::SeqCst);
+                }
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.contains("取消"), "{error}");
+        assert!(!output.exists(), "取消的恢复不得留下发布文件");
     }
 }

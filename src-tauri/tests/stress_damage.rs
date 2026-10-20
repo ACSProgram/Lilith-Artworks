@@ -7,8 +7,8 @@
 //! - **内容级校验**（`scrub`，逐块复算摘要链）必须报错；
 //! - **数据库级校验**（`verify`，UUID / 相对路径 / 摘要格式的全表检查）不打开文件内容，
 //!   因此仍通过——两层校验的分工由此可断言，也解释了为什么「能打开仓库」不等于「数据完好」；
-//! - 恢复损坏的节点必须**拒绝**且不留半成品输出；head snapshot 损坏后，一次内容未变化的
-//!   提交会重新发布 snapshot 并把它修好（错误恢复路径）。
+//! - 恢复损坏的节点必须**拒绝**且不留半成品输出；提交路径不再复检、也不再修复 head
+//!   snapshot，内容未变化的提交会直接返回「内容未变化」，损坏留给内容级校验暴露。
 //!
 //! R1/R2 改的是 `snapshot` / `delta` 的内容；R3/R4 改的是**主库文件本身**
 //! （`lilith-artworks.sqlite3`）——这是 R 组此前的直接空白：库级单测覆盖了函数层，
@@ -35,12 +35,11 @@ use serde_json::json;
 use stress_support::*;
 
 /// R1：head snapshot 被改坏 → 内容级校验报错、恢复拒绝，数据库仍可打开；随后一次
-/// 内容未变化的提交把它修好。
+/// 内容未变化的提交直接返回「内容未变化」，不再复检或改写这份损坏的 snapshot。
 #[test]
-fn r1_damaged_head_snapshot_is_detected_and_repaired() {
+fn r1_damaged_head_snapshot_is_detected_and_left_alone() {
     let fixture = ArtworkFixture::new();
     let head = fixture.commit(96 * 1024, 1, "baseline");
-    let expected = pattern_bytes(96 * 1024, 1);
 
     let before = assert_no_stray(&fixture.repository);
     assert_eq!(
@@ -95,44 +94,49 @@ fn r1_damaged_head_snapshot_is_detected_and_repaired() {
         json!({ "snapshot": damaged_relative }),
     );
 
-    // 正向对照（错误恢复）：内容未变化的提交重新生成并发布 head snapshot，旧的损坏
-    // 文件被回收；随后全库校验与恢复都恢复正常。
+    // 提交路径不再复检旧 snapshot：内容未变化的提交直接返回「内容未变化」，既不
+    // 创建新节点，也不改写或回收这份损坏的文件；损坏仍由内容级校验负责暴露。
     write_work_file(&fixture.work, 96 * 1024, 1);
-    let repaired = fixture
+    let unchanged = fixture
         .commit_command()
-        .arg("note", "repair after damage")
+        .arg("note", "check after damage")
         .finish();
-    repaired.expect_ok();
+    unchanged.expect_ok();
     assert!(
-        repaired.data("unchanged").as_bool().unwrap_or(false),
+        unchanged.data("unchanged").as_bool().unwrap_or(false),
         "内容未变化时应按「内容未变化」结果返回：\n{}",
-        repaired.describe()
+        unchanged.describe()
     );
     let after = assert_no_stray(&fixture.repository);
-    assert!(
-        !after.snapshots.contains(&damaged_relative),
-        "损坏的 snapshot 应被新文件替换：{:?}",
+    assert_eq!(after.snapshots.len(), 1, "{:?}", after.snapshots);
+    assert_eq!(
+        after.snapshots[0], damaged_relative,
+        "损坏的 snapshot 不应被提交路径替换：{:?}",
         after.snapshots
     );
-    assert_eq!(after.snapshots.len(), 1, "{:?}", after.snapshots);
-
-    fixture.command("scrub").finish().expect_ok();
-    assert_eq!(fixture.healthy(), 1, "修复不创建新节点");
+    assert!(
+        !fixture.command("scrub").finish().ok(),
+        "损坏仍应被内容级校验发现"
+    );
+    assert!(
+        unchanged.data("historyId").is_null(),
+        "内容未变化的提交不应返回新节点：\n{}",
+        unchanged.describe()
+    );
     fixture.assert_repository_clean();
 
-    let restored = fixture.workspace.out("repaired.bin");
-    fixture
+    let restored = fixture.workspace.out("still-damaged.bin");
+    let restore = fixture
         .command("restore")
         .arg("history", &head)
         .arg("output", restored.to_string_lossy())
-        .finish()
-        .expect_ok();
-    assert_eq!(
-        fs::read(&restored).expect("无法读取恢复输出"),
-        expected,
-        "修复后必须能恢复出与损坏前逐位一致的内容"
+        .finish();
+    assert!(
+        !restore.ok() && !restore.timed_out,
+        "未修复的损坏节点仍须拒绝恢复：\n{}",
+        restore.describe()
     );
-    let _ = fs::remove_file(&restored);
+    assert!(!restored.exists(), "被拒绝的恢复不得产生输出");
 }
 
 /// R2：delta 被改坏 → 内容级校验报错（失败原因指向 delta），但数据库级校验与 head 的

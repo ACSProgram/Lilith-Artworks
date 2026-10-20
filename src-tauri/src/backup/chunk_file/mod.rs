@@ -301,6 +301,12 @@ impl<'a> ChunkTask<'a> {
         Self::new(cancel, None)
     }
 
+    /// 并行管道把取消观察交给各自的线程；它们只需要令牌，不共享带 `Cell`
+    /// 的任务本体。
+    pub(super) fn cancel_token(&self) -> Option<&'a CancelToken> {
+        self.cancel
+    }
+
     pub(super) fn check(&self) -> ChunkFileResult<()> {
         if self.is_cancelled() {
             Err(ChunkFileError::Cancelled)
@@ -317,7 +323,8 @@ impl<'a> ChunkTask<'a> {
     /// 上报本步处理的字节数；回调收到的是本任务至今累计处理的逻辑字节。
     ///
     /// 热点路径每块调用一次，累计值在任务内单调不减，只有需要跨步骤重置时
-    /// （例如换了统计维度）才值得新建一个任务。
+    /// （例如换了统计维度）才值得新建一个任务。并行管道只由保序写线程调用，
+    /// 乱序完成的块不会提前推进进度。
     pub(super) fn report(&self, bytes: u64) {
         let Some(progress) = self.progress else {
             return;

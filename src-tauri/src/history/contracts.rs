@@ -216,8 +216,8 @@ fn collect_scan_directory(
     Ok(())
 }
 
-/// snapshot 命名：`<history-id>.lbc`，或修复 head snapshot 时的
-/// `<history-id>-repair-<uuid>.lbc`。
+/// snapshot 命名：`<history-id>.lbc`，或旧版本修复 head snapshot 时写下的
+/// `<history-id>-repair-<uuid>.lbc`（该修复路径已移除，命名仍被认作受管理文件）。
 fn is_snapshot_name(name: &str) -> bool {
     let Some(stem) = name.strip_suffix(".lbc") else {
         return false;

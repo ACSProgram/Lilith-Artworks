@@ -8,8 +8,12 @@ use std::{
 use super::{invalid_format, ChunkFileResult, ErrorDimension};
 
 /// A readable, seekable source of chunk payload bytes.
-pub(crate) trait ChunkSource: Read + Seek {}
-impl<T: Read + Seek> ChunkSource for T {}
+///
+/// `Send` lets the parallel export pipeline move its single reader into a scoped
+/// thread; neither the reader nor the source is shared, so concurrent access
+/// requirements stay at the sequential `&mut` contract.
+pub(crate) trait ChunkSource: Read + Seek + Send {}
+impl<T: Read + Seek + Send> ChunkSource for T {}
 
 struct Segment<'a> {
     source: Box<dyn ChunkSource + 'a>,
