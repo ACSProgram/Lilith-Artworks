@@ -7,63 +7,33 @@
 并归档后，从本文件删除，历史增量全部归 `docs/planning/archive/`（索引见其 `README.md`）。
 当前批次状态写 `current-handoff.md`。
 
-## 0.3 实施计划
+## 0.3 实施计划状态
 
-`0.3-architecture-algorithm-plan-2026-10-05.md` 在 `dev` 分三批实施，`main` 固定为 0.2 发布线：
-**alpha1**（阶段 1–5，架构与算法底座）已实现并切分为 `0.3.0-alpha.1`，不改持久 schema；
-**alpha2** = 阶段 6（仓储/备份设置分离与仓储空间状态 UI，仍不改 schema）+ 针对 alpha1 的测试与
-修复，已实现、通过维护者验收并切分为 `0.3.0-alpha.2`；**alpha3** = 原阶段 7–9（画板多态、节点
-缩略图、空闲完整性检查），共用唯一一次 v4 → v5 前向兼容迁移。阶段 7 已实现并完成自动验证，
-等待 GUI 手工验收；阶段 8 已实现并完成自动验证，GUI 手工验收已于 2026-10-20 通过（含大画布
-`.psd`/`.psb` 预览与详情区「重新获取缩略图」）；阶段 9 已实现并完成自动验证（开关与计数、窗口门控
-与每窗一批、让位、手动重查待 GUI 验收）。批次划分、依赖顺序与阶段口径见该计划文档。
+0.3 在 `dev` 分三批实施，`main` 固定为 0.2 发布线：**alpha1**（阶段 1–5，架构与算法底座）已实现
+并切分为 `0.3.0-alpha.1`，不改持久 schema；**alpha2**（阶段 6 与针对 alpha1 的测试与修复）已通过
+维护者验收并切分为 `0.3.0-alpha.2`；**alpha3**（原阶段 7–9：画板多态、节点缩略图、空闲完整性
+检查）已实现并切分为 `0.3.0-alpha.3`，共用唯一一次 v4 → v5 迁移。三个版本均未打标签。
 
-阶段 0（建立 0.2 基线，不改变行为）已完成，基线见 `0.3-baseline-2026-10-18.md`（采集用的临时
-仓库副本随计划落实后撤除）。阶段 1–5 已实现并切分 `0.3.0-alpha.1`；CI 通过。alpha1 的压力测试
-修复批次（8 条未通过项 + 小选区水印警告 + J5 并发断言口径）已实施并归档，记录见
-`archive/alpha1-stress-failure-fix-plan-2026-10-18.md` 与 `docs/user/stress-test-report.md`；
-alpha1 的发布前手动测试已于 2026-10-19 收口（见下）。alpha2（阶段 6 与写入闸门、临时目录清扫
-两项修复）已通过维护者验收并收口归档，记录见 `archive/handoff-log-2026-10-19.md` 第 7 节；
-阶段 7 与 9 已实现并完成自动验证，等待 GUI 手工验收；阶段 8 的 GUI 手工验收已于 2026-10-20 通过。
+alpha3 的验收状态：阶段 7、8 的 GUI 手工验收已通过；**阶段 9 的 GUI 手工验收暂时遗留**（见下）。
+**0.3 尚未完成**：阶段 9 验收、发布前压力测试（含 `manual` 档）与是否打标签都还没有落定。计划
+正文与阶段口径已归档：`archive/0.3-architecture-algorithm-plan-2026-10-05.md`；alpha3 的批次记录
+见 `archive/handoff-log-2026-10-20.md`。
 
-阶段 4 的 `stress_bench` P1B（多段链恢复 p50/p95）已随本轮采集（`--test-threads=1`，release
-构建）。2026-10-19 起 `stress_bench` 同时记录墙钟与子进程 **CPU 时间**（用户 + 内核），
-`tests/perf-baseline.json` 的 `#cpu` 键就是它；跨版本比较仍只在同一机器、同一构建档、单线程
-采集下进行，短操作（基线 < 50 ms）的 CPU 时间只记录不参与严格比对。基线文件顶层 `machine`
-字段记录采集机器。
-新增的 `stress_format` 组（`.clip` 容器感知分块与 v1/v2 混存仓库的端到端恢复）是便宜分组，
-随 Windows CI 运行，不在此列。
+阶段 0（建立 0.2 基线，不改变行为）的数值见 `0.3-baseline-2026-10-18.md`（采集用的临时仓库副本
+随 0.3 发布后撤除）。alpha1 的发布前手动测试已于 2026-10-19 收口，记录见
+`archive/handoff-log-2026-10-19.md` 与 `docs/user/stress-test-report.md`；`stress_large` 的
+`manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是开发期待办，见
+`docs/guides/release-policy.md`。
 
-**发布前手动测试已收口**（2026-10-19）：`stress_large` 四档、`stress_scale`、`stress_bench`、
-`stress_baseline` 与 `stress_authenticity` 的 16K 档均已采到 alpha1 的数值，记录见
-`docs/user/stress-test-report.md`，本轮批次记录见 `archive/handoff-log-2026-10-19.md`。
-`stress_large` 的 `manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是
-开发期待办，见 `docs/guides/release-policy.md`；开发阶段与候选版本切分都不跑它。
+## alpha3 阶段 9 的 GUI 手工验收（暂时遗留）
 
-「空闲链路校验重构」已按维护者 2026-10-19 的复核修订为「空闲完整性检查」（计划 §2.4，alpha3
-阶段 9），并已实现：复用全库扫描的逐节点物化内核做空闲增量批次，默认关闭、仅在主窗口隐藏或
-最小化时运行，校验状态挂 `history_nodes` 的节点级列（随阶段 7 的 v4 → v5 迁移建立，`branches`
-旧校验三列随同删除），不再建 `branch_notices` 告警表。批次取值、静默口径与失效粒度见计划
-§2.4 的「落实记录」。
-
-**阶段 9 的 GUI 手工验收项**（2026-10-19 记入）：
+2026-10-19 记入，2026-10-20 确认暂时遗留；自动验证已通过，界面行为仍待维护者验收：
 
 - 设置页「备份」页的开关默认关闭、保存后生效，待校验计数与仓库状态一致。
 - 主窗口隐藏或最小化且仓库静默后，每个空闲窗口只跑一批；窗口可见期间不运行；托盘暂停时一并暂停。
 - 校验进行中发起手动提交或前台操作时能及时让位，且不让错误地写入当前节点状态。
 - 手动「重新校验此分支」立即执行并显示进度；失败摘要定位到节点，分支状态行按整条链派生。
 - 全库扫描在存在损坏节点时继续扫完其余节点，并刷新各节点状态。
-
-分块、恢复与完整性算法（alpha1 阶段 4 已落地）的实测采用集来自本地研究仓
-`research/compression-optimization/`（格式 v2 + O2 容器感知分块 + 快照去重 + O5 鲁棒性；O6 解码域
-转码已否决）。
-
-**alpha3 切版本的元数据登记（待维护者执行）**：阶段 7 已把仓库 schema 提到 v5，但五处版本字段
-仍是 `0.3.0-alpha.2`（按「版本号滞后」口径不动），`tools/release/verify-metadata.mjs` 里 alpha.2
-登记的仍是 v4，因此 `npm run verify:release-metadata` 在切分 alpha3 之前会报
-`must use repository schema v4 (found: 5)`。维护者已确认**照常提交并接受这段已知红灯**（alpha3
-按计划覆盖阶段 7–9，现在只完成阶段 7 且 GUI 未验收，不提前切版本）。切 alpha3 时需在同一提交更新
-五处版本字段、`CHANGELOG.md` 小节并把该版本登记为 v5；在此之前不要为让脚本通过而修改登记表。
 
 ## alpha2 遗留验收
 
@@ -97,17 +67,18 @@ alpha2 已收口归档，以下验收项仍未执行（2026-10-19 记入）：
 
 ## 二、维护者决策记录
 
-2026-10-18 / 2026-10-19 起仍然生效的决策：
+仍然生效的决策：
 
 - **分支模型**：`main` 固定为 0.2 发布线（`v0.2.0`，指向 `0be6224`），不再接收 0.3 改动；
   `dev` 从 `0be6224` 创建，作为 0.3 开发线。历史与发布记录见
   `archive/handoff-log-2026-10-18.md`。
 - **0.3 批次划分**：alpha1（阶段 1–5）已完成并切分 `0.3.0-alpha.1`，不改持久 schema；alpha2
   （阶段 6 + 针对 alpha1 的测试与修复）已完成、通过验收并切分 `0.3.0-alpha.2`，仍不改 schema；
-  alpha3 = 原阶段 7–9，含唯一一次 v4 → v5 迁移。见 `0.3-architecture-algorithm-plan-2026-10-05.md`；
-  alpha1 各阶段的落实口径（owner lock、设置 CAS、事件 TTL、快速检查指纹、ChunkFile v2、调度
-  aging 与灾备抽样复核等）见 `archive/handoff-log-2026-10-18.md`，alpha2 收口见
-  `archive/handoff-log-2026-10-19.md`。
+  alpha3 = 原阶段 7–9，含唯一一次 v4 → v5 迁移，已实现并切分 `0.3.0-alpha.3`（阶段 7、8 已通过
+  GUI 手工验收，阶段 9 暂时遗留）。计划正文见
+  `archive/0.3-architecture-algorithm-plan-2026-10-05.md`；alpha1 各阶段的落实口径见
+  `archive/handoff-log-2026-10-18.md`，alpha2 收口与 alpha3 批次记录见
+  `archive/handoff-log-2026-10-19.md`、`archive/handoff-log-2026-10-20.md`。
 - **空闲链路校验重构改向（2026-10-19）**：原 2026-10-17 口径（per-branch 全链恢复校对 +
   `branch_notices` 共享告警）废止。阶段 9 改为「空闲完整性检查」：一套 scrub 内核、手动全库扫描
   与空闲增量两个入口，校验状态挂节点级列、待查集合按 `created_ms` 最旧优先（与 bit rot 威胁模型

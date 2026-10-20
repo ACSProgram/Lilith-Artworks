@@ -112,7 +112,7 @@
   的最近结果；历史节点信息栏的 ChunkFile v1/v2 版本标签，只读文件头不改 schema）与同批次的两
   项修复——同仓库写入排队（进程内写入闸门，计划与实施记录见
   `repository-write-lock-plan-2026-10-18.md`）与仓库根 `temp/` 超期残留自动清扫——均视为通过
-  维护者验收。行为变化见 `../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节。
+  维护者验收。行为变化见 `../../../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节。
 - **遗留验收记入待办**：写入闸门的人工验收（复现原始场景、备份中保存/退出、真跨进程拒绝）与
   `stress_concurrency` I/J 复跑仍未进行，移入 `../todo.md` 的「alpha2 遗留验收」段落。
 - **阶段 9 计划改向（2026-10-19 维护者复核）**：原 2026-10-17 口径（per-branch 全链恢复校对 +
@@ -122,9 +122,9 @@
   验状态挂 `history_nodes` 的节点级列，待查集合按 `created_ms` 最旧优先；默认关闭、窗口空闲门
   控与 `should_yield` 让位沿用 2026-10-17 口径。v5 迁移随之缩减：不建 `branch_notices`，改为
   建 `history_nodes` 校验列并删除 `branches` 旧校验三列。修订后的口径见
-  `../0.3-architecture-algorithm-plan-2026-10-05.md` §2.4。
-- **切分 `0.3.0-alpha.2`**（未打标签的过渡版本）：五处版本字段同步；`../CHANGELOG.md` 的
+  `0.3-architecture-algorithm-plan-2026-10-05.md` §2.4。
+- **切分 `0.3.0-alpha.2`**（未打标签的过渡版本）：五处版本字段同步；`../../../CHANGELOG.md` 的
   `## Unreleased`（alpha2 功能与修复、CPU 时间度量等）落为带日期小节；
   `tools/release/verify-metadata.mjs` 登记 `0.3.0-alpha.2` → schema v4 并验证通过；许可清单经
-  `npm run legal` 重新生成；`README.md` 与 `../guides/release-policy.md` 的版本引用同步。本批
+  `npm run legal` 重新生成；`README.md` 与 `../../guides/release-policy.md` 的版本引用同步。本批
   次不改产品代码，`git diff --check` 干净。

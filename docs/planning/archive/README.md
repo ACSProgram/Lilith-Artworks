@@ -30,7 +30,7 @@
   检测与恢复。八个批次已全部实施完毕，有效契约并入 `docs/guides/validation.md`、
   `docs/user/stress-test-report.md`，以及 `docs/modules/history-and-backup.md` 与
   `docs/modules/authenticity.md` 的「可靠性不变量与覆盖」；发布前实测数据见
-  `../user/stress-test-report.md`。
+  `../../user/stress-test-report.md`。
 - `handoff-log-2026-09-12-to-2026-10-08.md`：2026-09-12 至 2026-10-08 各批次交接记录的归档，
   含素材板迁入、任务调度总控、统一清理体系 A–F、压力测试批次 1–8、素材板退出握手等批次的
   实施细节、落实偏差与验证记录。当前批次状态改看 `../current-handoff.md`。
@@ -56,17 +56,18 @@
   口径与实测、自动与人工门槛现状、未签名发布口径，以及 `main` 冻结为 0.2 发布线、`dev`
   从 `0be6224` 建立为 0.3 开发线的分支模型；同日补齐 **0.3 alpha1（阶段 1–5）** 的收口——
   `0.3.0-alpha.1` 切分、逐阶段提交与实现记录、各阶段落实时定稿的口径，以及从
-  `../0.3-architecture-algorithm-plan-2026-10-05.md` 裁剪出的已完成计划正文。当前批次状态改看
+  `0.3-architecture-algorithm-plan-2026-10-05.md` 裁剪出的已完成计划正文。当前批次状态改看
   `../current-handoff.md`，剩余工作看该计划文档。
 - `0.3-architecture-algorithm-plan-alpha1-2026-10-05.md`：0.3 计划裁剪出的**完整原文快照**——
   被替代的文件头、§0 复查结论（三轮复查与落实前修订）、§1 现状判断、§2 目标架构、§3.A–E（阶段
   1–5 的实现口径与 §3.D 研究结论）、§4 分阶段实施顺序、§5 验证与完成条件、§6 非目标与待决策；
-  §3.G/H/F/I 仍留在现计划中（改编为剩余工作 §2.1–2.4），未复制到此。正文按裁剪前口径保留原始 § 编号与「两批交付」的批次划分。
+  §3.G/H/F/I 未复制到此，后续留在 `0.3-architecture-algorithm-plan-2026-10-05.md` 的 §2.1–2.4。
+  正文按裁剪前口径保留原始 § 编号与「两批交付」的批次划分。
 - `alpha1-stress-failure-fix-plan-2026-10-18.md`：alpha1 压力测试未通过项修复计划（阶段 1–3）的
   **完整正文**。记录 2026-10-18 release 档整套复跑中 8 条未通过记录的已确认根因与修复口径
   （B/C1/C5 同源的检查点膨胀、C2/C4/C6 的 v1 快照体积断言、G4 小图像素域回读），外加维护者要求的
   小选区水印警告与 `stress_concurrency` J5 的并发断言口径；三阶段均已实施并复验，逐条结果并入
-  `../user/stress-test-report.md`，检查点分层的验证口径并入 `docs/guides/validation.md`，本批次的
+  `../../user/stress-test-report.md`，检查点分层的验证口径并入 `docs/guides/validation.md`，本批次的
   实施与归档记录见 `handoff-log-2026-10-18.md`。
 - `repository-write-lock-plan-2026-10-18.md`：同仓库写入排队（消除同进程 owner lock 冲突）的
   独立计划与实施记录。含三个用户可见症状（偶发「另一个进程写入」提示、那次启动界面停在仓库
@@ -75,7 +76,7 @@
   且可取消）的设计、优先级与让位表。已实施完毕并补入两处实施期修正（`Gate::acquire` 入口复查
   `retired` 关闭「僵尸闸门」窗口、`OwnerAttempt` 装箱与 `#[must_use]`）；有效契约并入
   `docs/architecture/overview.md`、`docs/modules/library.md` 与 `docs/modules/history-and-backup.md`，
-  行为变化见 `../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节；维护者已于 2026-10-19 验收该修复（见
+  行为变化见 `../../../CHANGELOG.md` 的 `## 0.3.0-alpha.2` 小节；维护者已于 2026-10-19 验收该修复（见
   `handoff-log-2026-10-19.md` 第 7 节），人工验收场景与 `stress_concurrency` I/J 复跑仍记于
   `../todo.md`。
 - `handoff-log-2026-10-19.md`：alpha1 压力测试收尾与 CPU 时间度量的批次记录——测试侧新增子进程
@@ -85,8 +86,19 @@
   修正，P2/P8 的单轮采样改为三轮取最小以消除严格门的噪声误报，以及 `manual` 档改为只在正式
   发布前运行的维护者口径。有效契约并入
   `docs/guides/validation.md`、`docs/guides/release-policy.md` 与
-  `../user/stress-test-report.md`；同日稍后追加 **alpha2 收口**——维护者验收阶段 6、同仓库写
+  `../../user/stress-test-report.md`；同日稍后追加 **alpha2 收口**——维护者验收阶段 6、同仓库写
   入排队修复与超期临时目录清扫，遗留的人工验收与 `stress_concurrency` I/J 复跑移入
   `../todo.md`；阶段 9 计划由「per-branch 全链校验 + `branch_notices`」改向为「空闲完整性检查
   （复用 scrub 内核的空闲增量）」；同日切分 `0.3.0-alpha.2`（未打标签）。当前批次状态改看
   `../current-handoff.md`。
+- `0.3-architecture-algorithm-plan-2026-10-05.md`：0.3 计划的完整正文（原文自 `../` 移入）——
+  批次划分与依赖、阶段 6–9 的设计口径与落实记录、alpha2 的测试与修复判据、实施顺序与完成条件、
+  非目标与已落定的实现决策。阶段 1–9 已全部实现，alpha3 切分为 `0.3.0-alpha.3`（未打标签）；
+  文件头已标注**0.3 未完成**——阶段 9 的 GUI 手工验收暂时遗留，发布前压力测试与打标签仍待
+  维护者安排。当前状况见 `../current-handoff.md`，未完成事项见 `../todo.md`。
+- `handoff-log-2026-10-20.md`：alpha3 收口与文档整理的批次记录——阶段 7（画板条目多态与 v4 → v5
+  迁移，人工验收通过）、阶段 8（节点缩略图，含大画布 `.psd`/`.psb` 预览与「重新获取缩略图」，
+  人工验收通过）、阶段 9（空闲完整性检查，GUI 手工验收暂时遗留）、历史节点缩略图悬停预览、
+  画板文字定位与添加文字对话框、清理体系收口与检查点增量精简、2026-10-19 晚快速档压测复跑、
+  `0.3.0-alpha.3` 切分与 CHANGELOG 写法调整，以及本轮把 alpha3 与 0.3 计划搬入归档、同步落后
+  口径的记录。当前批次状态改看 `../current-handoff.md`。

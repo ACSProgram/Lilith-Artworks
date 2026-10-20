@@ -9,202 +9,161 @@ the five version fields move together, so the version number lags the work until
 the cut. A version can exist without a tag: tagging is a separate, later release
 decision, so an untagged version is transitional.
 
+Entries are written in proportion to the change: a feature gets a paragraph, a
+small fix one sentence. The `Added` / `Changed` / `Fixed` headings only group
+entries for the reader; they are not a template every entry has to fill.
+
 ## Unreleased
+
+## 0.3.0-alpha.3 - 2026-10-20
 
 ### Added
 
-- Reference inventories can report files that records still point at but the
-  storage model no longer reads (`redundant_targets`), so the junk scan can name
-  the reason instead of calling every candidate unreferenced.
-- Pin-board items are now polymorphic (`pin_board_items` plus per-kind payload
-  tables) instead of images only. A text item is the first non-bitmap kind:
-  `create_pin_board_text` stores text, font, size, colour, alignment and the
-  front-end's measured logical size; the renderer rasterizes it on demand at the
-  requested texture long edge with the same font metrics used for export. Export
-  rasterizes text at twice its logical long edge, encodes PNG in the webview and
-  hands the bytes to `write_pin_board_item_png`, which validates the payload and
-  publishes it atomically; shipping compressed PNG instead of raw RGBA keeps the
-  IPC payload in the hundreds of kilobytes. Text has no DDS, so copying it inside
-  the board or to the system clipboard remains bitmap-only for now, while export
-  handles both kinds.
-- The repository schema moves to v5 with a single v4 → v5 migration. It rebuilds
-  the pin-board tables while preserving item IDs and step history, adds
-  `history_nodes.thumbnail` / `thumbnail_version` / `verified_ms` /
-  `verify_error`, removes the legacy `branches` verification columns, creates
-  snapshot/delta/certification path indexes and adds `repository_backup_runs`.
-  Failed migrations roll back completely, and repositories from a newer schema
-  are refused before any write so an older build cannot corrupt them.
-- Repository backups record their result in `repository_backup_runs`, and
-  `get_last_repository_backup_run` lets the settings page show the latest backup
-  after a restart instead of only within the current run.
-- History nodes now carry a derived thumbnail so the branch inspector can show
-  a preview without restoring the work file. A changed commit extracts it from
-  the same file it already reads: `.clip` uses the canvas preview stored in the
-  embedded SQLite database, `.psd` / `.psb` prefer the PS 4.0/5.0 thumbnail
-  resource (the Photoshop 4.0 resource is BGR and is swapped back to RGB) and
+- Pin-board items are polymorphic now: `pin_board_items` plus a payload table per
+  kind, with text as the first non-bitmap kind. A text item is created through
+  `create_pin_board_text` with its content, font, size, colour, alignment and the
+  front-end's measured logical size, and rasterized on demand at the requested
+  texture long edge with the same font metrics the exporter uses. Export
+  rasterizes text at twice its logical edge, encodes PNG in the webview and hands
+  the bytes to `write_pin_board_item_png`, which validates and publishes them
+  atomically; shipping compressed PNG keeps the IPC payload in the hundreds of
+  kilobytes. Text has no DDS, so copying inside the board or to the system
+  clipboard is still bitmap-only, while export handles both kinds.
+- The repository schema is v5, reached by a single v4 → v5 migration: it rebuilds
+  the pin-board tables while preserving item IDs and step history, adds the node
+  thumbnail and verification columns, removes the legacy `branches` verification
+  columns, creates the snapshot/delta/certification path indexes and adds
+  `repository_backup_runs`. A failed migration rolls back completely, and a
+  repository from a newer schema is refused before any write, so an older build
+  cannot corrupt it.
+- Repository backups record their outcome in `repository_backup_runs`, so
+  `get_last_repository_backup_run` can still show the last backup after a
+  restart instead of only within the current run.
+- History nodes carry a derived thumbnail, so the inspector can preview a node
+  without restoring its work file. A changed commit extracts it from the file it
+  already reads: `.clip` uses the canvas preview inside its embedded SQLite
+  database, `.psd` / `.psb` prefer the PS 4.0/5.0 thumbnail resource and
   otherwise decode the merged composite (raw, RLE or ZIP), and
-  png/jpg/webp/tiff/bmp/gif are decoded directly. Previews are stored as
-  versioned, 512 px lossless WebP in `history_nodes.thumbnail` /
-  `thumbnail_version`, never inside ChunkFile content; unchanged checks,
-  checkpoints, forks and snapshot repairs keep the existing preview, and any
-  unsupported or malformed input only falls back to a placeholder.
-  `get_history_node_thumbnail` serves the selected node's preview on demand
-  without selecting the BLOB in graph or list reads.
-- A node preview can be re-extracted from the inspector. The refresh button sits
-  next to "无可用预览" and over an existing preview (so a cached thumbnail can be
-  replaced); `refresh_history_node_thumbnail` materializes the selected node's
-  own stored content into `temp/`, runs the same format dispatch and writes the
-  result back to `thumbnail` / `thumbnail_version`. It never reads the current
-  work file, so old nodes keep a preview that matches their stored version; the
-  command is a foreground write, verifies chunks while materializing, and leaves
-  the repository untouched when extraction fails.
-- History node cards show the stored preview on hover in the overview. The card
-  is still a button, so the popover is rendered at the page root and positioned
-  against the card's viewport rect, flipping to the left edge when the right side
-  is short; it stays open while the pointer moves onto it and closes on scroll,
-  resize or switching to the branch view. A node without a stored preview but
-  with a preview-capable format shows "无可用预览" and the same refresh button as
-  the inspector, and a node whose format has no extractor shows no popover at
-  all, exactly like hovering before the feature existed. The branch view keeps
-  the preview in its inspector only, so the same thumbnail is not shown twice.
-  Previews are cached per node, so repeated hovers and selecting the same node do
-  not re-request them, and the cache is dropped whenever the history reloads.
-- Idle integrity checking is available as an opt-in background task. When
-  `idleIntegrityCheckEnabled` is on and the main window is hidden or minimized,
-  the scheduler verifies up to eight history nodes (or 30 seconds) per idle
-  window after ten minutes of repository silence, oldest first. It reuses the
-  full-scan per-node materialization kernel, records `verified_ms` /
-  `verify_error` per node, yields at node boundaries to foreground work, pending
-  manual commits and due automatic backups, and consumes at most one batch per
-  idle window. The settings page shows the switch, its behaviour and the pending
-  node count; the tray pause also pauses this task. Manual branch re-verification
-  now verifies the whole chain immediately in the foreground, and the full scan
-  refreshes every node's verification state while continuing past individual
-  failures.
-- `tests/gate_guard.rs` now also fails when a `stress_*.rs` target opens its own
-  temp space (`env::temp_dir`, `tempfile::tempdir`) instead of going through
-  `stress_support::Workspace`, so test residue cannot drift out of the build's
-  target directory again.
+  png/jpg/webp/tiff/bmp/gif are decoded directly. Previews are versioned 512 px
+  lossless WebP in `history_nodes.thumbnail`, never inside ChunkFile content;
+  unchanged checks, checkpoints, forks and snapshot repairs keep the existing
+  preview, and unsupported or malformed input falls back to a placeholder.
+- The inspector can re-extract a node's preview from that node's own stored
+  content (`refresh_history_node_thumbnail`, also offered over an existing
+  preview). It never reads the current work file, so old nodes keep a preview
+  that matches their stored version, and a failed extraction leaves the
+  repository untouched.
+- Overview node cards show the stored preview on hover, with the same
+  "无可用预览" placeholder and refresh button as the inspector. The popover is
+  positioned against the card and stays open when the pointer moves onto it;
+  previews are cached per node and the cache is dropped whenever history
+  reloads. The branch view keeps the preview in its inspector only, so the same
+  thumbnail is not shown twice.
+- Idle integrity checking is available as an opt-in background task. With
+  `idleIntegrityCheckEnabled` on and the main window hidden or minimized, it
+  verifies up to eight nodes (or 30 seconds) per idle window after ten minutes
+  of repository silence, oldest first, yielding at node boundaries to foreground
+  work, pending commits and due backups. It reuses the full-scan materialization
+  kernel and records `verified_ms` / `verify_error` per node; the settings page
+  shows the switch, its behaviour and the pending count, and the tray pause
+  pauses it too.
+- Reference inventories report `redundant_targets` — files that records still
+  point at but the storage model no longer reads — so the junk scan can name the
+  reason instead of calling every candidate unreferenced.
+- `tests/gate_guard.rs` also fails when a `stress_*.rs` target opens its own temp
+  space instead of going through `stress_support::Workspace`, so test residue
+  cannot drift out of the build's target directory again.
 
 ### Changed
 
-- `get_history_node_thumbnail` returns `{ dataUrl, supported }` instead of a bare
-  data URL. `supported` reports whether the node's work-file format has an
-  extractor at all, decided from the extension of the branch's current work file
-  (`.clip`, `.psd`/`.psb` and the directly decoded bitmaps are supported, anything
-  else is not). A history node only stores a ChunkFile container, so the original
-  format cannot be probed from the node itself. The inspector now hides its
-  preview block for unsupported formats instead of offering a refresh that could
-  never succeed, while a stored thumbnail keeps being shown even after the branch
-  is re-pointed at another format.
-- The pin-board add-text dialog is rebuilt around a live text preview, a
-  stepper-controlled font size and an embedded colour picker (saturation/value
-  area, hue slider, hex input and preset swatches) instead of the native colour
-  dialog. Layout, focus rings and dark-theme colours follow the rest of the
-  application.
 - Checkpoints keep only their snapshot. A commit or compaction whose parent is a
-  checkpoint no longer writes a reverse delta: that node's snapshot is permanent,
-  so no read path could ever consume the delta. The edge is registered with an
-  empty path and the delta is rebuilt on demand when the checkpoint is cancelled.
-  The skip condition mirrors the snapshot-release rule (a checkpoint that holds a
-  snapshot), so a parent that only keeps its snapshot because it is another
-  branch's head still gets its delta.
-- Cancelling a checkpoint rebuilds the child-to-parent reverse delta outside the
-  transaction when the edge has none, then swaps the snapshot in a single
-  transaction; the new delta is removed if that transaction fails. The rebuild
-  reuses the edge's own file name, so a stale edge path is only queued for
-  cleanup when it names a different file. Repositories that already hold the
-  delta keep using it unchanged.
+  checkpoint no longer writes a reverse delta that no read path could consume;
+  the edge is registered with an empty path and the delta is rebuilt on demand
+  when the checkpoint is cancelled. The rebuild reuses the edge's own file name,
+  so a stale edge path is only queued for cleanup when it names a different file,
+  and repositories that already hold the delta keep using it unchanged.
 - The settings cleanup entry is a junk scan now: one pass reports checkpoint
   deltas, unreferenced files, pin-board leftovers and interrupted temp files. The
   history reference inventory only protects deltas a read path can reach, so
-  checkpoint deltas can actually be collected instead of being counted as
-  referenced forever.
-- Cleanup, unreferenced scans, DDS scrubbing, storage accounting and reference
-  inventories now read `pin_board_bitmaps`; text items have no file path and are
-  excluded by construction.
-- Branch verification status is derived from the entire head chain: any node's
+  checkpoint deltas can actually be collected instead of counting as referenced
+  forever.
+- Branch verification status is derived from the whole head chain: any node's
   `verify_error` marks the branch as failed, otherwise `verified_ms` is the
   oldest timestamp provided every node has been verified. Compaction, checkpoint
-  changes and snapshot replacement clear `verified_ms` / `verify_error` for the
-  artwork in the same transaction, so affected nodes rejoin the pending set.
-- The full repository integrity scan now records per-node verification state, so
-  it runs as a foreground write command holding the cross-process owner lock
-  rather than through the read-only path; it keeps scanning after an individual
-  node fails and returns a summary error.
+  changes and snapshot replacement clear the state for the artwork in the same
+  transaction, so affected nodes rejoin the pending set. The full scan now
+  records that per-node state and therefore runs as a foreground write command
+  holding the owner lock, continuing past individual failures instead of stopping
+  at the first one.
+- `get_history_node_thumbnail` returns `{ dataUrl, supported }` instead of a bare
+  data URL. A node only stores a ChunkFile container, so the original format is
+  judged from the branch's current work file; the inspector hides its preview
+  block for formats without an extractor instead of offering a refresh that could
+  never succeed, while a stored thumbnail keeps being shown after the branch is
+  re-pointed at another format.
+- The pin-board add-text dialog is rebuilt around a live text preview, a
+  stepper-controlled font size and an embedded colour picker instead of the
+  native colour dialog.
+- Cleanup, unreferenced scans, DDS scrubbing, storage accounting and reference
+  inventories read `pin_board_bitmaps`; text items have no file path and are
+  excluded by construction.
 - Stress-test output is collected under the build's own target directory
-  (`<target>/stress/` holding `report.jsonl`, `ledger.jsonl` and `workspaces/`)
-  instead of loose files in `src-tauri/target/`. `stress_support` derives the path
-  from cargo's `CARGO_TARGET_TMPDIR` rather than hard-coding `src-tauri/target`, so
-  the artifacts follow whichever target directory the build uses (including
-  `--target-dir` / `CARGO_TARGET_DIR`) and disappear with the rest of the build
-  output under `cargo clean`. Unit tests that use `tempfile::tempdir()` for
-  short-lived data stay on the system temp directory by convention; only
-  cross-process, large or long-running scenarios must live under the target
-  directory.
+  (`<target>/stress/`) instead of loose files in `src-tauri/target/`. The path is
+  derived from cargo's `CARGO_TARGET_TMPDIR`, so it follows `--target-dir` /
+  `CARGO_TARGET_DIR` and disappears with `cargo clean`. Short-lived unit-test data
+  stays on the system temp directory; only cross-process, large or long-running
+  scenarios must live under the target directory.
 
 ### Fixed
 
-- PSD previews are no longer dropped or blurry for large canvases. The parser
-  used to reject any document over the 64 MP shared decode budget before it read
-  the embedded thumbnail, so an 84 MP file with a valid 1033/1036 resource showed
-  "无可用预览". The header now always reaches the resource section, and a
-  thumbnail whose longest edge is under 256 px is treated as too soft: the merged
-  composite is streamed and sampled into the 512 px target instead, with the
-  embedded resource kept as the fallback when the composite is unavailable. The
-  composite budget is 256 MP because sampling is row-based, so memory stays tied
-  to the 512 px output rather than the source canvas.
-- Pin-board text textures centre the glyph ink inside each 1.3× line box.
-  Drawing with `textBaseline = "top"` left all extra line height below the
-  glyphs, so text sat above the centre of its selection quad and its top edge
-  was clipped by the texture. Display and export share the corrected path, so
-  existing text items are recentred when their texture is rebuilt.
-- Byte progress is cumulative again. `ChunkTask::report` hands the callback the
-  total logical bytes processed so far instead of the size of the step that just
-  finished, so restore, checkpoint and reverse-delta bars climb towards 100%
-  instead of oscillating between a few kilobytes on a multi-chunk file. The
+- PSD previews are no longer dropped or blurry on large canvases. The parser
+  rejected any document over the 64 MP shared decode budget before reading the
+  embedded thumbnail, so an 84 MP file with a valid 1033/1036 resource showed
+  "无可用预览". The header now always reaches the resource section, a thumbnail
+  whose longest edge is under 256 px counts as too soft, and the merged composite
+  is streamed and sampled into the 512 px target instead (256 MP budget,
+  row-based, so memory follows the output rather than the source canvas), with
+  the embedded resource kept as fallback.
+- Opening a repository no longer fails right after a cleanup run. A checkpoint's
+  child edge records an empty `delta_path` to mean "no reverse delta", but the
+  read-side path validation treated every row as a real relative path and refused
+  to open with `history_edges.delta_path 无效：仓库存储路径无效`. Blank entries in
+  `history_edges.delta_path` and in the compatible `history_nodes.delta_path`
+  column are now skipped as "no file", matching the reference inventory and
+  `load_node`. `snapshot_path` keeps its non-null requirement, since readers
+  treat any non-null value as a usable snapshot.
+- Byte progress is cumulative again. Restore, checkpoint and reverse-delta bars
+  climb towards 100% instead of oscillating between a few kilobytes, because the
+  callback now receives the total logical bytes processed so far; the
   reverse-delta phase also reports against the payload bytes it really copies
-  (`delta_payload_bytes`) rather than the parent file size, which kept that bar
-  near zero even when the work was finished.
-- Progress logging is sampled instead of written per step. `operation progress:`
-  was emitted once per chunk, so restoring a 2 GiB node flooded the log with
-  ~114,600 lines in a minute and rotated five files; it now writes one line when
-  the phase changes and otherwise at most every five seconds.
-- The headless `--marker` channel appends one `stage` line per phase instead of
-  one per chunk. Progress callbacks fire per chunk, so a single large restore
-  added megabytes of stage lines and every stress poll re-read the whole marker
-  file; checkpoint lines still carry the latest progress numbers.
-- Checkpoint deltas and stale `history_nodes.delta_path` entries were invisible to
-  the scan because the reference inventory counted every recorded path, including
-  deltas that no read path can reach. They are now reported as redundant files and
-  can be cleaned.
+  rather than the parent file size.
+- Progress logging is sampled instead of written per step: `operation progress:`
+  now writes one line when the phase changes and otherwise at most every five
+  seconds, where it used to flood the log with ~114,600 lines for a 2 GiB
+  restore and rotate five files. The headless `--marker` channel likewise appends
+  one `stage` line per phase instead of one per chunk.
+- Checkpoint deltas and stale `history_nodes.delta_path` entries are visible to
+  the junk scan: they are reported as redundant files and can be cleaned, instead
+  of being counted as referenced because the inventory saw a recorded path.
+- Pin-board text textures centre the glyph ink inside each line box. Drawing with
+  `textBaseline = "top"` left the extra line height below the glyphs, so text sat
+  above its selection quad with the top edge clipped; display and export share
+  the corrected path, so existing items are recentred when their texture is
+  rebuilt.
 - `history::load_node` no longer returns an empty delta path as `Some("")`; a
   checkpoint edge without a delta is reported as `None`, and chain resolution
   rejects an empty path with the node id instead of opening the repository root.
-- Opening a repository no longer rejects the blank edge paths the cleanup flow
-  leaves behind. A checkpoint's child edge records `delta_path = ''` to mean "no
-  reverse delta", but the read-side path validation treated every row as a real
-  relative path and refused to open the repository with
-  `history_edges.delta_path 无效：仓库存储路径无效` right after a cleanup run.
-  Blank entries in `history_edges.delta_path` and in the compatible
-  `history_nodes.delta_path` column are now skipped as "no file", matching the
-  reference inventory and `load_node`. `snapshot_path` keeps its non-null
-  requirement, since readers treat any non-null value as a usable snapshot.
-- The stress suite's commit crash/cancel points line up with the current
-  cancellation boundaries again. Adding the thumbnail-extraction boundary
-  shifted every later checkpoint by one, so `stress_crash` B1/B4 and
-  `stress_cleanup` B5 killed at the wrong place: B1/B5 stopped before the
-  publish step and were left with two `.tmp*` files instead of the expected
-  orphans, and B4 never reached the transaction marker. The boundary indexes now
-  live in `stress_support` as `COMMIT_AFTER_PUBLISH_CHECKPOINT` /
-  `COMMIT_TRANSACTION_CHECKPOINT` / `COMMIT_CHECKPOINTS`, B4 selects the marker
-  by its stage name instead of a number, the A1 and `stress_baseline` loops
-  cover all six boundaries, J1 parks at the post-publish boundary again, and a
-  new A0 contract test fails first whenever the boundary list changes.
+- The stress commit crash/cancel points line up with the current boundaries
+  again. Adding the thumbnail-extraction boundary shifted every later checkpoint
+  by one, so `stress_crash` B1/B4 and `stress_cleanup` B5 killed at the wrong
+  place. The indexes now live in `stress_support` as `COMMIT_*` constants, B4
+  selects its marker by stage name, the A1 and `stress_baseline` loops cover all
+  six boundaries, and a new A0 contract test fails first whenever the boundary
+  list changes.
 - `stress_concurrency` J6 expects the refusal the full scan actually returns.
-  Since the scan became a foreground write command it takes the cross-process
-  owner lock, so a second process gets "仓库正在被另一个进程写入；不支持同一仓库的
-  多进程写入" instead of the probe-era "仓库正在被写入，请稍后重试".
+  Since the scan became a foreground write command it takes the owner lock, so a
+  second process gets "仓库正在被另一个进程写入；不支持同一仓库的多进程写入"
+  instead of the probe-era message.
 
 ## 0.3.0-alpha.2 - 2026-10-19
 

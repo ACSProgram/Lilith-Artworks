@@ -41,7 +41,7 @@ src-tauri/resources/                    应用图标与随包分发的 TrustMark
 
 Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权、装配 `CommandContext`，然后调用 `app/usecases/` 中 GUI 与 headless 共享的业务入口。所有仓库入口都经 `OperationCoordinator` 统一取锁、取消、进度、耗时日志与事件；需要组合 checkpoint、调度唤醒、清理队列或发布流程的跨领域用例写在 `app/usecases/` 里，`app/workflows.rs` 只保留这些命令的 Tauri 适配函数。`pin_board` 命令直接在 `app/command_registry.rs` 注册，写命令走 `run_repository_write`（仓库 lease + 仓库操作锁，不取共享 `BackupState` 运行锁），浏览走共享读租约。前端命令名和 DTO 不因内部所有权变化而改变。
 
-跨模块旁路统一走中立契约层 `src-tauri/src/contracts/`：各领域用 `ReferenceInventory` 报告受管理文件、用 `RepositoryIntegrityProvider` 提供灾备副本的领域校验，应用层在 `app/contracts.rs` 注册实现。cleanup 因此不再导入画板路径常量，灾备核心也不再直接导入 Library/Authenticity；阶段 7 的画板 kind 分派在契约上扩展，不需要把领域模块互相接上。
+跨模块旁路统一走中立契约层 `src-tauri/src/contracts/`：各领域用 `ReferenceInventory` 报告受管理文件、用 `RepositoryIntegrityProvider` 提供灾备副本的领域校验，应用层在 `app/contracts.rs` 注册实现。cleanup 因此不再导入画板路径常量，灾备核心也不再直接导入 Library/Authenticity；画板的 kind 分派在契约上扩展，不需要把领域模块互相接上。
 
 开发/验证期另有一个**无界面命令行入口**（`--headless`，由 `headless` feature 门控、**不进发布产物**）：它与 Tauri 命令层并列，是同一批领域函数的另一个适配器，只做参数解析、锁与状态装配、领域调用，不含业务判断。它只供发布前的压力测试以**独立进程**调用真实可执行文件，不创建窗口、不建托盘、不加载 webview、不经过 IPC，因此发布版的产品行为零变化。定位、运行方式与覆盖矩阵见 `docs/guides/validation.md` 的「压力测试」小节，面向使用者的结论见 `docs/user/stress-test-report.md`。
 
@@ -241,7 +241,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 - History node：不可变提交，只有一个父节点，可以被多个后继节点引用；创建分支是从选定节点派生新的 branch/head。
 - Final artifact：分支可选的一份最终成品，固定关联进入发布状态时的 head。存在时分支被冻结，该 head 是强制检查点。
 - Certification record：不可变导出快照，固定关联 final artifact、branch 和发布节点，记录 TrustMark ID、输出文件摘要、C2PA manifest 与验证状态。
-- Pin board：Artwork 内平铺一层的画板聚合，拥有图片记录、step 历史、图层/顺序与回收站状态；不进入分支历史，DDS 实体存于 `boards/`。
+- Pin board：Artwork 内平铺一层的画板聚合，拥有条目记录（位图/文字）、step 历史、图层/顺序与回收站状态；不进入分支历史，位图条目的 DDS 实体存于 `boards/`，文字条目只存数据库。
 
 作品树删除使用数据库软删除。删除一个分组会把其完整子树作为同一个回收站根保存，恢复时优先回到原父分组，原父级不可用时回到根级。只有回收站中的永久删除才清理项目元数据。Artwork 内部的历史节点裁剪属于版本图操作，不进入项目回收站。
 
@@ -256,7 +256,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
     snapshots/<history-id>.lbc
     deltas/<child-id>-to-<parent-id>.lbd
     artifacts/<branch-id>/<artifact-id>.<ext>
-    boards/<board-id>/<image-id>.dds
+    boards/<board-id>/<item-id>.dds
     temp/
   temp/
 ```

@@ -1,7 +1,7 @@
 # 可靠性压力测试报告
 
 - 被测版本：应用 `0.3.0-alpha.1`，repository schema v4（2026-10-19 晚的快速档复跑用当前开发构建
-  `0.3.0-alpha.2` / schema v5，含 alpha3 阶段 7–9）
+  `0.3.0-alpha.3` / schema v5，含 alpha3 阶段 7–9）
 - 报告日期：2026-10-19（last reviewed: 2026-10-19 晚的快速档复跑）
 - 数据来源：本文数字均来自真实运行。2026-10-18 在 **release 构建**
   （`target/release/lilith-artworks.exe`）上重跑了全部十三组压力测试；2026-10-19 用同一构建

@@ -53,12 +53,13 @@ const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "s
 const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
 // Explicit version → repository schema registry. Cutting a version must add its
 // entry in the same commit; an unregistered version is refused. 0.2.x stays on
-// v4; per the 0.3 plan alpha1 and alpha2 also keep v4, and alpha3 lands the
-// single v4 → v5 migration, so only the alphas that ship it map to v5.
+// v4, alpha1 and alpha2 also keep v4, and alpha3 landed the single v4 → v5
+// migration, so alpha3 and later 0.3 versions map to v5.
 const schemaByVersion = new Map([
   ["0.2.0", "4"],
   ["0.3.0-alpha.1", "4"],
   ["0.3.0-alpha.2", "4"],
+  ["0.3.0-alpha.3", "5"],
 ]);
 const expectedSchema = schemaByVersion.get(expected);
 if (!expectedSchema) {
