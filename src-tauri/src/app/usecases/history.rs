@@ -34,21 +34,30 @@ pub(crate) fn node_format(
     })
 }
 
-/// 读取节点随行保存的派生缩略图；没有预览时返回 `None`，不影响节点信息展示。
+/// 读取节点随行保存的派生缩略图，并说明该节点的格式是否支持预览。
+///
+/// 没有预览时 `data_url` 为 `None`；`supported` 由节点所属分支工作文件的扩展名
+/// 决定，前端据此决定要不要给出「无可用预览」占位与刷新入口。两者都只影响展示，
+/// 不改变历史、校验或存储状态。
 pub(crate) fn thumbnail(
     context: &CommandContext,
     history_id: &str,
-) -> Result<Option<String>, CommandError> {
+) -> Result<history::NodePreview, CommandError> {
     context.run_read("get_history_node_thumbnail", |session| {
-        let Some((bytes, version)) =
-            history::load_thumbnail(session.root(), history_id).map_err(CommandError::from)?
-        else {
-            return Ok(None);
-        };
-        // 只服务当前编码版本：将来换编码时，旧行不会被当作 WebP 发给前端，
-        // 重建由版本号驱动。
-        Ok((version == preview::THUMBNAIL_VERSION)
-            .then(|| format!("data:image/webp;base64,{}", STANDARD.encode(bytes))))
+        let root = session.root();
+        let supported = history::node_source_path(root, history_id)
+            .map_err(CommandError::from)?
+            .is_some_and(|path| preview::supports_preview(Path::new(&path)));
+        let data_url = history::load_thumbnail(root, history_id)
+            .map_err(CommandError::from)?
+            // 只服务当前编码版本：将来换编码时，旧行不会被当作 WebP 发给前端，
+            // 重建由版本号驱动。
+            .filter(|(_, version)| *version == preview::THUMBNAIL_VERSION)
+            .map(|(bytes, _)| format!("data:image/webp;base64,{}", STANDARD.encode(bytes)));
+        Ok(history::NodePreview {
+            data_url,
+            supported,
+        })
     })
 }
 

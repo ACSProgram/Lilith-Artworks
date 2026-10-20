@@ -1,6 +1,6 @@
 import {
   Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
-  ListCollapse, Pencil, Play, RefreshCw, Trash2, X,
+  ListCollapse, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, MouseEvent } from "react";
@@ -15,7 +15,9 @@ import {
   branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
   isForcedCheckpoint, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
 } from "./historyModel";
-import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import { HoverPreview, InspectorPreview } from "./NodePreview";
+import type { PreviewAnchor } from "./NodePreview";
+import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode, NodePreview } from "./types";
 import { useHistoryController } from "./useHistoryController";
 
 interface HistoryModuleProps {
@@ -55,7 +57,13 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   } | null>(null);
   const [nodeThumbnail, setNodeThumbnail] = useState<{
     nodeId: string;
-    value: string | null;
+    value: NodePreview | null;
+    loading: boolean;
+  } | null>(null);
+  const [hover, setHover] = useState<{
+    nodeId: string;
+    anchor: PreviewAnchor;
+    value: NodePreview | null;
     loading: boolean;
   } | null>(null);
   const [commitNote, setCommitNote] = useState("");
@@ -71,6 +79,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const [mindmapNodeWidth, setMindmapNodeWidth] = useState(loadMindmapNodeWidth);
   const nodeElements = useRef(new Map<string, HTMLButtonElement>());
+  /** 缩略图按节点缓存在内存里：同一节点重复悬停与选中不再重复请求。 */
+  const previewCache = useRef(new Map<string, NodePreview>());
+  const hoverRequest = useRef(0);
+  const hoverCloseTimer = useRef<number | null>(null);
   const contextPlacement = useMenuPlacement(context);
 
   useEffect(() => {
@@ -85,6 +97,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     setConfirmRequest(null);
     setCompactMode(false);
     setCompactSelection(new Set());
+    setHover(null);
+    clearHoverTimer();
   }, [artworkId]);
 
   useEffect(() => setCommitFeedback(null), [selectedBranchId]);
@@ -123,6 +137,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
 
   const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
   const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const hoverNode = hover ? history?.nodes.find((node) => node.id === hover.nodeId) ?? null : null;
 
   // 详情面板的格式版本只按选中的节点读取文件头；历史刷新后节点对象会更新，
   // 因此检查点替换快照等操作也会重新读取。
@@ -142,32 +157,103 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   }, [readNodeFormat, selectedNode, view]);
 
   // 缩略图随节点行保存，选中时单独读取；历史刷新后重新拉取，不进入图轮询。
+  // 历史刷新可能改写缩略图（提交、检查点、手动刷新），因此缓存随之作废。
+  useEffect(() => {
+    previewCache.current.clear();
+  }, [artworkId, history]);
+
   useEffect(() => {
     if (!selectedNode || view !== "branch") {
       setNodeThumbnail(null);
       return;
     }
+    const cached = previewCache.current.get(selectedNode.id);
+    setNodeThumbnail({ nodeId: selectedNode.id, value: cached ?? null, loading: !cached });
+    if (cached) return;
     let cancelled = false;
-    setNodeThumbnail({ nodeId: selectedNode.id, value: null, loading: true });
     void readNodeThumbnail(selectedNode.id).then((value) => {
-      if (!cancelled) setNodeThumbnail({ nodeId: selectedNode.id, value, loading: false });
+      if (cancelled) return;
+      previewCache.current.set(selectedNode.id, value);
+      setNodeThumbnail({ nodeId: selectedNode.id, value, loading: false });
     });
     return () => {
       cancelled = true;
     };
   }, [readNodeThumbnail, selectedNode, view]);
 
+  const clearHoverTimer = () => {
+    if (hoverCloseTimer.current === null) return;
+    window.clearTimeout(hoverCloseTimer.current);
+    hoverCloseTimer.current = null;
+  };
+
+  // 浮层不在卡片内部，指针从卡片移到浮层会先触发一次 leave：留一点宽限时间，
+  // 由浮层自己的 enter 取消关闭。
+  const scheduleHoverClose = () => {
+    clearHoverTimer();
+    hoverCloseTimer.current = window.setTimeout(() => setHover(null), 140);
+  };
+
+  /**
+   * 悬停预览只在总览提供：当前分支视图的「节点信息」栏本来就会显示选中节点的
+   * 缩略图，再弹一层浮层是重复的。格式不支持缩略图时不显示任何浮层，与悬停前
+   * 完全一致。
+   */
+  const showHoverPreview = (event: MouseEvent<HTMLButtonElement>, node: HistoryNode) => {
+    if (view !== "overview") return;
+    clearHoverTimer();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const anchor = { top: rect.top, left: rect.left, right: rect.right };
+    const cached = previewCache.current.get(node.id);
+    if (cached) {
+      setHover({ nodeId: node.id, anchor, value: cached, loading: false });
+      return;
+    }
+    const request = ++hoverRequest.current;
+    setHover({ nodeId: node.id, anchor, value: null, loading: true });
+    void readNodeThumbnail(node.id).then((value) => {
+      previewCache.current.set(node.id, value);
+      // 结果到达时指针可能已经移到别的节点或离开卡片，只更新仍然指向它的浮层。
+      if (hoverRequest.current !== request) return;
+      setHover((current) => current?.nodeId === node.id
+        ? { nodeId: node.id, anchor: current.anchor, value, loading: false }
+        : current);
+    });
+  };
+
+  useEffect(() => {
+    if (!hover) return;
+    const close = () => setHover(null);
+    window.addEventListener("scroll", close, true);
+    window.addEventListener("resize", close);
+    return () => {
+      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("resize", close);
+    };
+  }, [hover?.nodeId]);
+
+  // 切到当前分支视图时收起总览留下的浮层。
+  useEffect(() => {
+    if (view !== "overview") setHover(null);
+  }, [view]);
+
+  useEffect(() => () => clearHoverTimer(), []);
+
   const refreshThumbnail = (node: HistoryNode) => {
-    const previous = nodeThumbnail?.nodeId === node.id ? nodeThumbnail.value : null;
-    setNodeThumbnail({ nodeId: node.id, value: previous, loading: true });
-    void refreshNodeThumbnail(node.id).then((value) => {
+    const previous = previewCache.current.get(node.id);
+    setNodeThumbnail((current) => current?.nodeId === node.id ? { ...current, loading: true } : current);
+    setHover((current) => current?.nodeId === node.id ? { ...current, loading: true } : current);
+    void refreshNodeThumbnail(node.id).then((dataUrl) => {
       // A refresh that extracts nothing must not hide a preview that is still
       // stored; the backend only replaces the row when extraction succeeds.
       // Selecting another node hands the state to the read effect, so a result
       // that arrives after the selection moved on must not overwrite it.
-      setNodeThumbnail((current) => current?.nodeId === node.id
-        ? { nodeId: node.id, value: value ?? previous, loading: false }
-        : current);
+      const value: NodePreview = dataUrl
+        ? { dataUrl, supported: previous?.supported ?? true }
+        : { dataUrl: previous?.dataUrl ?? null, supported: previous?.supported ?? true };
+      if (dataUrl) previewCache.current.set(node.id, value);
+      setNodeThumbnail((current) => current?.nodeId === node.id ? { ...current, value, loading: false } : current);
+      setHover((current) => current?.nodeId === node.id ? { ...current, value, loading: false } : current);
     });
   };
 
@@ -311,6 +397,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         }
       }}
       onContextMenu={(event) => openContext(event, node)}
+      onMouseEnter={(event) => showHoverPreview(event, node)}
+      onMouseLeave={scheduleHoverClose}
     >
       <CircleDot size={16} />
       <span className="history-node-copy">
@@ -409,37 +497,13 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <aside className="history-inspector">
         <header>节点信息</header>
         {selectedNode ? <>
-          <div className="history-preview">
-            {nodeThumbnail?.nodeId === selectedNode.id
-              ? nodeThumbnail.value
-                ? <>
-                  <img src={nodeThumbnail.value} alt={`${selectedNode.title} 的缩略图`} />
-                  <button
-                    className="icon-button history-preview-refresh history-preview-refresh-overlay"
-                    type="button"
-                    title="重新获取缩略图"
-                    aria-label="重新获取缩略图"
-                    disabled={busy || runtime.busy || nodeThumbnail.loading}
-                    onClick={() => refreshThumbnail(selectedNode)}
-                  ><RefreshCw className={nodeThumbnail.loading ? "spin" : undefined} size={13} /></button>
-                </>
-                : <span className="history-preview-empty">
-                  {nodeThumbnail.loading
-                    ? <><LoaderCircle className="spin" size={12} />读取预览…</>
-                    : <>
-                      <span>无可用预览</span>
-                      <button
-                        className="icon-button history-preview-refresh"
-                        type="button"
-                        title="重新获取缩略图"
-                        aria-label="重新获取缩略图"
-                        disabled={busy || runtime.busy}
-                        onClick={() => refreshThumbnail(selectedNode)}
-                      ><RefreshCw size={13} /></button>
-                    </>}
-                </span>
-              : <span className="history-preview-empty"><LoaderCircle className="spin" size={12} />读取预览…</span>}
-          </div>
+          <InspectorPreview
+            title={selectedNode.title}
+            preview={nodeThumbnail?.nodeId === selectedNode.id ? nodeThumbnail.value : null}
+            refreshing={nodeThumbnail?.nodeId === selectedNode.id && nodeThumbnail.loading}
+            disabled={busy || runtime.busy}
+            onRefresh={() => refreshThumbnail(selectedNode)}
+          />
           <dl>
             <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
             {selectedNode.note && <div><dt>提交备注</dt><dd>{selectedNode.note}</dd></div>}
@@ -462,6 +526,17 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         </> : <p>左键选择节点查看信息；右键打开节点操作。进入分支只在节点唯一属于一个分支时提供。</p>}
       </aside>
     </div>
+
+    {hoverNode && hover?.value && (hover.value.dataUrl || hover.value.supported) && <HoverPreview
+      anchor={hover.anchor}
+      title={hoverNode.title}
+      preview={hover.value}
+      refreshing={hover.loading}
+      disabled={busy || runtime.busy}
+      onRefresh={() => refreshThumbnail(hoverNode)}
+      onEnter={clearHoverTimer}
+      onLeave={scheduleHoverClose}
+    />}
 
     {context && actionNode && !compactMode && <div className="context-menu history-context" ref={contextPlacement.ref} style={contextPlacement.style} onClick={(event) => event.stopPropagation()}>
       {uniqueContextBranch && <button onClick={() => enterBranch(uniqueContextBranch)}><GitBranch size={15} />进入分支：{uniqueContextBranch.title}</button>}

@@ -6,7 +6,7 @@ import { useRuntimeSubscription } from "../../shared/useRuntimeSubscription";
 import { historyApi } from "./api";
 import type {
   ArtworkHistory, BackupCommitResult, BackupRuntimeStatus, ForkBranchRequest,
-  HistoryNode, RenameHistoryNodeRequest, UpdateBranchBackupRequest,
+  HistoryNode, NodePreview, RenameHistoryNodeRequest, UpdateBranchBackupRequest,
 } from "./types";
 
 const IDLE_RUNTIME: BackupRuntimeStatus = {
@@ -103,12 +103,15 @@ export function useHistoryController({
     }
   }, []);
 
-  /** 节点缩略图是派生数据；缺失或读取失败只显示占位，不影响历史读取。 */
-  const readNodeThumbnail = useCallback(async (historyId: string): Promise<string | null> => {
+  /**
+   * 节点缩略图是派生数据；读取失败按「暂无预览」处理，不影响历史读取。返回的
+   * `supported` 决定「无可用预览」占位与刷新入口是否出现。
+   */
+  const readNodeThumbnail = useCallback(async (historyId: string): Promise<NodePreview> => {
     try {
       return await historyApi.nodeThumbnail(historyId);
     } catch {
-      return null;
+      return { dataUrl: null, supported: true };
     }
   }, []);
 

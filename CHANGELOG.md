@@ -58,6 +58,17 @@ decision, so an untagged version is transitional.
   work file, so old nodes keep a preview that matches their stored version; the
   command is a foreground write, verifies chunks while materializing, and leaves
   the repository untouched when extraction fails.
+- History node cards show the stored preview on hover in the overview. The card
+  is still a button, so the popover is rendered at the page root and positioned
+  against the card's viewport rect, flipping to the left edge when the right side
+  is short; it stays open while the pointer moves onto it and closes on scroll,
+  resize or switching to the branch view. A node without a stored preview but
+  with a preview-capable format shows "无可用预览" and the same refresh button as
+  the inspector, and a node whose format has no extractor shows no popover at
+  all, exactly like hovering before the feature existed. The branch view keeps
+  the preview in its inspector only, so the same thumbnail is not shown twice.
+  Previews are cached per node, so repeated hovers and selecting the same node do
+  not re-request them, and the cache is dropped whenever the history reloads.
 - Idle integrity checking is available as an opt-in background task. When
   `idleIntegrityCheckEnabled` is on and the main window is hidden or minimized,
   the scheduler verifies up to eight history nodes (or 30 seconds) per idle
@@ -77,6 +88,15 @@ decision, so an untagged version is transitional.
 
 ### Changed
 
+- `get_history_node_thumbnail` returns `{ dataUrl, supported }` instead of a bare
+  data URL. `supported` reports whether the node's work-file format has an
+  extractor at all, decided from the extension of the branch's current work file
+  (`.clip`, `.psd`/`.psb` and the directly decoded bitmaps are supported, anything
+  else is not). A history node only stores a ChunkFile container, so the original
+  format cannot be probed from the node itself. The inspector now hides its
+  preview block for unsupported formats instead of offering a refresh that could
+  never succeed, while a stored thumbnail keeps being shown even after the branch
+  is re-pointed at another format.
 - The pin-board add-text dialog is rebuilt around a live text preview, a
   stepper-controlled font size and an embedded colour picker (saturation/value
   area, hue slider, hex input and preset swatches) instead of the native colour

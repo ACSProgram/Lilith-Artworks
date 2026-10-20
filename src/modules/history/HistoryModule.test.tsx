@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { HistoryModule } from "./HistoryModule";
@@ -121,7 +121,7 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     forkBranch: vi.fn(),
     renameNode: vi.fn(),
     readNodeFormat: vi.fn().mockResolvedValue("v2"),
-    readNodeThumbnail: vi.fn().mockResolvedValue(null),
+    readNodeThumbnail: vi.fn().mockResolvedValue({ dataUrl: null, supported: true }),
     refreshNodeThumbnail: vi.fn().mockResolvedValue(null),
     cancelOperation: vi.fn(),
     ...overrides,
@@ -344,7 +344,7 @@ describe("HistoryModule node inspector", () => {
   });
 
   it("shows the selected node's stored thumbnail in branch view", async () => {
-    const readNodeThumbnail = vi.fn().mockResolvedValue("data:image/webp;base64,cHJldmlldw==");
+    const readNodeThumbnail = vi.fn().mockResolvedValue({ dataUrl: "data:image/webp;base64,cHJldmlldw==", supported: true });
     controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail }));
 
     render(<HistoryModule
@@ -407,7 +407,9 @@ describe("HistoryModule node inspector", () => {
       finishRefresh = resolve;
     }));
     const readNodeThumbnail = vi.fn().mockImplementation((id: string) => Promise.resolve(
-      id === "middle" ? "data:image/webp;base64,bWlkZGxl" : null,
+      id === "middle"
+        ? { dataUrl: "data:image/webp;base64,bWlkZGxl", supported: true }
+        : { dataUrl: null, supported: true },
     ));
     controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail, refreshNodeThumbnail }));
 
@@ -435,5 +437,93 @@ describe("HistoryModule node inspector", () => {
     expect(screen.queryByText("读取预览…")).toBeNull();
     expect(screen.queryByRole("img", { name: "Middle 的缩略图" })).toBeNull();
     expect(screen.getByText("无可用预览")).toBeTruthy();
+  });
+
+  it("hides the preview block entirely when the format has no extractor", async () => {
+    const readNodeThumbnail = vi.fn().mockResolvedValue({ dataUrl: null, supported: false });
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail }));
+
+    const { container } = render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.click(screen.getByRole("button", { name: /Main head/ }));
+
+    await waitFor(() => expect(readNodeThumbnail).toHaveBeenCalledWith("main-head"));
+    await act(async () => {});
+
+    expect(container.querySelector(".history-preview")).toBeNull();
+    expect(screen.queryByText("无可用预览")).toBeNull();
+  });
+});
+
+describe("HistoryModule node hover preview", () => {
+  beforeEach(() => {
+    controller.useHistoryController.mockReturnValue(controllerReturn());
+  });
+
+  afterEach(() => cleanup());
+
+  const renderModule = () => render(<HistoryModule
+    artworkId="artwork-1"
+    selectedBranchId="main"
+    onSelectBranch={vi.fn()}
+    onHistoryChanged={vi.fn()}
+    onError={vi.fn()}
+  />);
+
+  it("previews a node on hover and re-extracts a missing preview", async () => {
+    const readNodeThumbnail = vi.fn().mockResolvedValue({ dataUrl: null, supported: true });
+    const refreshNodeThumbnail = vi.fn().mockResolvedValue("data:image/webp;base64,aG92ZXI=");
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail, refreshNodeThumbnail }));
+
+    const { container } = renderModule();
+    fireEvent.mouseEnter(screen.getByText("Middle").closest("button")!);
+
+    const popover = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".history-hover-preview");
+      expect(element).toBeTruthy();
+      return element!;
+    });
+    expect(readNodeThumbnail).toHaveBeenCalledWith("middle");
+    expect(popover.textContent).toContain("无可用预览");
+
+    fireEvent.click(within(popover).getByRole("button", { name: "重新获取缩略图" }));
+
+    await waitFor(() => expect(popover.querySelector("img")?.getAttribute("src"))
+      .toBe("data:image/webp;base64,aG92ZXI="));
+    expect(refreshNodeThumbnail).toHaveBeenCalledWith("middle");
+  });
+
+  it("leaves hover unchanged when the format has no extractor", async () => {
+    const readNodeThumbnail = vi.fn().mockResolvedValue({ dataUrl: null, supported: false });
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail }));
+
+    const { container } = renderModule();
+    fireEvent.mouseEnter(screen.getByText("Middle").closest("button")!);
+
+    await waitFor(() => expect(readNodeThumbnail).toHaveBeenCalledWith("middle"));
+    await act(async () => {});
+
+    expect(container.querySelector(".history-hover-preview")).toBeNull();
+  });
+
+  // 当前分支视图的「节点信息」栏本来就会显示选中节点的缩略图，浮层不再重复一遍。
+  it("does not preview on hover in the branch view", async () => {
+    const readNodeThumbnail = vi.fn().mockResolvedValue({ dataUrl: "data:image/webp;base64,bWlkZGxl", supported: true });
+    controller.useHistoryController.mockReturnValue(controllerReturn({ readNodeThumbnail }));
+
+    const { container } = renderModule();
+    fireEvent.click(screen.getByRole("button", { name: "当前分支" }));
+    fireEvent.mouseEnter(screen.getByRole("button", { name: /Middle/ }));
+    await act(async () => {});
+
+    expect(container.querySelector(".history-hover-preview")).toBeNull();
+    expect(readNodeThumbnail).not.toHaveBeenCalled();
   });
 });

@@ -43,6 +43,15 @@ export interface HistoryNode {
   chunkCount: number;
 }
 
+/**
+ * 节点缩略图读取结果。`supported` 说明该节点工作文件的格式有没有抽取器：无缩略图
+ * 时前端据此决定「无可用预览」占位与刷新入口是否出现，格式不支持时连占位都不显示。
+ */
+export interface NodePreview {
+  dataUrl: string | null;
+  supported: boolean;
+}
+
 export interface ForkBranchRequest {
   artworkId: string;
   fromHistoryId: string;

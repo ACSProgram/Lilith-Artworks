@@ -41,6 +41,35 @@ pub(crate) struct Thumbnail {
     pub(crate) version: i64,
 }
 
+/// 工作文件是否属于可抽取缩略图的格式。
+///
+/// 历史节点自身保存的是 ChunkFile 容器，读不出原始格式，所以这里按节点所属分支
+/// 工作文件的扩展名判断。它只决定前端要不要提供「无可用预览」占位与刷新入口，
+/// 不参与抽取本身：`.clip` 的内嵌预览、`.psd` / `.psb` 的缩略图资源或合成图、
+/// 以及直接解码的位图都算支持，其余格式一律返回 `false`。
+pub(crate) fn supports_preview(path: &Path) -> bool {
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+    matches!(
+        extension.as_deref(),
+        Some(
+            "clip"
+                | "psd"
+                | "psb"
+                | "png"
+                | "jpg"
+                | "jpeg"
+                | "webp"
+                | "tif"
+                | "tiff"
+                | "bmp"
+                | "gif"
+        )
+    )
+}
+
 /// Extract a bounded preview from a source file. Never fails the caller.
 pub(crate) fn extract(path: &Path, cancel: &CancelToken) -> Option<Thumbnail> {
     if cancel.observed() {
@@ -177,5 +206,14 @@ mod tests {
         let cancel = CancelToken::standalone();
         cancel.cancel();
         assert!(extract(&path, &cancel).is_none());
+    }
+
+    #[test]
+    fn preview_support_follows_the_source_extension() {
+        assert!(supports_preview(Path::new("work/a.clip")));
+        assert!(supports_preview(Path::new("work/a.PSB")));
+        assert!(supports_preview(Path::new("work/a.webp")));
+        assert!(!supports_preview(Path::new("work/a.txt")));
+        assert!(!supports_preview(Path::new("work/a")));
     }
 }

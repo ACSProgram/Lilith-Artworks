@@ -8,6 +8,7 @@
 - 工作区摘要（作品标题与分支列表）的非历史页兜底读取：`src/modules/history/useArtworkSummary.ts`；由 `src/app/ArtworkWorkspace.tsx` 在活动视图不是历史页且当前作品分支尚未加载时启用，只消费同一个 `history/api.ts`。
 - 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
+- 节点缩略图的展示：`src/modules/history/NodePreview.tsx`（节点卡片悬停浮层与「节点信息」栏的预览区），读取与刷新由 `useHistoryController.ts` 编排。
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
@@ -76,6 +77,12 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 - 其它格式、解析失败或损坏头部：无预览，详情区显示占位。
 
 内容未变化的快速检查不打开工作文件，沿用 head 已有缩略图；完整检查确认内容未变化时也不改写。检查点、fork 与 snapshot 修复作用于同一节点或复用原节点，不重新抽取；存量节点不回填。历史图与列表查询继续使用显式列名，不把 BLOB 带出；详情区选中节点时通过只读命令 `get_history_node_thumbnail` 单独拉取 data URL。读取只服务当前 `thumbnail_version` 的载荷，未知版本按「无预览」处理，避免把不认识的编码当作 WebP 发给前端。
+
+**格式是否支持缩略图**由节点所属分支当前工作文件的扩展名判断（`preview::supports_preview`：`.clip`、`.psd`/`.psb` 与 png/jpg/webp/tiff/bmp/gif 支持，其余格式与没有工作文件的分支一律不支持）。节点自身只保存 ChunkFile 容器，读不出原始格式，因此这条判断只能跟着分支的工作文件走——分支事后改指到另一种格式的文件时，老节点也按新扩展名回答。`get_history_node_thumbnail` 因此返回 `{ dataUrl, supported }`：`dataUrl` 是已存缩略图（没有时为 null），`supported` 只表示该格式有没有抽取器。两者相互独立：已有缩略图的节点即使分支改指到不支持的格式，也照常显示图片。
+
+前端据此分三档：有缩略图就显示图片；没有缩略图但格式支持时显示「无可用预览」与刷新按钮；格式不支持时「节点信息」栏整块不显示预览区（不是显示占位），节点卡片悬停也不出现任何浮层——悬停行为与没有这个功能时完全一致。读取失败按「暂无预览」处理，仍给出占位与刷新入口。
+
+**悬停预览**只在总览提供：当前分支视图的「节点信息」栏本来就显示选中节点的缩略图，再弹一层浮层是重复的，因此分支视图的卡片悬停不做任何事。指针进入总览的卡片时读取一次该节点的缩略图，浮层贴在卡片右侧、放不下时翻到左侧，并始终留在视口内。浮层挂在页面根部而不是卡片内部——卡片本身是 `button`，刷新按钮不能嵌套进去，画布容器还带滚动。指针从卡片移到浮层有一段宽限时间，滚动、窗口尺寸变化或切换到当前分支视图时关闭。缩略图按节点缓存在内存里，同一节点重复悬停或选中不再重复请求；历史刷新时整份缓存作废（提交、检查点与手动刷新都可能改写缩略图）。悬停与浮层里的刷新只读写该节点的预览列，不进入图轮询，也不触发恢复或工作文件读取。
 
 存量节点没有缩略图或需要替换已有缩略图时，详情区提供刷新按钮，经 `refresh_history_node_thumbnail` 重新抽取。命令先沿历史链解析并**物化该节点自身存储的内容**到仓库根 `temp/` 下的临时文件，再调用同一套 `preview` 抽取，最后把结果写回 `thumbnail` / `thumbnail_version`；它不读取当前工作文件（节点创建后工作文件可能已经变化），也不改写工作文件、ChunkFile、图或校验状态。整条链的块在物化时逐块验哈希，任一步失败只让本次刷新报错、不留下半成品；临时文件由 `NamedTempFile` 在正常返回或出错时删除，进程崩溃留下的 `.tmp*` 由仓库打开时的临时目录清扫按宽限期回收。刷新属于前台长命令，会请求后台任务让位并持有仓库操作锁；大文件需要多花一次完整物化的时间和临时磁盘空间。
 
@@ -265,7 +272,8 @@ scan_repository_storage_disk
 - 叶节点下显示其对应分支名称，帮助区分同一历史节点被多个分支引用的情况。
 - 当前分支状态归 `src/app/ArtworkWorkspace.tsx` 所有，`HistoryModule` 通过受控属性读写，发布页复用同一状态；历史数据刷新只在当前分支失效时回退到第一个分支。
 - 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节；delta 文件整体是 zstd 流，识别到 zstd 帧魔数后先流式解压出前 10 字节再判版本（`stored_format_label`），snapshot 则按明文读取。走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
-- 同一个「节点信息」栏在选中节点时按需显示该节点的缩略图：命令 `get_history_node_thumbnail` 只读取该行的 `thumbnail` BLOB 并返回 data URL；无预览、读取失败或节点已无缩略图时显示「无可用预览」和重新获取按钮，已有预览时同一按钮叠在预览右上角，便于替换旧的模糊缓存；两者都不进入全局错误提示，也不触发 restore 或工作文件读取。刷新按钮经 `refresh_history_node_thumbnail` 从节点自身存储的内容重新抽取并写回；请求只随选中节点、历史刷新或用户点击发起，不进入图轮询。
+- 同一个「节点信息」栏在选中节点时按需显示该节点的缩略图：命令 `get_history_node_thumbnail` 只读取该行的 `thumbnail` BLOB 并返回 data URL 与该格式是否支持缩略图；无预览、读取失败或节点已无缩略图时显示「无可用预览」和重新获取按钮，已有预览时同一按钮叠在预览右上角，便于替换旧的模糊缓存；格式不支持缩略图时整块预览区不显示。占位与刷新都不进入全局错误提示，也不触发 restore 或工作文件读取。刷新按钮经 `refresh_history_node_thumbnail` 从节点自身存储的内容重新抽取并写回；请求只随选中节点、历史刷新、悬停或用户点击发起，不进入图轮询。
+- 总览的节点卡片悬停时在卡片旁给出缩略图浮层（`NodePreview.tsx`）：有缩略图显示图片，没有但格式支持时显示「无可用预览」与刷新按钮，格式不支持时不出现浮层；当前分支视图不提供浮层，避免与「节点信息」栏重复。浮层与「节点信息」栏共用同一份按节点缓存的读取结果，刷新后同步更新两侧。
 - `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。

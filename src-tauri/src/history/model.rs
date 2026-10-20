@@ -52,6 +52,18 @@ pub(crate) struct HistoryNode {
     pub(crate) chunk_count: u64,
 }
 
+/// 单个节点的缩略图读取结果。
+///
+/// `supported` 说明该节点的工作文件格式有没有抽取器：前端据此决定「无可用预览」
+/// 占位与刷新入口要不要出现，格式不支持时连占位都不显示。它与 `data_url` 相互
+/// 独立——已有缩略图的节点即便分支事后改指到不支持的格式，也照常显示图片。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NodePreview {
+    pub(crate) data_url: Option<String>,
+    pub(crate) supported: bool,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ForkBranchRequest {

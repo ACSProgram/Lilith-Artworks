@@ -4,6 +4,7 @@ import type {
   BackupCommitResult,
   BackupRuntimeStatus,
   ForkBranchRequest,
+  NodePreview,
   UpdateBranchBackupRequest,
   RenameHistoryNodeRequest,
 } from "./types";
@@ -14,7 +15,7 @@ export const historyApi = {
   nodeFormat: (historyId: string) =>
     invokeCommand<string | null>("get_history_node_format", { historyId }),
   nodeThumbnail: (historyId: string) =>
-    invokeCommand<string | null>("get_history_node_thumbnail", { historyId }),
+    invokeCommand<NodePreview>("get_history_node_thumbnail", { historyId }),
   refreshNodeThumbnail: (historyId: string) =>
     invokeCommand<string | null>("refresh_history_node_thumbnail", { historyId }),
   fork: (request: ForkBranchRequest) =>

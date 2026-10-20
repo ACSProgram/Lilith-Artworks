@@ -36,7 +36,7 @@ pub(crate) async fn get_history_node_format(
 pub(crate) async fn get_history_node_thumbnail(
     history_id: String,
     coordinator: State<'_, OperationCoordinator>,
-) -> Result<Option<String>, String> {
+) -> Result<super::NodePreview, String> {
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::History, move |context| {

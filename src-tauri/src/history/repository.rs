@@ -331,6 +331,26 @@ pub(crate) fn node_storage_path(root: &Path, history_id: &str) -> Result<Option<
         .flatten())
 }
 
+/// 节点所属分支的当前工作文件路径；分支未设置工作文件时返回 `None`。
+///
+/// 历史节点自身只保存 ChunkFile 容器，读不出原始格式，因此「格式是否支持缩略图」
+/// 按这条路径的扩展名判断（见 `preview::supports_preview`）。分支事后改指到另一种
+/// 格式的文件时，老节点会跟着按新扩展名回答。
+pub(crate) fn node_source_path(root: &Path, history_id: &str) -> Result<Option<String>, String> {
+    Ok(storage::open(root)?
+        .query_row(
+            "SELECT NULLIF(TRIM(branch.source_path), '')
+               FROM history_nodes node
+               JOIN branches branch ON branch.id = node.created_on_branch_id
+              WHERE node.id = ?1",
+            [history_id],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?
+        .flatten())
+}
+
 /// 节点是否以检查点 snapshot 作为**永久表示**。
 ///
 /// 检查点的 snapshot 只有显式取消才会释放，因此子边的反向增量不会被任何读取
@@ -2102,6 +2122,19 @@ mod tests {
             )
             .unwrap();
         }
+    }
+
+    #[test]
+    fn node_source_path_follows_the_branch_work_file() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "node", None, 1);
+
+        let path = node_source_path(&fixture.root, "node").unwrap().unwrap();
+        assert!(path.ends_with("main.psd"), "{path}");
+        // 未知节点没有工作文件可回查，调用方据此按「不支持预览」处理。
+        assert!(node_source_path(&fixture.root, "missing")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
