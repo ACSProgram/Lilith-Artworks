@@ -16,7 +16,7 @@
  */
 
 export const STROKE_GEOMETRY_VERSION = 1;
-/** 单笔点数上限。写入侧超出时按距离抽稀，不报错。 */
+/** 单笔点数上限。编码侧超出即拒绝；距离抽稀由采样层在编码前完成（阶段 5）。 */
 export const MAX_STROKE_POINTS = 4096;
 export const STROKE_HEADER_BYTES = 8;
 export const STROKE_POINT_BYTES = 5;

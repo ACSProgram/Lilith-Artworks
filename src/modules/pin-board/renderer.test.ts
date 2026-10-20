@@ -8,6 +8,8 @@ import {
   resetPendingSettleForTests,
 } from "./pendingSettle";
 import type { PinBoardItem, PinBoardView } from "./types";
+import { STROKE_TOOL, decodeStrokeHeader, type PinBoardStrokeGeometry } from "./strokeGeometry";
+import { encodeStrokeGeometry } from "./strokeRender";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -45,6 +47,13 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     previewTextures: new Map(),
     failedTextureDimensions: new Map(),
     visibleImages: [],
+    // 笔迹相关状态：真实实例由类字段初始化，替身对象要手工补齐。
+    strokeGeometries: new Map(),
+    strokeOutlineIndex: new Map(),
+    strokeVersion: 0,
+    strokeSignature: "",
+    strokeLoadToken: 0,
+    strokeIndexCount: 0,
     // 基准预算（低档）：与历史常量一致，预算相关的断言依赖这些值。
     textureBudgetBytes: PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES,
     previewTextureBudgetBytes: PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -387,6 +396,126 @@ function autosaveRenderer(options: Record<string, unknown>): AutosaveTestRendere
     ...options,
   }) as unknown as AutosaveTestRenderer;
 }
+
+describe("pin-board stroke rendering", () => {
+  const strokeQuad: PinBoardItem["points"] = [[0, 0], [100, 0], [100, 100], [0, 100]];
+
+  function strokeItem(itemId = 5): PinBoardItem {
+    return {
+      boardId: 1,
+      itemId,
+      kind: "stroke",
+      width: 100,
+      height: 100,
+      order: itemId,
+      layer: 3,
+      deleted: false,
+      points: strokeQuad,
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      tool: STROKE_TOOL.line,
+      color: "#FF8000",
+      strokeWidth: 2,
+    } as unknown as PinBoardItem;
+  }
+
+  function strokeGeometry(): PinBoardStrokeGeometry {
+    const bytes = encodeStrokeGeometry(STROKE_TOOL.line, [], 0);
+    return {
+      ...decodeStrokeHeader(bytes),
+      itemId: 5,
+      color: "#FF8000",
+      strokeWidth: 2,
+      width: 100,
+      height: 100,
+      geometry: bytes,
+    };
+  }
+
+  it("never queues a texture load for a stroke item", () => {
+    const renderer = rendererWith({
+      visibleImages: [strokeItem()],
+      textureQualityCaps: new Map(),
+      selectedIds: new Set<number>(),
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      gpu: { device: { limits: { maxTextureDimension2D: 8192 } } },
+      canvas: { height: 100 },
+    });
+
+    const candidates = (renderer as unknown as {
+      textureLoadCandidates: () => unknown[];
+    }).textureLoadCandidates();
+
+    // 笔迹进纹理队列会去读 DDS 并失败，最终变成红色失败占位框。
+    expect(candidates).toHaveLength(0);
+  });
+
+  it("does not paint a loading placeholder over a stroke", () => {
+    const layer = document.createElement("div");
+    const renderer = rendererWith({
+      visibleImages: [strokeItem()],
+      placeholderElement: layer,
+      placeholderNodes: new Map(),
+      loaded: true,
+      destroyed: false,
+      gpuUnavailable: false,
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      canvas: {
+        getBoundingClientRect: () => ({ width: 100, height: 100, left: 0, top: 0 }),
+      },
+    });
+
+    (renderer as unknown as { updatePlaceholderOverlay: () => void }).updatePlaceholderOverlay();
+
+    expect(layer.childElementCount).toBe(0);
+  });
+
+  it("builds the stroke buffer once and only rebuilds when zoom changes", () => {
+    const created: number[] = [];
+    const device = {
+      createBuffer: (descriptor: { size: number }) => {
+        created.push(descriptor.size);
+        return {
+          getMappedRange: () => new ArrayBuffer(descriptor.size),
+          unmap: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    };
+    const renderer = rendererWith({
+      visibleImages: [strokeItem()],
+      strokeGeometries: new Map([[5, strokeGeometry()]]),
+      strokeVersion: 0,
+      strokeSignature: "",
+      strokeOutlineIndex: new Map(),
+      strokeIndexCount: 0,
+      gpu: { device },
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      canvas: { height: 100 },
+      loaded: true,
+      destroyed: false,
+      boardId: 1,
+      onError: vi.fn(),
+    });
+    const syncStrokeBuffers = () => (renderer as unknown as {
+      syncStrokeBuffers: () => void;
+    }).syncStrokeBuffers();
+
+    syncStrokeBuffers();
+
+    // 顶点 + 索引 + 选中描边三个缓冲。
+    expect(created).toHaveLength(3);
+    expect((renderer as unknown as { strokeIndexCount: number }).strokeIndexCount).toBe(6);
+
+    syncStrokeBuffers();
+    // 可见集合与缩放都没变：不重建。
+    expect(created).toHaveLength(3);
+
+    (renderer as unknown as { viewport: { height: number } }).viewport.height = 50;
+    syncStrokeBuffers();
+    expect(created).toHaveLength(6);
+  });
+});
 
 describe("pin-board renderer autosave", () => {
   it("does not schedule a save while the setting is disabled", () => {

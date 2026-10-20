@@ -14,14 +14,14 @@
 //! ```
 //!
 //! 坐标量化为 `u16`（4000 px 宽的包围盒仍有 0.06 px 分辨率），压感量化为 `u8`；
-//! 点数上限 [`MAX_STROKE_POINTS`]，超限由写入侧按距离抽稀，不在这一层拒绝。
+//! 点数上限 [`MAX_STROKE_POINTS`]，超限由校验拒绝；距离抽稀由采样侧在编码前完成。
 //!
 //! 前端解析在 `src/modules/pin-board/strokeGeometry.ts`，两边的校验口径必须一致：
 //! 任一侧改动都要同步另一侧与各自测试。
 
 /// 笔迹固定落在标注层（[`STROKE_LAYER`]），永远在所有图片与文字之上。
 pub(crate) const STROKE_LAYER: u8 = 3;
-/// 单笔点数上限。写入侧超出时按距离抽稀，不拒绝。
+/// 单笔点数上限，与前端 `MAX_STROKE_POINTS` 一致。超限由校验拒绝。
 pub(crate) const MAX_STROKE_POINTS: usize = 4096;
 /// 几何 BLOB 的头部长度（version / tool / flags / reserved / pointCount）。
 pub(crate) const STROKE_HEADER_BYTES: usize = 8;

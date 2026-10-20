@@ -16,6 +16,7 @@
 - 阵列排序（统一高度、阅读序、断行、落位）：`src-tauri/src/pin_board/arrange.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
+- 笔迹渲染的几何与缓冲构建（局部坐标、SDF 图元、LOD 抽稀、顶点布局）：`strokeRender.ts`，着色器与管线在 `renderer.ts`
 - 素材板表定义（仓库 schema v5 起为多态条目，v6 起含笔迹）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
@@ -82,12 +83,31 @@ SQLite:
 - `revision` 每次画板内容写库（`save_pin_board`/`finalize_pin_board`）后单调更新，用于保存冲突检测；`reorder_pin_boards` 只调整 `sort_order`，`rename_pin_board` 只更新 `name` 与 `updated_ms`，都不改 `revision`，因此重排或改名不会让已打开画板的下一次保存被误判为冲突；
 - 笔迹是第三种条目（`kind = 2`）：只落数据库，不建纹理、不落实体文件，因此不进入 DDS 引用清单、清理、scrub、孤儿扫描、磁盘空间统计、画板内复制与系统剪贴板复制（系统剪贴板仍只认位图）；
 - 笔迹的 `layer` 固定为标注层 3，永远在所有图片与文字之上：`save_pin_board` 忽略前端传入的 `layer` 并强制写 3（防御性契约，配单测；同一份几何下只改 `layer` 不算改动、不产生新步骤），超出 0–3 的取值仍被拒绝，文字与图片照旧使用 0–2；
-- 笔迹几何的 BLOB 布局、长度/点数校验与批量打包口径由 `stroke.rs` 与 `strokeGeometry.ts` 两侧各持一份，任何一侧改动都要同步另一侧与各自测试；单笔点数上限 4096，超限由写入侧抽稀；形状（直线/箭头/矩形/椭圆）不带点数据，两端点由包围盒与方向位推出，退化包围盒（水平或垂直线）由前端按线宽膨胀后再存，读侧拒绝零尺寸；
+- 笔迹几何的 BLOB 布局、长度/点数校验与批量打包口径由 `stroke.rs` 与 `strokeGeometry.ts` 两侧各持一份，任何一侧改动都要同步另一侧与各自测试；单笔点数上限 4096，编码侧超出即拒绝（距离抽稀由采样层在编码前完成，属阶段 5）；形状（直线/箭头/矩形/椭圆）不带点数据，两端点由包围盒与方向位推出，退化包围盒（水平或垂直线）由前端按线宽膨胀后再存，读侧拒绝零尺寸；
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；两者都经共享 `ConfirmDialog` 确认，其中「清空回收站」的最终动作由滑动确认控件承担，单块画板的永久删除沿用点击确认；
 - 画板结算清除仍为删除状态的条目时，位图条目的 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。文字与笔迹条目没有实体文件，结算只删除条目记录。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_bitmaps` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
 - 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页「空间」页的「文件清理」区确认后入队清理（该区同时列出待清理队列并支持单条/全部重试）；`cleanup::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。设置页「空间」页的队列与扫描入口见 `docs/modules/history-and-backup.md`。
+
+## 渲染
+
+两条路径，按「有没有纹理」划分，最终落在同一个 render pass 里：
+
+- **位图与文字**：一个条目一张纹理、一个 quad，按 `layer` 再按 `order` 逐个绘制；
+- **笔迹**：不建纹理，整板可见笔迹合并成一条三角形列表，**在图片之后用一次 indexed draw 画完**。笔迹固定占标注层，因此不需要与图片交错，也不需要在图片处切分批次。
+
+笔迹的顶点带「世界位置 + 局部坐标 + 图元参数」：局部坐标以条目包围盒为界（`x ∈ [0, width]`、`y ∈ [0, height]`，原点在左上，与图片 UV 同一取向），构建时经条目四角的双线性映射落到世界空间，因此移动、旋转、缩放**不需要任何额外变换代码**；`uv` 被左右或上下镜像时同一份映射会让笔迹跟着镜像。片元着色器在局部空间算距离场：自由笔与直线是两端宽度线性插值的锥形胶囊，矩形是 `abs(sdBox) - 半线宽`，椭圆是椭圆距离场近似，箭头是一段止于三角底边的杆加一个三角形；随后按视口 uniform 里的「设备像素 / 世界单位」做 1 px 羽化，缩放 10%–800% 边缘都清晰。
+
+包围盒是**墨迹外框**：矩形与椭圆的路径从四边各内缩半个线宽，直线与箭头的两端点同样内缩半个线宽，方向位（0 左上 / 1 右上 / 2 右下 / 3 左下）决定起点落在哪个角。写入侧必须按线宽把包围盒向外膨胀，否则水平或垂直直线的退化包围盒会归一化除零（见计划的「风险 4」）。自由笔的点按压感收细（`0.15 + 0.85 × pressure`，压感为 0 视为设备没给数据、回退到固定线宽）；手感相关的采样、光滑与两端 taper 属阶段 5。
+
+低缩放下按距离抽稀而不是逐段裁剪：相邻点的距离不足一个设备像素时合并，首尾点始终保留，因此一条 300 点的笔画缩到 10% 会收成十来个点而不会断裂。抽稀的阈值按世界单位给出、距离在条目的局部坐标系里度量：条目显示尺寸与包围盒不一致时只会多留点，不会漏点。缓冲只在「可见笔迹集合、缩放或几何版本变化」时重建——平移只改视口位置，因此拖动画布不重建（拖动笔迹本身会重建，逐段裁剪留给阶段 5）；设备丢失时随纹理一起丢弃，由 `recoverGpu` 之后的 `refreshViewport` 按当前画板重建。
+
+**笔迹必须排除的既有纹理路径**（漏掉会出「红色失败占位框」或显存空转）：`textureLoadCandidates`、`updatePlaceholderOverlay`、`requestedDimension`、`estimatedResidentBytes`。淘汰只遍历两张纹理表，笔迹本来就不在其中，因此 `evictTextures` 不需要改动。选中描边走独立的 line-strip 缓冲（每笔 5 个顶点、按槽位连续排布），与位图的包围框描边同一套颜色与线宽。
+
+几何读取与画板装载解耦：`loadBoard` 保持同步，装载后若画板含笔迹条目才异步调用 `read_pin_board_strokes`，回来后重建缓冲并补画，因此切换画板不会为几 KB 几何多等一次 IPC。新建笔迹后（`applyMutationResult`）同样重读一次整板几何——几何不在条目 DTO 里。
+
+笔迹能被选中，因此工具栏的导出按钮按「可导出条目」（位图与文字，`interactionState.exportableCount`）判断可用性：只选中笔迹时保持禁用，不再打开目录选择器后写 0 个文件。笔迹不参与导出与系统剪贴板复制（笔迹计划把这两项列为非目标）。
 
 ## 命令面
 
@@ -137,7 +157,7 @@ SQLite:
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，只并入与框选包围框相交的未删除图片；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
 - “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。栅格化按字形墨迹（`actualBoundingBoxAscent/Descent`）把文字块在每个 1.3 倍行盒内垂直居中，并以此定位基线——此前用 `textBaseline = "top"` 把行高余量全留在下方，文字因此整体偏上、顶部越出纹理被裁掉；显示纹理与导出共用这条绘制路径，存量条目也会按新定位重绘。对话框提供内容预览、字号步进与内置取色器（饱和度/亮度面板、色相条、十六进制输入和预设色），不再调用系统取色器。导出时按逻辑长边的 2 倍（受 8192 与 64 MiB RGBA 像素预算约束）栅格化，由浏览器编码 PNG 后经 `write_pin_board_item_png` 校验并原子写盘——传的是压缩后的 PNG 而不是 RGBA，避免一次 IPC 搬运数千万个数字。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计和画板内复制；系统剪贴板复制只支持位图；
-- 笔迹条目（`kind = stroke`）是本批次新增的能力，目前只到存储与命令面：几何契约由 `stroke.rs` / `strokeGeometry.ts` 两侧持有，`create_pin_board_stroke` 与 `read_pin_board_strokes` 已可用，但渲染器还不会装载笔迹（SDF 渲染、绘制工具、图层可见性、压感与性能验收仍是 `docs/planning/pin-board-strokes-plan-2026-10-20.md` 的阶段 2–5），因此界面暂时看不到也画不出笔迹；笔迹的选中、移动、旋转、缩放、删除与撤销计划复用图片的条目路径；
+- 笔迹条目（`kind = stroke`）目前到「能读、能画、能选中」：几何契约由 `stroke.rs` / `strokeGeometry.ts` 两侧持有，`create_pin_board_stroke` 与 `read_pin_board_strokes` 已可用，渲染走 `strokeRender.ts` 的 SDF 管线（见「渲染」），选中、移动、旋转、缩放、翻转、删除与撤销复用图片的条目路径；笔迹固定在标注层，右键菜单的「图层」项会跳过笔迹（原生端保存时也强制写 3），不会产生「改完重开又回去」的状态。**还没有绘制工具**——工具状态机、工具栏、快捷键、实时预览、图层开关与压感手感是计划的阶段 3–5，因此在界面上暂时画不出新笔迹，只能显示与编辑仓库里已有的笔迹；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
 - 锁定与全屏快捷键默认为 `Ctrl+R` 与 `F11`，可在设置弹窗“素材板”页自定义（沿用 Client 的快捷键录入控件）；F5 / `Ctrl+R` 整页刷新由应用层的 `preventWebViewReload` 只取消默认行为来屏蔽，不停止事件传播，因此 `Ctrl+R` 仍能命中锁定快捷键，避免 WebView 刷新丢失画布状态（与 Client 的实现一致）；设置 v1 中仍是旧默认值的 `CommandOrControl+Shift+K` 在读取时迁移为 `CommandOrControl+R`（见 `docs/architecture/overview.md`）；
@@ -148,6 +168,6 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、笔迹几何解析与批量载荷边界、取色器十六进制/HSV 换算、controller 生命周期注册与进度事件），不启动 Tauri；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、笔迹几何解析与批量载荷边界、笔迹缓冲构建与 LOD 抽稀/局部坐标映射/四种形状与箭头、取色器十六进制/HSV 换算、controller 生命周期注册与进度事件），不启动 Tauri；
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4/v5→v6 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字与笔迹条目（BLOB 边界、标注层强制、批量二进制打包、坏几何报错）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

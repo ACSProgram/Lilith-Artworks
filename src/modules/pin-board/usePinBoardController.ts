@@ -39,6 +39,7 @@ const DEFAULT_INTERACTION: PinBoardInteractionState = {
   imageCount: 0,
   selectedCount: 0,
   arrangeableCount: 0,
+  exportableCount: 0,
   canUndo: false,
   canRedo: false,
   dirty: false,
@@ -462,7 +463,7 @@ export function usePinBoardController({
     const selectedIds = current?.selectedImageIds() ?? [];
     const images = current?.copySelection() ?? [];
     if (images.length === 0) {
-      if (selectedIds.length > 0) setStatus("文字条目暂不支持画板内复制。");
+      if (selectedIds.length > 0) setStatus("文字与笔迹条目暂不支持画板内复制。");
       return;
     }
     clipboardRef.current = images;
@@ -476,7 +477,7 @@ export function usePinBoardController({
     if (!current || selected === null) return;
     if (imageId === null) {
       if (current.selectedImageIds().length > 0) {
-        setStatus("文字条目暂不支持复制到系统剪贴板。");
+        setStatus("文字与笔迹条目暂不支持复制到系统剪贴板。");
       }
       return;
     }

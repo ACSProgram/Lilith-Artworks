@@ -25,16 +25,41 @@ entries for the reader; they are not a template every entry has to fill.
   system clipboard, which remain bitmap-only. The geometry is a small-endian,
   versioned layout that both sides validate the same way: a freehand stroke
   carries quantized points and pressure, a shape carries none and derives its two
-  ends from the bounding box plus a direction bit, and the write-side limit of
-  4096 points is thinned by distance rather than refused. `create_pin_board_stroke`
-  passes the blob as an ordinary argument — a `Uint8Array` arrives as a numeric
-  array, about 75 KB at the limit, so no raw channel is worth opening — and
-  `read_pin_board_strokes` returns the whole board as one binary payload that the
-  renderer parses into a map without JSON. A stroke always sits on the annotation
-  layer: `save_pin_board` ignores the `layer` sent by the front end and writes
-  three, so sending a different layer alone is not a change. The canvas does not
-  draw strokes yet; the SDF pipeline, the tools, the layer switches and the
-  pressure work remain in the plan.
+  ends from the bounding box plus a direction bit, and the encoder refuses more
+  than 4096 points, leaving distance-based thinning to the sampling layer.
+  `create_pin_board_stroke` passes the blob as an ordinary argument — a
+  `Uint8Array` arrives as a numeric array, about 75 KB at the limit, so no raw
+  channel is worth opening — and `read_pin_board_strokes` returns the whole board
+  as one binary payload that the renderer parses into a map without JSON. A stroke
+  always sits on the annotation layer: `save_pin_board` ignores the `layer` sent
+  by the front end and writes three, so sending a different layer alone is not a
+  change. The canvas now draws strokes that exist in the database (see the next
+  entry); the tools, the layer switches and the pressure work remain in the plan.
+- The pin board renders strokes with a signed-distance pipeline instead of a
+  texture per item. Every visible stroke is flattened into one interleaved vertex
+  buffer and drawn as a single indexed call after the bitmaps, because the
+  annotation layer always sits on top. Each primitive is a quad whose corners are
+  mapped from box space into world space by bilinear interpolation of the item's
+  four corners, so moving, rotating or scaling a stroke needs no extra transform
+  code, and a mirrored `uv` mirrors the stroke together with the item. The
+  fragment shader evaluates a tapered capsule for pen segments and lines, a box
+  or ellipse band for the two closed shapes and a triangle for the arrow head,
+  then feathers one device pixel using the world-to-pixel ratio carried in the
+  viewport uniform, which keeps edges clean from 10% to 800% zoom. Points below
+  the pixel spacing are merged by distance, erring towards keeping points rather
+  than clipping them, so a stroke stays connected when the board is zoomed out.
+  The buffer is rebuilt only when the visible stroke set or the zoom changes, and
+  it is dropped and rebuilt on device loss alongside the textures. Strokes are
+  excluded from the texture paths that would otherwise touch them — the load
+  queue, the placeholder overlay and the resident-byte estimate — so they never
+  request a DDS or show a failing placeholder, and they never enter the eviction
+  pass because they own no texture. Their selection outline comes from a separate
+  strip buffer that matches the bitmap outline, and picking a layer for a stroke
+  selection is a no-op because the annotation layer is fixed. Reading the geometry
+  happens after the board is shown, so switching boards still never waits on the
+  repository. Since strokes can now be selected, the export button counts bitmaps
+  and text only and stays disabled for a stroke-only selection, instead of opening
+  a directory picker that writes nothing.
 - The repository schema is v6, reached by a single v5 → v6 migration that also
   widens the pin-board tables (`kind` accepts 2, `history.layer` accepts 3) and
   adds `branches.last_check_elapsed_ms`, `branches.last_check_mode` (quick / full /

@@ -70,6 +70,7 @@ function fakeRenderer(): PinBoardRenderer {
       imageCount: 0,
       selectedCount: 0,
       arrangeableCount: 0,
+      exportableCount: 0,
       canUndo: false,
       canRedo: false,
       dirty: false,
