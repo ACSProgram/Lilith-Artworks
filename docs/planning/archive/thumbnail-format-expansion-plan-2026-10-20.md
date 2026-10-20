@@ -1,11 +1,18 @@
 # 缩略图格式扩展计划（2026-10-20）
 
-状态：**待实施**。2026-10-20 构思完成，格式依据已全部落实；范围未经用户最终确认前不动代码。
-本计划不引入 Windows Shell 缩略图接口（用户已决定先不考虑）。
+状态：**已实施并归档**（2026-10-20，第一批）。2026-10-20 构思完成；同日经维护者确认缩小
+范围，只落第一批（`.sai2`、`.procreate`）与无魔数的 `.tga`，其余格式（kra/krz、ora、cbz、
+ooxml、odf、blend、svg、exr/hdr/qoi/ff/pnm）**暂不做**，`supports_preview` 不登记它们。
+实施范围与验证见 §9；有效契约并入 `docs/modules/history-and-backup.md`，行为变化见
+`CHANGELOG.md` 的 `## Unreleased`；剩余的 GUI 手工验收只在 `../todo.md` 追踪。本文件自此
+只作为计划、格式依据与落实口径的历史快照。
+
+文档性质：独立计划，不写入 `todo.md`；已按 AGENTS 的归档规则归入本目录。
+本计划不引入 Windows Shell 缩略图接口（已决定先不考虑）。
 
 ## 1. 一句话结论
 
-在既有 preview 管线上新增 10 类格式：位图 6 种（纯 feature flag）、ZIP 家族 6 类
+在既有 preview 管线上新增 11 项格式（条目见 §2.1）：位图 6 种（纯 feature flag）、ZIP 家族 6 类
 （kra/krz、ora、procreate、ooxml、odf、cbz，共用一个 zip extractor）、`.sai2`、
 `.blend`、`.svg`。所有格式的内嵌预览结构均有公开依据，其中 `.blend` 已用本机双样本
 实证、`.sai2` 已从 MIT 开源的 libsai 实现提取到完整算法——**不需要额外样本即可开工**，
@@ -122,6 +129,9 @@ xlsx、pptx、odt、ods、odp、tga、pnm、ppm、pgm、pbm、hdr、qoi、ff、e
     DeltaUnpackRow16Bpc（类 PNG Up 的 16bpc 预测器 + 饱和运算）得 8bpc BGRA；3 通道时
     Alpha 填 0xFF。每个 tile 行首/行尾有 u16 校验（高字节 = tile X 索引）。
 - 顺序：先 `thum`，失败或不存在再 `intg`；两者都遵守 degrade 契约。
+  **实施时改为 `intg` 优先**：`thum` 恒定只有约 256 px 宽（本机四个样本都是
+  256×448），而输出目标最长边 512 px 会把它放大成糊图；`intg` 就是画布本身，
+  预算内解码后是真正的降采样。`thum` 保留为超预算画布与旧变体的兜底。
 - 移植来源：libsai `include/sai2.hpp` + `source/sai2.cpp`（MIT，SPDX 标头）；四张
   Huffman 表与算法常量按源码照抄。
 - 风险：SaiThumbs 作者注明「部分旧格式 sai2 文件尚不支持」——旧变体解析失败即无
@@ -189,11 +199,29 @@ BE 字节序（`V`）→ None（罕见，degrade）。
 ## 8. 待确认 / 待验证
 
 1. exr 与 resvg 的编译体积/时间增量是否可接受（实施首个 crate 时度量后再继续）。
-2. `.sai2` 真实样本：端到端验证需要（≥512² 与 <512² 各一个最好）。本机
-   `F:/Models` 未找到 `.sai`/`.sai2`，实施时向用户索取。
+2. `.sai2` 真实样本：**已找到**（原判断「本机未找到」只查了 `F:/Models`）。
+   `F:/Artworks/创作/2023Q4/芙宁娜/` 下有 4 个：`S1/2.sai2`(3.8MB)、
+   `S1/3.sai2`(4.5MB)、`S1/4.sai2`(4.7MB)、`S2/1.sai2`(18.9MB)，画布
+   512×896 / 1024×1792，`thum` 与 `intg` 都在。实施时已用它们做端到端验证。
 3. `.procreate`：社区四个项目文档一致，但本机网络受限未能取得
    silicate 的 `reference.procreate` 实测；合成测试 + 文档依据先行，真实样本作可选验证。
 4. `.blend` 新头两个保留字段（样本均为 0）：若日后遇到非 0 变体导致行走步错位，
    按 degrade 处理并记录到模块文档。
 5. cbz「第一张图」取字典序最小：对 001/002 命名即封面，特殊命名由 degrade 兜底。
 6. 旧版 SAI2 变体（SaiThumbs 注明部分旧文件不支持）：解析失败即无预览。
+
+## 9. 已实施范围（2026-10-20 第一批）
+
+维护者确认只做第一批 + `.procreate` + 无魔数的 `.tga`，其余暂缓。落地内容：
+
+| 项 | 结果 |
+| --- | --- |
+| `.sai2` | `preview/sai2.rs`：头 + chunk 表 → `intg` 优先、`thum` 兜底。libsai（MIT）移植，已记入 `THIRD_PARTY_NOTICES.md`。4 个真实样本端到端通过：3 个 512×896 样本的 `intg` 解码结果与 SAI 导出的同目录 PNG **逐像素一致**，第 4 个（1024×1792，导出为 960×1680）缩放后差异 0.99，仅重采样误差；`thum` 与导出图的均差是 3.6–7.5，正是它只作兜底的理由。JSSF→JPEG 另有合成单测覆盖 1 / 3 通道（灰与彩色）两条 DQT / DHT / SOS 形态 |
+| `.procreate` | `preview/zip.rs`：候选条目表 + `QuickLook/Thumbnail.png`，大小写不敏感；未登记的扩展名不进容器扫描 |
+| `.tga` | `preview/bitmap.rs`：`guess_format` 明确不识别 TGA，改为扩展名判定 + 显式格式解码。注意调色板型 TGA 头会与 ICO 魔数撞车（`00 00 01 00`），因此拒绝分支也要给 `.tga` 一次机会 |
+| 依赖 | 只新增 `zip`（复用 c2pa 已带的 8.6，`deflate-flate2`，不拉 zopfli）；`image` feature 未改（tga 本来就开着） |
+| 暂缓 | kra/krz、ora、cbz、ooxml、odf、blend、svg、exr/hdr/qoi/ff/pnm 均未实现，`supports_preview` 不登记 |
+
+实施中修正的两处计划假设：`thum` 并不总比 `intg` 新/大（见 §4.3），`sai2` 样本本来就在本机（见 §8.2）。
+另记一条与本批无关但值得知道的现状：`preview::encode` 会把小于 512 px 的源**放大**到 512，
+这正是 `intg` 必须优先的原因，也说明 `thum` 一旦作为兜底仍会被放大。

@@ -25,6 +25,20 @@ alpha3 的验收状态：阶段 7、8 的 GUI 手工验收已通过；**阶段 9
 `manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是开发期待办，见
 `docs/guides/release-policy.md`。
 
+## 缩略图格式扩展的 GUI 验收（2026-10-20 记入）
+
+`archive/thumbnail-format-expansion-plan-2026-10-20.md` 的第一批已实施并归档：`.sai2`、`.procreate`
+与无魔数的 `.tga` 进入 `preview`。自动验证已通过（`cargo test --lib`，含新增的 JSSF→JPEG 合成单测；
+`intg` 在 3 个真实 `.sai2` 样本上与 SAI 导出的 PNG 逐像素一致）。以下界面行为仍待维护者验收：
+
+- 工作文件为 `.sai2` 的分支显示的是画布本身（`intg`），不是被放大的 `thum`；`intg`/`thum` 都
+  读不出来的旧变体显示「无可用预览」与刷新按钮，而不是空白或隐藏预览区。
+- 工作文件为 `.procreate` 的分支能显示 `QuickLook` 缩略图；缺该条目的文件按占位处理。
+- 工作文件为 `.tga` 的分支能显示预览；把同一份 TGA 字节改成别的扩展名后，「节点信息」栏整块
+  不再出现预览区（格式不支持档）。
+
+`.procreate` 的真实文件仍是可选验证：本机没有样本，只有合成 ZIP 单测。
+
 ## 平台代码集中的 GUI 手工验收（2026-10-20 记入）
 
 `archive/platform-code-consolidation-plan-2026-10-20.md` 已实施并归档：平台分支集中到
@@ -128,6 +142,10 @@ alpha2 已收口归档，以下验收项仍未执行（2026-10-19 记入）：
   `scrub_history`，逐块校验并写节点校验时间）。维护者明确接受「该开关默认关闭，关闭时这层
   体检实际不生效」这个代价，也不采用按计数抽检。实测依据见
   `archive/backup-scheduling-fix-plan-2026-10-20.md` §6.1，实施口径见同文件 §7 的 A7。
+- **缩略图格式扩展只做第一批（2026-10-20）**：`.sai2`、`.procreate` 与无魔数的 `.tga` 已实施，
+  kra/krz、ora、cbz、ooxml、odf、blend、svg、exr/hdr/qoi/ff/pnm 暂不做，`supports_preview` 不登记
+  它们；不引入 Windows Shell 缩略图接口。格式依据与实施记录见
+  `archive/thumbnail-format-expansion-plan-2026-10-20.md`（§2、§9）。
 - **签名**：Authenticode 签名仍无法进行。按 `docs/guides/release-policy.md`，未配置证书输入时
   允许未签名发布，但发布说明必须显著披露未签名状态及 SmartScreen 影响；签名相关的人工门槛项
   在签名可用前无法执行。

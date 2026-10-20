@@ -14,7 +14,7 @@
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
 - SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file/`。
-- `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。
+- `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。仅缩略图才需要的格式（`.sai2`、ZIP 容器、TGA 这类无魔数位图）在 `src-tauri/src/preview/` 内自行探测，不进 `format/container.rs`。
 - 节点缩略图抽取：`src-tauri/src/preview/`；只读传入的文件、按格式分派（提交时是工作文件，手动刷新时是 backup 物化到 `temp/` 的节点内容），失败只跳过预览，不改变提交或历史结果。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
 - 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
@@ -26,7 +26,7 @@
 - `src-tauri/src/library/`：仓库初始化、作品树、搜索与项目回收站。
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
-- `src-tauri/src/preview/`：历史节点派生缩略图。只读传入的文件、按格式分派（`.clip` 内嵌 SQLite、`.psd`/`.psb`、直接位图），任何失败只让该节点没有预览，不改提交或刷新结果；不参与 ChunkFile、摘要、scrub 与恢复。
+- `src-tauri/src/preview/`：历史节点派生缩略图。只读传入的文件、按格式分派（`.clip` 内嵌 SQLite、`.psd`/`.psb`、`.sai2` 画布内嵌缩略图、ZIP 容器内的预览条目、直接位图），任何失败只让该节点没有预览，不改提交或刷新结果；不参与 ChunkFile、摘要、scrub 与恢复。
 - `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
 - `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与垃圾文件扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
@@ -75,12 +75,17 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 - `.clip`：复用 `format/container.rs` 定位 `SQLi` 块，把该块有界复制到系统临时目录后以只读 SQLite 打开，扫描名字含 `preview` 的表（优先 `CanvasPreview`）中的可解码 BLOB。容器自带的画布预览 PNG 若无法解码（例如非标准 filter 字节）则回退为占位。
 - `.psd` / `.psb`：优先 Image Resources 中的 1036 / 1033 缩略图资源（JPEG 或 raw RGB；1033 按规范是 BGR，取出后换回 RGB），但该资源的最长边小于 256 px 时改为解码合并合成图，避免把很小的内嵌缩略图放大成模糊预览；合成图按行采样到 512 px 目标尺寸，解码预算为 256 MP，超出预算、无法识别、截断或格式不支持时回退到内嵌缩略图（两者都不可用时无预览）。合成图支持 8/16 位，RGB / 灰度 / CMYK，raw / RLE / ZIP ± prediction。
+- `.sai2`：文件头（`SAI-CANVAS-TYPE0`）后是 `{ tag, layer, 绝对偏移 }` 的 chunk 表，blob 到下一项偏移为止。优先解 `intg`（delta 压缩的画布合成图，256×256 分块，每块行先位级 RLE 再用 16bpc 类 PNG `Up` 预测还原），因为它就是画布本身；`thum`（`jssf`：量化表 + 逐 MCU 行的老式 JPEG 熵流，重打包成标准基线 JPEG 后交共享解码器）只作兜底。**顺序与直觉相反的原因**：`thum` 恒定只有约 256 px 宽，先取它会被 512 px 目标放大成糊图。移植自 libsai（MIT），见 `THIRD_PARTY_NOTICES.md`。
+- `.procreate`：ZIP 容器，读 `QuickLook/Thumbnail.png`（条目名大小写不敏感）。读取前按中央目录声明的未压缩大小设上限、读取时再用 `take` 二次钳制并按块查取消令牌，解出的字节仍走共享解码预算；同一模块里的候选条目表就是 ZIP 家族的布局知识，加新家族只加一行，不碰分派逻辑。**普通 `.zip`/`.jar` 会进这个分支但立刻判否**：分派只按 ZIP 局部文件头进入，真正去开容器由候选表里登记的扩展名决定。
+- `.tga`：唯一靠扩展名而不是魔数判定解码的格式——TGA 没有可靠签名，`image::guess_format` 明确不识别它，因此未知头部 + `.tga` 扩展名才走 `ImageFormat::Tga` 显式解码；同字节内容换成别的扩展名一律不认。
 - png / jpg / webp / tiff / bmp / gif：在同一解码预算内直接解码并按最长边缩放。
 - 其它格式、解析失败或损坏头部：无预览，详情区显示占位。
 
 内容未变化的快速检查不打开工作文件，沿用 head 已有缩略图；完整检查确认内容未变化时也不改写。检查点与 fork 作用于同一节点或复用原节点的预览，不重新抽取；存量节点不回填。历史图与列表查询继续使用显式列名，不把 BLOB 带出；详情区选中节点时通过只读命令 `get_history_node_thumbnail` 单独拉取 data URL。读取只服务当前 `thumbnail_version` 的载荷，未知版本按「无预览」处理，避免把不认识的编码当作 WebP 发给前端。
 
-**格式是否支持缩略图**由节点所属分支当前工作文件的扩展名判断（`preview::supports_preview`：`.clip`、`.psd`/`.psb` 与 png/jpg/webp/tiff/bmp/gif 支持，其余格式与没有工作文件的分支一律不支持）。节点自身只保存 ChunkFile 容器，读不出原始格式，因此这条判断只能跟着分支的工作文件走——分支事后改指到另一种格式的文件时，老节点也按新扩展名回答。`get_history_node_thumbnail` 因此返回 `{ dataUrl, supported }`：`dataUrl` 是已存缩略图（没有时为 null），`supported` 只表示该格式有没有抽取器。两者相互独立：已有缩略图的节点即使分支改指到不支持的格式，也照常显示图片。
+**格式是否支持缩略图**由节点所属分支当前工作文件的扩展名判断（`preview::supports_preview`：`.clip`、`.psd`/`.psb`、`.sai2`、`.procreate`、tga 与 png/jpg/webp/tiff/bmp/gif 支持，其余格式与没有工作文件的分支一律不支持）。节点自身只保存 ChunkFile 容器，读不出原始格式，因此这条判断只能跟着分支的工作文件走——分支事后改指到另一种格式的文件时，老节点也按新扩展名回答。`get_history_node_thumbnail` 因此返回 `{ dataUrl, supported }`：`dataUrl` 是已存缩略图（没有时为 null），`supported` 只表示该格式有没有抽取器。两者相互独立：已有缩略图的节点即使分支改指到不支持的格式，也照常显示图片。
+
+**「支持 ≠ 一定有」**：`.sai2` 的旧变体、`intg`/`thum` 都读不出来的画布、没有 `QuickLook/Thumbnail.png` 的 `.procreate` 都会在「支持」的前提下抽不出预览，此时按上面的三档显示占位与刷新入口，而不是隐藏预览区。
 
 前端据此分三档：有缩略图就显示图片；没有缩略图但格式支持时显示「无可用预览」与刷新按钮；格式不支持时「节点信息」栏整块不显示预览区（不是显示占位），节点卡片悬停也不出现任何浮层——悬停行为与没有这个功能时完全一致。读取失败按「暂无预览」处理，仍给出占位与刷新入口。
 

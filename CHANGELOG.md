@@ -15,6 +15,25 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- History node previews now also come from `.sai2`, `.procreate` and `.tga`
+  working files. A `.sai2` canvas prefers its `intg` composite (the canvas
+  itself, 256×256 delta-compressed tiles) and falls back to the older `jssf`
+  thumbnail, which is repacked into a baseline JPEG and handed to the shared
+  decoder; the composite wins because `thum` is only about 256 px wide and the
+  512 px output target would upscale it into a blur. `.procreate` reads
+  `QuickLook/Thumbnail.png` from its ZIP container, with the entry-count,
+  uncompressed-size and cancellation bounds applied before anything is decoded.
+  `.tga` is the one format decided by extension rather than magic bytes, since
+  the format has no signature. All of them keep the existing 512 px, lossless
+  WebP, decode-budget and degradation contract, and a supported format still
+  does not promise a preview: canvases without a readable thumbnail blob and
+  `.procreate` files without that entry keep the placeholder and refresh button.
+- The `.sai2` decoders are a port of libsai (MIT) and `zip` becomes a direct
+  dependency at the version c2pa already pulls in, both recorded in
+  `THIRD_PARTY_NOTICES.md`.
+
 ### Changed
 
 - Backup commits and restores record per-phase timings on their existing result

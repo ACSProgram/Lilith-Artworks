@@ -27,8 +27,14 @@ v3.0 only 发布（见根目录 `LICENSE`）。第三方软件与模型保留各
 | [ort](https://github.com/pykeio/ort) | ONNX Runtime Rust 绑定 | MIT 或 Apache-2.0 |
 | [ONNX Runtime](https://onnxruntime.ai) | TrustMark 模型推理运行时 | MIT |
 | [image](https://github.com/image-rs/image) | 图片解码/编码 | MIT 或 Apache-2.0 |
+| [zip](https://github.com/zip-rs/zip2) | 读取 ZIP 容器（`.procreate` 缩略图） | MIT |
+| [libsai](https://github.com/Wunkolo/libsai) | `.sai2` 缩略图解析与解码（**移植代码**，非依赖） | MIT |
 | [zstd](https://github.com/gyscos/zstd-rs) | 压缩 | MIT 或 Apache-2.0 |
 | [serde / serde_json](https://serde.rs) | 序列化 | MIT 或 Apache-2.0 |
+
+`src-tauri/src/preview/sai2.rs` 是 libsai（Copyright (c) 2025 Wunkolo，MIT）的
+**移植代码**，不是通过 Cargo 引入的依赖：JSSF 重打包、`intg` 的位级 RLE 与 16bpc
+行预测都按原实现的算法逐段转写，原项目许可为 MIT，与本项目的 GPL-3.0-only 兼容。
 
 ## 构建与测试工具
 

@@ -116,3 +116,12 @@
   snapshot 整份复检并把结构单元改为缓冲顺序读、提交与恢复导出的三段式有界管道。有效契约并入
   `docs/modules/history-and-backup.md`，行为变化见 `../../../CHANGELOG.md` 的 `## Unreleased`；
   release 复测、GUI 手工验收与日志观察在 `../todo.md` 追踪。
+- `thumbnail-format-expansion-plan-2026-10-20.md`：历史节点缩略图格式扩展的独立计划与实施记录。
+  含 11 项候选格式的预览来源与格式依据、接入设计（`format/container` 不扩张、复用 512 px / 无损
+  WebP / 解码预算 / degrade 契约）、`.sai2` 两种内嵌预览（`intg` 的 dpcm 分块与 `thum` 的 JSSF→
+  JPEG 重打包）与 `.blend` 双样本实证；实施记录为维护者确认的缩小范围——只做第一批 `.sai2`、
+  `.procreate` 与无魔数的 `.tga`，其余暂缓。记录里包含三处落地口径：`intg` 优先于 `thum`（后者
+  约 256 px，会被 512 px 目标放大成糊图）、`intg` 与 SAI 导出 PNG 的逐像素验证、`zip` 只以
+  `deflate-flate2` 引入（复用 c2pa 已带的 8.6）。有效契约并入
+  `docs/modules/history-and-backup.md`，行为变化见 `../../../CHANGELOG.md` 的 `## Unreleased`；
+  GUI 手工验收在 `../todo.md` 追踪。

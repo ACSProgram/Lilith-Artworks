@@ -45,6 +45,10 @@ trustmark = "0.4"
 ureq = { version = "3.4", default-features = false, features = ["rustls"] }
 uuid = { version = "1", features = ["v4"] }
 zeroize = "1.8"
+# 缩略图只需读取 ZIP 容器（`.procreate`），不写不压缩：`deflate` 会把 zopfli
+# 编码器和 zlib-rs 一起拉进来，`deflate-flate2` 只复用已有 flate2。c2pa 已经带进
+# 同一版本的 zip（关掉了默认特性），这里不开默认特性就不会多编一份实现。
+zip = { version = "8.6", default-features = false, features = ["deflate-flate2"] }
 zstd = "0.13"
 
 # 仅测试使用：仓库临时目录清扫的单测需要把会话目录的修改时间拨回宽限期之前。
