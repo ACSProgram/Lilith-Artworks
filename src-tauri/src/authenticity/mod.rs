@@ -2,6 +2,7 @@ mod artifact;
 mod c2pa;
 mod commands;
 mod contracts;
+pub(crate) mod drop_stage;
 mod error;
 mod image_resource;
 mod model;

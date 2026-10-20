@@ -427,6 +427,16 @@ pub fn run() {
                 let _ = window.set_icon(icons.window.clone());
             }
             build_tray(application, runtime_icon.map(|icons| icons.tray))?;
+            // 上一个进程被强杀或断电时，系统临时目录里会留下拖放暂存会话目录；
+            // 正常退出由 `RunEvent::Exit` 删除本进程自己的那一份。
+            let drop_stage_sweep = authenticity::drop_stage::sweep_stale();
+            if drop_stage_sweep.reclaimed > 0 || drop_stage_sweep.failed > 0 {
+                log::info!(
+                    "drop stage sweep finished: reclaimed={}, failed={}",
+                    drop_stage_sweep.reclaimed,
+                    drop_stage_sweep.failed
+                );
+            }
             log::info!(
                 "Lilith Artworks started: elapsed_ms={}",
                 started.elapsed().as_millis()
@@ -467,6 +477,13 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(app::command_registry::handler())
-        .run(tauri::generate_context!())
-        .expect("error while running Lilith Artworks");
+        .build(tauri::generate_context!())
+        .expect("error while building Lilith Artworks")
+        .run(|_application, event| {
+            // 退出路径只有这里一处能同时覆盖确认退出与哨兵强退，拖放暂存目录的
+            // 删除因此挂在这里，而不是挂在某一条具体的关闭流程上。
+            if let tauri::RunEvent::Exit = event {
+                authenticity::drop_stage::remove_session();
+            }
+        });
 }

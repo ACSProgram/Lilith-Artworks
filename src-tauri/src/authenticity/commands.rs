@@ -2,7 +2,6 @@ use std::{
     fs::{self, File},
     io::{Cursor, Write},
     path::{Path, PathBuf},
-    sync::OnceLock,
 };
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -123,6 +122,8 @@ pub(crate) async fn preview_authenticity_image(
 /// 因此前端读取字节、这里落盘，再复用既有的外部图片预览与识别流程。落盘目录位于
 /// 系统临时目录（仓库之外），路径立即加入文件系统 scope，使后续预览与识别仍走
 /// 同一条「路径必须被显式授权」的检查，不新增可绕过的入口。
+///
+/// 目录的创建、退出删除与崩溃残留清扫见 `drop_stage`。
 #[tauri::command]
 pub(crate) async fn stage_authenticity_input(
     request: StageImportRequest,
@@ -151,23 +152,12 @@ pub(crate) async fn stage_authenticity_input(
     if bytes.len() > MAX_DROP_BYTES {
         return Err(AuthenticityError::InvalidInput("拖入的图片过大".into()));
     }
-    let directory = drop_stage_directory()?;
-    let path = directory.join(format!("{}.{}", storage::new_id(), extension));
-    fs::write(&path, &bytes)?;
+    let path = super::drop_stage::write_staged_image(&bytes, &extension)?;
     window
         .fs_scope()
         .allow_file(&path)
         .map_err(|error| AuthenticityError::Task(format!("无法授权拖入的图片：{error}")))?;
     Ok(display_path(&path))
-}
-
-static DROP_STAGE_SESSION: OnceLock<String> = OnceLock::new();
-
-fn drop_stage_directory() -> AuthenticityResult<PathBuf> {
-    let session = DROP_STAGE_SESSION.get_or_init(storage::new_id);
-    let directory = std::env::temp_dir().join(format!("lilith-artworks-drop-{session}"));
-    fs::create_dir_all(&directory)?;
-    Ok(directory)
 }
 
 #[tauri::command]

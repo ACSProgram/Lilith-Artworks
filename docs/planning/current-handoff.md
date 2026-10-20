@@ -8,14 +8,19 @@
 
 ## 当前批次状态
 
-2026-10-20 缩略图格式扩展（第一批，已提交）：节点缩略图新增三种来源——`.sai2`（libsai 移植，
+2026-10-20 拖放暂存清理（已提交）：拖放导入的暂存目录改为按需创建、退出删除、崩溃残留下次启动
+清扫，不再每次运行在系统临时目录里留一个空文件夹。行为变化见 `CHANGELOG.md` 的 `## Unreleased`，
+模块口径见 `docs/modules/authenticity.md`。自动验证已通过（`cargo test --lib`、`cargo check
+--all-targets`、`cargo fmt --check`），**退出与强杀行为仍待人工确认**（验收项在 `todo.md`）。
+
+上一批（缩略图格式扩展第一批，已提交）：节点缩略图新增三种来源——`.sai2`（libsai 移植，
 `intg` 画布优先、`thum` 兜底）、`.procreate`（ZIP 内的 `QuickLook/Thumbnail.png`）与无魔数的
 `.tga`，`supports_preview` 同步登记；其余候选格式由维护者决定暂缓。计划、格式依据与实施记录已
 归档：`archive/thumbnail-format-expansion-plan-2026-10-20.md`；行为变化见 `CHANGELOG.md` 的
 `## Unreleased`。自动验证已通过（含 `intg` 在 3 个真实样本上与 SAI 导出 PNG 的逐像素比对），
 **GUI 手工验收与 `.procreate` 真实样本验证仍待人工**（验收项在 `todo.md`）。
 
-2026-10-20 批次（自动备份调度与快速检查修复，阶段 1–5，已提交）：快速检查的指纹门槛、调度侧
+上一批（自动备份调度与快速检查修复，阶段 1–5，已提交）：快速检查的指纹门槛、调度侧
 静默与代价感知、让位改事件驱动、后台完成事件收敛、提交路径删除 head snapshot 整份复检、
 结构单元改缓冲顺序读，以及提交与恢复导出的三段式有界管道全部落地。计划、release 实测与实施
 记录已归档：`archive/backup-scheduling-fix-plan-2026-10-20.md`；行为变化见 `CHANGELOG.md` 的
@@ -35,6 +40,8 @@
 
 ## 下一步
 
+- 本批次的退出行为确认：退出后系统临时目录里没有本次运行的拖放暂存目录，被强杀留下的目录在
+  下次启动且超过 10 分钟后被清掉。验收项见 `todo.md`。
 - 缩略图格式扩展的 GUI 手工验收：选中 `.sai2` / `.procreate` / `.tga` 分支的节点，逐档确认图片、
   「无可用预览」占位与「格式不支持」三种表现；`.procreate` 的真实文件仍只有合成 ZIP 单测。
   验收项见 `todo.md`。

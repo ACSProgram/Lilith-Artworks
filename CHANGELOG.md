@@ -96,6 +96,11 @@ entries for the reader; they are not a template every entry has to fill.
   fall back records the reason — `no baseline`, unreadable metadata or sample, or
   a size / fingerprint mismatch — once per branch and reason, so a quick check that
   stays broken is visible instead of silent.
+- Drag-and-drop staging no longer leaves one empty folder per run in the system
+  temp directory. The `lilith-artworks-drop-<UUID>` session directory is created
+  on the first drop, removed on exit (including the forced exit after a hung
+  webview), and leftovers from a killed process are swept on the next start after
+  a ten-minute grace period; only the prefix plus a valid UUID is touched.
 
 ## 0.3.0-alpha.3 - 2026-10-20
 

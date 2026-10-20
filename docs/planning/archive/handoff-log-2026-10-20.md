@@ -151,7 +151,20 @@ alpha3 的实现已全部完成，本批次把表层文档收回到「只写当�
 - 同步修正落后口径：压力测试报告的当前构建版本、系统架构里画板实体文件名的命名、以及本目录与
   `research/` 中指向 0.3 计划的相对路径。
 
-## 10. 已归入既有日志的批次（指针）
+## 10. 拖放暂存目录清理（2026-10-20，已实现、自动验证通过）
+
+长期静默的运行时缺陷，此前作为补强候选挂在 `../todo.md`：
+
+- **拖放暂存目录不清理**：`authenticity::commands::drop_stage_directory` 每次运行在 `%TEMP%` 下建
+  一个 `lilith-artworks-drop-<session>`，全仓库没有对应的删除代码，长期会静默攒下一堆空目录。
+  新增 `authenticity/drop_stage.rs` 接管生命周期：目录在第一次落盘时才创建，`RunEvent::Exit`
+  删除本次运行的目录（确认退出与哨兵强退都走这条），启动时清扫超过 10 分钟宽限期的残留；只认
+  「前缀 + 合法 UUID」的目录名，不跟随符号链接。`stage_authenticity_input` 改为直接调用它。顺带
+  修正了原记录的一处口径：目录里的暂存图片是普通文件而不是 `NamedTempFile`，随目录一起删除。
+- 验证：`cargo test --lib`（含新增的 `drop_stage` 单测）、`cargo check --all-targets`、
+  `cargo fmt --check` 全部通过。退出与强杀行为仍待维护者确认，验收项记于 `../todo.md`。
+
+## 11. 已归入既有日志的批次（指针）
 
 - **alpha1 压力测试收尾与 CPU 时间度量**（2026-10-19）：`stress_large` 四档、`stress_scale`、
   `stress_bench`、`stress_baseline` 与 `stress_authenticity` 的 16K 档全部通过，`stress_bench`
