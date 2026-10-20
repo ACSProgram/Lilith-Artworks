@@ -21,6 +21,8 @@ const branch = (backupEnabled: boolean): ArtworkBranch => ({
   backupQuickEnabled: false,
   lastCheckMs: null,
   lastSuccessMs: null,
+  lastCheckElapsedMs: null,
+  lastCheckMode: null,
   lastError: backupEnabled ? null : "persistent failure",
   consecutiveBackupFailures: backupEnabled ? 0 : 5,
   backupRetryAtMs: null,
@@ -246,6 +248,17 @@ describe("BranchScheduleStatus", () => {
   it("mentions quick check for branches that opted in", () => {
     render(<BranchScheduleStatus branch={{ ...branch(true), backupQuickEnabled: true }} />);
     expect(screen.getByText(/每 10 分钟自动备份 · 快速检查/)).toBeTruthy();
+  });
+
+  it("shows how the last automatic check ran and what it cost", () => {
+    render(<BranchScheduleStatus branch={{
+      ...branch(true),
+      lastSuccessMs: Date.UTC(2026, 9, 21, 8, 0, 0),
+      lastCheckMode: "quick",
+      lastCheckElapsedMs: 12,
+    }} />);
+
+    expect(screen.getByText(/最近成功 .* · 上次自动检查：快速检查命中（12 ms）/)).toBeTruthy();
   });
 
   it("shows the oldest chain verification time when no node failed", () => {

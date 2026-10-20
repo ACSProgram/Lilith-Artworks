@@ -7,6 +7,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { ConfirmDialog as SharedConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
 import { appApi } from "../../app/api";
+import { describeLastCheck } from "./historyModel";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
@@ -34,6 +35,10 @@ export function BranchScheduleStatus({
     }
   };
 
+  const lastCheckDetail = describeLastCheck(branch);
+  const successSummary = branch.lastSuccessMs
+    ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}${lastCheckDetail ? ` · ${lastCheckDetail}` : ""}`
+    : "等待首次检查";
   const status = branch.finalArtifactLocked
     ? `成品已锁定 · 已发布 ${branch.publishedCount} 条`
     : branch.lastError && !branch.backupEnabled
@@ -41,7 +46,7 @@ export function BranchScheduleStatus({
       : branch.lastError
         ? "备份失败，将按策略重试"
         : branch.backupEnabled
-          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${branch.lastSuccessMs ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}` : "等待首次检查"}`
+          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${successSummary}`
           : "自动备份已关闭";
 
   // 两类问题分开数：确认坏掉的和没有结论的不能混成一句，否则用户会以为都坏了。

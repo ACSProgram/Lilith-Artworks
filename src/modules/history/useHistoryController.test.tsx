@@ -66,6 +66,8 @@ const branch = (lastSuccessMs: number): ArtworkBranch => ({
   backupQuickEnabled: true,
   lastCheckMs: lastSuccessMs,
   lastSuccessMs,
+  lastCheckElapsedMs: null,
+  lastCheckMode: null,
   lastError: null,
   consecutiveBackupFailures: 0,
   backupRetryAtMs: null,

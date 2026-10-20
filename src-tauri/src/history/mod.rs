@@ -9,7 +9,7 @@ pub(crate) use contracts::HistoryReferenceInventory;
 pub(crate) use deletion_repository::{delete_branch, delete_subtree, validate_subtree_deletion};
 pub(crate) use model::{
     classify_verify_failure, ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget,
-    BranchDeletion, BranchRecord, CompactionTarget, ForkBranchRequest, HistoryCommit,
+    BranchDeletion, BranchRecord, CheckMode, CompactionTarget, ForkBranchRequest, HistoryCommit,
     HistoryDeletion, HistoryNode, HistoryRecord, NodePreview, NodeVerifyIssue,
     RenameHistoryNodeRequest, ScheduledBranch, UpdateBranchBackupRequest, VerifyChainNode,
     VerifyNodeTarget, VERIFY_MISSING_MARKER, VERIFY_UNVERIFIABLE_MARKER,
@@ -23,6 +23,6 @@ pub(crate) use repository::{
     mark_automatic_backup_skipped, mark_checkpoint, mark_error, mark_node_verified,
     mark_node_verify_error, mark_unchanged, materialization_chain,
     next_backup_disable_notice_target, node_source_path, node_storage_path,
-    plan_checkpoint_release, record_source_metadata, rename_node, set_snapshot, store_thumbnail,
-    unmark_checkpoint, update_branch, verification_inventory,
+    plan_checkpoint_release, record_check_result, record_source_metadata, rename_node,
+    set_snapshot, store_thumbnail, unmark_checkpoint, update_branch, verification_inventory,
 };

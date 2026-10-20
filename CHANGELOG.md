@@ -148,11 +148,22 @@ entries for the reader; they are not a template every entry has to fill.
   `pin_board_items` and SQLite rewrites them when a table is renamed; the migration
   runs with foreign keys off, checks them before committing and rolls back whole on
   failure, so a v5 repository still opens as v5. The three scheduler columns are
-  created here only: the scheduler still keeps the check cost in memory, their
-  wiring is not part of this batch, and reading them yields NULL / 0.
+  created here; check elapsed and mode were wired to the scheduler and history UI
+  in a follow-up (see below), while `quick_hit_count` still has no reader or
+  writer and reads as 0.
 
 ### Changed
 
+- Automatic backup checks now remember their cost and path. After every successful
+  scheduled check the scheduler stores the elapsed time and whether it was a
+  quick hit, a quick check that fell back to a full read, or a full check in
+  `branches.last_check_elapsed_ms` / `last_check_mode`. The due time keeps using
+  `max(interval, 2 × elapsed)` and now falls back to the persisted measurement
+  when the process has none, so a restart no longer resets the widened interval
+  for one round. The branch status row appends this to "last success" as e.g.
+  「上次自动检查：快速检查命中（12 ms）」. Manual commits only move the success time
+  and leave these two columns untouched. A failed metadata write logs a warning
+  instead of turning an already successful check into a failure.
 - The headless test entry point now creates strokes and reads them back for the
   stress suites: `create-board-stroke` writes one stroke from a geometry file or
   hex bytes, `create-board-strokes` writes a batch from a small-endian spec file

@@ -16,7 +16,7 @@ use crate::{
         AppState,
     },
     cancel::CancelToken,
-    history::{self, ScheduledBranch},
+    history::{self, CheckMode, ScheduledBranch},
     platform::path::display_path,
     repository_lock::{self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority},
     storage,
@@ -769,18 +769,19 @@ fn run_scheduled_backup(
     // 未变化，任何不一致都退回下方全量检查和备份流程。全局设置只在分支创建时
     // 提供初始值，不参与这里的判定。
     let checked_started = Instant::now();
+    let mut check_mode = CheckMode::Full;
     if branch.quick_enabled {
-        let quick_unchanged = worker::quick_check_unchanged(root, branch_id).map_err(|error| {
+        let outcome = worker::quick_check_outcome(root, branch_id).map_err(|error| {
             AutomaticBackupError::Failed {
                 error,
                 disabled: false,
             }
         })?;
-        if quick_unchanged {
+        if outcome == worker::QuickCheckOutcome::Unchanged {
             let checked_ms = storage::now_ms().map_err(AutomaticBackupError::Infrastructure)?;
             history::mark_unchanged(root, branch_id, checked_ms)
                 .map_err(AutomaticBackupError::Infrastructure)?;
-            state.record_check_elapsed(branch_id, checked_started.elapsed());
+            record_check_result(root, state, branch_id, checked_started, CheckMode::Quick);
             log::info!("backup quick-unchanged: branch_id={branch_id}");
             return Ok(BackupCommitResult {
                 created: false,
@@ -788,6 +789,7 @@ fn run_scheduled_backup(
                 history_id: None,
             });
         }
+        check_mode = CheckMode::Fallback;
     }
     let cancel = CancelToken::with_source({
         let state = state.clone();
@@ -795,7 +797,7 @@ fn run_scheduled_backup(
     });
     match worker::run_backup(root, branch_id, "", "automatic", &cancel, options) {
         Ok(result) => {
-            state.record_check_elapsed(branch_id, checked_started.elapsed());
+            record_check_result(root, state, branch_id, checked_started, check_mode);
             Ok(result)
         }
         Err(worker::BackupRunError::Cancelled) => Err(AutomaticBackupError::Cancelled),
@@ -867,20 +869,38 @@ fn wait_for_write_gate(state: &BackupState, root: &Path) -> bool {
     state.wait_scheduler(Duration::ZERO)
 }
 
+/// 记录本次成功检查的耗时与方式：内存值供当前进程立即使用，库值供重启后继续
+/// 代价感知，并供分支状态行显示。写库失败只记日志——检查本身已经成功，不应因为
+/// 一条调度提示把分支推进失败退避。
+fn record_check_result(
+    root: &Path,
+    state: &BackupState,
+    branch_id: &str,
+    started: Instant,
+    mode: CheckMode,
+) {
+    let elapsed = started.elapsed();
+    state.record_check_elapsed(branch_id, elapsed);
+    let elapsed_ms = i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX);
+    if let Err(error) = history::record_check_result(root, branch_id, elapsed_ms, mode) {
+        log::warn!("failed to record check metadata for branch {branch_id}: {error}");
+    }
+}
+
 /// 下一次自动备份的截止时刻。实际间隔取 `max(用户设置的间隔, 2 × 上次耗时)`：
-/// 一次检查比间隔还长时，等它跑完再等同样长的时间，避免连续满负荷。学习结果
-/// 只在内存里，重启后第一轮按名义间隔跑。
+/// 一次检查比间隔还长时，等它跑完再等同样长的时间，避免连续满负荷。耗时优先
+/// 取本进程刚记下的值，没有时回退到库里的上次成功检查，因此重启后第一轮不会
+/// 丢掉代价感知。
 fn due_at_ms(branch: &ScheduledBranch, now: i64, state: &BackupState) -> i64 {
     branch.retry_at_ms.unwrap_or_else(|| {
         branch.last_check_ms.map_or(now, |checked| {
             let nominal = i64::from(branch.interval_minutes) * 60_000;
-            let effective = state
+            let last_elapsed_ms = state
                 .check_elapsed(&branch.id)
-                .map(|elapsed| {
-                    let measured =
-                        i64::try_from(elapsed.as_millis().saturating_mul(2)).unwrap_or(i64::MAX);
-                    nominal.max(measured)
-                })
+                .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+                .or(branch.last_check_elapsed_ms);
+            let effective = last_elapsed_ms
+                .map(|elapsed| nominal.max(elapsed.saturating_mul(2)))
                 .unwrap_or(nominal);
             checked
                 .saturating_add(effective)
@@ -957,6 +977,17 @@ mod tests {
         )
     }
 
+    fn check_metadata(root: &Path, branch_id: &str) -> (Option<String>, Option<i64>) {
+        crate::storage::open(root)
+            .unwrap()
+            .query_row(
+                "SELECT last_check_mode, last_check_elapsed_ms FROM branches WHERE id = ?1",
+                [branch_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
     fn make_due(root: &Path, branch_id: &str) {
         crate::storage::open(root)
             .unwrap()
@@ -1028,6 +1059,53 @@ mod tests {
             )
             .unwrap();
         assert!(last_check > 1);
+        let (mode, elapsed) = check_metadata(&root, &branch_id);
+        assert_eq!(mode.as_deref(), Some("quick"));
+        assert!(elapsed.is_some_and(|value| value >= 0));
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert_eq!(branch.last_check_mode, Some(CheckMode::Quick));
+        assert_eq!(branch.last_check_elapsed_ms, elapsed);
+    }
+
+    #[test]
+    fn manual_commit_leaves_the_automatic_check_metadata_alone() {
+        let (_directory, root, source, _artwork_id, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        make_due(&root, &branch_id);
+        run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let recorded = check_metadata(&root, &branch_id);
+        assert_eq!(recorded.0.as_deref(), Some("quick"));
+
+        // 手动提交只推进 last_check_ms / last_success_ms，不改写自动检查的两列。
+        fs::write(&source, b"manually changed content").unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "Manual",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(check_metadata(&root, &branch_id), recorded);
     }
 
     #[test]
@@ -1056,6 +1134,9 @@ mod tests {
 
         assert!(result.created);
         assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 2);
+        let (mode, elapsed) = check_metadata(&root, &branch_id);
+        assert_eq!(mode.as_deref(), Some("fallback"));
+        assert!(elapsed.is_some());
     }
 
     #[test]
@@ -1157,6 +1238,9 @@ mod tests {
 
         assert!(full.created, "关闭快速检查后必须走全量并发现改动");
         assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 2);
+        let (mode, elapsed) = check_metadata(&root, &branch_id);
+        assert_eq!(mode.as_deref(), Some("full"));
+        assert!(elapsed.is_some());
     }
 
     #[test]
@@ -1278,6 +1362,26 @@ mod tests {
         let widened = due_at_ms(&branch, 0, &state);
         assert_eq!(widened, 1_000_000 + 4 * 60 * 60 * 1_000 + jitter_ms("slow"));
         assert!(widened > nominal);
+    }
+
+    #[test]
+    fn due_time_uses_the_persisted_elapsed_after_restart() {
+        let state = BackupState::default();
+        let mut branch = scheduled_branch("slow", Some(1_000_000), None);
+        branch.last_check_elapsed_ms = Some(2 * 60 * 60 * 1_000);
+
+        // 进程刚刚重启、内存里还没有记录时，库里的耗时继续把间隔放宽到 4 小时。
+        assert_eq!(
+            due_at_ms(&branch, 0, &state),
+            1_000_000 + 4 * 60 * 60 * 1_000 + jitter_ms("slow")
+        );
+
+        // 本进程的新测量优先于库里的旧值。
+        state.record_check_elapsed("slow", Duration::from_secs(60));
+        assert_eq!(
+            due_at_ms(&branch, 0, &state),
+            1_000_000 + 60 * 60 * 1_000 + jitter_ms("slow")
+        );
     }
 
     #[test]
@@ -1405,6 +1509,7 @@ mod tests {
             artwork_id: "artwork".into(),
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms: Some(10),
+            last_check_elapsed_ms: None,
             interval_minutes: 120,
             quick_enabled: false,
             retry_at_ms: Some(42),
@@ -1697,6 +1802,7 @@ mod tests {
             artwork_id: format!("artwork-{id}"),
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms,
+            last_check_elapsed_ms: None,
             interval_minutes: 60,
             quick_enabled: false,
             retry_at_ms,

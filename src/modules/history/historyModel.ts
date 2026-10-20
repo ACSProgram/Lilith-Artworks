@@ -1,4 +1,4 @@
-import type { ArtworkBranch, ArtworkHistory, HistoryNode, NodeVerifyIssue } from "./types";
+import type { ArtworkBranch, ArtworkHistory, CheckMode, HistoryNode, NodeVerifyIssue } from "./types";
 
 export interface HistoryTreeNode {
   node: HistoryNode;
@@ -72,6 +72,42 @@ export function isRenamedNode(node: HistoryNode): boolean {
  */
 export function needsCompactSecondConfirm(node: HistoryNode): boolean {
   return node.commitKind !== "automatic" || isRenamedNode(node);
+}
+
+export function checkModeLabel(mode: CheckMode): string {
+  switch (mode) {
+    case "quick":
+      return "快速检查命中";
+    case "fallback":
+      return "快速检查退回全量";
+    case "full":
+      return "全量检查";
+  }
+}
+
+export function formatCheckElapsed(elapsedMs: number): string {
+  const clamped = Math.max(0, elapsedMs);
+  if (clamped < 1_000) return `${Math.round(clamped)} ms`;
+  const tenths = Math.round(clamped / 100);
+  // 按一位小数的显示值判断是否满一分钟，避免 59.96 秒显示成「60.0 秒」。
+  if (tenths < 600) return `${(tenths / 10).toFixed(1)} 秒`;
+  const totalSeconds = Math.round(clamped / 1_000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分`;
+}
+
+/**
+ * 分支状态行里的「上次自动检查」说明。只有调度器成功完成过一次检查时才有值；
+ * 手动提交不写检查方式与耗时，因此不会把人工操作说成自动检查。
+ */
+export function describeLastCheck(branch: ArtworkBranch): string | null {
+  if (!branch.lastCheckMode) return null;
+  const label = checkModeLabel(branch.lastCheckMode);
+  const detail = branch.lastCheckElapsedMs == null
+    ? label
+    : `${label}（${formatCheckElapsed(branch.lastCheckElapsedMs)}）`;
+  return `上次自动检查：${detail}`;
 }
 
 export function canCompact(node: HistoryNode, history: ArtworkHistory): boolean {

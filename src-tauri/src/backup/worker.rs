@@ -220,18 +220,29 @@ fn quick_check(root: &Path, branch_id: &str) -> Result<QuickCheck, String> {
     Ok(QuickCheck::Unchanged)
 }
 
-/// 快速检查：指纹完全一致返回 true；其余情况（缺少基线、指纹不同、读取失败）
-/// 返回 false，交给全量流程给出权威结论并自行修复或报错。退回全量的原因按分支
-/// 去重记录，避免每次调度都刷一条同样的日志。
-pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool, String> {
+/// 快速检查对调度器暴露的结论。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum QuickCheckOutcome {
+    Unchanged,
+    /// 无法断定未变化，需要全量复核。
+    Fallback,
+}
+
+/// 快速检查：指纹完全一致返回 `Unchanged`；其余情况（缺少基线、指纹不同、
+/// 读取失败）返回 `Fallback`，交给全量流程给出权威结论并自行修复或报错。
+/// 退回全量的原因按分支去重记录，避免每次调度都刷一条同样的日志。
+pub(crate) fn quick_check_outcome(
+    root: &Path,
+    branch_id: &str,
+) -> Result<QuickCheckOutcome, String> {
     match quick_check(root, branch_id)? {
         QuickCheck::Unchanged => {
             clear_fallback(branch_id);
-            Ok(true)
+            Ok(QuickCheckOutcome::Unchanged)
         }
         QuickCheck::Fallback(reason) => {
             report_fallback(branch_id, reason);
-            Ok(false)
+            Ok(QuickCheckOutcome::Fallback)
         }
     }
 }
@@ -700,7 +711,10 @@ mod tests {
         let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
 
         // 没有任何提交也没有基线时必须退回全量。
-        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Fallback
+        );
 
         run_backup(
             &root,
@@ -711,14 +725,23 @@ mod tests {
             ChunkWriteOptions::V1,
         )
         .unwrap();
-        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Unchanged
+        );
 
         fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
-        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Fallback
+        );
 
         // 恢复内容后元数据基线不再匹配（修改时间变化），仍需全量复核。
         fs::write(&source, vec![b'A'; 96 * 1024]).unwrap();
-        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Fallback
+        );
     }
 
     #[test]
@@ -761,7 +784,10 @@ mod tests {
                 .is_some(),
             "a coarse mtime must still produce a baseline fingerprint"
         );
-        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Unchanged
+        );
     }
 
     #[test]
@@ -817,7 +843,10 @@ mod tests {
             ChunkWriteOptions::V1,
         )
         .unwrap();
-        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Unchanged
+        );
 
         let modified = fs::metadata(&source).unwrap().modified().unwrap();
         let mut bytes = fs::read(&source).unwrap();
@@ -832,7 +861,10 @@ mod tests {
             .set_modified(modified)
             .unwrap();
 
-        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Fallback
+        );
     }
 
     #[test]
@@ -848,7 +880,10 @@ mod tests {
         )
         .unwrap();
         fs::remove_file(&source).unwrap();
-        assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+        assert_eq!(
+            quick_check_outcome(&root, &branch_id).unwrap(),
+            QuickCheckOutcome::Fallback
+        );
     }
 
     #[test]

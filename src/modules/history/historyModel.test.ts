@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import type { ArtworkBranch, HistoryNode } from "./types";
 import {
-  buildBranchLine, canCompact, isRenamedNode, mergeNodeVerifyStates,
-  needsCompactSecondConfirm, suggestedRestorePath,
+  buildBranchLine, canCompact, checkModeLabel, describeLastCheck, formatCheckElapsed,
+  isRenamedNode, mergeNodeVerifyStates, needsCompactSecondConfirm, suggestedRestorePath,
 } from "./historyModel";
 
 const node = (
@@ -40,6 +40,8 @@ const branch: ArtworkBranch = {
   backupQuickEnabled: false,
   lastCheckMs: null,
   lastSuccessMs: null,
+  lastCheckElapsedMs: null,
+  lastCheckMode: null,
   lastError: null,
   consecutiveBackupFailures: 0,
   backupRetryAtMs: null,
@@ -68,6 +70,31 @@ describe("history model", () => {
 
   it("preserves the working file extension in restore suggestions", () => {
     expect(suggestedRestorePath(nodes[2], branch)).toBe("C:/art/source_restored.psd");
+  });
+
+  it("describes the last automatic check with its mode and elapsed time", () => {
+    expect(describeLastCheck(branch)).toBeNull();
+    expect(describeLastCheck({ ...branch, lastCheckMode: "quick", lastCheckElapsedMs: 12 }))
+      .toBe("上次自动检查：快速检查命中（12 ms）");
+    expect(describeLastCheck({ ...branch, lastCheckMode: "fallback", lastCheckElapsedMs: 65_000 }))
+      .toBe("上次自动检查：快速检查退回全量（1 分 5 秒）");
+    expect(describeLastCheck({ ...branch, lastCheckMode: "full", lastCheckElapsedMs: 1_500 }))
+      .toBe("上次自动检查：全量检查（1.5 秒）");
+    expect(describeLastCheck({ ...branch, lastCheckMode: "full" }))
+      .toBe("上次自动检查：全量检查");
+  });
+
+  it("formats elapsed times at human scales", () => {
+    expect(formatCheckElapsed(0)).toBe("0 ms");
+    expect(formatCheckElapsed(999)).toBe("999 ms");
+    expect(formatCheckElapsed(1_000)).toBe("1.0 秒");
+    expect(formatCheckElapsed(59_940)).toBe("59.9 秒");
+    expect(formatCheckElapsed(59_960)).toBe("1 分");
+    expect(formatCheckElapsed(60_000)).toBe("1 分");
+    expect(formatCheckElapsed(125_000)).toBe("2 分 5 秒");
+    expect(checkModeLabel("quick")).toBe("快速检查命中");
+    expect(checkModeLabel("full")).toBe("全量检查");
+    expect(checkModeLabel("fallback")).toBe("快速检查退回全量");
   });
 
   it("reports a node as renamed only when its title left the generated default", () => {

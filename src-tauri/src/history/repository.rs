@@ -10,8 +10,9 @@ use crate::{cleanup, storage};
 
 use super::{
     classify_verify_failure, ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget,
-    BranchDeletion, BranchRecord, CompactionTarget, HistoryCommit, HistoryDeletion, HistoryNode,
-    HistoryRecord, NodeVerifyIssue, ScheduledBranch, VerifyChainNode, VerifyNodeTarget,
+    BranchDeletion, BranchRecord, CheckMode, CompactionTarget, HistoryCommit, HistoryDeletion,
+    HistoryNode, HistoryRecord, NodeVerifyIssue, ScheduledBranch, VerifyChainNode,
+    VerifyNodeTarget,
 };
 
 pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, String> {
@@ -35,7 +36,8 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                     b.backup_disable_notice_pending,
                     EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id),
                     (SELECT COUNT(*) FROM certification_records record WHERE record.branch_id = b.id),
-                    b.backup_quick_enabled
+                    b.backup_quick_enabled,
+                    b.last_check_elapsed_ms, b.last_check_mode
              FROM branches b WHERE b.artwork_id = ?1 ORDER BY b.created_ms, b.id",
         )
         .map_err(storage::database_error)?;
@@ -51,6 +53,11 @@ pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, Stri
                 backup_interval_minutes: row.get(6)?,
                 last_check_ms: row.get(7)?,
                 last_success_ms: row.get(8)?,
+                last_check_elapsed_ms: row.get(16)?,
+                last_check_mode: row
+                    .get::<_, Option<String>>(17)?
+                    .as_deref()
+                    .and_then(CheckMode::from_db),
                 last_error: row.get(9)?,
                 consecutive_backup_failures: row.get(10)?,
                 backup_retry_at_ms: row.get(11)?,
@@ -775,6 +782,23 @@ pub(crate) fn mark_unchanged(root: &Path, branch_id: &str, checked_ms: i64) -> R
             consecutive_backup_failures = 0, backup_retry_at_ms = NULL, updated_ms = ?2 WHERE id = ?1",
         params![branch_id, checked_ms]
     ).map_err(storage::database_error)?;
+    Ok(())
+}
+
+/// 记录一次成功自动检查的耗时与方式。只由调度器在成功路径调用；失败、取消与
+/// 让位不写，避免把半途而废的检查当成代价依据。
+pub(crate) fn record_check_result(
+    root: &Path,
+    branch_id: &str,
+    elapsed_ms: i64,
+    mode: CheckMode,
+) -> Result<(), String> {
+    storage::open(root)?
+        .execute(
+            "UPDATE branches SET last_check_elapsed_ms = ?2, last_check_mode = ?3 WHERE id = ?1",
+            params![branch_id, elapsed_ms.max(0), mode.as_str()],
+        )
+        .map_err(storage::database_error)?;
     Ok(())
 }
 
@@ -1754,7 +1778,8 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
     let mut statement = connection
         .prepare(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id
+                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
+                    b.last_check_elapsed_ms
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND TRIM(b.source_path) <> ''
@@ -1769,6 +1794,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
                 artwork_id: row.get(6)?,
                 source_path: row.get(1)?,
                 last_check_ms: row.get(2)?,
+                last_check_elapsed_ms: row.get(7)?,
                 interval_minutes: row.get(3)?,
                 quick_enabled: row.get::<_, i64>(4)? != 0,
                 retry_at_ms: row.get(5)?,
@@ -1787,7 +1813,8 @@ pub(crate) fn load_scheduled(
     storage::open(root)?
         .query_row(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id
+                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
+                    b.last_check_elapsed_ms
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
@@ -1799,6 +1826,7 @@ pub(crate) fn load_scheduled(
                     artwork_id: row.get(6)?,
                     source_path: row.get(1)?,
                     last_check_ms: row.get(2)?,
+                    last_check_elapsed_ms: row.get(7)?,
                     interval_minutes: row.get(3)?,
                     quick_enabled: row.get::<_, i64>(4)? != 0,
                     retry_at_ms: row.get(5)?,

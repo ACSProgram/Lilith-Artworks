@@ -9,6 +9,37 @@ pub(crate) struct ArtworkHistory {
     pub(crate) nodes: Vec<HistoryNode>,
 }
 
+/// 上一次成功自动检查的方式，持久化在 `branches.last_check_mode`。
+///
+/// 手动提交不写这一列：它记录的是调度器最近一次自动检查走的是哪条路径，
+/// 分支状态行据此说明「快速命中 / 快速检查退回全量 / 全量检查」。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum CheckMode {
+    Quick,
+    Full,
+    Fallback,
+}
+
+impl CheckMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Full => "full",
+            Self::Fallback => "fallback",
+        }
+    }
+
+    pub(crate) fn from_db(value: &str) -> Option<Self> {
+        match value {
+            "quick" => Some(Self::Quick),
+            "full" => Some(Self::Full),
+            "fallback" => Some(Self::Fallback),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ArtworkBranch {
@@ -22,6 +53,10 @@ pub(crate) struct ArtworkBranch {
     pub(crate) backup_quick_enabled: bool,
     pub(crate) last_check_ms: Option<i64>,
     pub(crate) last_success_ms: Option<i64>,
+    /// 上一次成功自动检查的耗时，调度器在重启后据此继续放宽间隔。
+    pub(crate) last_check_elapsed_ms: Option<i64>,
+    /// 上一次成功自动检查的方式；尚未自动检查过为 `None`。
+    pub(crate) last_check_mode: Option<CheckMode>,
     pub(crate) last_error: Option<String>,
     pub(crate) consecutive_backup_failures: u32,
     pub(crate) backup_retry_at_ms: Option<i64>,
@@ -195,6 +230,9 @@ pub(crate) struct ScheduledBranch {
     /// 设备命名空间一律跳过（见 `storage::unattended_source_path_rejection`）。
     pub(crate) source_path: String,
     pub(crate) last_check_ms: Option<i64>,
+    /// 上一次成功检查的耗时。有内存记录时优先用内存，没有时用它让代价感知
+    /// 在重启后继续生效。
+    pub(crate) last_check_elapsed_ms: Option<i64>,
     pub(crate) interval_minutes: u32,
     pub(crate) quick_enabled: bool,
     pub(crate) retry_at_ms: Option<i64>,
@@ -285,8 +323,23 @@ impl VerifyChainNode {
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_verify_failure, NodeVerifyIssue, VERIFY_MISSING_MARKER, VERIFY_UNVERIFIABLE_MARKER,
+        classify_verify_failure, CheckMode, NodeVerifyIssue, VERIFY_MISSING_MARKER,
+        VERIFY_UNVERIFIABLE_MARKER,
     };
+
+    #[test]
+    fn check_mode_tokens_match_the_database_and_json() {
+        for (mode, token) in [
+            (CheckMode::Quick, "quick"),
+            (CheckMode::Full, "full"),
+            (CheckMode::Fallback, "fallback"),
+        ] {
+            assert_eq!(mode.as_str(), token);
+            assert_eq!(CheckMode::from_db(token), Some(mode));
+            assert_eq!(serde_json::to_value(mode).unwrap(), token);
+        }
+        assert_eq!(CheckMode::from_db("unknown"), None);
+    }
 
     #[test]
     fn missing_marker_wins_over_the_rest_of_the_message() {

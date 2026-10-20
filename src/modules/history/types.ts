@@ -16,6 +16,10 @@ export interface ArtworkBranch {
   backupQuickEnabled: boolean;
   lastCheckMs: number | null;
   lastSuccessMs: number | null;
+  /** 上一次成功自动检查的耗时；尚未自动检查过为 null。 */
+  lastCheckElapsedMs: number | null;
+  /** 上一次成功自动检查的方式；手动提交不刷新这一项。 */
+  lastCheckMode: CheckMode | null;
   lastError: string | null;
   consecutiveBackupFailures: number;
   backupRetryAtMs: number | null;
@@ -45,6 +49,9 @@ export interface ArtworkBranch {
  * 后端从完整文案派生，前端只按它上色与选文案，不再解析错误文本。
  */
 export type NodeVerifyIssue = "missing" | "damaged" | "unverifiable";
+
+/** 调度器上一次成功自动检查走的路径；与后端 `CheckMode` 的序列化值一致。 */
+export type CheckMode = "quick" | "full" | "fallback";
 
 export interface HistoryNode {
   id: string;

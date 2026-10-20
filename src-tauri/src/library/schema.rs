@@ -756,15 +756,14 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
 /// 改变，提前创建会与旧表上的同名索引冲突。
 ///
 /// 分支三列都是可空或带默认值，旧行迁移后不需要回填：
-/// - `last_check_elapsed_ms`：上一次成功检查的耗时，调度器据此放宽间隔（重启后
-///   仍然记得，不必重新学习）；
-/// - `last_check_mode`：本次检查方式（`quick` / `full` / `fallback`），供分支状态
-///   行显示；
+/// - `last_check_elapsed_ms`：上一次成功自动检查的耗时，调度器据此放宽间隔
+///   （重启后仍然记得，不必重新学习）；
+/// - `last_check_mode`：上一次成功自动检查的方式（`quick` / `full` / `fallback`），
+///   供分支状态行显示；
 /// - `quick_hit_count`：连续快速命中次数，供「每 N 次强制一次全量」收窄整秒盲区。
 ///
-/// 三列在本批次只建立，还没有读写它们的代码：调度器目前仍在内存里记检查耗时
-/// 与方式（`docs/modules/history-and-backup.md` 的「调度」）。接线仍待安排，见
-/// `docs/planning/todo.md` 的「备份检查元数据持久化」。
+/// 迁移只负责建列：前两列随后已接进调度器与历史页，`quick_hit_count` 仍没有
+/// 读写方（见 `docs/planning/todo.md` 的「快速命中计数与周期性强制全量」）。
 fn migrate_v5_to_v6(connection: &mut Connection) -> Result<(), String> {
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
