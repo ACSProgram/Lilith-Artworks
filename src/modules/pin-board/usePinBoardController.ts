@@ -271,11 +271,9 @@ export function usePinBoardController({
       if (!isLoadCurrent(sequence)) return;
       const current = rendererRef.current;
       if (current) {
-        const switched = await current.loadBoard(
-          loaded,
-          getBoardSession(artworkId, loaded.boardId),
-        );
-        if (!switched || !isLoadCurrent(sequence)) return;
+        // 装载是同步的：旧画板的未保存改动交给后台结算队列，切换本身不等仓库写入。
+        current.loadBoard(loaded, getBoardSession(artworkId, loaded.boardId));
+        if (!isLoadCurrent(sequence)) return;
       }
       setSelected(board.boardId);
       setSelectedBoardId(artworkId, board.boardId);
@@ -374,16 +372,13 @@ export function usePinBoardController({
         const fallback = next[0];
         if (fallback) {
           const loaded = await pinBoardApi.loadPinBoard(fallback.boardId);
-          await current?.loadBoard(
-            loaded,
-            getBoardSession(artworkId, loaded.boardId),
-            false,
-          );
+          // 旧画板已被移入回收站：不再为它写库（快照也不暂存）。
+          current?.loadBoard(loaded, getBoardSession(artworkId, loaded.boardId), false);
           setSelected(fallback.boardId);
           setSelectedBoardId(artworkId, fallback.boardId);
           setView(loaded);
         } else {
-          await current?.unloadBoard(false);
+          current?.unloadBoard(false);
           setView(null);
         }
       }

@@ -30,7 +30,14 @@
 
 模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。
 
-**渲染器与 GPU 设备在模块生命周期内只创建一次**：`PinBoardRenderer.create` 只做画布生命周期内的一次性初始化（适配器/设备/上下文/管线/采样器/`ResizeObserver`/主题观察器/事件监听），画板数据由 `loadBoard(view, session)` 装载。切换画板与切换作品都只换数据、复用同一设备：`loadBoard` 先以**旧 `boardId`** 完成结算（保存 + `finalize_pin_board`，失败即中止切换、保留旧画板），再**释放旧画板的全部纹理**（切换即全释放，不跨画板保留）并装载新画板，同一 `boardId` 幂等；`unloadBoard` 用于当前作品已无画板时清空画面。`destroy()` 只用于模块真正卸载：仓库切换（`LibraryModule` 以仓库路径为 key 整块重建）、切到非作品节点或退出。这消除了旧实现「切换即创建/销毁渲染器与 WebGPU 设备」的 churn——该 churn 已确认会触发 WebView2 渲染进程冻结。
+**渲染器与 GPU 设备在模块生命周期内只创建一次**：`PinBoardRenderer.create` 只做画布生命周期内的一次性初始化（适配器/设备/上下文/管线/采样器/`ResizeObserver`/主题观察器/事件监听），画板数据由 `loadBoard(view, session, stagePrevious)` 装载。切换画板与切换作品都只换数据、复用同一设备，且**装载是同步的**：先把旧画板的未保存改动导出成快照交给后台结算队列（`pendingSettle.ts`），再**释放旧画板的全部纹理**（切换即全释放，不跨画板保留）并装载新画板，同一 `boardId` 幂等；`stagePrevious=false` 用于旧画板已被删除或移入回收站、不能再次写库的场景；`unloadBoard` 用于当前作品已无画板时清空画面。`destroy()` 只用于模块真正卸载：仓库切换（`LibraryModule` 以仓库路径为 key 整块重建）、切到非作品节点或退出。这消除了旧实现「切换即创建/销毁渲染器与 WebGPU 设备」的 churn——该 churn 已确认会触发 WebView2 渲染进程冻结。
+
+**切换不等仓库写入：旧画板的改动交给后台结算队列**。此前 `loadBoard` 要先以旧 `boardId` 完成 `save_pin_board` + `finalize_pin_board` 才装载新画板，切换因此被仓库写锁绑架：维护扫描、恢复、精简这类长任务持锁几十秒到几分钟时（实测一次仓库完整性扫描持锁 111 秒），交互写排队 10 秒后按 `repository_busy` 失败，界面停在新作品、画布停在旧画板。现在 `loadBoard` 只做同步的状态交接，写回交给 `pendingSettle.ts` 的串行 worker，因此切换本身不取写锁，后台任务再长也不影响切换。两条硬约定：
+
+- **没有未保存改动就不产生快照**。`dirty` 为假时切换完全不碰仓库——切一次作品不该在数据层变成一次写操作。软删除条目的回收（`finalize_pin_board`）也不再挂在切换上，而是由队列在对应保存成功后按 `2 s / 8 s` 补做，全部失败只写日志（数据已落库，残留由下一次保存、退出结算或设置页清理扫描收走）。
+- **同一画板只有一个写者**。渲染器再次装载该画板时用 `takeBoardSettle` 取回快照内容（`dirty` 保持为真、`savedStateKey` 清空），队列随即不再负责它；若取回时队列正在写同一份内容，那次写仍会完成，但不会覆盖后续编辑。`revision` 由共享账本 `resolveBoardRevision` / `recordBoardRevision` 统一给出——渲染器装载与保存都从账本取值，避免切换期间队列已推进 revision、渲染器还拿着旧值去撞「画板已被其他窗口修改」。切换时若该画板还有一次保存在飞行，队列会先等它落地（`stageBoardSettle` 的 `after`）再写，避免同样的 revision 冲突。
+
+队列的可见性：失败分两类。可重试的（`retryable` 为真，含 `repository_busy` 与 IO 抖动）按 `0.5 s → 15 s` 指数退避**无限重试且不弹错误**，正常情况用户只会看到一条短暂的「正在后台保存 N 块画板的改动」（延迟 800 ms 才出现，避免瞬时完成时闪一下）；不可重试的（revision 冲突、仓库只读）停止自动重试、保留快照，并在素材板页头下方常驻一条「N 块画板的改动还没写进仓库：原因」+「重试」。快照只在内存里：进程被强杀会丢掉还没写回的改动，这是为「切换永不被写锁阻塞」刻意接受的取舍；退出与切仓库经 `flushPendingSettle` 在 5 秒预算内尽量写完。
 
 **设备丢失走限流自动重建**：`device.lost` 后经 `makeGpu` 重建设备（与创建共用同一条初始化路径）并重新武装新设备的 `lost` 监听，随后按当前画板重载纹理；每个渲染器生命周期最多重建 2 次、带 600 ms × 次数退避，重建期间暂停绘制与纹理加载，超限或重建失败即保持挂起并只上报错误。
 
@@ -112,7 +119,7 @@ SQLite:
 - 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `dds.rs`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；
 - 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录（对应 DDS 的删除走 `pending_file_cleanup` 提交后重放，见上节）；
 - 编辑自动保存：设置页「自动保存」开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。
-- 结算边界：应用层在会释放仓库的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，结算失败即中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
+- 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
 - 撤销历史只存在于当前会话内存，重开画板后不能撤销。
 - 图层由 `layer`（底层/中层/顶层）与 `sort_order` 共同决定；新图片统一进入中层并占据最优先顺序；
 - 阵列排序使用总宽度平方根估算，间距由设置的 `arrangementGapPx`（默认 10 CSS 像素）换算为世界单位；
@@ -127,7 +134,7 @@ SQLite:
 - 画板列表为空或未选中画板时，画布区域显示“当前未选择素材板”等占位提示，不显示加载动画；
 - 纹理未就绪的占位：画布上可见、但**缩略图与高清纹理都尚未就绪**的图片，会在其显示范围上铺一块中性灰方框（DOM 层 `.pin-board-placeholder-layer`，由 `renderer.updatePlaceholderOverlay` 按世界→屏幕变换定位），中心是旋转的强调色弧线图标；方框随平移/缩放/旋转同步，图标反向抵消图片角度保持竖直，并随方框缩放（任一边小于 18px 时只留底色）。纹理到位后由下一次 `draw()` 自动移除；节点按 `itemId` 复用，画板释放与 `destroy()` 时清理。加载失败的图片（`failedTextureDimensions` 有记录）改显**红色调**方框与静态 `!` 徽标，不再无限转圈。占位层 `pointer-events: none`，不影响拖拽、框选与拖入导入；缺失 DDS 的图片（`available: false`）不在可见集内，因此不显示占位（仍由工具栏「N 张缺失」提示）；
 - 侧栏画板支持拖放排序（沿用 Client 的拖放语义）：拖动行到目标行的上/下半区决定插入到前/后，落库前先本地乐观重排，失败回滚；`reorder_pin_boards` 要求传入的 id 集合与当前未删除画板完全一致（缺项、重复或跨作品 id 一律拒绝），顺序只是列表元数据，不影响已打开画板的编辑会话；
-- 将当前选中画板移入回收站时渲染器不销毁，只以「跳过旧画板 finalize」的方式切换：有回退画板时 `loadBoard(..., finalizeCurrent=false)`，无可回退画板时 `unloadBoard(false)`；跳过对已删除画板的 finalize 保存，避免时序上的写库失败。
+- 将当前选中画板移入回收站时渲染器不销毁，只以「跳过旧画板结算」的方式切换：有回退画板时 `loadBoard(..., stagePrevious=false)`，无可回退画板时 `unloadBoard(false)`；已删除的画板不再暂存快照，避免时序上的写库失败。
 
 ## 快速验证
 

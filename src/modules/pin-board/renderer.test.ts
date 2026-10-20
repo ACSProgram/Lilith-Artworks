@@ -3,7 +3,11 @@ import { viewportBounds, type Viewport } from "./geometry";
 import { PinBoardRenderer } from "./renderer";
 import { pinBoardApi } from "./api";
 import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
-import type { PinBoardItem } from "./types";
+import {
+  pendingSettleState,
+  resetPendingSettleForTests,
+} from "./pendingSettle";
+import type { PinBoardItem, PinBoardView } from "./types";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -660,5 +664,97 @@ describe("pin-board additive marquee selection", () => {
     expect(sameSelection(new Set(), new Set())).toBe(true);
     expect(sameSelection(new Set([1, 2]), new Set([1]))).toBe(false);
     expect(sameSelection(new Set([1, 2]), new Set([1, 3]))).toBe(false);
+  });
+});
+
+type BoardSwitchRenderer = {
+  loadBoard: (view: PinBoardView, session: null, stagePrevious?: boolean) => boolean;
+  currentBoardId: number;
+  interactionState: { dirty: boolean; imageCount: number };
+};
+
+const SWITCH_QUAD: PinBoardItem["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
+
+function boardView(boardId: number, items: PinBoardItem[] = []): PinBoardView {
+  return { boardId, name: `Board ${boardId}`, items, missingTextures: 0, revision: `r${boardId}`, nowStep: 0 };
+}
+
+/**
+ * 切换作品的关键是「装载同步完成、写回交给队列」：这里把画板级资源释放与重绘替身掉，
+ * 只观察快照的交接。
+ */
+function boardSwitchRenderer(images: PinBoardItem[] = [boardImage(1, SWITCH_QUAD)], dirty = true): BoardSwitchRenderer {
+  return rendererWith({
+    loaded: true,
+    boardId: 1,
+    revision: "r1",
+    dirty,
+    finalized: false,
+    images,
+    imageById: new Map(images.map((image) => [image.itemId, image])),
+    selectedIds: new Set<number>(),
+    viewport: { centerX: 0, centerY: 0, height: 1 },
+    autosaveTimer: null,
+    savePromise: null,
+    onSessionChange: vi.fn(),
+    onState: vi.fn(),
+    persistSession: vi.fn(),
+    releaseBoardResources: vi.fn(),
+    resize: vi.fn(),
+    draw: vi.fn(),
+    canvas: {
+      getBoundingClientRect: () => ({ width: 100, height: 100 }),
+      classList: { remove: vi.fn() },
+    },
+  }) as unknown as BoardSwitchRenderer;
+}
+
+describe("pin-board renderer board switch", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    resetPendingSettleForTests();
+  });
+
+  it("switches without waiting for the repository write", () => {
+    // 写回卡在仓库里（后台任务持锁时就是这样）：切换仍必须立刻完成。
+    vi.spyOn(pinBoardApi, "savePinBoard").mockReturnValue(new Promise(() => undefined));
+    const renderer = boardSwitchRenderer();
+
+    expect(renderer.loadBoard(boardView(2), null)).toBe(true);
+
+    // 画布已经切到画板 2，而画板 1 的改动还压在后台队列里等仓库。
+    expect(renderer.currentBoardId).toBe(2);
+    expect(pendingSettleState().count).toBe(1);
+  });
+
+  it("stages nothing when the board has no unsaved edit", () => {
+    const renderer = boardSwitchRenderer([boardImage(1, SWITCH_QUAD)], false);
+
+    renderer.loadBoard(boardView(2), null);
+
+    expect(pendingSettleState().count).toBe(0);
+  });
+
+  it("drops the board state without staging when the old board is gone", () => {
+    const renderer = boardSwitchRenderer();
+
+    renderer.loadBoard(boardView(2), null, false);
+
+    expect(pendingSettleState().count).toBe(0);
+  });
+
+  it("restores the staged content when the user switches back immediately", () => {
+    vi.spyOn(pinBoardApi, "savePinBoard").mockResolvedValue({ saved: true, revision: "r2", nowStep: 1 });
+    const renderer = boardSwitchRenderer([boardImage(1, SWITCH_QUAD), boardImage(2, SWITCH_QUAD)]);
+
+    renderer.loadBoard(boardView(2), null);
+    expect(pendingSettleState().count).toBe(1);
+
+    renderer.loadBoard(boardView(1), null);
+
+    // 快照回到渲染器手里：画布恢复成离开时的内容，改动仍算未保存。
+    expect(pendingSettleState().count).toBe(0);
+    expect(renderer.interactionState.imageCount).toBe(2);
+    expect(renderer.interactionState.dirty).toBe(true);
   });
 });

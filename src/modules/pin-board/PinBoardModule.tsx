@@ -71,6 +71,8 @@ import {
 } from "./session";
 import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
 import { usePinBoardController } from "./usePinBoardController";
+import { usePendingSettle } from "./usePendingSettle";
+import { retryPendingSettle } from "./pendingSettle";
 import { PinBoardColorPicker } from "./PinBoardColorPicker";
 
 /**
@@ -265,20 +267,15 @@ function GpuCanvas({
     };
   }, []);
 
-  // 画板装载：view 变化或渲染器就绪时调用 `loadBoard`（按 boardId 幂等）。
+  // 画板装载：view 变化或渲染器就绪时装载（按 boardId 幂等）。装载是同步的——旧画板的
+  // 未保存改动交给后台结算队列，画布不会因为仓库写锁被占而停在上一块画板。
   useEffect(() => {
     const renderer = rendererRef.current;
     if (!renderer) return;
     if (view) {
-      void renderer
-        .loadBoard(view, getBoardSession(artworkId, view.boardId))
-        .then((loaded) => {
-          if (!loaded && !disposedRef.current) {
-            setStatusRef.current("切换素材板失败：旧画板未能完成结算");
-          }
-        });
+      renderer.loadBoard(view, getBoardSession(artworkId, view.boardId));
     } else {
-      void renderer.unloadBoard();
+      renderer.unloadBoard();
     }
   }, [view, artworkId, readyVersion]);
 
@@ -544,6 +541,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
    * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
    */
   const [unavailable, setUnavailable] = useState<string | null>(null);
+  /** 切到后台写回的画板改动（切换作品不再阻塞等待仓库写入，进度在这里可见）。 */
+  const pendingSettle = usePendingSettle();
   /** 拖入文件悬停在画布上时显示投放提示。 */
   const [dropActive, setDropActive] = useState(false);
   const [sidebar, setSidebar] = useState(getSidebarVisible);
@@ -1008,6 +1007,29 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
               <AlertTriangle size={16} />
               <span>{status}</span>
             </>
+          </div>
+        )}
+        {pendingSettle && (
+          <div
+            className={`pin-board-status pin-board-settle${pendingSettle.failure ? " failed" : ""}`}
+            role="status"
+            title={pendingSettle.failure
+              ? `${pendingSettle.failure.message}（画板 ${pendingSettle.failure.boardId}）`
+              : undefined}
+          >
+            {pendingSettle.failure
+              ? <AlertTriangle size={16} />
+              : <LoaderCircle className="spin" size={16} />}
+            <span>
+              {pendingSettle.failure
+                ? `${pendingSettle.count} 块画板的改动还没写进仓库：${pendingSettle.failure.message}`
+                : `正在后台保存 ${pendingSettle.count} 块画板的改动`}
+            </span>
+            {pendingSettle.failure && (
+              <button type="button" className="pin-board-settle-retry" onClick={retryPendingSettle}>
+                重试
+              </button>
+            )}
           </div>
         )}
         {transferProgress && (

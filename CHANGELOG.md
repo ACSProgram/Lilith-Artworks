@@ -96,6 +96,22 @@ entries for the reader; they are not a template every entry has to fill.
   fall back records the reason — `no baseline`, unreadable metadata or sample, or
   a size / fingerprint mismatch — once per branch and reason, so a quick check that
   stays broken is visible instead of silent.
+- Switching artwork no longer waits for the repository. The canvas used to settle
+  the old board — save plus `finalize_pin_board` — before loading the new one, so a
+  long task holding the write lock (a repository scan held it for 111 seconds in
+  practice) made every switch queue for ten seconds and then fail, leaving the new
+  artwork in the tree and the old board on the canvas. Loading a board is now
+  synchronous: the old board's unsaved edits are exported as a snapshot to a
+  background settle queue, the board is released and the new one activated in the
+  same tick, and a board with nothing unsaved produces no write at all. The queue
+  writes snapshots one at a time, retrying a busy or IO failure with a
+  0.5 s → 15 s backoff and no error dialog, so a switch is never refused; failures
+  that cannot recover on their own (a revision conflict, a read-only repository)
+  keep the snapshot and show a persistent `N 块画板的改动还没写进仓库` line with a
+  retry button. A snapshot is also handed back to the canvas if the user returns
+  to that board before it was written, so the queue and the renderer never write
+  the same board at once, and both resolve revisions through one shared ledger.
+  Exit and repository switching flush the queue within a five-second budget.
 - Drag-and-drop staging no longer leaves one empty folder per run in the system
   temp directory. The `lilith-artworks-drop-<UUID>` session directory is created
   on the first drop, removed on exit (including the forced exit after a hung

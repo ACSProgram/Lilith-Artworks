@@ -164,7 +164,38 @@ alpha3 的实现已全部完成，本批次把表层文档收回到「只写当�
 - 验证：`cargo test --lib`（含新增的 `drop_stage` 单测）、`cargo check --all-targets`、
   `cargo fmt --check` 全部通过。退出与强杀行为仍待维护者确认，验收项记于 `../todo.md`。
 
-## 11. 已归入既有日志的批次（指针）
+## 11. 切换作品不再等待仓库写入（2026-10-20，已实现、自动验证通过）
+
+上一节之后紧接着的另一处长期缺陷，同样挂在 `../todo.md` 的补强候选里：
+
+- **现象**：切换作品时素材板有小概率「没切过来」——树上已是新作品，画布还是旧画板。运行日志给出了
+  完整证据链：`loadBoard` 要先以旧 `boardId` 完成 `save_pin_board` + `finalize_pin_board` 才装载新
+  画板；仓库完整性扫描作为 `domain=maintenance` 的前台写任务持锁 111 秒（`repository mutation held
+  the lock for 111344 ms`），期间每次 `finalize_pin_board` 都在写入闸门排队到 10 秒上限后按
+  `repository_busy` 失败（`elapsed_ms≈10005`），重试一次仍是 20 秒一次，结算返回 `false`，渲染器
+  保留旧画板，界面却已经切走。成功路径同样不便宜：扫描刚释放锁那次 finalize 用了 2397 ms。
+- **根因**：把「画布与界面一致」建立在一个可以被无关长任务长时间独占的写锁上；而且**每次切换都
+  强制 finalize**，哪怕画板一个字都没改（日志里前后 revision 相同，说明是纯粹的 no-op 写事务）。
+- **放弃的方案**：切换前「先结算、失败就拒绝切换 + 静默退避重试」。实测下它的预算不是设计里的
+  1.8 秒：每次尝试本身要排队 10 秒、内部 busy 重试再一次，最坏约 100 秒的点击无响应；而且交互写
+  撞锁时会顺带 `cancel_background()`，只是切个作品就把正在跑的自动备份打断。
+- **落地方案**：`loadBoard` / `unloadBoard` 改为同步交接——旧画板的未保存改动导出成快照交给新增的
+  模块级后台队列 `pin-board/pendingSettle.ts`，随即释放旧画板、装载新画板。切换不再取写锁，后台
+  任务持锁多久都不影响它；`dirty` 为假时不产生快照，因此绝大多数切换在数据层零写入。队列串行写回
+  快照，可重试失败（`retryable`，含 busy 与 IO）按 0.5 s → 15 s 退避无限重试且不弹错误，不可重试
+  失败保留快照并在素材板页头下方常驻提示 + 重试。同一画板只有一个写者：渲染器再次装载时用
+  `takeBoardSettle` 取回快照（`dirty` 保持为真），队列随即放手；revision 经共享账本
+  `resolveBoardRevision` / `recordBoardRevision` 统一取值，切换瞬间若有保存在飞行，队列先用
+  `stageBoardSettle` 的 `after` 等它落地。软删除条目的回收从切换路径挪到队列：保存成功后按
+  2 s / 8 s 补做 `finalize_pin_board`，失败只记日志。退出与切仓库经 `preparePinBoardRuntimeChange`
+  结算当前画板后 `flushPendingSettle`（5 秒预算）清空队列，清不空则抛错——切仓库中止，退出只记日志。
+- **刻意接受的取舍**：快照只在内存里，进程被强杀会丢掉还没写回的改动。换来的是「切换永不被写锁
+  阻塞」。不落盘：落盘快照会引入第二份画板状态的持久化口径，代价远大于收益。
+- 验证：`npx tsc --noEmit`、`npm test`（36 个测试文件、267 项，含新增 `pendingSettle.test.ts`
+  8 项、`lifecycle.test.ts` 4 项与 `renderer.test.ts` 的 4 项切换用例）全部通过。界面与退出行为
+  仍待维护者确认，验收项记于 `../todo.md`。
+
+## 12. 已归入既有日志的批次（指针）
 
 - **alpha1 压力测试收尾与 CPU 时间度量**（2026-10-19）：`stress_large` 四档、`stress_scale`、
   `stress_bench`、`stress_baseline` 与 `stress_authenticity` 的 16K 档全部通过，`stress_bench`

@@ -1,6 +1,12 @@
 import { errorMessage } from "../../shared/errors";
 import { diagnosticsLog, diagnosticsSlowStep } from "../../shared/diagnostics";
 import { pinBoardApi } from "./api";
+import {
+  recordBoardRevision,
+  resolveBoardRevision,
+  stageBoardSettle,
+  takeBoardSettle,
+} from "./pendingSettle";
 import type {
   PinBoardClipboardImage,
   PinBoardEditableItem,
@@ -609,8 +615,6 @@ export class PinBoardRenderer {
   private pendingViewportFit = false;
   /** 是否已装载画板。未装载时所有画板级绘制/保存/会话都停用，但 GPU 设备保持存活。 */
   private loaded = false;
-  /** 画板切换按此链串行化，避免连续切换时「结算旧画板」与「装载新画板」交错。 */
-  private boardTransition: Promise<unknown> = Promise.resolve();
   /** 设备丢失恢复：已尝试重建次数（不重置，作为整会话上限）。 */
   private gpuRecoveryAttempts = 0;
   /** GPU 不可用（丢失后正在重建，或已达重建上限而放弃）：期间暂停绘制与纹理加载。 */
@@ -812,48 +816,33 @@ export class PinBoardRenderer {
   }
 
   /**
-   * 装载一块画板。顺序为先结算旧画板（保存 + `finalize_pin_board`，语义与
-   * `destroy(true)` 一致，且**先以旧 boardId 完成**）、释放旧画板资源，再装载新画板。
-   * 传入的 boardId 与当前一致时直接返回（幂等）。结算失败时保持旧画板原样并返回 false。
+   * 装载一块画板：先把旧画板的未保存改动导出成快照交给后台结算队列，随后**同步**释放
+   * 旧画板并装载新画板。
+   *
+   * 切换因此不等待任何仓库写入：后台任务（维护扫描、恢复、精简）持写锁多久都不影响这里。
+   * 旧画板的改动由 `pendingSettle` 的串行 worker 写回；同一 `boardId` 幂等。传入的
+   * boardId 与当前一致时直接返回。
+   *
+   * `stagePrevious = false` 用于旧画板已被删除或移入回收站、不能再次写库的场景（那里的
+   * 内存状态直接丢弃）。
    */
   loadBoard(
     view: PinBoardView,
     session: PinBoardViewSession | null,
-    finalizeCurrent = true,
-  ): Promise<boolean> {
-    const run = this.boardTransition.then(
-      () => this.performLoadBoard(view, session, finalizeCurrent),
-    );
-    this.boardTransition = run.catch(() => undefined);
-    return run;
-  }
-
-  /** 卸载当前画板（当前作品的画板已被清空等场景）：结算后清空画面，保留 GPU 设备。 */
-  unloadBoard(finalizeCurrent = true): Promise<void> {
-    const run = this.boardTransition.then(() => this.performUnloadBoard(finalizeCurrent));
-    this.boardTransition = run.catch(() => undefined);
-    return run;
-  }
-
-  private async performLoadBoard(
-    view: PinBoardView,
-    session: PinBoardViewSession | null,
-    finalizeCurrent: boolean,
-  ): Promise<boolean> {
+    stagePrevious = true,
+  ): boolean {
     if (this.destroyed) return false;
     if (this.loaded && this.boardId === view.boardId) return true;
-    if (this.loaded) {
-      if (!await this.settleCurrentBoard(finalizeCurrent)) return false;
-    }
+    this.detachCurrentBoard(stagePrevious);
     if (this.destroyed) return false;
     this.activateBoard(view, session);
     return true;
   }
 
-  private async performUnloadBoard(finalizeCurrent: boolean): Promise<void> {
+  /** 卸载当前画板（当前作品的画板已被清空等场景）：导出待结算快照后清空画面，保留 GPU 设备。 */
+  unloadBoard(stagePrevious = true): void {
     if (this.destroyed || !this.loaded) return;
-    await this.settleCurrentBoard(finalizeCurrent);
-    if (this.destroyed) return;
+    this.detachCurrentBoard(stagePrevious);
     this.locked = false;
     this.canvas.classList.remove("locked");
     this.selectionElement.hidden = true;
@@ -863,21 +852,45 @@ export class PinBoardRenderer {
     this.onState(this.interactionState);
   }
 
-  /** 结算当前画板：保存并 finalize，随后释放画板级资源并把 boardId 归零。 */
-  private async settleCurrentBoard(finalize: boolean): Promise<boolean> {
-    if (!this.loaded) return true;
+  /**
+   * 释放当前画板：先记视图会话、再把未保存的改动导出成快照，最后丢画板级资源。
+   *
+   * 导出是同步的（快照就是内存里条目的副本），因此从调用方看切换是瞬时的。
+   */
+  private detachCurrentBoard(stagePending: boolean) {
+    if (!this.loaded) return;
     this.finishActiveInteraction();
-    if (finalize) {
-      const saved = await this.finalize();
-      if (!saved) return false;
-    } else {
-      this.cancelAutosave();
-    }
     this.persistSession();
+    // 挂起的自动保存由快照接手：队列会写同一份内容，不必再走一次防抖保存。
+    this.cancelAutosave();
+    if (stagePending) this.stagePendingBoard();
     this.releaseBoardResources();
     this.loaded = false;
     this.boardId = 0;
-    return true;
+  }
+
+  /**
+   * 把未保存的改动交给后台结算队列。
+   *
+   * 没有未保存改动时不产生快照——切一次作品不该在数据层变成一次仓库写操作，这也是
+   * 「后台任务期间照样能切」的来源。软删除条目的回收由队列在保存成功后补做
+   * （`finalize_pin_board`），不在切换路径上。
+   */
+  private stagePendingBoard() {
+    if (!this.dirty) return;
+    stageBoardSettle(
+      {
+        boardId: this.boardId,
+        revision: this.revision,
+        items: this.images.map(cloneImage),
+      },
+      // 自动保存可能正在飞行：队列要等它落地再写，否则会拿着旧 revision 被拒。
+      this.savePromise ?? undefined,
+    );
+    diagnosticsLog(
+      "info",
+      `pin-board pending staged: boardId=${this.boardId}, items=${this.images.length}, saving=${this.savePromise !== null}`,
+    );
   }
 
   /** 释放画板级资源：纹理、历史、选中、拖动中间态与飞行中的加载。 */
@@ -910,16 +923,20 @@ export class PinBoardRenderer {
   }
 
   private activateBoard(view: PinBoardView, session: PinBoardViewSession | null) {
+    // 该画板若还有后台未写回的快照，内容以快照为准：它比仓库里的更新（用户刚在这块
+    // 画板上编辑过）；否则后台正握着写、这边又按旧内容装载，界面会回退。
+    const pending = takeBoardSettle(view.boardId);
     this.boardId = view.boardId;
-    this.images = view.items.map(cloneImage);
+    this.images = (pending?.items ?? view.items).map(cloneImage);
     this.imageById.clear();
     for (const image of this.images) this.imageById.set(image.itemId, image);
-    this.revision = view.revision;
+    this.revision = resolveBoardRevision(view.boardId, pending?.revision ?? view.revision);
     this.finalized = false;
     this.finalizePromise = null;
     this.savePromise = null;
     this.saving = false;
-    this.dirty = false;
+    // 快照还没落库，改动就必须继续算「未保存」，否则它会在下次切换时被丢掉。
+    this.dirty = pending !== null;
     this.cancelAutosave();
     this.cssHeight = Math.max(this.canvas.getBoundingClientRect().height, 1);
     this.viewport.centerX = DEFAULT_VIEWPORT.centerX;
@@ -945,12 +962,16 @@ export class PinBoardRenderer {
       this.locked = true;
       this.pendingViewportFit = true;
     }
-    this.savedStateKey = this.stateKey();
+    // 取回快照时不能把当前状态记成「已保存」：否则下一次 `save` 会直接短路，
+    // 快照里的改动就永远落不了库。
+    this.savedStateKey = pending ? "" : this.stateKey();
     this.loaded = true;
     this.resize();
     diagnosticsLog(
       "info",
-      `pin-board board loaded: boardId=${view.boardId}, images=${this.images.length}`,
+      pending
+        ? `pin-board board loaded from pending snapshot: boardId=${view.boardId}, images=${this.images.length}`
+        : `pin-board board loaded: boardId=${view.boardId}, images=${this.images.length}`,
     );
   }
 
@@ -968,12 +989,15 @@ export class PinBoardRenderer {
   /**
    * 释放整个渲染器与 GPU 设备。只用于模块真正卸载（关闭工作区、切仓库、退出），
    * 切换画板/作品请改用 `loadBoard` / `unloadBoard`。
+   *
+   * `stagePending` 为真时把未保存的改动交给后台结算队列：模块卸载（例如切到非作品节点）
+   * 没有等待写入的时机，交给队列比一次可能失败且无人可见的写更可靠——重新打开该画板时
+   * 快照会被 `takeBoardSettle` 取回。
    */
-  destroy(finalize = true) {
+  destroy(stagePending = true) {
     if (this.destroyed) return;
-    // finalize 内部会先保存当前状态，挂起的防抖保存没有必要再触发。
     this.cancelAutosave();
-    if (finalize && this.loaded && !this.finalized) void this.finalize();
+    if (stagePending && this.loaded && !this.finalized) this.stagePendingBoard();
     if (this.loaded) this.persistSession();
     this.destroyed = true;
     this.generation += 1;
@@ -1025,7 +1049,7 @@ export class PinBoardRenderer {
     liveRenderers = Math.max(0, liveRenderers - 1);
     diagnosticsLog(
       "info",
-      `pin-board renderer destroyed: gpuSeq=${this.gpu.sequence}, liveRenderers=${liveRenderers}, finalized=${this.finalized}, finalizeRequested=${finalize}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
+      `pin-board renderer destroyed: gpuSeq=${this.gpu.sequence}, liveRenderers=${liveRenderers}, finalized=${this.finalized}, stagePending=${stagePending}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
     );
   }
 
@@ -1295,17 +1319,28 @@ export class PinBoardRenderer {
     }
     const stateKey = this.stateKey();
     if (stateKey === this.savedStateKey) return Promise.resolve(true);
-    const revision = this.revision;
+    // 切换画板是同步释放的，写入却可能还在飞行：结果回来时当前画板可能已经换了一块，
+    // 因此保存期间的变化一律按发起时的 boardId 归属，只推进 revision 账本。
+    const boardId = this.boardId;
+    const revision = resolveBoardRevision(boardId, this.revision);
     const images = this.editableImages();
     this.saving = true;
     this.emitState();
     const started = performance.now();
     diagnosticsLog(
       "info",
-      `pin-board save start: boardId=${this.boardId}, revision=${revision}, images=${images.length}`,
+      `pin-board save start: boardId=${boardId}, revision=${revision}, images=${images.length}`,
     );
-    const task = pinBoardApi.savePinBoard(this.boardId, images, revision)
+    const task = pinBoardApi.savePinBoard(boardId, images, revision)
       .then((result) => {
+        recordBoardRevision(boardId, result.revision);
+        if (this.boardId !== boardId) {
+          diagnosticsLog(
+            "info",
+            `pin-board save landed on a released board: boardId=${boardId}, revision=${result.revision}, elapsedMs=${Math.round(performance.now() - started)}`,
+          );
+          return true;
+        }
         this.revision = result.revision;
         this.savedStateKey = stateKey;
         this.dirty = this.stateKey() !== stateKey;
@@ -1313,16 +1348,17 @@ export class PinBoardRenderer {
         if (this.dirty) this.scheduleAutosave();
         diagnosticsLog(
           "info",
-          `pin-board save done: boardId=${this.boardId}, revision=${result.revision}, elapsedMs=${Math.round(performance.now() - started)}`,
+          `pin-board save done: boardId=${boardId}, revision=${result.revision}, elapsedMs=${Math.round(performance.now() - started)}`,
         );
         return true;
       })
       .catch((error) => {
         diagnosticsLog(
           "warn",
-          `pin-board save failed: boardId=${this.boardId}, elapsedMs=${Math.round(performance.now() - started)}, error=${errorMessage(error)}`,
+          `pin-board save failed: boardId=${boardId}, elapsedMs=${Math.round(performance.now() - started)}, error=${errorMessage(error)}`,
         );
-        this.onError(`画板保存失败：${errorMessage(error)}`);
+        // 已释出的画板没有界面可提示：它的改动在后台队列里，由队列决定重试或报错。
+        if (this.boardId === boardId) this.onError(`画板保存失败：${errorMessage(error)}`);
         return false;
       })
       .finally(() => {
@@ -1338,26 +1374,29 @@ export class PinBoardRenderer {
     if (!this.loaded) return Promise.resolve(true);
     if (this.finalized) return Promise.resolve(true);
     if (this.finalizePromise) return this.finalizePromise;
+    const boardId = this.boardId;
     diagnosticsLog(
       "info",
-      `pin-board finalize start: boardId=${this.boardId}, revision=${this.revision}`,
+      `pin-board finalize start: boardId=${boardId}, revision=${this.revision}`,
     );
     const task = this.save()
       .then((saved) => {
         if (!saved) {
           diagnosticsLog(
             "warn",
-            `pin-board finalize aborted: boardId=${this.boardId}, save failed`,
+            `pin-board finalize aborted: boardId=${boardId}, save failed`,
           );
           return false;
         }
         return this.finalizeWithBusyRetry()
           .then((result) => {
+            recordBoardRevision(boardId, result.revision);
+            if (this.boardId !== boardId) return true;
             this.revision = result.revision;
             this.finalized = true;
             diagnosticsLog(
               "info",
-              `pin-board finalize done: boardId=${this.boardId}, revision=${result.revision}`,
+              `pin-board finalize done: boardId=${boardId}, revision=${result.revision}`,
             );
             return true;
           });
@@ -1365,9 +1404,9 @@ export class PinBoardRenderer {
       .catch((error) => {
         diagnosticsLog(
           "warn",
-          `pin-board finalize failed: boardId=${this.boardId}, error=${errorMessage(error)}`,
+          `pin-board finalize failed: boardId=${boardId}, error=${errorMessage(error)}`,
         );
-        this.onError(`画板结算失败：${errorMessage(error)}`);
+        if (this.boardId === boardId) this.onError(`画板结算失败：${errorMessage(error)}`);
         return false;
       })
       .finally(() => {

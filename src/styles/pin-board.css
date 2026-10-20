@@ -145,6 +145,29 @@
 .pin-board-status svg { flex: none; }
 .pin-board-status span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
+/* 后台结算提示：切换作品不再等仓库写入，写回进度与失败在这里可见。
+   正常状态用中性色（保存常常几十毫秒就结束，停留时间很短），仅失败转警告色。 */
+.pin-board-settle {
+  color: var(--pb-text-soft);
+  background: var(--surface-subtle);
+  border-bottom: 1px solid var(--border);
+}
+.pin-board-settle.failed {
+  color: var(--warning);
+  background: var(--pb-warning-soft);
+}
+.pin-board-settle-retry {
+  flex: none;
+  padding: 2px 8px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.pin-board-settle-retry:hover { background: var(--surface); }
+
 .pin-board-transfer-progress {
   display: grid;
   gap: 6px;
