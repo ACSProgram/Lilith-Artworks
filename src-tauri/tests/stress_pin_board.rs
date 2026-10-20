@@ -5,8 +5,9 @@
 //! - **H2 孤儿 DDS 回收**：复用统一清理体系的「扫描发现 + 确认清理」闭环，被引用 DDS
 //!   不被误删（扫描只报告孤儿，即便被引用文件同样「过期」）。
 //! - **H3 规模与取消**：单画板数百张图片下完整性检查仍正确、逐条响应取消、内存有界。
-//! - **H4 笔迹 BLOB 边界**：空点、单点、超上限、长度与点数不符、未知版本/工具、形状带
-//!   点或带压感、超长 BLOB 全部明确拒绝；上限内的 4096 点必须被接受。
+//! - **H4 笔迹 BLOB 边界**：空点、超上限、长度与点数不符、未知版本/工具、形状带
+//!   点或带压感、超长 BLOB 全部明确拒绝；上限内的 4096 点必须被接受（单点是合法的
+//!   圆点笔迹，不在拒绝之列）。
 //! - **H5 笔迹批量读写**：`create-board-strokes` 一次事务写入后，`read-board-strokes`
 //!   的载荷逐字节等于按契约拼出的期望值（含摘要比对）；批量里有一条不合法时一条也不写。
 //!
@@ -689,9 +690,10 @@ fn h5_stroke_batch_read_write_roundtrip() {
         read.describe()
     );
 
-    // 批量里有一条畸形几何：整批拒绝，画板内容不变。
+    // 批量里有一条畸形几何（空点）：整批拒绝，画板内容不变。单点是合法的圆点笔迹，
+    // 不能拿单点当畸形样本。
     let mut broken = records.clone();
-    broken.push(SpecRecord::pen(&[(0, 0, 0)], 10.0, 10.0));
+    broken.push(SpecRecord::pen(&[], 10.0, 10.0));
     let broken_spec = fixture.workspace.work("strokes-broken.bin");
     fs::write(&broken_spec, stroke_spec(&broken)).expect("无法写入畸形清单");
     let rejected = fixture

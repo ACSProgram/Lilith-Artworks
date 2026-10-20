@@ -22,9 +22,13 @@
 的 CPU 成本，不写仓库、不碰 GPU。无头入口新增 `create-board-stroke` / `create-board-strokes` /
 `read-board-strokes`，压力测试补上 H4（几何 BLOB 边界）、H5（批量读写逐字节核对与整批回滚）与
 P9（500 / 2000 / 5000 笔读写）。自动验证已通过（`npx tsc --noEmit`、`npm test` 369 通过，素材板
-195 项；`cargo test --lib` 376 通过、`cargo check --all-targets`、`cargo fmt --check`）。
-**性能指标、压感手感与真实数位笔实测都还没有做**，按维护者安排留到下一轮；本轮没有运行任何
-压力测试。计划已归档（`docs/planning/archive/pin-board-strokes-plan-2026-10-20.md`），行为变化见
+195 项；`cargo test --lib` 376 通过、`cargo check --all-targets`、`cargo fmt --check`）。2026-10-21
+深夜又在 release 无头构建上按**除 `manual` 档外的全套**跑完压力测试并全部通过——含 H4/H5 与 P9
+的发布档首跑、`stress_large` 四档（`extreme` 4 GiB）与 16K 认证大图；P9 的 release 数字已写进
+`tests/perf-baseline.json`，实测见 `docs/user/stress-test-report.md` 的「2026-10-21 复跑摘要」。
+唯一改动在测试侧：H5 样本原本把合法的单点笔迹当畸形几何（单点是合法的圆点笔迹），改成空点后通过，
+产品代码零改动。**性能指标、压感手感与真实数位笔实测都还没有做**，按维护者安排留到下一轮。
+计划已归档（`docs/planning/archive/pin-board-strokes-plan-2026-10-20.md`），行为变化见
 `CHANGELOG.md` 的 `## Unreleased`，模块口径见 `docs/modules/pin-board.md` 的「渲染」「绘制」。
 
 同一批的上一阶段（笔迹阶段 4：编辑能力与图层可见性，已实现并提交）：画布左上角多了
@@ -170,9 +174,9 @@ indexed draw 画完（标注层永远在最上），顶点从条目包围盒的�
   （预览与落库的位置、粗细、颜色一致，两端 taper 自然，驱动「鼠标模式」下 `pressure` 恒为 0.5
   时回退成等宽笔），再用开发构建控制台的 `__lilithPinBoardStrokeProbe()` 量 CPU 侧采样/编码/
   缓冲成本；GPU 帧率只能在真实适配器上手工看——500 / 2000 / 5000 笔的打开、平移/缩放与绘制按
-  计划指标逐档对照。压力测试在下一轮跑全套（含 `stress_pin_board` 的 H4/H5 与 `stress_bench`
-  的 P9；P9 的 release 数字需人工解读后续写 `tests/perf-baseline.json` 与
-  `docs/user/stress-test-report.md`）。验收项见 `todo.md`。
+  计划指标逐档对照。自动压力测试已于 2026-10-21 跑完（除 `manual` 档外全套通过，实测见
+  `docs/user/stress-test-report.md` 的「2026-10-21 复跑摘要」）；0.3 发布前只剩 `manual` 8 GiB
+  档，由维护者显式安排。验收项见 `todo.md`。
 - 上一批（笔迹阶段 4）的复测：分层显示的显示效果已人工验证通过；改成画布左上角可收起的浮动面板
   后，复测面板在窄窗口与全屏下的位置、收起/展开是否顺手、四个开关的观感与按钮高亮，以及面板不遮住
   画布内容；分别隐藏底层/中层/顶层/标注层，确认只剩对应内容，且被隐藏的内容点不到、框不到、`Ctrl+A`
