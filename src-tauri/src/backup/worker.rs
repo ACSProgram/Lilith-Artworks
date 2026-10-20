@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     fs,
     fs::File,
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
+    sync::{Mutex, OnceLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -24,8 +26,9 @@ use super::{
 
 const MAX_TITLE_CHARS: usize = 160;
 /// 快速检查指纹的版本与首尾采样大小。版本号随算法演进；旧基线（历史上直接
-/// 保存的 mtime）与当前值不相等时自然退回全量并重写基线。
-const SOURCE_FINGERPRINT_VERSION: u8 = 1;
+/// 保存的 mtime，或版本 1 要求亚秒精度的指纹）与当前值取值域不同，因此自然
+/// 退回一次全量并重写基线。
+const SOURCE_FINGERPRINT_VERSION: u8 = 2;
 const SOURCE_FINGERPRINT_SAMPLE_BYTES: u64 = 64 * 1024;
 
 /// 提交失败的原因。`pub(crate)` 而不是 `pub(super)`：无头入口同样要区分
@@ -66,17 +69,13 @@ struct SourceMetadata {
     fingerprint: Option<i64>,
 }
 
-/// 计算工作文件的 cheap fingerprint：版本号、大小、修改时间（纳秒）与
-/// 首尾各 64 KiB 采样。任何一步取不到（时间精度不足、打开失败、采样读取失败）
-/// 都返回 `None`，调用方必须退回全量；旧基线里保存的裸 mtime 与指纹取值域不同，
-/// 因此也会自然退回一次全量并重写基线。
+/// 计算工作文件的 cheap fingerprint：版本号、大小、修改时间与首尾各 64 KiB
+/// 采样。修改时间按系统实际给出的精度取用——NTFS 带亚秒位，而 `.clip` 这类由
+/// 应用保存的文件往往只有整秒；两种精度都必须可比较，因此不再要求亚秒精度。
+/// 打开或采样读取失败（文件被删除、被截断、权限不足）时返回 `None`，调用方退回
+/// 全量。旧基线里保存的裸 mtime 与指纹取值域不同，也会自然退回一次全量。
 fn source_fingerprint(path: &Path, metadata: &fs::Metadata) -> Option<i64> {
     let duration = metadata.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
-    // FAT 等粗粒度时间源可能只记录整秒；没有亚秒精度时无法区分同一秒内
-    // 的同尺寸改写，按计划退回全量。
-    if duration.subsec_nanos() == 0 {
-        return None;
-    }
     let size = metadata.len();
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -100,35 +99,141 @@ fn source_fingerprint(path: &Path, metadata: &fs::Metadata) -> Option<i64> {
     Some((digest_prefix & 0x7fff_ffff_ffff_ffff) as i64)
 }
 
-/// 快速检查：比较工作文件大小与上次全量检查记录的指纹（时间、首尾采样）。
-/// 完全一致返回 true；缺少基线、任何不一致或读取失败都返回 false，交给全量
-/// 流程给出权威结论并自行修复或报错。
-pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool, String> {
+/// 快速检查为什么没能给出「未变化」的结论。
+///
+/// 这里把两类原因分开：内容确实可能变了（全量检查本来就要跑，属于正常路径），
+/// 与快速检查自身不可用（退化，需要能在日志里看见）。二者都不改变「退回全量」
+/// 这个结论，只影响是否值得记一条 warn。
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum QuickCheckFallback {
+    /// 还没有任何提交，或历史表里的基线列为空。
+    NoBaseline,
+    /// 工作文件的元数据读不到（已删除或无权访问）。
+    MetadataUnavailable,
+    /// 路径不再是普通文件。
+    NotARegularFile,
+    /// 大小与基线不同。
+    SizeMismatch,
+    /// 首尾采样读不到：文件在比较期间被删除或截断。
+    SampleUnavailable,
+    /// 指纹与基线不同：修改时间或采样内容变了。
+    FingerprintMismatch,
+}
+
+impl QuickCheckFallback {
+    /// 退化：快速检查在这条分支上系统性不可用，值得一条 warn。
+    fn is_degradation(self) -> bool {
+        !matches!(self, Self::SizeMismatch | Self::FingerprintMismatch)
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NoBaseline => "no baseline",
+            Self::MetadataUnavailable => "source metadata unavailable",
+            Self::NotARegularFile => "source is not a regular file",
+            Self::SizeMismatch => "size mismatch",
+            Self::SampleUnavailable => "sample read failed",
+            Self::FingerprintMismatch => "fingerprint mismatch",
+        }
+    }
+}
+
+enum QuickCheck {
+    Unchanged,
+    /// 无法断定未变化，需要全量复核。
+    Fallback(QuickCheckFallback),
+}
+
+/// 每个分支上一次记录的退回原因，用来把重复日志压成一条；快速检查恢复后清空，
+/// 下一次退化仍然可见。分支数量有限，条目在成功后即删除，不会持续增长。
+static QUICK_CHECK_FALLBACKS: OnceLock<Mutex<HashMap<String, QuickCheckFallback>>> =
+    OnceLock::new();
+
+fn quick_check_fallbacks() -> &'static Mutex<HashMap<String, QuickCheckFallback>> {
+    QUICK_CHECK_FALLBACKS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn clear_fallback(branch_id: &str) {
+    if let Ok(mut guard) = quick_check_fallbacks().lock() {
+        guard.remove(branch_id);
+    }
+}
+
+fn report_fallback(branch_id: &str, reason: QuickCheckFallback) {
+    let previous = match quick_check_fallbacks().lock() {
+        Ok(mut guard) => guard.insert(branch_id.to_owned(), reason),
+        Err(_) => None,
+    };
+    // 同一分支同一原因只记一次；原因变了才重新记。
+    if previous == Some(reason) {
+        return;
+    }
+    if reason.is_degradation() {
+        log::warn!(
+            "backup quick check fell back to a full check: branch_id={branch_id}, reason={}",
+            reason.as_str()
+        );
+    } else {
+        log::info!(
+            "backup quick check found a changed fingerprint: branch_id={branch_id}, reason={}",
+            reason.as_str()
+        );
+    }
+}
+
+/// 快速检查的判定本体：只比较大小、修改时间与首尾采样，不读全文。
+///
+/// 路径资格错误（网络位置/设备命名空间）仍作为 `Err` 上报，与「宁可全量」的结论
+/// 区分开；资格判定由调度器负责记录原因，这里只兜底不触碰路径。
+fn quick_check(root: &Path, branch_id: &str) -> Result<QuickCheck, String> {
     let branch = history::load_branch(root, branch_id)?;
     // 没有工作文件或还没有任何提交时无从比较，必须走全量路径建立基线。
     if branch.source_path.trim().is_empty() || branch.head_history_id.is_none() {
-        return Ok(false);
+        return Ok(QuickCheck::Fallback(QuickCheckFallback::NoBaseline));
     }
-    // 快速检查只服务无人值守流程，因此网络位置与设备命名空间必须先拒绝：下面的
-    // `metadata()` 就是这条路径真正落到操作系统的地方。资格判定由调度器负责记录
-    // 原因，这里只兜底不触碰路径。
     if let Some(reason) = storage::unattended_source_path_rejection(&branch.source_path) {
         return Err(reason);
     }
     let Some((size, Some(expected))) = history::load_source_metadata(root, branch_id)? else {
-        return Ok(false);
+        return Ok(QuickCheck::Fallback(QuickCheckFallback::NoBaseline));
     };
     let path = Path::new(&branch.source_path);
     let Ok(metadata) = path.metadata() else {
-        return Ok(false);
+        return Ok(QuickCheck::Fallback(
+            QuickCheckFallback::MetadataUnavailable,
+        ));
     };
-    if !metadata.is_file() || metadata.len() != u64::try_from(size).unwrap_or(u64::MAX) {
-        return Ok(false);
+    if !metadata.is_file() {
+        return Ok(QuickCheck::Fallback(QuickCheckFallback::NotARegularFile));
+    }
+    if metadata.len() != u64::try_from(size).unwrap_or(u64::MAX) {
+        return Ok(QuickCheck::Fallback(QuickCheckFallback::SizeMismatch));
     }
     let Some(fingerprint) = source_fingerprint(path, &metadata) else {
-        return Ok(false);
+        return Ok(QuickCheck::Fallback(QuickCheckFallback::SampleUnavailable));
     };
-    Ok(fingerprint == expected)
+    if fingerprint != expected {
+        return Ok(QuickCheck::Fallback(
+            QuickCheckFallback::FingerprintMismatch,
+        ));
+    }
+    Ok(QuickCheck::Unchanged)
+}
+
+/// 快速检查：指纹完全一致返回 true；其余情况（缺少基线、指纹不同、读取失败）
+/// 返回 false，交给全量流程给出权威结论并自行修复或报错。退回全量的原因按分支
+/// 去重记录，避免每次调度都刷一条同样的日志。
+pub(crate) fn quick_check_unchanged(root: &Path, branch_id: &str) -> Result<bool, String> {
+    match quick_check(root, branch_id)? {
+        QuickCheck::Unchanged => {
+            clear_fallback(branch_id);
+            Ok(true)
+        }
+        QuickCheck::Fallback(reason) => {
+            report_fallback(branch_id, reason);
+            Ok(false)
+        }
+    }
 }
 
 fn record_source_metadata(root: &Path, branch_id: &str, metadata: &SourceMetadata) {
@@ -660,6 +765,90 @@ mod tests {
         // 恢复内容后元数据基线不再匹配（修改时间变化），仍需全量复核。
         fs::write(&source, vec![b'A'; 96 * 1024]).unwrap();
         assert!(!quick_check_unchanged(&root, &branch_id).unwrap());
+    }
+
+    #[test]
+    fn quick_check_accepts_second_precision_mtime_baseline() {
+        // `.clip` 这类由应用保存的文件只有整秒 mtime（亚秒位为 0）。旧版指纹要求
+        // 亚秒精度，这类分支的基线永远为空、每次都静默退回全量——这里锁住修复。
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+        let whole_second =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_modified(whole_second)
+            .unwrap();
+        let nanos = fs::metadata(&source)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .subsec_nanos();
+        assert_eq!(nanos, 0, "fixture must reproduce a coarse mtime");
+
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        assert!(
+            history::load_source_metadata(&root, &branch_id)
+                .unwrap()
+                .unwrap()
+                .1
+                .is_some(),
+            "a coarse mtime must still produce a baseline fingerprint"
+        );
+        assert!(quick_check_unchanged(&root, &branch_id).unwrap());
+    }
+
+    #[test]
+    fn quick_check_reports_why_it_falls_back() {
+        let (_directory, root, source, _artwork_id, branch_id) = create_fixture();
+        assert!(matches!(
+            quick_check(&root, &branch_id).unwrap(),
+            QuickCheck::Fallback(QuickCheckFallback::NoBaseline)
+        ));
+
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert!(matches!(
+            quick_check(&root, &branch_id).unwrap(),
+            QuickCheck::Unchanged
+        ));
+
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        assert!(matches!(
+            quick_check(&root, &branch_id).unwrap(),
+            QuickCheck::Fallback(QuickCheckFallback::FingerprintMismatch)
+        ));
+
+        fs::write(&source, vec![b'B'; 96 * 1024 + 1]).unwrap();
+        assert!(matches!(
+            quick_check(&root, &branch_id).unwrap(),
+            QuickCheck::Fallback(QuickCheckFallback::SizeMismatch)
+        ));
+
+        fs::remove_file(&source).unwrap();
+        assert!(matches!(
+            quick_check(&root, &branch_id).unwrap(),
+            QuickCheck::Fallback(QuickCheckFallback::MetadataUnavailable)
+        ));
     }
 
     #[test]

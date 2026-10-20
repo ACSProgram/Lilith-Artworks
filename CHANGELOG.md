@@ -27,6 +27,17 @@ entries for the reader; they are not a template every entry has to fill.
   table, and Windows CI now fails when a platform `cfg` branch appears outside
   `platform/` or the registered exceptions.
 
+### Fixed
+
+- The unattended quick check accepts a second-precision modification time now, so
+  branches whose work files are saved with a whole-second `mtime` (every `.clip`
+  file in practice) stop recording an empty baseline and stop falling back to a
+  full check on every tick; the fingerprint version moves to 2, which makes an
+  existing branch fall back once and rewrite its baseline. A quick check that does
+  fall back records the reason — `no baseline`, unreadable metadata or sample, or
+  a size / fingerprint mismatch — once per branch and reason, so a quick check that
+  stays broken is visible instead of silent.
+
 ## 0.3.0-alpha.3 - 2026-10-20
 
 ### Added
