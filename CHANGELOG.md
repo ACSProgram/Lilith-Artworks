@@ -84,8 +84,9 @@ entries for the reader; they are not a template every entry has to fill.
   as one binary payload that the renderer parses into a map without JSON. A stroke
   always sits on the annotation layer: `save_pin_board` ignores the `layer` sent
   by the front end and writes three, so sending a different layer alone is not a
-  change. The canvas now draws strokes that exist in the database (see the next
-  entry); the tools, the layer switches and the pressure work remain in the plan.
+  change. The canvas now draws strokes that exist in the database (see the
+  following entries); the tools, the layer switches, the sampling pipeline and
+  pressure are covered below.
 - The pin board renders strokes with a signed-distance pipeline instead of a
   texture per item. Every visible stroke is flattened into one interleaved vertex
   buffer and drawn as a single indexed call after the bitmaps, because the
@@ -111,6 +112,34 @@ entries for the reader; they are not a template every entry has to fill.
   repository. Since strokes can now be selected, the export button counts bitmaps
   and text only and stays disabled for a stroke-only selection, instead of opening
   a directory picker that writes nothing.
+- Freehand strokes are sampled before they are stored, so fast drawing keeps its
+  detail and zoomed-in strokes stay smooth. Each pointer move contributes every
+  point from `getCoalescedEvents()`, which Chromium otherwise merges down to about
+  60 Hz, and the pointer-up position is added as the final point so a quick lift
+  no longer cuts off the last few pixels. The raw trail is deduplicated, thinned
+  with Ramer–Douglas–Peucker, split at sharp corners, interpolated with a
+  centripetal Catmull-Rom spline converted to cubic Béziers, resampled at an even
+  arc length and finally given pressure smoothing plus a taper at both ends. The
+  tolerance (1 CSS pixel) and the step (2 CSS pixels) are converted to world units
+  with the zoom the stroke was drawn at, so density follows the zoom on screen;
+  long strokes widen the step and are decimated one last time rather than being
+  rejected at the 4096-point limit. Pressure is judged for the whole stroke: the
+  flag is set only for a pen that actually reported non-zero pressure, and once
+  set, a zero inside the stroke means "barely pressed" and draws the thinnest
+  ramp instead of falling back to full width — the old per-point fallback made a
+  light touch come out thickest. A pen preview is now a widened ink outline built
+  with the same radius formula as the shader, so releasing the pointer no longer
+  changes the width, while a mouse still previews a constant-width polyline.
+- Stroke rendering now culls per primitive against an over-scanned viewport and
+  remembers the box it was built for. Primitives wholly outside the box write no
+  vertices, so a long stroke only pays for the part that is on screen; panning
+  within half a viewport reuses the buffer, and leaving that box rebuilds it even
+  when the set of visible items has not changed — otherwise the culled gap in a
+  board-spanning stroke would be exposed by the pan. A development-only console
+  entry, `__lilithPinBoardStrokeProbe({ strokes, pointsPerStroke })`, generates
+  synthetic strokes and times sampling, encoding and buffer building without
+  touching the repository or the GPU; frame rate still has to be checked by hand
+  on a real adapter.
 - The repository schema is v6, reached by a single v5 → v6 migration that also
   widens the pin-board tables (`kind` accepts 2, `history.layer` accepts 3) and
   adds `branches.last_check_elapsed_ms`, `branches.last_check_mode` (quick / full /
@@ -124,6 +153,16 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- The headless test entry point now creates strokes and reads them back for the
+  stress suites: `create-board-stroke` writes one stroke from a geometry file or
+  hex bytes, `create-board-strokes` writes a batch from a small-endian spec file
+  in a single transaction, and `read-board-strokes` reports the payload's item
+  count, byte length and SHA-256 instead of dumping megabytes through JSON. The
+  batch path shares the same validation and insert code as the GUI's single
+  creation, so the measured write cost is the product path. `stress_pin_board`
+  gains H4 (geometry blob boundaries, including the accepted 4096-point limit)
+  and H5 (batch round-trip compared byte for byte plus whole-batch rollback), and
+  `stress_bench` gains P9 (500 / 2000 / 5000 strokes written and read back).
 - The pin board's `阵列排序` is rewritten, and the placement math now lives in a
   single native implementation (`src-tauri/src/pin_board/arrange.rs`) shared by
   arrange, paste and import. The old code had two defects: it derived the gap

@@ -317,10 +317,29 @@ describe("pin-board stroke primitives", () => {
 
   it("keeps pressure-driven radii inside the tapered range", () => {
     expect(strokePointRadius(10, 0, false)).toBe(5);
-    // 压感为 0 视为「设备没给数据」，回退到固定线宽而不是最细。
-    expect(strokePointRadius(10, 0, true)).toBe(5);
+    // 整笔没有压感时才回退到固定线宽；笔迹内部的 0 就是「几乎没使劲」，按最细一档画。
+    expect(strokePointRadius(10, 0, true)).toBeCloseTo(5 * 0.15);
     expect(strokePointRadius(10, 1, true)).toBe(5);
     expect(strokePointRadius(10, 0.5, true)).toBeCloseTo(5 * (0.15 + 0.85 * 0.5));
+  });
+
+  it("skips primitives that fall outside the cull bounds", () => {
+    const items = [entry(
+      strokeItem({ tool: STROKE_TOOL.line }),
+      geometryFor(STROKE_TOOL.line),
+    )];
+    const options = { pixelsPerWorldUnit: 1 };
+
+    const whole = buildStrokeBatch(items, options);
+    const culled = buildStrokeBatch(items, {
+      ...options,
+      cullBounds: { minX: 1000, minY: 1000, maxX: 2000, maxY: 2000 },
+    });
+
+    expect(whole.indices.length).toBeGreaterThan(0);
+    // 整条直线都在裁剪框外：一个图元都不写，调用方跳过这一趟绘制。
+    expect(culled.indices).toHaveLength(0);
+    expect(culled.strokeCount).toBe(0);
   });
 });
 

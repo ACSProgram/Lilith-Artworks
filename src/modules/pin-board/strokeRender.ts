@@ -25,7 +25,8 @@ import {
   type PinBoardStrokeGeometry,
   type PinBoardStrokeTool,
 } from "./strokeGeometry";
-import type { Point, Quad } from "./geometry";
+import type { Bounds, Point, Quad } from "./geometry";
+import { quadIntersectsBounds } from "./geometry";
 import type { PinBoardStrokeItem } from "./types";
 
 /** 图元类型，与着色器里的 `params.x` 一一对应。 */
@@ -74,6 +75,12 @@ export interface StrokeDrawEntry {
 export interface StrokeBatchOptions {
   /** 设备像素 / 世界单位：决定抗锯齿羽化宽度与亚像素点的合并阈值。 */
   pixelsPerWorldUnit: number;
+  /**
+   * 逐段裁剪的世界包围框（视口 + 超扫边距）。给出时，完全落在框外的图元不写入缓冲：
+   * 长笔迹只画看得见的那一段。调用方必须传**扩过边距**的框，否则平移会把还没重建
+   * 的段露出来。
+   */
+  cullBounds?: Bounds;
 }
 
 export interface StrokeBatch {
@@ -102,7 +109,8 @@ export function decodeStrokeSamples(geometry: PinBoardStrokeGeometry): StrokeSam
 
 /**
  * 编码几何 BLOB（写入侧）。自由笔逐点量化 `u16 / u16 / u8`；形状只写头部，两端点由
- * 包围盒与方向位推出。超出点数上限直接拒绝——抽稀是采样层（阶段 5）的职责。
+ * 包围盒与方向位推出。超出点数上限直接拒绝——抽稀与重采样由 `strokeSampling.ts`
+ * 在编码前完成。
  */
 export function encodeStrokeGeometry(
   tool: PinBoardStrokeTool,
@@ -140,7 +148,14 @@ export function encodeStrokeGeometry(
   return bytes;
 }
 
-/** 单点半径：带压感时按 `0.15 + 0.85 × pressure` 收细，无数据（0）回退到固定线宽。 */
+/**
+ * 单点半径：带压感时按 `0.15 + 0.85 × pressure` 收细。
+ *
+ * 「无压感回退固定线宽」在**整笔**层面判断（`hasPressure === false`）：写入侧只在
+ * 确实收到数位笔压感时才置位，因此整笔要么全按压感画、要么全等宽。笔迹内部的
+ * `pressure === 0` 就是「这一下几乎没使劲」，按最细的一档画——早期实现把它当成
+ * 「设备没给数据」而回退成满宽，结果是轻描反而最粗。
+ */
 export function strokePointRadius(
   strokeWidth: number,
   pressure: number,
@@ -148,8 +163,7 @@ export function strokePointRadius(
 ): number {
   const base = Math.max(strokeWidth, 0.01) / 2;
   if (!hasPressure) return base;
-  const value = pressure > 0 ? clamp(pressure, 0, 1) : 1;
-  return base * (0.15 + 0.85 * value);
+  return base * (0.15 + 0.85 * clamp(pressure, 0, 1));
 }
 
 /**
@@ -245,15 +259,20 @@ export function buildStrokeBatch(
     const corners = strokeWorldCorners(item.points, item.uv);
     const primitives = itemPrimitives(item, geometry, pixelsPerWorldUnit, pad);
     if (primitives.length === 0) continue;
-    strokeCount += 1;
     const color = hexToRgba(item.color);
+    let emitted = 0;
     for (const primitive of primitives) {
+      const world = primitive.quad.map((corner) => (
+        mapLocalPoint(corners, corner, item.width, item.height)
+      )) as Quad;
+      // 逐段裁剪：整块四边形都在视口（含超扫边距）之外时直接跳过，不写顶点。
+      if (options.cullBounds && !quadIntersectsBounds(world, options.cullBounds)) continue;
       const base = vertices.length / STROKE_VERTEX_FLOATS;
-      for (const corner of primitive.quad) {
-        const world = mapLocalPoint(corners, corner, item.width, item.height);
+      for (let index = 0; index < world.length; index += 1) {
+        const corner = primitive.quad[index];
         vertices.push(
-          world[0],
-          world[1],
+          world[index][0],
+          world[index][1],
           corner[0],
           corner[1],
           primitive.a[0],
@@ -274,7 +293,11 @@ export function buildStrokeBatch(
       }
       indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
       primitiveCount += 1;
+      emitted += 1;
     }
+    // 只有真正写出图元的笔迹才计入：被裁剪掉的整笔不进 `strokeCount`，
+    // 调用方据此判断「这一趟有没有东西要画」。
+    if (emitted > 0) strokeCount += 1;
   }
 
   return {

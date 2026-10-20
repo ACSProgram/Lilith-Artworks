@@ -31,9 +31,13 @@
 //! - **P7 多分支调度**：夹具作品之外再造 [`SCHEDULER_ARTWORKS`] 个作品、每作品
 //!   1 个主分支 + [`SCHEDULER_FORKS_PER_ARTWORK`] 个分叉下的候选扫描成本。
 //! - **P8 大规模孤儿清理**：[`ORPHAN_FILES`] 个无记录画板 DDS 的扫描与确认清理。
+//! - **P9 笔迹读写**：500 / 2000 / 5000 笔的批量写入（一次事务）与整板载荷读取，
+//!   每档单独一块画板，因此读数就是该档的规模。写入含几何校验与 2N 行历史，读取含
+//!   逐条几何校验与二进制打包——两侧都是产品真实路径，不含编解码以外的额外工作。
 //!
 //! P1B、P2 与 P4–P8 各测 [`REPEATS`] 轮：墙钟取最小值（削弱调度抖动），CPU 时间取均值
 //! （单轮只有几十毫秒，逐轮值会被 15.6 ms 的记账粒度量化）。这是**相对基线**能用的前提。
+//! P9 只跑单轮：每档要新建一块画板才读得出该档规模，重复写入会把画板越堆越大。
 //!
 //! **断言只设灾难性上界**（数量级失控），避免把环境噪声变成 flaky；真正的回归门是
 //! `LILITH_STRESS_PERF_STRICT=1` 与 `tests/perf-baseline.json` 的比对（见 [`emit`]）。
@@ -96,6 +100,9 @@ const SCHEDULER_FORKS_PER_ARTWORK: usize = 11;
 /// P8 的大规模孤儿：120 个画板 DDS 候选，一次扫描并确认清理。
 const ORPHAN_FILES: usize = 120;
 const ORPHAN_FILE_BYTES: usize = 16 * 1024;
+/// P9 的三档笔迹规模（计划里的日常 / 极端 / 极限）与每笔点数。
+const STROKE_TIERS: [usize; 3] = [500, 2_000, 5_000];
+const STROKE_POINTS: usize = 200;
 /// P4–P8 的重测轮数：取最小值以削弱调度抖动（回归看的是同一档位下的相对变化）。
 const REPEATS: usize = 3;
 
@@ -112,6 +119,10 @@ const CATASTROPHIC_BACKUP_MS: f64 = 600_000.0;
 const CATASTROPHIC_CLEANUP_SCAN_MS: f64 = 300_000.0;
 const CATASTROPHIC_SCHEDULER_SCAN_MS: f64 = 60_000.0;
 const CATASTROPHIC_ORPHAN_CLEANUP_MS: f64 = 300_000.0;
+/// P9 的护栏按「每笔」与「整板读取」两档给：5000 笔的写入目标 < 500 ms、读取目标
+/// < 200 ms（计划里的指标），这里只拦数量级失控（debug 档与冷缓存都远快于此）。
+const CATASTROPHIC_STROKE_WRITE_PER_STROKE_MS: f64 = 20.0;
+const CATASTROPHIC_STROKE_READ_MS: f64 = 60_000.0;
 
 // ---------------------------------------------------------------------------
 // 性能基线的记录、更新与比对
@@ -1448,4 +1459,150 @@ fn p8_large_orphan_scan_and_cleanup_baseline() {
             "orphanBytes": ORPHAN_FILES * ORPHAN_FILE_BYTES,
         }),
     );
+}
+
+// ---------------------------------------------------------------------------
+// P9 笔迹读写
+// ---------------------------------------------------------------------------
+
+/// 生成 `count` 条笔迹的批量清单：每条 [`STROKE_POINTS`] 个点，走正弦路径 + 起伏压感，
+/// 几何长度一致，因此「每笔耗时」可以直接横向比较。
+fn stroke_spec(count: usize, points: usize) -> Vec<u8> {
+    // 与 `pin_board::stroke` 同一份契约：version 1、tool 0、带压感标志。
+    let mut geometry = Vec::with_capacity(8 + points * 5);
+    geometry.extend_from_slice(&[1, 0, 0b0000_0100, 0]);
+    geometry.extend_from_slice(&(points as u32).to_le_bytes());
+    for index in 0..points {
+        let t = index as f64 / (points.max(2) - 1) as f64;
+        let x = ((t * 400.0).sin().abs() * 0xffff as f64) as u16;
+        let y = (t * 0xffff as f64) as u16;
+        let pressure = ((t * std::f64::consts::PI * 3.0).sin().abs() * 255.0) as u8;
+        geometry.extend_from_slice(&x.to_le_bytes());
+        geometry.extend_from_slice(&y.to_le_bytes());
+        geometry.push(pressure);
+    }
+
+    let mut spec = (count as u32).to_le_bytes().to_vec();
+    for index in 0..count {
+        spec.push(0); // tool = pen
+        for value in [
+            6.0_f32,             // strokeWidth
+            400.0_f32,           // width
+            200.0_f32,           // height
+            index as f32 * 10.0, // centerX
+            0.0_f32,             // centerY
+        ] {
+            spec.extend_from_slice(&value.to_le_bytes());
+        }
+        spec.extend_from_slice(&(geometry.len() as u32).to_le_bytes());
+        spec.extend_from_slice(&geometry);
+    }
+    spec
+}
+
+/// P9：500 / 2000 / 5000 笔的批量写入（一次事务）与整板载荷读取。
+///
+/// 每档单独一块画板：`read-board-strokes` 返回整块画板的笔迹，混在一起就读不出单档的
+/// 数字。写入走 `create-board-strokes`（与 GUI 的单笔创建共用同一份校验与落库逻辑，
+/// 只是不逐笔重读视图），读取走 `read-board-strokes`（逐条校验几何后打包成二进制）。
+///
+/// 计划里的指标是 5000 笔读取 < 200 ms、写入 < 500 ms；本组只拦数量级失控，指标本身
+/// 需要在 release 档上人工对照（数值进 `tests/perf-baseline.json` 的 `release` 档）。
+#[test]
+fn p9_stroke_write_and_read_baseline() {
+    let fixture = ArtworkFixture::new();
+    let mut measurements = Vec::new();
+    let mut extra = Map::new();
+
+    for strokes in STROKE_TIERS {
+        let board = fixture
+            .command("create-board")
+            .arg("artwork", &fixture.artwork_id)
+            .arg("title", format!("Strokes {strokes}"))
+            .finish();
+        board.expect_ok();
+        let board_id = board
+            .data("boardId")
+            .as_i64()
+            .unwrap_or_else(|| panic!("创建画板未返回 boardId：\n{}", board.describe()));
+        let revision = board.data_str("revision");
+        assert!(!revision.is_empty(), "{}", board.describe());
+
+        let spec_path = fixture.workspace.work(&format!("strokes-{strokes}.bin"));
+        fs::write(&spec_path, stroke_spec(strokes, STROKE_POINTS)).expect("无法写入笔迹清单");
+
+        let write_started = Instant::now();
+        let created = fixture
+            .command("create-board-strokes")
+            .arg("board", board_id.to_string())
+            .arg("revision", &revision)
+            .arg("spec", spec_path.to_string_lossy())
+            .finish();
+        let write_total = write_started.elapsed();
+        created.expect_ok();
+        let write_sample = Sample::of(write_total, &created);
+        assert_eq!(
+            created.data_u64("count"),
+            strokes as u64,
+            "{}",
+            created.describe()
+        );
+
+        let read_started = Instant::now();
+        let read = fixture
+            .command("read-board-strokes")
+            .arg("board", board_id.to_string())
+            .finish();
+        let read_total = read_started.elapsed();
+        read.expect_ok();
+        let read_sample = Sample::of(read_total, &read);
+        assert_eq!(
+            read.data_u64("count"),
+            strokes as u64,
+            "{}",
+            read.describe()
+        );
+        assert!(
+            read.data_u64("bytes") as usize > strokes * STROKE_POINTS * 5,
+            "载荷应包含每笔的几何：\n{}",
+            read.describe()
+        );
+
+        assert!(
+            write_sample.wall_ms / (strokes as f64) < CATASTROPHIC_STROKE_WRITE_PER_STROKE_MS,
+            "{strokes} 笔的写入耗时失控：{:.1} ms（每笔 {:.2} ms）",
+            write_sample.wall_ms,
+            write_sample.wall_ms / (strokes as f64)
+        );
+        assert!(
+            read_sample.wall_ms < CATASTROPHIC_STROKE_READ_MS,
+            "{strokes} 笔的读取耗时失控：{:.1} ms",
+            read_sample.wall_ms
+        );
+
+        // 标签必须是编译期常量（基线键按标签记），因此按档位取固定名字。
+        let (write_total_label, write_per_label, read_label) = match strokes {
+            500 => ("writeTotalMs500", "writePerStrokeMs500", "readTotalMs500"),
+            2_000 => (
+                "writeTotalMs2000",
+                "writePerStrokeMs2000",
+                "readTotalMs2000",
+            ),
+            _ => (
+                "writeTotalMs5000",
+                "writePerStrokeMs5000",
+                "readTotalMs5000",
+            ),
+        };
+        measurements.push(write_sample.measure(write_total_label));
+        measurements.push(write_sample.scale(strokes as f64).measure(write_per_label));
+        measurements.push(read_sample.measure(read_label));
+        extra.insert(
+            format!("payloadBytes{strokes}"),
+            json!(read.data_u64("bytes")),
+        );
+    }
+    extra.insert("pointsPerStroke".into(), json!(STROKE_POINTS));
+
+    emit("P9 stroke io", &measurements, Value::Object(extra));
 }

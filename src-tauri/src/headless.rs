@@ -195,6 +195,9 @@ fn usage() -> String {
          \x20 list-history         列出某 Artwork 的分支与节点计数\n\
          \x20 create-board         为 Artwork 创建画板\n\
          \x20 import-board-images  按路径导入画板图片\n\
+         \x20 create-board-stroke  创建一笔笔迹（几何来自 --geometry 或 --geometry-hex）\n\
+         \x20 create-board-strokes 按 --spec 清单批量创建笔迹\n\
+         \x20 read-board-strokes   读取整板笔迹载荷（回报条目数、字节数与摘要）\n\
          \x20 scrub-board-dds      双向检查画板 DDS（缺失/损坏/孤儿）\n\
          \x20 commit               提交分支工作文件\n\
          \x20 restore              恢复历史节点到输出文件\n\
@@ -238,6 +241,11 @@ fn usage() -> String {
          \x20 --destination                              repository-backup\n\
          \x20 --artwork/--title                          create-board\n\
          \x20 --board/--revision/--paths                 import-board-images\n\
+         \x20 --board/--revision/--tool/--color/--stroke-width\n\
+         \x20 --width/--height/--center-x/--center-y     create-board-stroke\n\
+         \x20 --geometry/--geometry-hex                  create-board-stroke\n\
+         \x20 --board/--revision/--spec/--color          create-board-strokes\n\
+         \x20 --board                                    read-board-strokes\n\
          \x20 --branch/--artifact                        enter-publication\n\
          \x20 --branch/--output/--certificate/--key/--title/--creator\n\
          \x20 --rights/--content/--algorithm/--trustmark/--regions\n\
@@ -269,7 +277,7 @@ struct Options {
 
 impl Options {
     fn parse(args: &[String]) -> Result<Self, String> {
-        const KNOWN: [&str; 41] = [
+        const KNOWN: [&str; 51] = [
             "workspace",
             "repository",
             "models",
@@ -311,6 +319,16 @@ impl Options {
             "timestamp-url",
             "input",
             "region",
+            "tool",
+            "geometry",
+            "geometry-hex",
+            "stroke-width",
+            "width",
+            "height",
+            "center-x",
+            "center-y",
+            "color",
+            "spec",
         ];
         let command = args
             .first()
@@ -763,6 +781,9 @@ fn dispatch(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, Strin
         "list-history" => list_history(options, runtime),
         "create-board" => create_board(options, runtime),
         "import-board-images" => import_board_images(options, runtime),
+        "create-board-stroke" => create_board_stroke(options, runtime),
+        "create-board-strokes" => create_board_strokes(options, runtime),
+        "read-board-strokes" => read_board_strokes(options, runtime),
         "scrub-board-dds" => scrub_board_dds(runtime),
         "commit" => commit(options, runtime),
         "restore" => restore_node(options, runtime),
@@ -1042,6 +1063,248 @@ fn scrub_board_dds(runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
         "corrupt": report.corrupt,
         "orphans": report.orphans,
     }))
+}
+
+/// 从画板视图里取修订号。`PinBoardView` 的字段对适配器不可见，序列化后按键取值，
+/// 与 GUI 拿到的 DTO 是同一份口径（`revision`）。
+fn revision_of(view: &impl Serialize) -> String {
+    serde_json::to_value(view)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("revision")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        })
+        .unwrap_or_default()
+}
+
+/// 创建一笔笔迹。几何 BLOB 从 `--geometry` 指向的原始文件读入（`--geometry-hex`
+/// 供边界用例直接给字节），与 GUI 的 `create_pin_board_stroke` 走同一条领域函数。
+fn create_board_stroke(
+    options: &Options,
+    runtime: &HeadlessRuntime,
+) -> Result<Value, CommandError> {
+    let board_id = board_id_option(options)?;
+    let revision = options.require("revision").map_err(CommandError::from)?;
+    let tool = options
+        .number::<u8>("tool")
+        .map_err(CommandError::from)?
+        .unwrap_or(0);
+    let geometry = geometry_option(options)?;
+    let stroke_width = options
+        .number::<f64>("stroke-width")
+        .map_err(CommandError::from)?
+        .unwrap_or(6.0);
+    let width = options
+        .number::<f64>("width")
+        .map_err(CommandError::from)?
+        .unwrap_or(100.0);
+    let height = options
+        .number::<f64>("height")
+        .map_err(CommandError::from)?
+        .unwrap_or(100.0);
+    let center_x = options
+        .number::<f64>("center-x")
+        .map_err(CommandError::from)?
+        .unwrap_or(0.0);
+    let center_y = options
+        .number::<f64>("center-y")
+        .map_err(CommandError::from)?
+        .unwrap_or(0.0);
+    let color = options.value("color").unwrap_or("#e5484d");
+
+    let (view, item_ids) = runtime.run(OperationDomain::PinBoard, |context| {
+        usecases::pin_board::create_stroke(
+            context,
+            board_id,
+            tool,
+            color,
+            stroke_width,
+            width,
+            height,
+            &geometry,
+            center_x,
+            center_y,
+            revision,
+        )
+    })?;
+    Ok(json!({
+        "itemId": item_ids.first().copied().unwrap_or_default(),
+        "revision": revision_of(&view),
+    }))
+}
+
+/// 批量创建笔迹：`--spec` 指向的二进制清单一次读入、一次事务写完。
+///
+/// 逐条调用 `create-board-stroke` 要起 N 个进程，量的就不再是写入成本而是进程启动
+/// 成本；而一次手势只有一笔，GUI 路径也不会有这种批量。清单布局（小端）：
+///
+/// ```text
+/// u32 count
+/// 每条：u8 tool, f32 strokeWidth, f32 width, f32 height, f32 centerX, f32 centerY,
+///       u32 geometryLen, bytes
+/// ```
+fn create_board_strokes(
+    options: &Options,
+    runtime: &HeadlessRuntime,
+) -> Result<Value, CommandError> {
+    let board_id = board_id_option(options)?;
+    let revision = options.require("revision").map_err(CommandError::from)?;
+    let color = options.value("color").unwrap_or("#e5484d");
+    let spec_path = options
+        .path_within("spec", "笔迹清单")
+        .map_err(CommandError::from)?;
+    let spec = std::fs::read(&spec_path)
+        .map_err(|error| CommandError::invalid_input(format!("无法读取 --spec：{error}")))?;
+    let records = parse_stroke_spec(&spec)?;
+    let strokes = records
+        .iter()
+        .map(|record| crate::pin_board::repository::StrokeInsert {
+            tool: record.tool,
+            color,
+            stroke_width: record.stroke_width,
+            width: record.width,
+            height: record.height,
+            geometry: &record.geometry,
+            center_x: record.center_x,
+            center_y: record.center_y,
+        })
+        .collect::<Vec<_>>();
+
+    let started = Instant::now();
+    let (view, item_ids) = runtime.run(OperationDomain::PinBoard, |context| {
+        usecases::pin_board::create_strokes(context, board_id, &strokes, revision)
+    })?;
+    Ok(json!({
+        "itemIds": item_ids,
+        "revision": revision_of(&view),
+        "count": item_ids.len(),
+        "elapsedMs": started.elapsed().as_secs_f64() * 1000.0,
+    }))
+}
+
+/// 读取整板笔迹的二进制载荷，回报条目数、字节数与 SHA-256。
+///
+/// 不把整份载荷塞进 JSON（5000 笔约 7 MB，转成十六进制再翻一倍）：调用方拿摘要与
+/// 自己按同一布局拼出的期望载荷比对，既验证了字节布局，也不用搬运数据。
+fn read_board_strokes(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
+    let board_id = board_id_option(options)?;
+    let started = Instant::now();
+    let payload = runtime.run(OperationDomain::PinBoard, |context| {
+        usecases::pin_board::read_strokes(context, board_id)
+    })?;
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let count = payload
+        .get(0..4)
+        .map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap_or_default()))
+        .unwrap_or_default();
+    Ok(json!({
+        "count": count,
+        "bytes": payload.len(),
+        "digest": hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&payload)),
+        "elapsedMs": elapsed_ms,
+    }))
+}
+
+/// 解析 `--board`：所有画板子命令共用同一条错误文案。
+fn board_id_option(options: &Options) -> Result<i64, CommandError> {
+    options
+        .require("board")
+        .map_err(CommandError::from)?
+        .parse::<i64>()
+        .map_err(|_| {
+            CommandError::invalid_input(format!(
+                "--board 必须是整数，收到 {:?}",
+                options.value("board")
+            ))
+        })
+}
+
+/// 几何 BLOB 的两种给法：`--geometry` 读原始文件（压力测试的常规用法），
+/// `--geometry-hex` 直接给十六进制（边界用例不必落盘）。
+fn geometry_option(options: &Options) -> Result<Vec<u8>, CommandError> {
+    match options.value("geometry") {
+        Some(_) => {
+            let path = options
+                .path_within("geometry", "笔迹几何")
+                .map_err(CommandError::from)?;
+            std::fs::read(&path).map_err(|error| {
+                CommandError::invalid_input(format!("无法读取 --geometry：{error}"))
+            })
+        }
+        None => {
+            let hex = options
+                .require("geometry-hex")
+                .map_err(CommandError::from)?;
+            hex::decode(hex.trim()).map_err(|error| {
+                CommandError::invalid_input(format!("--geometry-hex 无效：{error}"))
+            })
+        }
+    }
+}
+
+/// 批量清单里的一条记录。
+struct StrokeSpecRecord {
+    tool: u8,
+    stroke_width: f64,
+    width: f64,
+    height: f64,
+    center_x: f64,
+    center_y: f64,
+    geometry: Vec<u8>,
+}
+
+/// 解析批量清单。长度不符、条目数越界一律明确拒绝，不做宽容截断。
+fn parse_stroke_spec(spec: &[u8]) -> Result<Vec<StrokeSpecRecord>, CommandError> {
+    let invalid = |message: &str| CommandError::invalid_input(message.to_owned());
+    if spec.len() < 4 {
+        return Err(invalid("--spec 不完整"));
+    }
+    let count = u32::from_le_bytes(spec[0..4].try_into().unwrap_or_default()) as usize;
+    if count == 0 || count > crate::pin_board::dds::MAX_BOARD_ITEMS {
+        return Err(invalid("--spec 的条目数超出范围"));
+    }
+    let mut offset = 4;
+    let mut records = Vec::with_capacity(count);
+    for _ in 0..count {
+        // u8 tool + 5 × f32 + u32 geometryLen
+        const HEADER: usize = 1 + 4 * 5 + 4;
+        if offset + HEADER > spec.len() {
+            return Err(invalid("--spec 不完整"));
+        }
+        let tool = spec[offset];
+        let float_at =
+            |at: usize| f32::from_le_bytes(spec[at..at + 4].try_into().unwrap_or_default()) as f64;
+        let stroke_width = float_at(offset + 1);
+        let width = float_at(offset + 5);
+        let height = float_at(offset + 9);
+        let center_x = float_at(offset + 13);
+        let center_y = float_at(offset + 17);
+        let geometry_len = u32::from_le_bytes(
+            spec[offset + 21..offset + 25]
+                .try_into()
+                .unwrap_or_default(),
+        ) as usize;
+        offset += HEADER;
+        if geometry_len > spec.len() - offset {
+            return Err(invalid("--spec 的几何长度越界"));
+        }
+        records.push(StrokeSpecRecord {
+            tool,
+            stroke_width,
+            width,
+            height,
+            center_x,
+            center_y,
+            geometry: spec[offset..offset + geometry_len].to_vec(),
+        });
+        offset += geometry_len;
+    }
+    if offset != spec.len() {
+        return Err(invalid("--spec 有多余字节"));
+    }
+    Ok(records)
 }
 
 fn commit(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {

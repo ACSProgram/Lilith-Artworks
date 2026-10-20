@@ -336,6 +336,29 @@ pub(crate) fn create_stroke(
     })
 }
 
+/// 批量新增笔迹：一次事务写完、末尾只读一次视图。GUI 只走单笔的 `create_stroke`，
+/// 这条路径给压力测试量「真实写入成本」用，校验与落库逻辑与单笔完全相同。
+/// 只有无头入口调用它，因此随 `headless` feature 门控（发布产物里不存在）。
+#[cfg(feature = "headless")]
+pub(crate) fn create_strokes(
+    context: &CommandContext,
+    board_id: i64,
+    strokes: &[repository::StrokeInsert<'_>],
+    expected_revision: &str,
+) -> Result<(PinBoardView, Vec<i64>), CommandError> {
+    context.run_repository_write(|session| {
+        let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
+        repository::create_strokes(
+            &mut connection,
+            session.root(),
+            board_id,
+            strokes,
+            expected_revision,
+        )
+        .map_err(CommandError::from)
+    })
+}
+
 /// 读取整板笔迹几何的二进制载荷；布局见 `pin_board::stroke::encode_batch`。
 pub(crate) fn read_strokes(
     context: &CommandContext,

@@ -1732,6 +1732,19 @@ fn normalise_color(color: &str) -> Result<String, String> {
     stroke::normalise_hex_color(color, "文字")
 }
 
+/// 一条待写入的笔迹。`create_stroke`（GUI 的单笔创建）与 `create_strokes`（压力测试
+/// 的批量创建）共用同一份校验与落库逻辑，避免两条写入路径各自演化。
+pub(crate) struct StrokeInsert<'a> {
+    pub(crate) tool: u8,
+    pub(crate) color: &'a str,
+    pub(crate) stroke_width: f64,
+    pub(crate) width: f64,
+    pub(crate) height: f64,
+    pub(crate) geometry: &'a [u8],
+    pub(crate) center_x: f64,
+    pub(crate) center_y: f64,
+}
+
 /// 新增笔迹条目：几何 BLOB 由前端编码，原生端只校验结构与声明尺寸，不解释
 /// 具体形状。与文字一样只落数据库，不生成图片，也不占 DDS 文件。
 ///
@@ -1751,16 +1764,54 @@ pub(crate) fn create_stroke(
     center_y: f64,
     expected_revision: &str,
 ) -> Result<(PinBoardView, Vec<i64>), String> {
-    let header = stroke::validate_geometry(geometry)?;
-    if header.tool != tool {
-        // 工具同时出现在列与 BLOB 头部；不一致说明编码端有 bug，宁可拒绝也不写进
-        // 一条自相矛盾的记录（列用于检索，头部用于渲染）。
-        return Err("笔迹工具与几何头部不一致".into());
+    create_strokes(
+        connection,
+        root,
+        board_id,
+        &[StrokeInsert {
+            tool,
+            color,
+            stroke_width,
+            width,
+            height,
+            geometry,
+            center_x,
+            center_y,
+        }],
+        expected_revision,
+    )
+}
+
+/// 批量新增笔迹：一次事务、一次 revision 推进、末尾只读一次画板视图。
+///
+/// 逐条 `create_stroke` 对 GUI 没有差别（一次手势只有一笔），但几百上千笔时每条都
+/// 重新 `load_view` 会把写入退化成 O(n²)——压力测试要量的正是「真实写入成本」，因此
+/// 批量入口必须存在。校验全部前置：任何一条不合法都一条也不写。
+pub(crate) fn create_strokes(
+    connection: &mut Connection,
+    root: &Path,
+    board_id: i64,
+    strokes: &[StrokeInsert<'_>],
+    expected_revision: &str,
+) -> Result<(PinBoardView, Vec<i64>), String> {
+    if strokes.is_empty() {
+        return Err("没有要写入的笔迹".into());
     }
-    stroke::validate_extent(width, height, stroke_width)?;
-    let color = stroke::normalise_hex_color(color, "笔迹")?;
-    if !center_x.is_finite() || !center_y.is_finite() {
-        return Err("笔迹位置无效".into());
+    let mut headers = Vec::with_capacity(strokes.len());
+    let mut colors = Vec::with_capacity(strokes.len());
+    for stroke in strokes {
+        let header = stroke::validate_geometry(stroke.geometry)?;
+        if header.tool != stroke.tool {
+            // 工具同时出现在列与 BLOB 头部；不一致说明编码端有 bug，宁可拒绝也不写进
+            // 一条自相矛盾的记录（列用于检索，头部用于渲染）。
+            return Err("笔迹工具与几何头部不一致".into());
+        }
+        stroke::validate_extent(stroke.width, stroke.height, stroke.stroke_width)?;
+        if !stroke.center_x.is_finite() || !stroke.center_y.is_finite() {
+            return Err("笔迹位置无效".into());
+        }
+        headers.push(header);
+        colors.push(stroke::normalise_hex_color(stroke.color, "笔迹")?);
     }
 
     let transaction = connection.transaction().map_err(storage::database_error)?;
@@ -1769,51 +1820,58 @@ pub(crate) fn create_stroke(
         root,
         board_id,
         expected_revision,
-        1,
+        strokes.len(),
         ITEM_KIND_STROKE,
     )?;
-    let item_id = setup.item_ids[0];
-    transaction
-        .execute(
-            "INSERT INTO pin_board_strokes
-               (item_id, tool, color, stroke_width, width, height, geometry)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                item_id,
-                i64::from(header.tool),
-                color,
-                stroke_width,
-                width,
-                height,
-                geometry
-            ],
+    for (index, stroke) in strokes.iter().enumerate() {
+        let item_id = setup.item_ids[index];
+        transaction
+            .execute(
+                "INSERT INTO pin_board_strokes
+                   (item_id, tool, color, stroke_width, width, height, geometry)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    item_id,
+                    i64::from(headers[index].tool),
+                    colors[index],
+                    stroke.stroke_width,
+                    stroke.width,
+                    stroke.height,
+                    stroke.geometry
+                ],
+            )
+            .map_err(storage::database_error)?;
+        let points = dds::imported_points(
+            &[(stroke.width, stroke.height)],
+            stroke.center_x,
+            stroke.center_y,
+            0.0,
         )
-        .map_err(storage::database_error)?;
-    let points = dds::imported_points(&[(width, height)], center_x, center_y, 0.0)
         .into_iter()
         .next()
         .ok_or("无法计算笔迹位置")?;
-    let editable = EditablePinBoardItem {
-        item_id,
-        order: 0,
-        layer: stroke::STROKE_LAYER,
-        deleted: false,
-        points,
-        uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
-    };
-    record_initial_state(
-        &transaction,
-        board_id,
-        item_id,
-        setup.next_step,
-        0,
-        ITEM_KIND_STROKE,
-        &editable,
-    )?;
+        let editable = EditablePinBoardItem {
+            item_id,
+            order: index as u64,
+            layer: stroke::STROKE_LAYER,
+            deleted: false,
+            points,
+            uv: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
+        };
+        record_initial_state(
+            &transaction,
+            board_id,
+            item_id,
+            setup.next_step,
+            index as u64,
+            ITEM_KIND_STROKE,
+            &editable,
+        )?;
+    }
     bump_revision(&transaction, board_id)?;
     transaction.commit().map_err(storage::database_error)?;
     let view = load_view(connection, root, board_id)?;
-    Ok((view, vec![item_id]))
+    Ok((view, setup.item_ids))
 }
 
 /// 读取整板笔迹几何并打包成二进制，供渲染器一次性建缓冲（不经过 JSON）。

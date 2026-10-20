@@ -11,7 +11,6 @@ import {
   extendStrokeDraft,
   resolveStrokeDraft,
   strokeDraftPoints,
-  thinStrokePoints,
   toolForShortcut,
   type StrokeCommit,
   type StrokeToolName,
@@ -81,17 +80,25 @@ describe("pin-board pen drafts", () => {
     );
     expect(commit).not.toBeNull();
     const resolved = commit!;
-    // 墨迹外框：点中心极值 ± 半个线宽。
-    expect(resolved.width).toBeCloseTo(220 + WIDTH, 6);
-    expect(resolved.height).toBeCloseTo(200 + WIDTH, 6);
-    expect(resolved.centerX).toBeCloseTo(210, 6);
-    expect(resolved.centerY).toBeCloseTo(300, 6);
+    // 墨迹外框：点中心极值 ± 半个线宽。光滑后的曲线会略微过冲，因此留一点余量。
+    expect(resolved.width).toBeCloseTo(220 + WIDTH, 0);
+    expect(resolved.height).toBeCloseTo(200 + WIDTH, 0);
+    expect(resolved.centerX).toBeCloseTo(210, 0);
+    expect(resolved.centerY).toBeCloseTo(300, 0);
     const quad = commitQuad(resolved);
     const world = penSamples(resolved).map((sample) => quad.toWorld(sample));
+    // 首尾点原样落在用户按下的位置与抬笔的位置。
     expect(world[0][0]).toBeCloseTo(100, 2);
     expect(world[0][1]).toBeCloseTo(200, 2);
-    expect(world[2][0]).toBeCloseTo(320, 2);
-    expect(world[2][1]).toBeCloseTo(400, 2);
+    expect(world[world.length - 1][0]).toBeCloseTo(320, 2);
+    expect(world[world.length - 1][1]).toBeCloseTo(400, 2);
+    // 归一化后仍在包围盒内：不会因为光滑而溢出选中框。
+    for (const sample of penSamples(resolved)) {
+      expect(sample[0]).toBeGreaterThanOrEqual(-1e-4);
+      expect(sample[0]).toBeLessThanOrEqual(1 + 1e-4);
+      expect(sample[1]).toBeGreaterThanOrEqual(-1e-4);
+      expect(sample[1]).toBeLessThanOrEqual(1 + 1e-4);
+    }
   });
 
   it("keeps a horizontal stroke from collapsing to zero height", () => {
@@ -125,19 +132,60 @@ describe("pin-board pen drafts", () => {
     extendStrokeDraft(draft, [0, 0], false);
     extendStrokeDraft(draft, [10, 0], false);
     extendStrokeDraft(draft, [10, 0], false);
-    expect(draft.points).toHaveLength(2);
+    expect(draft.samples).toHaveLength(2);
   });
 
   it("thins strokes that exceed the point limit instead of rejecting them", () => {
     const points: Point[] = Array.from({ length: MAX_STROKE_POINTS + 900 }, (_, index) => (
       [index, index % 17] as Point
     ));
-    const thinned = thinStrokePoints(points);
-    expect(thinned).toHaveLength(MAX_STROKE_POINTS);
-    expect(thinned[0]).toEqual(points[0]);
-    expect(thinned[thinned.length - 1]).toEqual(points[points.length - 1]);
     const commit = resolveStrokeDraft(draftOf("pen", points), WIDTH)!;
-    expect(decodeStrokeHeader(commit.geometry).pointCount).toBe(MAX_STROKE_POINTS);
+    expect(decodeStrokeHeader(commit.geometry).pointCount).toBeLessThanOrEqual(MAX_STROKE_POINTS);
+    const world = penSamples(commit).map((sample) => commitQuad(commit).toWorld(sample));
+    expect(world[0][0]).toBeCloseTo(0, 0);
+    expect(world[world.length - 1][0]).toBeCloseTo(points[points.length - 1][0], 0);
+  });
+});
+
+describe("pin-board pen pressure", () => {
+  function penPressures(commit: StrokeCommit): number[] {
+    return decodeStrokeSamples({
+      ...decodeStrokeHeader(commit.geometry),
+      itemId: 1,
+      color: "#FFFFFF",
+      strokeWidth: commit.strokeWidth,
+      width: commit.width,
+      height: commit.height,
+      geometry: commit.geometry,
+    }).map((sample) => sample.pressure);
+  }
+
+  it("writes the pressure flag only for a pen with real pressure data", () => {
+    const pen = beginStrokeDraft("pen", [0, 0], { pressure: 0.4, pointerType: "pen" });
+    extendStrokeDraft(pen, [100, 0], false, { pressure: 0.9, pointerType: "pen" });
+    const penCommit = resolveStrokeDraft(pen, WIDTH)!;
+    expect(decodeStrokeHeader(penCommit.geometry).hasPressure).toBe(true);
+    const pressures = penPressures(penCommit);
+    // 两端 taper 收细，中段保持原始压感：不会整笔被压成一个宽度。
+    expect(pressures[0]).toBeLessThan(pressures[Math.floor(pressures.length / 2)]);
+    expect(Math.max(...pressures)).toBeGreaterThan(0.6);
+
+    // 鼠标的 `pressure` 恒为 0.5 且没有意义：整笔按固定线宽，不写压感标志。
+    const mouse = beginStrokeDraft("pen", [0, 0], { pressure: 0.5, pointerType: "mouse" });
+    extendStrokeDraft(mouse, [100, 0], false, { pressure: 0.5, pointerType: "mouse" });
+    expect(decodeStrokeHeader(resolveStrokeDraft(mouse, WIDTH)!.geometry).hasPressure).toBe(false);
+  });
+
+  it("keeps the pressure of the final sample on a shift-constrained line", () => {
+    const draft = beginStrokeDraft("pen", [0, 0], { pressure: 0.2, pointerType: "pen" });
+    extendStrokeDraft(draft, [50, 50], false, { pressure: 0.2, pointerType: "pen" });
+    extendStrokeDraft(draft, [100, 10], true, { pressure: 0.9, pointerType: "pen" });
+    expect(strokeDraftPoints(draft)).toEqual([[0, 0], [100, 10]]);
+    const commit = resolveStrokeDraft(draft, WIDTH)!;
+    const header = decodeStrokeHeader(commit.geometry);
+    expect(header.pointCount).toBe(2);
+    expect(header.hasPressure).toBe(true);
+    expect(penPressures(commit)[1]).toBeGreaterThan(penPressures(commit)[0]);
   });
 });
 

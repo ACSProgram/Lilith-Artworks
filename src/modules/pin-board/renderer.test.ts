@@ -488,7 +488,7 @@ describe("pin-board stroke rendering", () => {
       },
     };
     const renderer = rendererWith({
-      visibleImages: [strokeItem()],
+      images: [strokeItem()],
       strokeGeometries: new Map([[5, strokeGeometry()]]),
       strokeVersion: 0,
       strokeSignature: "",
@@ -496,7 +496,7 @@ describe("pin-board stroke rendering", () => {
       strokeIndexCount: 0,
       gpu: { device },
       viewport: { centerX: 50, centerY: 50, height: 100 },
-      canvas: { height: 100 },
+      canvas: { width: 100, height: 100 },
       loaded: true,
       destroyed: false,
       boardId: 1,
@@ -519,6 +519,99 @@ describe("pin-board stroke rendering", () => {
     (renderer as unknown as { viewport: { height: number } }).viewport.height = 50;
     syncStrokeBuffers();
     expect(created).toHaveLength(6);
+
+    // 平移在超扫边距以内：集合与缩放都没变，缓冲继续复用。
+    (renderer as unknown as { viewport: { centerX: number } }).viewport.centerX = 60;
+    syncStrokeBuffers();
+    expect(created).toHaveLength(6);
+
+    // 平移到笔迹完全落在「视口 + 边距」之外：集合变了，缓冲重建为空。
+    (renderer as unknown as { viewport: { centerX: number } }).viewport.centerX = 10_000;
+    syncStrokeBuffers();
+    expect(created).toHaveLength(6);
+    expect((renderer as unknown as { strokeIndexCount: number }).strokeIndexCount).toBe(0);
+  });
+
+  it("rebuilds after panning out of the over-scan box even when the item set is unchanged", () => {
+    const created: number[] = [];
+    const device = {
+      createBuffer: (descriptor: { size: number }) => {
+        created.push(descriptor.size);
+        return {
+          getMappedRange: () => new ArrayBuffer(descriptor.size),
+          unmap: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    };
+    // 一条横跨整个画板的长笔迹：两种视口下它都「可见」，但缓冲里未必有远处那段。
+    const wide = {
+      ...strokeItem(),
+      points: [[-1000, 0], [1000, 0], [1000, 100], [-1000, 100]],
+      width: 2000,
+    } as unknown as PinBoardItem;
+    const renderer = rendererWith({
+      images: [wide],
+      strokeGeometries: new Map([[5, { ...strokeGeometry(), width: 2000 }]]),
+      strokeOutlineIndex: new Map(),
+      gpu: { device },
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      canvas: { width: 100, height: 100 },
+      loaded: true,
+      destroyed: false,
+      boardId: 1,
+      onError: vi.fn(),
+    });
+    const syncStrokeBuffers = () => (renderer as unknown as {
+      syncStrokeBuffers: () => void;
+    }).syncStrokeBuffers();
+
+    syncStrokeBuffers();
+    expect(created).toHaveLength(3);
+
+    // 平移仍在构建缓冲时那个「视口 + 边距」框内：不重建。
+    (renderer as unknown as { viewport: { centerX: number } }).viewport.centerX = 60;
+    syncStrokeBuffers();
+    expect(created).toHaveLength(3);
+
+    // 条目集合没变，但新视口已在旧框之外：被裁掉的段可能露出来，必须重建。
+    (renderer as unknown as { viewport: { centerX: number } }).viewport.centerX = 300;
+    syncStrokeBuffers();
+    expect(created).toHaveLength(6);
+  });
+
+  it("collects strokes from the over-scan margin, not just the viewport", () => {
+    const near = strokeItem(5);
+    const far = { ...strokeItem(9), points: strokeQuad.map(([x, y]) => [x + 10_000, y]) } as unknown as PinBoardItem;
+    const device = {
+      createBuffer: (descriptor: { size: number }) => ({
+        getMappedRange: () => new ArrayBuffer(descriptor.size),
+        unmap: () => undefined,
+        destroy: () => undefined,
+      }),
+    };
+    const renderer = rendererWith({
+      images: [near, far],
+      strokeGeometries: new Map([
+        [5, strokeGeometry()],
+        [9, { ...strokeGeometry(), itemId: 9 }],
+      ]),
+      strokeOutlineIndex: new Map(),
+      gpu: { device },
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      canvas: { width: 100, height: 100 },
+      loaded: true,
+      destroyed: false,
+      boardId: 1,
+      onError: vi.fn(),
+    });
+
+    (renderer as unknown as { syncStrokeBuffers: () => void }).syncStrokeBuffers();
+
+    const slots = (renderer as unknown as { strokeOutlineIndex: Map<number, number> }).strokeOutlineIndex;
+    expect(slots.has(5)).toBe(true);
+    // 一万单位之外的那条不参与构建：既省缓冲，也不会被逐段裁剪后的空图元拖慢。
+    expect(slots.has(9)).toBe(false);
   });
 });
 

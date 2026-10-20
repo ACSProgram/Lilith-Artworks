@@ -132,3 +132,11 @@
   `deflate-flate2` 引入（复用 c2pa 已带的 8.6）。有效契约并入
   `docs/modules/history-and-backup.md`，行为变化见 `../../../CHANGELOG.md` 的 `## Unreleased`；
   GUI 手工验收在 `../todo.md` 追踪。
+- `pin-board-strokes-plan-2026-10-20.md`：素材板笔迹、形状与图层（alpha5）的独立计划与实施记录。
+  含数据模型（`kind = 2`、固定标注层、几何 BLOB 布局与 `pin_board_strokes` 表）、五个阶段的
+  交付边界与验收口径、四项风险（半透明接缝、驱动鼠标模式、创建不可撤销、退化包围盒），以及
+  阶段 1–5 的落地结论：v5 → v6 迁移（搭车 `branches` 三列）、SDF 渲染管线、绘制工具与浮动
+  工具条、四个图层开关、采样管道（RDP / 向心 Catmull-Rom / 弧长重采样 / 压感平滑与 taper）、
+  合并事件、逐段裁剪与超扫边距、无头批量命令与 H4/H5/P9 压力测试。阶段 1–5 均已实现；
+  **阶段 5 的性能指标、压感手感与发布前压力测试仍待人工验收**，在 `../todo.md` 追踪。有效
+  契约并入 `docs/modules/pin-board.md`，行为变化见 `../../../CHANGELOG.md` 的 `## Unreleased`。

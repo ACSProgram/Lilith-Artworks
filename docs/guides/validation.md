@@ -41,14 +41,14 @@
 
 `src-tauri/tests/` 下的十三组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
 `stress_large` 大文件端到端与大文件中断、`stress_scale` 规模与灾备与参数边界、`stress_cleanup`
-崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、`stress_authenticity` 认证发布内存与回读、
+崩溃孤儿回收闭环、`stress_pin_board` 画板 DDS 完整性、笔迹 BLOB 边界与批量读写、`stress_authenticity` 认证发布内存与回读、
 `stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏与画板 DDS 损坏）、
 `stress_format` ChunkFile 格式矩阵——合成 `.clip` 容器感知分块（tile 结构 / 无 tile / 截断回退
 CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，断言用磁盘事实（ChunkFile 公共头的
 版本 / chunker / adapter 字节，delta 先过 zstd 解压）逐提交核对、
 `stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 + 全库读、
 写哨兵持有期间全库校验的明确拒绝）、
-`stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准、`stress_baseline` 0.3
+`stress_input` 输入域极值与路径边界、`stress_bench` 核心算法性能基准（含笔迹批量读写）、`stress_baseline` 0.3
 阶段 0 基线——锁等待 / 任务耗时 / 取消延迟 / 深链恢复 / 调度扫描 / 清理查询 / 灾备 I/O）都以
 **真实可执行文件**驱动，只通过命令行、stdin 与磁盘事实断言。
 
@@ -220,7 +220,9 @@ cargo test --features headless --test stress_baseline -- --test-threads=1 --noca
   2.5× 门抓不到 1.5 倍这类小幅退化，只用于发现数量级错误。单轮采样的短操作尤其不稳
   （2026-10-19 实测签名 8–50 ms、孤儿扫描 51–203 ms，曾使 6 次比对误报 2 次），因此
   P2、P4–P8 一律取 `REPEATS`（`stress_bench.rs` 的常量，当前为 3）轮最小值；新增场景请沿用
-  这一口径，不要引入单轮测量的基线。
+  这一口径，不要引入单轮测量的基线。P9（笔迹批量读写）目前只跑单轮：每档要单独新建一块画板
+  才读得出该档规模，重复写入会把三块画板越堆越大；它只拦数量级失控，计划指标仍需在 release
+  档上人工对照。
 
 结果写入 `<target>/stress/report.jsonl`（每场景一行 JSON）与 `<target>/stress/ledger.jsonl`
 （磁盘账本）；工作区位于 `<target>/stress/workspaces/`，正常结束后自动回收。被测子进程是单线程的

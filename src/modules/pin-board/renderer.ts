@@ -27,7 +27,7 @@ import {
   extendStrokeDraft,
   isStrokeTool,
   resolveStrokeDraft,
-  strokeDraftPoints,
+  strokeDraftSamples,
   toolForShortcut,
   type PinBoardTool,
   type StrokeCommitRequest,
@@ -38,6 +38,7 @@ import {
   STROKE_VERTEX_BYTES,
   buildStrokeBatch,
   buildStrokeOutlines,
+  strokePointRadius,
   type StrokeBatch,
 } from "./strokeRender";
 import {
@@ -219,6 +220,12 @@ const GPU_RECOVERY_BACKOFF_MS = 600;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
+/**
+ * 笔迹缓冲的超扫边距（视口宽高的比例）：四周各扩这么多，平移在这个范围内既不改
+ * 可见集合、也不改缓冲签名，因此拖动画布不重建；逐段裁剪用同一个框，边距内平移
+ * 也不会露出被裁掉的段。
+ */
+const STROKE_OVERSCAN_RATIO = 0.5;
 
 /** 指针拖拽的进行中状态；`draw` 是绘制工具下的那一支。 */
 type DragMode = "pan" | "images" | "marquee" | "rotate" | "scale" | "draw";
@@ -378,6 +385,36 @@ function cloneQuad(quad: Quad): Quad {
 
 function cloneImage(image: PinBoardItem): PinBoardItem {
   return { ...image, points: cloneQuad(image.points), uv: cloneQuad(image.uv) };
+}
+
+/** 一次指针事件换算出的笔迹采样：世界坐标 + 压感 + 指针类型。 */
+interface PointerStrokeSample {
+  point: Point;
+  pressure: number;
+  pointerType: string;
+}
+
+/**
+ * 一次指针事件里的全部采样点。
+ *
+ * Chromium 会把 `pointermove` 合并到约 60 Hz，被合并掉的中间点只在
+ * `getCoalescedEvents()` 里；不可用（旧内核、测试环境）或返回空数组时退回事件本身。
+ * 一次事件内的所有点共用同一个画布矩形，不必逐点测量布局。
+ */
+function coalescedStrokeSamples(
+  event: PointerEvent,
+  rect: DOMRect,
+  viewport: Viewport,
+): PointerStrokeSample[] {
+  const coalesced = typeof event.getCoalescedEvents === "function"
+    ? event.getCoalescedEvents()
+    : [];
+  const events = coalesced.length > 0 ? coalesced : [event];
+  return events.map((entry) => ({
+    point: screenToWorld(entry.clientX, entry.clientY, rect, viewport),
+    pressure: entry.pressure,
+    pointerType: entry.pointerType ?? "",
+  }));
 }
 
 function estimatedLoadBytes(image: PinBoardItem, maxDimension: number): number {
@@ -863,6 +900,11 @@ export class PinBoardRenderer {
   private strokeVersion = 0;
   /** 上次构建笔迹缓冲时的「可见笔迹 + 缩放」签名，避免平移时逐帧重建。 */
   private strokeSignature = "";
+  /**
+   * 当前笔迹缓冲是按哪个「视口 + 超扫边距」框构建的。视口一旦走出它，被逐段
+   * 裁掉的段就可能露出来；即使可见条目没变也必须重建。
+   */
+  private strokeBuiltBounds: Bounds | null = null;
   /** 笔迹读取的代次：切画板或重复读取时丢弃旧结果。 */
   private strokeLoadToken = 0;
   private strokeVertexBuffer: any = null;
@@ -1192,6 +1234,7 @@ export class PinBoardRenderer {
     this.strokeOutlineBuffer = null;
     this.strokeIndexCount = 0;
     this.strokeOutlineIndex.clear();
+    this.strokeBuiltBounds = null;
   }
 
   /**
@@ -1231,38 +1274,74 @@ export class PinBoardRenderer {
     return this.canvas.height / Math.max(this.viewport.height, 1e-6);
   }
 
+  /** 笔迹缓冲的收集范围：视口四周各扩 `STROKE_OVERSCAN_RATIO`。 */
+  private strokeCullBounds(viewport: Bounds): Bounds {
+    const marginX = (viewport.maxX - viewport.minX) * STROKE_OVERSCAN_RATIO;
+    const marginY = (viewport.maxY - viewport.minY) * STROKE_OVERSCAN_RATIO;
+    return {
+      minX: viewport.minX - marginX,
+      minY: viewport.minY - marginY,
+      maxX: viewport.maxX + marginX,
+      maxY: viewport.maxY + marginY,
+    };
+  }
+
   /**
    * 按「可见笔迹 + 缩放」重建笔迹缓冲。
    *
-   * 签名不变就跳过：平移只改视口位置、不改可见集合与缩放，因此拖动画布不会逐帧
-   * 重建整板笔迹（逐段裁剪留给阶段 5 的性能优化）。
+   * 签名不变**且**视口仍在缓冲的收集框内时跳过：平移只改视口位置、不改集合与
+   * 缩放，因此拖动画布不会逐帧重建整板笔迹。集合按扩过超扫边距的视口取，逐段
+   * 裁剪也用同一个框，所以在框内平移既不改签名、也不会露出被裁掉的段；视口走出
+   * 那个框就重建一次。只比较条目集合不够——一条横跨整个画板的笔迹在两种视口下
+   * 都算可见，但缓冲里不一定有远处那段。
    */
   private syncStrokeBuffers() {
-    const strokes = this.visibleImages.filter(
-      (image): image is PinBoardStrokeItem => image.kind === "stroke",
-    );
+    const hasCanvas = this.canvas.width > 0 && this.canvas.height > 0;
+    const viewport = hasCanvas
+      ? viewportBounds(this.viewport, this.canvas.width, this.canvas.height)
+      : null;
+    const cullBounds = viewport ? this.strokeCullBounds(viewport) : null;
+    const strokes = this.images.filter((image): image is PinBoardStrokeItem => (
+      image.kind === "stroke"
+      && !image.deleted
+      && image.available
+      && isLayerVisible(this.visibleLayers, image.layer)
+      && (cullBounds === null || intersects(imageBounds(image), cullBounds))
+    ));
     const pixelsPerWorldUnit = this.devicePixelsPerWorldUnit();
     const signature = [
       this.strokeVersion,
       Math.round(pixelsPerWorldUnit * 100),
       strokes.map((stroke) => stroke.itemId).join(","),
     ].join("|");
-    if (signature === this.strokeSignature) return;
+    const builtBounds = this.strokeBuiltBounds;
+    const covered = viewport !== null && builtBounds != null
+      && viewport.minX >= builtBounds.minX
+      && viewport.maxY <= builtBounds.maxY
+      && viewport.maxX <= builtBounds.maxX
+      && viewport.minY >= builtBounds.minY;
+    if (signature === this.strokeSignature && (cullBounds === null || covered)) return;
     this.strokeSignature = signature;
     const entries = strokes.flatMap((item) => {
       const geometry = this.strokeGeometries.get(item.itemId);
       return geometry ? [{ item, geometry }] : [];
     });
-    const batch = buildStrokeBatch(entries, { pixelsPerWorldUnit });
-    this.uploadStrokeBatch(batch, buildStrokeOutlines(strokes));
+    const batch = buildStrokeBatch(entries, {
+      pixelsPerWorldUnit,
+      ...(cullBounds ? { cullBounds } : {}),
+    });
+    const uploaded = this.uploadStrokeBatch(batch, buildStrokeOutlines(strokes));
+    // 上传失败时不做「已覆盖」标记：下一帧还会重试，而不是永远跳过。
+    this.strokeBuiltBounds = uploaded ? cullBounds : null;
   }
 
+  /** 返回是否已可复用（空缓冲也算成功）。失败时由调用方保留重试机会。 */
   private uploadStrokeBatch(
     batch: StrokeBatch,
     outlines: { vertices: Float32Array; index: Map<number, number> },
-  ) {
+  ): boolean {
     this.destroyStrokeBuffers();
-    if (batch.indices.length === 0) return;
+    if (batch.indices.length === 0) return true;
     try {
       const device = this.gpu.device;
       // 先挂到字段上再写数据：中途失败时 `destroyStrokeBuffers` 仍能释放已创建的缓冲。
@@ -1294,6 +1373,7 @@ export class PinBoardRenderer {
         new Float32Array(outlineBuffer.getMappedRange()).set(outlines.vertices);
         outlineBuffer.unmap();
       }
+      return true;
     } catch (error) {
       this.destroyStrokeBuffers();
       diagnosticsLog(
@@ -1301,6 +1381,7 @@ export class PinBoardRenderer {
         `pin-board stroke buffer failed: boardId=${this.boardId}, error=${errorMessage(error)}`,
       );
       this.onError(`笔迹缓冲创建失败：${errorMessage(error)}`);
+      return false;
     }
   }
 
@@ -2099,7 +2180,7 @@ export class PinBoardRenderer {
       this.dragMode = "pan";
     } else if (isStrokeTool(this.tool)) {
       // 绘制分支与选中/框选互斥：工具不是 select 时，按下只可能是要画一笔。
-      if (!this.beginDrawing(this.dragWorld)) return;
+      if (!this.beginDrawing(this.dragWorld, event)) return;
     } else if (this.rotationHandleHit(event.clientX, event.clientY)) {
       const selection = this.selectionWorldQuad();
       if (!selection) return;
@@ -2212,17 +2293,17 @@ export class PinBoardRenderer {
       this.refreshViewport(VIEWPORT_LOAD_DELAY_MS);
       this.emitState();
     } else {
-      const world = screenToWorld(
-        event.clientX,
-        event.clientY,
-        this.canvas.getBoundingClientRect(),
-        this.viewport,
-      );
+      const rect = this.canvas.getBoundingClientRect();
+      const world = screenToWorld(event.clientX, event.clientY, rect, this.viewport);
       if (this.dragMode === "draw") {
         // 只更新草稿与 DOM 预览层：GPU 缓冲在落库后由 `applyMutationResult` 重建，
         // 不在每次 pointermove 重建整板笔迹。
         if (this.draft) {
-          extendStrokeDraft(this.draft, world, event.shiftKey);
+          // Chromium 会把 pointermove 合并到约 60 Hz，快速划线因此丢点；被合并掉的
+          // 中间点只在 `getCoalescedEvents()` 里。一次事件里的所有点共用一个画布矩形。
+          for (const sample of coalescedStrokeSamples(event, rect, this.viewport)) {
+            extendStrokeDraft(this.draft, sample.point, event.shiftKey, sample);
+          }
           this.drawStrokePreview();
         }
       } else if (this.dragMode === "images") {
@@ -2294,8 +2375,24 @@ export class PinBoardRenderer {
 
   private readonly pointerUp = (event: PointerEvent) => {
     if (!this.dragMode || this.dragPointerId !== event.pointerId) return;
-    if (this.dragMode === "draw") this.commitDrawing();
-    else this.finishInteraction();
+    if (this.dragMode === "draw") {
+      // 抬笔的位置可能比最后一个 pointermove 更远（快速收笔时常见）：补上这一点，
+      // 否则每笔都会少画最后几个像素。重合时 `extendStrokeDraft` 会合并掉。
+      if (this.draft) {
+        extendStrokeDraft(
+          this.draft,
+          screenToWorld(
+            event.clientX,
+            event.clientY,
+            this.canvas.getBoundingClientRect(),
+            this.viewport,
+          ),
+          event.shiftKey,
+          { pressure: event.pressure, pointerType: event.pointerType },
+        );
+      }
+      this.commitDrawing();
+    } else this.finishInteraction();
     event.preventDefault();
   };
 
@@ -2353,11 +2450,14 @@ export class PinBoardRenderer {
    * 开始绘制。选中态先清掉：绘制中不该同时显示变换手柄；落库后的新条目只在
    * `select` 工具下自动选中（见 `applyMutationResult`），绘制工具下保持干净。
    */
-  private beginDrawing(world: Point): boolean {
+  private beginDrawing(world: Point, event?: PointerEvent): boolean {
     if (!this.loaded || !isStrokeTool(this.tool)) return false;
     this.selectedIds.clear();
     this.refreshSelectionVisuals();
-    this.draft = beginStrokeDraft(this.tool, world);
+    this.draft = beginStrokeDraft(this.tool, world, {
+      pressure: event?.pressure,
+      pointerType: event?.pointerType,
+    });
     this.dragMode = "draw";
     this.drawStrokePreview();
     return true;
@@ -2377,6 +2477,8 @@ export class PinBoardRenderer {
         draft,
         this.strokeWidthValue,
         MIN_STROKE_DRAG_CSS_PIXELS * this.worldUnitsPerCssPixel(),
+        // 采样管道的容差与点距按绘制时的缩放换算：画的时候多细，存下来的密度就有多细。
+        this.devicePixelsPerWorldUnit(),
       )
       : null;
     if (!draft || !request) {
@@ -2438,19 +2540,26 @@ export class PinBoardRenderer {
     context.lineWidth = this.strokeWidthValue;
     context.lineJoin = "round";
     context.lineCap = "round";
-    const points = strokeDraftPoints(draft);
-    const [start, end] = points;
-    switch (draft.tool) {
-      case "pen": {
-        if (points.length < 2) return;
-        context.beginPath();
-        context.moveTo(points[0][0], points[0][1]);
-        for (let index = 1; index < points.length; index += 1) {
-          context.lineTo(points[index][0], points[index][1]);
-        }
-        context.stroke();
+    const samples = strokeDraftSamples(draft);
+    // 自由笔每个指针事件都重画一遍：直接读采样数组，不再复制成一份点数组。
+    if (draft.tool === "pen") {
+      if (samples.length < 2) return;
+      // 数位笔的预览按压感画成变宽墨迹：与落库判定同一条件（指针是笔**且**确实
+      // 收到过非零压感），否则会出现「预览细、落库粗」的跳变。鼠标仍画等宽折线。
+      if (draft.pen && samples.some((sample) => sample.pressure > 0)) {
+        this.strokePreviewInk(context, samples);
         return;
       }
+      context.beginPath();
+      context.moveTo(samples[0].point[0], samples[0].point[1]);
+      for (let index = 1; index < samples.length; index += 1) {
+        context.lineTo(samples[index].point[0], samples[index].point[1]);
+      }
+      context.stroke();
+      return;
+    }
+    const [start, end] = [samples[0].point, samples[1].point];
+    switch (draft.tool) {
       case "line":
         this.strokePreviewSegment(context, start, end);
         return;
@@ -2502,6 +2611,52 @@ export class PinBoardRenderer {
     context.moveTo(start[0], start[1]);
     context.lineTo(end[0], end[1]);
     context.stroke();
+  }
+
+  /**
+   * 按压感把一段草稿画成变宽的墨迹：沿中心线按每点的半径向两侧偏移出一条闭合
+   * 轮廓再一次填充，而不是逐段 `stroke()`——后者在几百个点上就是几百次绘制调用，
+   * 每次 `pointermove` 重画一遍会拖慢预览。
+   */
+  private strokePreviewInk(
+    context: CanvasRenderingContext2D,
+    samples: readonly { point: Point; pressure: number }[],
+  ) {
+    if (samples.length < 2) return;
+    // 与着色器共用同一个半径公式，预览与落库不会各写一份而慢慢漂移。
+    const radii = samples.map((sample) => (
+      strokePointRadius(this.strokeWidthValue, sample.pressure, true)
+    ));
+    const left: Point[] = [];
+    const right: Point[] = [];
+    for (let index = 0; index < samples.length; index += 1) {
+      const previous = samples[Math.max(0, index - 1)].point;
+      const next = samples[Math.min(samples.length - 1, index + 1)].point;
+      let deltaX = next[0] - previous[0];
+      let deltaY = next[1] - previous[1];
+      const length = Math.hypot(deltaX, deltaY);
+      if (!(length > 0)) {
+        deltaX = 1;
+        deltaY = 0;
+      } else {
+        deltaX /= length;
+        deltaY /= length;
+      }
+      const center = samples[index].point;
+      const radius = radii[index];
+      left.push([center[0] - deltaY * radius, center[1] + deltaX * radius]);
+      right.push([center[0] + deltaY * radius, center[1] - deltaX * radius]);
+    }
+    context.beginPath();
+    context.moveTo(left[0][0], left[0][1]);
+    for (let index = 1; index < left.length; index += 1) {
+      context.lineTo(left[index][0], left[index][1]);
+    }
+    for (let index = right.length - 1; index >= 0; index -= 1) {
+      context.lineTo(right[index][0], right[index][1]);
+    }
+    context.closePath();
+    context.fill();
   }
 
   private readonly wheel = (event: WheelEvent) => {

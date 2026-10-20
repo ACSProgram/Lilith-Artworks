@@ -10,6 +10,10 @@
  * - 形状不存点数据，两端点由包围盒与方向位（0 左上 / 1 右上 / 2 右下 / 3 左下）推出，
  *   方向位按局部坐标计（局部 y 向下，与图片 UV 同一取向）；
  * - 自由笔的点按包围盒归一化，`u` 沿 x、`v` 沿局部 y（顶边为 0）。
+ *
+ * 自由笔在落库前还要过一遍 `strokeSampling.ts` 的采样管道（抽稀、光滑、按弧长重采样、
+ * 压感平滑与两端 taper）；草稿本身保留原始采样，预览直接画它们，因此预览与落库的
+ * 形状只差那一次光滑（亚像素级）。
  */
 
 import type { Point } from "./geometry";
@@ -20,6 +24,10 @@ import {
   type PinBoardStrokeTool,
 } from "./strokeGeometry";
 import { encodeStrokeGeometry } from "./strokeRender";
+import {
+  normalisePenSamples,
+  type PressureSample,
+} from "./strokeSampling";
 
 /** 可绘制工具；`select` 不在其中，它沿用原有的选中/框选/变换交互。 */
 export type StrokeToolName = "pen" | "line" | "arrow" | "rect" | "ellipse";
@@ -72,20 +80,37 @@ export function clampStrokeWidth(width: number): number {
 /** 一次绘制的草稿：世界坐标，与视口无关（缩放/平移不影响已采样的点）。 */
 export interface StrokeDraft {
   readonly tool: StrokeToolName;
-  /** 自由笔的全部采样点；形状只保留起点。 */
-  readonly points: Point[];
+  /** 自由笔的全部采样点（含压感）；形状只保留起点。 */
+  readonly samples: PressureSample[];
   /** 当前末点（未经 Shift 约束）；形状与 Shift 下的自由笔都从这里取末端。 */
   end: Point;
+  /** 末点对应的压感：Shift 直线只保留首尾两点，末端也要带上它。 */
+  endPressure: number;
   /** 最后一次指针事件的 Shift 状态。 */
   shift: boolean;
+  /** 这次拖拽里是否出现过数位笔：决定落库时是否写压感标志。 */
+  pen: boolean;
 }
 
-export function beginStrokeDraft(tool: StrokeToolName, point: Point): StrokeDraft {
+/** 指针事件里与笔迹有关的附加信息；渲染器从 `PointerEvent` 取。 */
+export interface StrokeInput {
+  pressure?: number;
+  pointerType?: string;
+}
+
+export function beginStrokeDraft(
+  tool: StrokeToolName,
+  point: Point,
+  input: StrokeInput = {},
+): StrokeDraft {
+  const pressure = normalisePressure(input.pressure);
   return {
     tool,
-    points: [[point[0], point[1]]],
+    samples: [{ point: [point[0], point[1]], pressure }],
     end: [point[0], point[1]],
+    endPressure: pressure,
     shift: false,
+    pen: input.pointerType === "pen",
   };
 }
 
@@ -95,23 +120,51 @@ export function beginStrokeDraft(tool: StrokeToolName, point: Point): StrokeDraf
  * 自由笔在按住 Shift 时不再累计点：那段时间的轨迹就是一条从起点出发的直线，末端由
  * `end` 给出；松开 Shift 后继续从起点往后累计（与常见绘图软件一致）。
  */
-export function extendStrokeDraft(draft: StrokeDraft, point: Point, shift: boolean): void {
+export function extendStrokeDraft(
+  draft: StrokeDraft,
+  point: Point,
+  shift: boolean,
+  input: StrokeInput = {},
+): void {
   draft.end = [point[0], point[1]];
+  draft.endPressure = normalisePressure(input.pressure);
   draft.shift = shift;
+  if (input.pointerType === "pen") draft.pen = true;
   if (draft.tool !== "pen" || shift) return;
-  const last = draft.points[draft.points.length - 1];
-  if (Math.hypot(point[0] - last[0], point[1] - last[1]) < MIN_SAMPLE_DISTANCE) return;
-  draft.points.push([point[0], point[1]]);
+  const last = draft.samples[draft.samples.length - 1].point;
+  if (Math.hypot(point[0] - last[0], point[1] - last[1]) < MIN_SAMPLE_DISTANCE) {
+    // 位置没变，但压感可能变了（按住不动时压感仍会漂移）：更新末点而不是丢样本。
+    draft.samples[draft.samples.length - 1] = {
+      point: [last[0], last[1]],
+      pressure: draft.endPressure,
+    };
+    return;
+  }
+  draft.samples.push({ point: [point[0], point[1]], pressure: draft.endPressure });
 }
 
 /** 草稿的有效点序列：形状为 [起点, 约束后的末点]，自由笔为全部采样点。 */
 export function strokeDraftPoints(draft: StrokeDraft): readonly Point[] {
-  const start = draft.points[0];
+  return strokeDraftSamples(draft).map((sample) => sample.point);
+}
+
+/** 草稿的有效采样（带压感），与 `strokeDraftPoints` 同一顺序。 */
+export function strokeDraftSamples(draft: StrokeDraft): readonly PressureSample[] {
+  const start = draft.samples[0];
   if (draft.tool === "pen") {
-    // 直接返回采样数组：预览每个指针事件都要读它，复制一份在长笔画上是纯开销。
-    return draft.shift ? [[...start] as Point, [...draft.end] as Point] : draft.points;
+    if (!draft.shift) return draft.samples;
+    return [
+      { point: [start.point[0], start.point[1]], pressure: start.pressure },
+      { point: [draft.end[0], draft.end[1]], pressure: draft.endPressure },
+    ];
   }
-  return [[...start] as Point, constrainShapeEnd(draft.tool, start, draft.end, draft.shift)];
+  return [
+    start,
+    {
+      point: constrainShapeEnd(draft.tool, start.point, draft.end, draft.shift),
+      pressure: 0,
+    },
+  ];
 }
 
 /**
@@ -167,43 +220,51 @@ export interface StrokeCommitRequest extends StrokeCommit {
  * 把草稿编码成落库请求；拖拽距离不足、包围盒越界或几何无法编码时返回 null
  * （调用方按「取消」处理，不产生条目）。
  *
- * `minimumExtent` 是拖拽距离下限（世界单位），由渲染器按当前缩放换算成像素。
+ * `minimumExtent` 是拖拽距离下限（世界单位），由渲染器按当前缩放换算成像素；
+ * `pixelsPerWorldUnit` 是绘制时的缩放，采样管道的容差、步长与 taper 都按它换算——
+ * 用户在哪个缩放下画，存下来的点密度就按那个缩放定。
  */
 export function resolveStrokeDraft(
   draft: StrokeDraft,
   strokeWidth: number,
   minimumExtent = 0,
+  pixelsPerWorldUnit = 1,
 ): StrokeCommit | null {
   const width = clampStrokeWidth(strokeWidth);
-  const points = strokeDraftPoints(draft);
-  if (draft.tool === "pen") return penCommit(points, width, minimumExtent);
-  return shapeCommit(draft.tool, points[0], points[1], width, minimumExtent);
+  const samples = strokeDraftSamples(draft);
+  if (draft.tool === "pen") {
+    return penCommit(
+      samples,
+      width,
+      minimumExtent,
+      Math.max(pixelsPerWorldUnit, 1e-6),
+      draft.pen && samples.some((sample) => sample.pressure > 0),
+    );
+  }
+  return shapeCommit(draft.tool, samples[0].point, samples[1].point, width, minimumExtent);
 }
 
 /**
- * 点数超限时按固定步长抽稀（首尾点保留）。阶段 5 的 RDP 抽稀在采样层完成，
- * 这里只是兜住「一次拖拽点数超过上限」的写入侧，避免整笔被拒绝。
+ * 自由笔的落库几何：先过采样管道（抽稀 → 光滑 → 重采样 → 压感平滑与 taper），
+ * 再按墨迹外框归一化。点数上限由管道兜住，这里不会再被拒绝。
  */
-export function thinStrokePoints(points: readonly Point[], limit = MAX_STROKE_POINTS): Point[] {
-  if (points.length <= limit) return points.map((point) => [...point] as Point);
-  const kept: Point[] = [];
-  const step = (points.length - 1) / (limit - 1);
-  for (let index = 0; index < limit - 1; index += 1) {
-    kept.push([...points[Math.round(index * step)]] as Point);
-  }
-  kept.push([...points[points.length - 1]] as Point);
-  return kept;
-}
-
 function penCommit(
-  samples: readonly Point[],
+  samples: readonly PressureSample[],
   strokeWidth: number,
   minimumExtent: number,
+  pixelsPerWorldUnit: number,
+  usePressure: boolean,
 ): StrokeCommit | null {
   // 单点画不出线段：与其留一个看不见的条目，不如按取消处理。
   if (samples.length < 2) return null;
-  const points = thinStrokePoints(samples);
-  const bounds = pointsBounds(points);
+  const points = normalisePenSamples(samples, {
+    pixelsPerWorldUnit,
+    strokeWidth,
+    usePressure,
+    maxPoints: MAX_STROKE_POINTS,
+  });
+  if (points.length < 2) return null;
+  const bounds = pointsBounds(points.map((sample) => sample.point));
   if (Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY) < minimumExtent) return null;
   const half = strokeWidth / 2;
   // 包围盒是墨迹外框：点中心极值再向外扩一个半径。
@@ -214,11 +275,11 @@ function penCommit(
   if (!(width > 0) || !(height > 0) || width > MAX_STROKE_EXTENT || height > MAX_STROKE_EXTENT) {
     return null;
   }
-  const normalized = points.map(([x, y]) => ({
-    u: (x - left) / width,
+  const normalized = points.map(({ point, pressure }) => ({
+    u: (point[0] - left) / width,
     // 局部 y 向下：顶边对应世界坐标的最大 y。
-    v: (top - y) / height,
-    pressure: 0,
+    v: (top - point[1]) / height,
+    pressure,
   }));
   return {
     tool: "pen",
@@ -277,4 +338,10 @@ function pointsBounds(points: readonly Point[]) {
     maxY = Math.max(maxY, y);
   }
   return { minX, minY, maxX, maxY };
+}
+
+/** 压感收敛到 0–1；缺失或非有限值按 0（设备没给数据）处理。 */
+function normalisePressure(pressure: number | undefined): number {
+  if (pressure === undefined || !Number.isFinite(pressure)) return 0;
+  return Math.min(1, Math.max(0, pressure));
 }

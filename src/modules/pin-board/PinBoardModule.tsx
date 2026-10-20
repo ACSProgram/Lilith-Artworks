@@ -86,6 +86,7 @@ import {
   type PinBoardTool,
   type StrokeCommitRequest,
 } from "./strokeDrawing";
+import { installStrokePerfProbe } from "./strokePerfProbe";
 import { usePinBoardController } from "./usePinBoardController";
 import { usePendingSettle } from "./usePendingSettle";
 import { retryPendingSettle } from "./pendingSettle";
@@ -332,6 +333,12 @@ function GpuCanvas({
   onContextMenuRef.current = onContextMenu;
   const onStrokeCommitRef = useRef(onStrokeCommit);
   onStrokeCommitRef.current = onStrokeCommit;
+
+  // 开发期自检入口：控制台里 `__lilithPinBoardStrokeProbe({ strokes: 500 })` 能跑一遍
+  // 合成笔迹的采样、编码与缓冲构建并打点。生产构建里这个分支会被整段去掉。
+  useEffect(() => {
+    if (import.meta.env.DEV) installStrokePerfProbe();
+  }, []);
 
   // 创建 effect 幂等化：StrictMode 的「挂载 → 清理 → 再挂载」复用同一次创建，
   // 因此每次挂载只创建一个 GPU 设备。真正的销毁推迟到模块卸载时执行。
