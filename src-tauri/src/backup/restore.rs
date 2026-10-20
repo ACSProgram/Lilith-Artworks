@@ -1,6 +1,7 @@
 use std::{
     fs::{self, File},
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 use tempfile::NamedTempFile;
@@ -35,6 +36,7 @@ pub(crate) fn restore(
     progress: impl Fn(&str, u64, u64),
 ) -> Result<String, String> {
     ensure_not_cancelled(cancel)?;
+    let started = Instant::now();
     let output = validate_output_path(root, output_path)?;
     let output_parent = output.parent().ok_or("恢复输出路径无效")?;
     let ResolvedChain {
@@ -48,6 +50,10 @@ pub(crate) fn restore(
         cancel,
         &|label, current, total| progress(label, current, total),
     )?;
+    // 分段耗时：链解析包含打开 snapshot、逐跳解压 delta 并重排块表，与后面的
+    // 导出、同步分开记，才能看出恢复是卡在解压还是卡在写盘。
+    let resolve_ms = started.elapsed().as_millis();
+    let export_started = Instant::now();
     ensure_not_cancelled(cancel)?;
     let mut output_temp = NamedTempFile::new_in(output_parent)
         .map_err(|error| format!("无法创建恢复输出：{error}"))?;
@@ -62,21 +68,27 @@ pub(crate) fn restore(
             .copy_original(&mut reader, output_temp.as_file_mut(), &task)
             .map_err(|error| format!("无法导出恢复文件：{error}"))?;
     }
+    let export_ms = export_started.elapsed().as_millis();
+    let sync_started = Instant::now();
     output_temp
         .as_file()
         .sync_all()
         .map_err(|error| format!("无法同步恢复文件：{error}"))?;
+    let sync_ms = sync_started.elapsed().as_millis();
     let output_bytes = output_temp
         .as_file()
         .metadata()
         .map(|metadata| metadata.len())
         .unwrap_or(0);
     ensure_not_cancelled(cancel)?;
+    let publish_started = Instant::now();
     output_temp
         .persist_noclobber(&output)
         .map_err(|error| format!("无法发布恢复文件：{}", error.error))?;
+    let publish_ms = publish_started.elapsed().as_millis();
     log::info!(
-        "restored history node: history_id={history_id}, chain_steps={steps}, output_bytes={output_bytes}, output={}",
+        "restored history node: history_id={history_id}, chain_steps={steps}, output_bytes={output_bytes}, elapsed_ms={}, resolve_ms={resolve_ms}, export_ms={export_ms}, sync_ms={sync_ms}, publish_ms={publish_ms}, output={}",
+        started.elapsed().as_millis(),
         display_path(&output)
     );
     progress("恢复完成", steps, steps);

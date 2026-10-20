@@ -5,7 +5,7 @@ use std::{
     io::{self, Read, Seek, SeekFrom, Write},
     path::Path,
     sync::{Mutex, OnceLock},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use sha2::{Digest, Sha256};
@@ -288,7 +288,10 @@ pub(crate) fn run_backup(
     if note.chars().count() > 500 {
         return Err(BackupRunError::Failed("提交备注不能超过 500 个字符".into()));
     }
-    let started = std::time::Instant::now();
+    let started = Instant::now();
+    // 一次提交只在既有那条结果日志里多带分段耗时：这些边界覆盖了这条路径上
+    // 全部真实 I/O（读源文件、写快照、同步、提预览、写增量、落图），不新增行。
+    let mut phase = started;
     let title = if note.trim().is_empty() {
         if commit_kind == "automatic" {
             "自动备份"
@@ -319,11 +322,17 @@ pub(crate) fn run_backup(
     let temp_directory = artwork_directory.join("temp");
     let mut snapshot_temp = NamedTempFile::new_in(&temp_directory)
         .map_err(|error| format!("无法创建 snapshot 临时文件：{error}"))?;
+    let prepare_ms = phase.elapsed().as_millis();
+    phase = Instant::now();
     let snapshot = create_snapshot(&mut source, snapshot_temp.as_file_mut(), options, cancel)?;
+    let snapshot_ms = phase.elapsed().as_millis();
+    phase = Instant::now();
     snapshot_temp
         .as_file()
         .sync_all()
         .map_err(|error| format!("无法同步 snapshot：{error}"))?;
+    let snapshot_sync_ms = phase.elapsed().as_millis();
+    phase = Instant::now();
     ensure_not_cancelled(cancel)?;
     let after_snapshot = source_metadata(source_path)?;
     ensure_source_unchanged(&before, &after_snapshot)?;
@@ -339,6 +348,7 @@ pub(crate) fn run_backup(
         .as_ref()
         .filter(|node| node.sha256.eq_ignore_ascii_case(&digest))
     {
+        let validate_started = Instant::now();
         if let Err(validation_error) = validate_head_snapshot(root, head, cancel) {
             ensure_not_cancelled(cancel)?;
             log::warn!(
@@ -354,11 +364,12 @@ pub(crate) fn run_backup(
         // 内容已与 head 核对一致，记录基线元数据供快速检查使用。
         record_source_metadata(root, branch_id, &after_snapshot);
         log::info!(
-            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}",
+            "backup unchanged: branch_id={branch_id}, history_id={}, logical_bytes={}, format={:?}, elapsed_ms={}, prepare_ms={prepare_ms}, snapshot_ms={snapshot_ms}, snapshot_sync_ms={snapshot_sync_ms}, validate_ms={}",
             head.id,
             snapshot.logical_size(),
             options.format,
-            started.elapsed().as_millis()
+            started.elapsed().as_millis(),
+            validate_started.elapsed().as_millis()
         );
         return Ok(BackupCommitResult {
             created: false,
@@ -372,6 +383,7 @@ pub(crate) fn run_backup(
     // Any unsupported or malformed work file simply produces no thumbnail; the
     // commit result never depends on it.
     let thumbnail = preview::extract(source_path, cancel);
+    let preview_ms = phase.elapsed().as_millis();
     ensure_not_cancelled(cancel)?;
     // The preview re-reads the file, so re-check the file against the snapshot
     // baseline: a preview may never describe content different from the one
@@ -386,6 +398,11 @@ pub(crate) fn run_backup(
     let mut delta_final = None;
     let mut delta_relative = None;
     let mut delta_size = None;
+    // 增量的真实工作量是它携带的载荷字节（父版本相对本次变化的块），不是父文件
+    // 大小；把它和耗时一起记下来，才能判断增量这一步是被读盘还是压缩限住的。
+    let mut delta_input_bytes = 0_u64;
+    let mut delta_ms = 0_u128;
+    let mut delta_sync_ms = 0_u128;
     // 检查点父节点以 snapshot 作永久表示：子边增量不会被任何读取路径消费，
     // 因此不为它生成文件（取消检查点时由 `restore::build_reverse_delta` 重建）。
     // head 的 snapshot 会在本次提交中被释放，那条增量随后仍是父节点的唯一表示，
@@ -404,6 +421,8 @@ pub(crate) fn run_backup(
             .map_err(|error| format!("无法打开当前 snapshot：{error}"))?;
         let previous_chunk = ChunkFile::open(&mut previous_file)
             .map_err(|error| format!("无法读取当前 snapshot：{error}"))?;
+        delta_input_bytes = snapshot.delta_payload_bytes(&previous_chunk);
+        phase = Instant::now();
         let mut temp = NamedTempFile::new_in(&temp_directory)
             .map_err(|error| format!("无法创建 delta 临时文件：{error}"))?;
         let task = ChunkTask::cancel(cancel);
@@ -416,9 +435,12 @@ pub(crate) fn run_backup(
                 &task,
             )
             .map_err(|error| format!("无法创建反向增量：{error}"))?;
+        delta_ms = phase.elapsed().as_millis();
+        phase = Instant::now();
         temp.as_file()
             .sync_all()
             .map_err(|error| format!("无法同步 delta：{error}"))?;
+        delta_sync_ms = phase.elapsed().as_millis();
         let final_path = artwork_directory
             .join("deltas")
             .join(format!("{history_id}-to-{}.lbd", previous.id));
@@ -434,6 +456,7 @@ pub(crate) fn run_backup(
     }
 
     ensure_not_cancelled(cancel)?;
+    phase = Instant::now();
     publish_temp(snapshot_temp, &snapshot_final, "snapshot")?;
     if let (Some(temp), Some(final_path)) = (delta_temp, delta_final.as_ref()) {
         if let Err(error) = publish_temp(temp, final_path, "delta") {
@@ -441,6 +464,8 @@ pub(crate) fn run_backup(
             return Err(error.into());
         }
     }
+    let publish_ms = phase.elapsed().as_millis();
+    phase = Instant::now();
     if let Err(error) = ensure_not_cancelled(cancel) {
         let _ = fs::remove_file(&snapshot_final);
         if let Some(path) = delta_final.as_ref() {
@@ -490,10 +515,11 @@ pub(crate) fn run_backup(
     // 提交释放的父 snapshot 已在事务内入队，这里单遍重放；失败只留队列可重试，
     // 不影响已成功的提交结果。
     cleanup::replay(root, &cleanup_ids);
+    let graph_ms = phase.elapsed().as_millis();
     // 提交成功，记录基线元数据供快速检查使用。
     record_source_metadata(root, branch_id, &after_preview);
     log::info!(
-        "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, format={:?}, chunking={:?}, elapsed_ms={}",
+        "backup committed: branch_id={branch_id}, history_id={history_id}, commit_kind={commit_kind}, logical_bytes={committed_logical}, snapshot_bytes={committed_chunk}, delta_bytes={committed_delta:?}, format={:?}, chunking={:?}, elapsed_ms={}, prepare_ms={prepare_ms}, snapshot_ms={snapshot_ms}, snapshot_sync_ms={snapshot_sync_ms}, preview_ms={preview_ms}, delta_ms={delta_ms}, delta_input_bytes={delta_input_bytes}, delta_sync_ms={delta_sync_ms}, publish_ms={publish_ms}, graph_ms={graph_ms}",
         options.format,
         options.chunking,
         started.elapsed().as_millis()

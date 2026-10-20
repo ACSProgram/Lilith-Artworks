@@ -17,6 +17,11 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- Backup commits and restores record per-phase timings on their existing result
+  lines (commit: prepare, snapshot write, snapshot sync, preview, reverse delta
+  with its payload bytes, delta sync, publish, graph; restore: chain resolution,
+  export, sync, publish). One line now shows whether a large file is limited by
+  reading, compressing or writing; no new lines, no behavior change.
 - Automatic backups wait ten seconds after the last user activity (write
   commands and content-level read scans alike) before starting, and the
   scheduler learns each branch's last successful check duration and stretches
