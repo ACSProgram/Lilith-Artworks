@@ -102,3 +102,9 @@
   画板文字定位与添加文字对话框、清理体系收口与检查点增量精简、2026-10-19 晚快速档压测复跑、
   `0.3.0-alpha.3` 切分与 CHANGELOG 写法调整，以及本轮把 alpha3 与 0.3 计划搬入归档、同步落后
   口径的记录。当前批次状态改看 `../current-handoff.md`。
+- `platform-code-consolidation-plan-2026-10-20.md`：平台代码集中与可移植性的独立计划与实施记录。
+  含平台专属逻辑的九处盘点（`file:line` 已核实）、`src-tauri/src/platform/` 的接口设计（业务语义
+  命名、能力缺失显式、`cfg` 只准出现在该模块内）、例外登记表与「加平台清单」的口径、四项维护者
+  决策（压力测试辅助代码不纳入、CI grep 随批实施、前端 `normalizeRepositoryKey` 保留并登记）、
+  收益与代价，以及实施后的偏差与验收前整理明细。有效规则并入 `docs/guides/platform.md`，界面项
+  人工验收在 `../todo.md` 追踪。

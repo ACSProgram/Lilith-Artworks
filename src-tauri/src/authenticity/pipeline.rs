@@ -14,7 +14,7 @@ use sha2::{Digest, Sha256};
 use tempfile::{tempdir_in, NamedTempFile};
 use zeroize::Zeroizing;
 
-use crate::{cleanup, storage};
+use crate::{cleanup, platform::path::display_path, storage};
 
 use super::{
     c2pa,
@@ -671,7 +671,7 @@ pub(crate) fn publish(
     let manifest = c2pa::read_manifest(&signed_path)?;
     ensure_not_cancelled(operation)?;
     validate_signed_manifest(&manifest, &request.config, &record_id, &identifier)?;
-    let output_path = storage::display_path(&output);
+    let output_path = display_path(&output);
     let output_sha256 = sha256_file_cancelable(&signed_path, operation)?;
     let output_bytes = fs::metadata(&signed_path)?.len();
     let created_ms = storage::now_ms().map_err(AuthenticityError::Task)?;

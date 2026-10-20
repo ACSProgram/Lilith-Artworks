@@ -9,6 +9,10 @@ use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use crate::platform::path::{
+    display_path, equivalence_key, path_namespace, source_path_key, PathNamespace,
+};
+
 pub(crate) const DATABASE_NAME: &str = "lilith-artworks.sqlite3";
 
 pub(crate) fn database_path(root: &Path) -> PathBuf {
@@ -50,11 +54,6 @@ pub(crate) fn database_error(error: rusqlite::Error) -> String {
     format!("作品数据库操作失败：{error}")
 }
 
-pub(crate) fn display_path(path: &Path) -> String {
-    let value = path.to_string_lossy();
-    value.strip_prefix(r"\\?\").unwrap_or(&value).to_owned()
-}
-
 pub(crate) fn validate_title(value: &str, label: &str) -> Result<(), String> {
     let title = value.trim();
     if title.is_empty() {
@@ -92,39 +91,9 @@ pub(crate) fn validate_repository_relative_path(value: &str) -> Result<(), Strin
     Ok(())
 }
 
-/// 路径的命名空间分类。只做**词法**判断，不访问文件系统：读取侧校验要能在文件
-/// 已被移动或删除、甚至从未存在的情况下照常完成。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PathNamespace {
-    /// 本地卷或普通挂载点。
-    Local,
-    /// UNC 网络位置：`\\server\share\...` 与 verbatim 形式 `\\?\UNC\server\share\...`。
-    /// NAS 与共享目录是合法工作方式，[`PathNamespace::Network`] 本身不是错误。
-    Network,
-    /// Windows 设备命名空间：`\\.\`、verbatim 前缀 `\\?\`，以及 NT 对象路径
-    /// `\Device\`。读取这类路径可绕过盘符与访问控制，因此一律拒绝。
-    Device,
-}
-
-/// 分类路径命名空间。分隔符 `\` 与 `/` 视为等价，前缀匹配不区分大小写——
-/// Windows 对两者都接受，只按 `/` 或原始大小写判断会被绕过。
-pub(crate) fn path_namespace(value: &str) -> PathNamespace {
-    let normalized = value.trim().replace('/', "\\");
-    let lowered = normalized.to_lowercase();
-    if lowered.starts_with(r"\\?\unc\") {
-        return PathNamespace::Network;
-    }
-    if lowered.starts_with(r"\\?\")
-        || lowered.starts_with(r"\\.\")
-        || lowered.starts_with(r"\device\")
-    {
-        return PathNamespace::Device;
-    }
-    if lowered.starts_with(r"\\") {
-        return PathNamespace::Network;
-    }
-    PathNamespace::Local
-}
+// 路径命名空间分类（`PathNamespace` / `path_namespace`）与设备命名空间拒绝
+// （`ensure_not_device_path`）已集中到 `crate::platform::path`；本模块保留按
+// 业务语义组合它们的仓库侧规则。
 
 /// 无人值守流程（自动备份）可以安全使用的分支工作文件路径。
 ///
@@ -138,15 +107,6 @@ pub(crate) fn unattended_source_path_rejection(value: &str) -> Option<String> {
         PathNamespace::Network => Some("工作文件位于网络位置，已跳过自动备份".into()),
         PathNamespace::Device => Some("工作文件位于设备命名空间，已跳过自动备份".into()),
     }
-}
-
-/// 拒绝设备命名空间路径；网络位置照常通过。用于用户在场、可自行判断的手动操作
-/// （手动提交、在文件夹中显示）。
-pub(crate) fn ensure_not_device_path(value: &str, label: &str) -> Result<(), String> {
-    if path_namespace(value) == PathNamespace::Device {
-        return Err(format!("{label}不能是设备命名空间路径"));
-    }
-    Ok(())
 }
 
 /// 分支工作文件路径的**读取侧**结构校验。
@@ -182,27 +142,13 @@ pub(crate) fn validate_branch_source_path(
 /// 目标文件可能不存在，而读取侧校验必须在任何磁盘状态下都能给出结论。
 fn is_inside_repository(root: &Path, value: &str) -> bool {
     let root = display_path(root);
-    let root_key = comparable_path(root.trim_end_matches(['\\', '/']));
+    let root_key = equivalence_key(root.trim_end_matches(['\\', '/']));
     if root_key.is_empty() {
         return false;
     }
-    let value_key = comparable_path(value);
+    let value_key = equivalence_key(value);
     value_key == root_key
         || value_key.starts_with(&format!("{root_key}{}", std::path::MAIN_SEPARATOR))
-}
-
-/// 把路径归一成可比较的形式：统一分隔符，Windows 上再统一大小写。
-fn comparable_path(value: &str) -> String {
-    let normalized = if std::path::MAIN_SEPARATOR == '\\' {
-        value.replace('/', "\\")
-    } else {
-        value.replace('\\', "/")
-    };
-    if cfg!(windows) {
-        normalized.to_lowercase()
-    } else {
-        normalized
-    }
 }
 
 pub(crate) fn verify_file_sha256(
@@ -251,11 +197,7 @@ pub(crate) fn normalize_source_path(
         return Err("分支工作文件不能位于作品仓库内部".into());
     }
     let display = display_path(&canonical);
-    let key = if cfg!(windows) {
-        display.to_lowercase()
-    } else {
-        display.clone()
-    };
+    let key = source_path_key(&display);
     Ok((display, key))
 }
 
@@ -355,38 +297,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_local_network_and_device_namespaces() {
-        assert_eq!(path_namespace(r"C:\work\artwork.psd"), PathNamespace::Local);
-        assert_eq!(
-            path_namespace(r"\\nas\share\artwork.psd"),
-            PathNamespace::Network
-        );
-        assert_eq!(
-            path_namespace(r"//nas/share/artwork.psd"),
-            PathNamespace::Network
-        );
-        assert_eq!(
-            path_namespace(r"\\?\UNC\nas\share\artwork.psd"),
-            PathNamespace::Network
-        );
-        // verbatim 与设备前缀一律按设备命名空间处理：它们绕过盘符与访问控制，
-        // 而写入侧早已把 `\\?\` 前缀剥掉（见 `display_path`），正常数据不会带它。
-        assert_eq!(
-            path_namespace(r"\\?\C:\work\artwork.psd"),
-            PathNamespace::Device
-        );
-        assert_eq!(path_namespace(r"\\.\PhysicalDrive0"), PathNamespace::Device);
-        assert_eq!(
-            path_namespace(r"\\?\GLOBALROOT\Device\HarddiskVolumeShadowCopy1\x"),
-            PathNamespace::Device
-        );
-        assert_eq!(
-            path_namespace(r"\Device\HarddiskVolume1\x"),
-            PathNamespace::Device
-        );
-    }
-
-    #[test]
     fn unattended_paths_skip_network_and_device_namespaces() {
         assert!(unattended_source_path_rejection(r"C:\work\artwork.psd").is_none());
         let network = unattended_source_path_rejection(r"\\nas\share\artwork.psd").unwrap();
@@ -420,12 +330,5 @@ mod tests {
         let inside_error =
             validate_branch_source_path(&root, &display_path(&inside), "分支工作文件").unwrap_err();
         assert!(inside_error.contains("作品仓库内部"), "{inside_error}");
-    }
-
-    #[test]
-    fn manual_paths_reject_only_the_device_namespace() {
-        ensure_not_device_path(r"\\nas\share\artwork.psd", "工作文件").unwrap();
-        let error = ensure_not_device_path(r"\\.\PhysicalDrive0", "工作文件").unwrap_err();
-        assert!(error.contains("设备命名空间"), "{error}");
     }
 }

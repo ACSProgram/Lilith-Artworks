@@ -14,6 +14,7 @@ mod history;
 mod library;
 mod path_scope;
 mod pin_board;
+mod platform;
 mod preview;
 mod repository_lock;
 mod storage;

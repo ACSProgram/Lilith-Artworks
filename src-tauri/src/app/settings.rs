@@ -2,7 +2,6 @@ use std::{
     fs,
     io::Write,
     path::{Path, PathBuf},
-    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex, RwLock,
@@ -19,7 +18,11 @@ use super::{
     usecases, OperationCoordinator,
 };
 use crate::backup::BackupState;
-use crate::{authenticity::pipeline, cleanup, history, library, storage};
+use crate::platform::{
+    path::ensure_not_device_path,
+    shell::{open_directory, open_existing_directory, reveal_in_file_manager},
+};
+use crate::{authenticity::pipeline, cleanup, history, library};
 
 pub(crate) const CURRENT_SETTINGS_VERSION: u32 = 2;
 
@@ -771,35 +774,12 @@ pub(crate) fn reveal_path_in_folder(path: String) -> Result<(), String> {
     }
     // 用户在场的手动操作：网络位置照常打开（NAS 是合法用法），但设备命名空间
     // 一律拒绝——那是设备对象而不是文件，交给资源管理器打开没有意义。
-    storage::ensure_not_device_path(trimmed, "文件路径")?;
+    ensure_not_device_path(trimmed, "文件路径")?;
     let path = Path::new(trimmed);
     if !path.is_file() {
         return Err("文件不存在或已被移动".into());
     }
-    #[cfg(target_os = "windows")]
-    {
-        Command::new("explorer.exe")
-            .arg(format!("/select,{}", path.display()))
-            .spawn()
-            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
-    }
-    #[cfg(target_os = "macos")]
-    {
-        Command::new("open")
-            .arg("-R")
-            .arg(path)
-            .spawn()
-            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let directory = path.parent().ok_or("文件路径无效")?;
-        Command::new("xdg-open")
-            .arg(directory)
-            .spawn()
-            .map_err(|error| format!("无法打开文件所在文件夹：{error}"))?;
-    }
-    Ok(())
+    reveal_in_file_manager(path)
 }
 
 #[tauri::command]
@@ -817,26 +797,6 @@ pub(crate) fn open_legal_directory(app: AppHandle) -> Result<(), String> {
         .find(|path| path.join("THIRD_PARTY_LICENSES.html").is_file())
         .ok_or("随包法律材料缺失；请重新安装应用")?;
     open_existing_directory(directory, "法律材料")
-}
-
-fn open_directory(path: &Path, label: &str) -> Result<(), String> {
-    fs::create_dir_all(path).map_err(|error| format!("无法创建{label}目录：{error}"))?;
-    open_existing_directory(path, label)
-}
-
-fn open_existing_directory(path: &Path, label: &str) -> Result<(), String> {
-    let mut command = if cfg!(target_os = "windows") {
-        Command::new("explorer.exe")
-    } else if cfg!(target_os = "macos") {
-        Command::new("open")
-    } else {
-        Command::new("xdg-open")
-    };
-    command
-        .arg(path)
-        .spawn()
-        .map_err(|error| format!("无法打开{label}目录：{error}"))?;
-    Ok(())
 }
 
 #[tauri::command]

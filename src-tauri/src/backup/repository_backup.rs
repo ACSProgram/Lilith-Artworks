@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     cancel::CancelToken,
     contracts::{BackupVerificationMode, RepositoryIntegrityProvider},
+    platform::path::display_path,
     repository_lock, storage,
 };
 
@@ -219,7 +220,7 @@ fn sweep_stale_staging_directories(destination_parent: &Path, now_ms: i64) -> St
         Err(error) => {
             log::warn!(
                 "无法读取备份目标目录 {}，跳过残留暂存目录清扫：{error}",
-                storage::display_path(destination_parent)
+                display_path(destination_parent)
             );
             return sweep;
         }
@@ -255,7 +256,7 @@ fn sweep_stale_staging_directories(destination_parent: &Path, now_ms: i64) -> St
                 sweep.failed += 1;
                 log::warn!(
                     "无法回收残留的备份暂存目录 {}：{error}",
-                    storage::display_path(&path)
+                    display_path(&path)
                 );
             }
         }
@@ -418,8 +419,8 @@ pub(crate) fn create_repository_backup(
         progress("备份发布完成", 1, 1);
 
         Ok(RepositoryBackupReport {
-            backup_path: storage::display_path(&final_path),
-            repository_path: storage::display_path(&final_path.join(REPOSITORY_DIRECTORY)),
+            backup_path: display_path(&final_path),
+            repository_path: display_path(&final_path.join(REPOSITORY_DIRECTORY)),
             file_count: manifest.file_count,
             total_bytes: manifest.total_bytes,
             history_nodes: integrity.history_nodes,
@@ -549,7 +550,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
         if metadata.file_type().is_symlink() {
             return Err(format!(
                 "仓库包含不受支持的符号链接：{}",
-                storage::display_path(&path)
+                display_path(&path)
             ));
         }
         if metadata.is_dir() {
@@ -566,7 +567,7 @@ fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Res
         } else {
             return Err(format!(
                 "仓库包含不受支持的文件类型：{}",
-                storage::display_path(&path)
+                display_path(&path)
             ));
         }
     }

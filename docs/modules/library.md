@@ -41,7 +41,7 @@
 - 发现旧名称的备用 `.sqlite3` 时，先执行 `wal_checkpoint(TRUNCATE)` 合并已提交 WAL、关闭连接并清理旧 sidecar，再改名为标准数据库名；如果仍有进程占用导致 checkpoint busy，则保留原文件并返回错误，不做不完整迁移。
 - 数据库发现与「目录是否非空」判定忽略仓库根目录下的运行时文件：跨进程 owner lock 的锁库 `.lilith-write-lock.sqlite3*` 与 owner 元数据 `.lilith-write-owner.json` 不是作品数据库，也不能让首次初始化被误判为非空目录。
 - `schema.rs` 是仓库格式常量、当前建库 SQL、完整校验、轻量校验和 schema 迁移的唯一所有者；Library 业务仓储不再内嵌 schema SQL。新建仓库直接以当前 `SCHEMA_VERSION`（v5）落库；打开旧版本仓库时按 `v1 → v2 → v3 → v4 → v5` 迁移链向前升级。若仓库版本高于当前 `SCHEMA_VERSION`（例如旧程序打开新仓库），打开被直接拒绝且不写入任何结构，避免旧代码按旧表形状破坏数据；不提供降级。
-- 打开既有仓库时，`validate_repository_semantics` 除受控相对路径外还校验 `branches.source_path` / `source_path_key`：该字段按设计保存仓库之外的绝对路径，因此走独立的**结构校验**（绝对路径、无设备命名空间、不在仓库目录内），**不检查文件是否存在**（工作文件会被移动或删除，打开仓库必须仍然成功），也不拒绝网络位置（NAS 是合法用法）。挡住的是「打开他人构造或分享的仓库后，路径被写成 `\\.\`、`\\?\` 之类的设备对象或仓库内部文件」——这类值只可能来自手工写入，写入侧早已拒绝。空字符串表示分支尚未选择工作文件，属于合法状态。判定逻辑集中在 `storage::validate_branch_source_path` / `storage::path_namespace`，都是纯词法判断，不做 canonicalize。
+- 打开既有仓库时，`validate_repository_semantics` 除受控相对路径外还校验 `branches.source_path` / `source_path_key`：该字段按设计保存仓库之外的绝对路径，因此走独立的**结构校验**（绝对路径、无设备命名空间、不在仓库目录内），**不检查文件是否存在**（工作文件会被移动或删除，打开仓库必须仍然成功），也不拒绝网络位置（NAS 是合法用法）。挡住的是「打开他人构造或分享的仓库后，路径被写成 `\\.\`、`\\?\` 之类的设备对象或仓库内部文件」——这类值只可能来自手工写入，写入侧早已拒绝。空字符串表示分支尚未选择工作文件，属于合法状态。判定逻辑集中在 `storage::validate_branch_source_path` / `platform::path::path_namespace`，都是纯词法判断，不做 canonicalize。
 - 受控相对路径校验跳过空字符串：`history_edges.delta_path` 在检查点父节点名下按设计登记 `''`（表示该边没有反向增量，取消检查点时重建），兼容列 `history_nodes.delta_path` 同样把 `''` 当作未设置。这类值不是路径，不参与相对路径校验，也不要求文件存在；否则清理过一次检查点增量的仓库会因为自己的合法记账而拒绝打开。`snapshot_path` 没有这种记账语义（读取侧把非 NULL 一律当作可用快照），仍要求非空且合法。
 
 ## 回收站

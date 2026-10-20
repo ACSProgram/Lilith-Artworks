@@ -16,6 +16,7 @@ use crate::{
         command_runtime::{CommandError, OperationDomain},
         usecases, OperationCoordinator,
     },
+    platform::path::display_path,
     storage,
 };
 
@@ -157,7 +158,7 @@ pub(crate) async fn stage_authenticity_input(
         .fs_scope()
         .allow_file(&path)
         .map_err(|error| AuthenticityError::Task(format!("无法授权拖入的图片：{error}")))?;
-    Ok(storage::display_path(&path))
+    Ok(display_path(&path))
 }
 
 static DROP_STAGE_SESSION: OnceLock<String> = OnceLock::new();

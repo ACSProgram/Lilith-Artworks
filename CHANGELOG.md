@@ -15,6 +15,18 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- Platform-specific branches are consolidated into a single
+  `src-tauri/src/platform/` module (`path` / `shell` / `clipboard` /
+  `process`), so business code no longer carries `cfg` branches; call sites
+  were renamed mechanically and behavior, return values and error messages are
+  unchanged. A new portability guide (`docs/guides/platform.md`) documents the
+  single-entry rule, the exception registry (including the frontend
+  `normalizeRepositoryKey` sync requirement) and the per-platform capability
+  table, and Windows CI now fails when a platform `cfg` branch appears outside
+  `platform/` or the registered exceptions.
+
 ## 0.3.0-alpha.3 - 2026-10-20
 
 ### Added

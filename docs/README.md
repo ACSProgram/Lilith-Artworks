@@ -32,6 +32,7 @@
 流程与计划：
 
 - [验证策略](guides/validation.md)：分层验证、压力测试边界与持续集成。
+- [可移植性规范](guides/platform.md)：平台分支唯一入口 `src-tauri/src/platform/`、例外登记表与「加平台清单」。
 - [发行政策](guides/release-policy.md)：滞后版本号、`Unreleased` 暂存段、发布门槛与产物。
 - [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。
 - [0.2 基线报告（0.3 阶段 0）](planning/0.3-baseline-2026-10-18.md)：锁等待、任务耗时、

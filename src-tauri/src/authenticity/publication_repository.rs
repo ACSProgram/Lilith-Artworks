@@ -2,7 +2,7 @@ use std::path::Path;
 
 use rusqlite::{params, OptionalExtension, Row};
 
-use crate::{cleanup, storage};
+use crate::{cleanup, platform::path::display_path, storage};
 
 use super::model::FinalArtifact;
 
@@ -107,8 +107,7 @@ pub(crate) fn publication_target(
         .optional()
         .map_err(storage::database_error)?
         .ok_or_else(|| "分支尚未进入发布状态".to_owned())?;
-    target.artifact_path =
-        storage::display_path(&storage::resolve_path(root, &target.artifact_path)?);
+    target.artifact_path = display_path(&storage::resolve_path(root, &target.artifact_path)?);
     storage::verify_file_sha256(
         Path::new(&target.artifact_path),
         &target.source_sha256,
@@ -128,8 +127,7 @@ pub(crate) fn find_artifact(root: &Path, branch_id: &str) -> Result<Option<Final
         .optional()
         .map_err(storage::database_error)?;
     if let Some(value) = artifact.as_mut() {
-        value.source_path =
-            storage::display_path(&storage::resolve_path(root, &value.source_path)?);
+        value.source_path = display_path(&storage::resolve_path(root, &value.source_path)?);
     }
     Ok(artifact)
 }

@@ -12,6 +12,7 @@
 - 仓储空间状态（数据库记录口径或磁盘扫描）：先读 `docs/modules/history-and-backup.md` 的“仓储空间状态”，再进入 `src-tauri/src/storage_overview.rs` 或 `src/app/RepositoryStoragePanel.tsx`。
 - 样式问题：业务模块样式优先读对应 `src/styles/<module>.css`；`src/styles/index.css` 只保留基础控件和仍未拆出的共享规则。
 - 日志与诊断（分档、新增日志的取舍、格式约定）：读 `docs/guides/logging.md`，再进入 `src/shared/diagnostics.ts` 或 `src-tauri/src/app/diagnostics.rs`。
+- 平台分支（路径表示、文件管理器、剪贴板、进程信息）：读 `docs/guides/platform.md`，再进入 `src-tauri/src/platform/`；业务代码里不写 `cfg` 分支，能力缺失按规范显式返回。
 - 构建与验证：只读 `docs/guides/validation.md`，按用户要求选择轻量检查或完整验证；压力测试只随发布运行，不在日常开发或收尾阶段执行。
 - 版本、CHANGELOG 与发布口径：只读 `docs/guides/release-policy.md`。
 - 本轮尚未验收的工作：读 `docs/planning/current-handoff.md`；未完成事项查 `docs/planning/todo.md`，不要从旧聊天记录重建范围。

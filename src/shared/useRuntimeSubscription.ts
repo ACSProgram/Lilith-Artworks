@@ -15,6 +15,11 @@ let activeRepositoryKey: string | null = null;
 /**
  * 仓库 key 只用于相等比较：去掉 Windows 扩展前缀、统一分隔符与大小写，
  * 并去掉结尾分隔符，避免原生侧与设置侧一处带 `\`、一处不带时把事件全部丢掉。
+ *
+ * 同步要求：本函数是后端 `platform::path::display_path`（剥 `\\?\` 前缀）+
+ * `platform::path::equivalence_key`（统一分隔符与大小写）再加「去掉结尾分隔符」
+ * 的组合（`src-tauri/src/platform/path.rs`）。后端任一环节改语义，这里必须对齐，
+ * 见 `docs/guides/platform.md` 的例外登记表。
  */
 function normalizeRepositoryKey(value: string | null | undefined): string | null {
   if (!value) return null;

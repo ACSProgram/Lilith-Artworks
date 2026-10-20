@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::{
     cancel::CancelToken,
     contracts::{reference_inventories, ScanCandidateFile},
+    platform::path::display_path,
     storage,
 };
 
@@ -602,7 +603,7 @@ fn sweep_repository_temp_at(
         Err(error) => {
             log::warn!(
                 "无法读取仓库临时目录 {}，跳过清扫：{error}",
-                storage::display_path(&temp_directory)
+                display_path(&temp_directory)
             );
             return sweep;
         }
@@ -647,7 +648,7 @@ fn sweep_repository_temp_at(
                 sweep.failed += 1;
                 log::warn!(
                     "无法回收仓库临时目录中的残留 {}：{error}",
-                    storage::display_path(&entry.path())
+                    display_path(&entry.path())
                 );
             }
         }
@@ -935,13 +936,8 @@ mod tests {
     fn enqueue_external(root: &Path, path: &Path, expected_sha256: &str) -> String {
         let mut connection = storage::open(root).unwrap();
         let transaction = connection.transaction().unwrap();
-        let id = enqueue_external_file(
-            &transaction,
-            &storage::display_path(path),
-            expected_sha256,
-            "test",
-        )
-        .unwrap();
+        let id = enqueue_external_file(&transaction, &display_path(path), expected_sha256, "test")
+            .unwrap();
         transaction.commit().unwrap();
         id
     }
@@ -1653,7 +1649,7 @@ mod tests {
                         authentication_content, regions_json, created_ms)
                      VALUES ('record', 'artifact', 'branch', 'history', NULL, 0, ?1,
                              'artworks/stored.jpg', ?2, 8, 't', 'c', 'r', 'a', '[]', 0)",
-                    params![storage::display_path(&output), expected],
+                    params![display_path(&output), expected],
                 )
                 .unwrap();
         }

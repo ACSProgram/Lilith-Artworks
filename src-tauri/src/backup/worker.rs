@@ -13,6 +13,7 @@ use crate::{
     cancel::CancelToken,
     cleanup,
     history::{self, HistoryCommit},
+    platform::path::ensure_not_device_path,
     preview, storage,
 };
 
@@ -204,8 +205,7 @@ pub(crate) fn run_backup(
     }
     // 手动提交允许网络位置（NAS 是合法用法），但设备命名空间一律拒绝：这类路径
     // 指向的是设备对象而不是文件，打开它等同一次未经确认的原生对象访问。
-    storage::ensure_not_device_path(&branch.source_path, "分支工作文件")
-        .map_err(BackupRunError::Failed)?;
+    ensure_not_device_path(&branch.source_path, "分支工作文件").map_err(BackupRunError::Failed)?;
     let source_path = Path::new(&branch.source_path);
     let before = source_metadata(source_path)?;
     let mut source =

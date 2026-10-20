@@ -8,11 +8,11 @@ use crate::{
     app::AppState,
     backup::{BackupState, BackupTaskKind, ExclusiveRunError},
     cancel::CancelToken,
+    platform::path::display_path,
     repository_lock::{
         self, OwnerLockError, RepositoryOwnerLock, WaitPolicy, WritePriority,
         WRITE_WAIT_TIMEOUT_MESSAGE,
     },
-    storage,
 };
 
 use super::{
@@ -702,7 +702,7 @@ impl OperationCoordinator {
             .repository_path()
             .ok()
             .flatten()
-            .map(|path| storage::display_path(&path))
+            .map(|path| display_path(&path))
     }
 }
 

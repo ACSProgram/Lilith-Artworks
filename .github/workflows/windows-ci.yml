@@ -106,6 +106,28 @@ jobs:
       - name: Check Rust formatting
         run: cargo fmt --check --manifest-path src-tauri/Cargo.toml
 
+      # 可移植性规范（docs/guides/platform.md）规则 1 的机器把关：平台分支只准
+      # 出现在 src-tauri/src/platform/ 内。允许列表与规范文档的例外登记表一一
+      # 对应（repository_lock.rs 的 Windows 大小写闸门测试）；main.rs、Cargo.toml
+      # 的 target 依赖段与 tests/stress_support/ 也登记在例外表里，但不在本脚本的
+      # 扫描范围（src-tauri/src/）内。新增例外时两处同步更新。
+      #
+      # 模式覆盖 cfg(...)、cfg!(...) 与 cfg_attr(...) 三种写法，并同时认
+      # windows / unix / target_os：只写 `cfg!\(windows` 会漏掉
+      # `cfg!(target_os = "linux")` 这类最常见的写法。注释里的提及（规范文档要求
+      # 在注释里说明平台差异）不算违规，因此按「行首是 // 或 * 或 /*」整行排除。
+      - name: Check platform branches stay in platform/
+        shell: bash
+        run: |
+          violations=$(grep -rnE 'cfg(_attr)?!?\((target_os|windows|unix)' src-tauri/src --include='*.rs' \
+            | grep -vE '^src-tauri/src/(platform/|repository_lock\.rs)' \
+            | grep -vE '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*)' || true)
+          if [ -n "$violations" ]; then
+            echo "::error::Platform cfg branches outside platform/ (see docs/guides/platform.md, rule 1):"
+            echo "$violations"
+            exit 1
+          fi
+
       - name: Run Rust library tests
         run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 

@@ -34,7 +34,9 @@ use crate::{
     },
     authenticity::{self, AuthenticityState, PathAuthorization},
     backup::BackupState,
-    library, repository_lock,
+    library,
+    platform::process::peak_memory_bytes,
+    repository_lock,
 };
 
 const EXIT_OK: i32 = 0;
@@ -1305,24 +1307,4 @@ fn decode_authenticity(
     })?;
     serde_json::to_value(&result)
         .map_err(|error| CommandError::internal(format!("无法序列化识别结果：{error}")))
-}
-
-/// 进程自身的峰值工作集。Windows 用 `GetProcessMemoryInfo`；其它平台返回 `None`，
-/// 调用方据此写 null 而不是伪造数值。
-#[cfg(target_os = "windows")]
-fn peak_memory_bytes() -> Option<u64> {
-    use windows_sys::Win32::System::ProcessStatus::{
-        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
-    };
-    use windows_sys::Win32::System::Threading::GetCurrentProcess;
-    // SAFETY: 结构体按 C 布局分配并清零，长度与 API 期望的一致。
-    let mut counters: PROCESS_MEMORY_COUNTERS = unsafe { std::mem::zeroed() };
-    let size = u32::try_from(std::mem::size_of::<PROCESS_MEMORY_COUNTERS>()).ok()?;
-    let succeeded = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) };
-    (succeeded != 0).then(|| u64::try_from(counters.PeakWorkingSetSize).unwrap_or(u64::MAX))
-}
-
-#[cfg(not(target_os = "windows"))]
-fn peak_memory_bytes() -> Option<u64> {
-    None
 }

@@ -23,6 +23,7 @@ src-tauri/src/app/usecases/            GUI 与 headless 共享的业务入口
 src-tauri/src/app/workflows.rs         跨领域 Tauri 命令适配器
 src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领域分组）
 src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
+src-tauri/src/platform/                跨平台差异唯一入口：路径表示、文件管理器、剪贴板与进程信息（规范见 docs/guides/platform.md）
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
 src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务

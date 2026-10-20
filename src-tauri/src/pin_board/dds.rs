@@ -626,63 +626,6 @@ pub(crate) fn imported_points(
         .collect()
 }
 
-#[cfg(target_os = "windows")]
-pub(crate) fn clipboard_file_paths() -> Result<Vec<String>, String> {
-    use std::ptr;
-    use windows_sys::Win32::{
-        System::{
-            DataExchange::{
-                CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
-            },
-            Ole::CF_HDROP,
-        },
-        UI::Shell::DragQueryFileW,
-    };
-
-    struct ClipboardGuard;
-    impl Drop for ClipboardGuard {
-        fn drop(&mut self) {
-            unsafe {
-                CloseClipboard();
-            }
-        }
-    }
-
-    unsafe {
-        if OpenClipboard(ptr::null_mut()) == 0 {
-            return Err("无法打开系统剪贴板".into());
-        }
-        let _guard = ClipboardGuard;
-        let format = u32::from(CF_HDROP);
-        if IsClipboardFormatAvailable(format) == 0 {
-            return Ok(Vec::new());
-        }
-        let drop = GetClipboardData(format);
-        if drop.is_null() {
-            return Err("无法读取剪贴板文件路径".into());
-        }
-        let count = DragQueryFileW(drop, u32::MAX, ptr::null_mut(), 0).min(MAX_IMPORT_FILES as u32);
-        let mut paths = Vec::with_capacity(count as usize);
-        for index in 0..count {
-            let length = DragQueryFileW(drop, index, ptr::null_mut(), 0);
-            if length == 0 {
-                continue;
-            }
-            let mut buffer = vec![0_u16; length as usize + 1];
-            let written = DragQueryFileW(drop, index, buffer.as_mut_ptr(), buffer.len() as u32);
-            if written > 0 {
-                paths.push(String::from_utf16_lossy(&buffer[..written as usize]));
-            }
-        }
-        Ok(paths)
-    }
-}
-
-#[cfg(not(target_os = "windows"))]
-pub(crate) fn clipboard_file_paths() -> Result<Vec<String>, String> {
-    Ok(Vec::new())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

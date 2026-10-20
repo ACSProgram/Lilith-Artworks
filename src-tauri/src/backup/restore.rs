@@ -5,7 +5,9 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use crate::{cancel::CancelToken, cleanup, history, preview, storage};
+use crate::{
+    cancel::CancelToken, cleanup, history, platform::path::display_path, preview, storage,
+};
 
 use super::chunk_file::{ChunkFile, ChunkFileDelta, ChunkStore, ChunkTask, ChunkWriteOptions};
 
@@ -75,10 +77,10 @@ pub(crate) fn restore(
         .map_err(|error| format!("无法发布恢复文件：{}", error.error))?;
     log::info!(
         "restored history node: history_id={history_id}, chain_steps={steps}, output_bytes={output_bytes}, output={}",
-        storage::display_path(&output)
+        display_path(&output)
     );
     progress("恢复完成", steps, steps);
-    Ok(storage::display_path(&output))
+    Ok(display_path(&output))
 }
 
 /// Rebuilds the reverse delta of a removable intermediate node.

@@ -8,9 +8,8 @@ use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Transaction};
 
 use crate::{
     cleanup,
-    storage::{
-        self, database_error, display_path, new_id, normalize_source_path, now_ms, validate_title,
-    },
+    platform::path::display_path,
+    storage::{self, database_error, new_id, normalize_source_path, now_ms, validate_title},
 };
 
 use super::model::{
@@ -1251,7 +1250,7 @@ mod tests {
         connection
             .execute(
                 "UPDATE branches SET source_path = ?1, source_path_key = ?1",
-                [storage::display_path(&inside)],
+                [display_path(&inside)],
             )
             .unwrap();
         drop(connection);
@@ -1668,7 +1667,7 @@ mod tests {
                          'Title', '', '', '', '[]', 1)",
                 params![
                     fixture.artwork.branch_id,
-                    storage::display_path(&external_output),
+                    display_path(&external_output),
                     "C".repeat(64)
                 ],
             )

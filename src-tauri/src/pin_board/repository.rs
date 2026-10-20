@@ -17,7 +17,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::dds;
-use crate::{cleanup, storage};
+use crate::{cleanup, platform::path::display_path, storage};
 
 pub(crate) const BOARD_DIRECTORY: &str = "boards";
 /// 单个 Artwork 的画板数量上限（规划确认的规模假设）。
@@ -1838,7 +1838,7 @@ pub(crate) fn write_text_png(
         file.write_all(png)
             .map_err(|error| format!("无法写出文字图片：{error}"))
     })?;
-    Ok(storage::display_path(&target))
+    Ok(display_path(&target))
 }
 
 /// 读取图片 PNG（复制到系统剪贴板用）。
@@ -1962,7 +1962,7 @@ mod tests {
             &mut connection,
             &root,
             board.board_id,
-            &[storage::display_path(&inside_source)],
+            &[display_path(&inside_source)],
             0.0,
             0.0,
             0.0,
@@ -1979,7 +1979,7 @@ mod tests {
             &root,
             board.board_id,
             &[1],
-            &storage::display_path(&inside_output),
+            &display_path(&inside_output),
             |_, _| {},
         )
         .unwrap_err();

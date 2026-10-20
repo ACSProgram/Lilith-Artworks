@@ -25,6 +25,20 @@ alpha3 的验收状态：阶段 7、8 的 GUI 手工验收已通过；**阶段 9
 `manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是开发期待办，见
 `docs/guides/release-policy.md`。
 
+## 平台代码集中的 GUI 手工验收（2026-10-20 记入）
+
+`archive/platform-code-consolidation-plan-2026-10-20.md` 已实施并归档：平台分支集中到
+`src-tauri/src/platform/`，纯机械搬移、行为零变化；自动验证已通过（`cargo check
+--all-targets`、`cargo check --features headless`、`cargo test --lib`、`cargo fmt
+--check`、`git diff --check`、前端 `tsc --noEmit` 与 `src/shared` 测试）。
+以下界面行为仍待维护者验收：
+
+- 「在文件夹中显示」（认证记录/成品入口）仍能打开资源管理器并选中文件；错误路径
+  （文件不存在、设备命名空间路径）文案与此前一致。
+- 设置页「打开日志目录」「打开设置目录」与「法律材料」三个入口正常打开对应目录。
+- 复制文件后在素材板里粘贴仍能导入；一次粘贴超过 256 个文件时按 `MAX_IMPORT_FILES`
+  上限截断（与迁移前一致）。
+
 ## alpha3 阶段 9 的 GUI 手工验收（暂时遗留）
 
 2026-10-19 记入，2026-10-20 确认暂时遗留；自动验证已通过，界面行为仍待维护者验收：

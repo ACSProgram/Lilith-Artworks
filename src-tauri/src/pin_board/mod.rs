@@ -21,6 +21,7 @@ use tauri_plugin_fs::FsExt;
 use crate::{
     app::{command_runtime::OperationDomain, usecases, OperationCoordinator},
     cleanup, path_scope,
+    platform::clipboard,
 };
 use repository::{
     EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView, SavePinBoardResult,
@@ -451,7 +452,12 @@ pub(crate) async fn read_pin_board_texture(
 pub(crate) fn read_pin_board_clipboard_paths(
     window: tauri::WebviewWindow,
 ) -> Result<Vec<String>, String> {
-    let paths = dds::clipboard_file_paths()?;
+    // 平台剪贴板读取返回全部文件路径；「最多导入多少个」是素材板的业务上限，
+    // 在这里按 `MAX_IMPORT_FILES` 截断（与迁移前在读取侧截断的结果一致）。
+    let mut paths = clipboard::file_paths()?;
+    if paths.len() > dds::MAX_IMPORT_FILES {
+        paths.truncate(dds::MAX_IMPORT_FILES);
+    }
     for path in &paths {
         let file = Path::new(path);
         if file.is_file() {

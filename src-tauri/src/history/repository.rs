@@ -2065,6 +2065,7 @@ pub(crate) fn ensure_directories(root: &Path, artwork_id: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::path::display_path;
     use std::io::Write;
 
     struct HistoryFixture {
@@ -2177,7 +2178,7 @@ mod tests {
             load_branch(&fixture.root, &fixture.main_branch_id)
                 .unwrap()
                 .source_path,
-            storage::display_path(&replacement.canonicalize().unwrap())
+            display_path(&replacement.canonicalize().unwrap())
         );
 
         let missing = fixture._directory.path().join("missing.psd");
@@ -2196,7 +2197,7 @@ mod tests {
         assert_eq!(preserved.branches[0].title, "Main");
         assert_eq!(
             preserved.branches[0].source_path,
-            storage::display_path(&replacement.canonicalize().unwrap())
+            display_path(&replacement.canonicalize().unwrap())
         );
     }
 
