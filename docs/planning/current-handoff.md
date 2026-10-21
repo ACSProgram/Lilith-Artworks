@@ -8,6 +8,19 @@
 
 ## 当前批次状态
 
+2026-10-21 错误边界与上下文拆分（本次提交）：渲染期异常不再卸载整棵 React 树——根边界包在
+`NoticeCenter` / `AppRuntimeProvider` **之外**（三个 context hook 在 provider 缺失时都抛错，边界
+放在里面就兜不住），兜底自带可拖拽顶条与窗口按钮；作品工作区、三个标签页共用的视图层与素材板
+窗格各有一层区块边界，切换作品或标签页时按 `resetKeys` 自动复挂，不必点重试。捕获后写
+`[boundary]` 日志（消息 + 出错组件 + 堆栈），日志标签表已登记。同批把三个 context 从 Provider
+文件拆到 `appRuntimeContext.ts` / `noticeContext.ts` / `runtimeProgressContext.ts`：context 与
+Provider 同文件时，开发模式保存 Provider 会热更新出新的 context 对象，仍持有旧 `useContext` 的
+消费者读到 `null` 抛错并带走整棵树（2026-10-21 素材板渲染器被卸载即由此触发）。窗口按钮抽成
+共用的 `WindowControls.tsx`，标题栏与根兜底不再各写一份标记。行为变化见 `CHANGELOG.md` 的
+`## Unreleased`，架构口径见 `docs/architecture/overview.md` 的「错误边界」与「上下文模块」。
+自动验证已通过（`tsc --noEmit`、`vitest run src/app`），**兜底界面的观感、真实崩溃恢复与
+热更新不再卸载界面仍待人工确认**（验收项在 `todo.md`）。
+
 2026-10-21 素材板整画布导出（计划阶段 2，已实现、人工验收通过并归档）：
 `archive/pin-board-copy-eraser-export-plan-2026-10-21.md` 的阶段 2 落地——离屏 `rgba8unorm`
 渲染通道、
@@ -99,6 +112,8 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 
 ## 下一步
 
+- 错误边界的界面验收：根兜底顶条与窗口按钮、区块兜底的作用范围（含素材板窗格内的位置）、
+  热更新不再整棵卸载，以及 `[boundary]` 日志能否按标签筛到。验收项见 `todo.md`。
 - 测试体检第二批的收尾：随发布前压力测试轮运行 C9/C10（含 4.8 新增的临时文件清理闭环），并用
   同一轮发布档 C3 实测收紧 3.7 的内存与快照上界。验收项见 `todo.md`。
 - 自动备份调度修复的阶段 2–5 待人工验证：GUI 手工验收（静默窗、调度器代价感知、让位不空转、

@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { Fingerprint, GitCommitVertical, Images, ShieldCheck } from "lucide-react";
 import { AuthenticityModule } from "../modules/authenticity/AuthenticityModule";
 import type { CertificationRecord } from "../modules/authenticity/types";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { SectionErrorFallback } from "./ErrorFallback";
 import { HistoryModule } from "../modules/history/HistoryModule";
 import type { ArtworkBranch, ArtworkHistory } from "../modules/history/types";
 import { useArtworkSummary } from "../modules/history/useArtworkSummary";
@@ -92,11 +94,19 @@ export function ArtworkWorkspace({
       <button className={view === "identify" ? "active" : ""} type="button" onClick={() => setView("identify")}><Fingerprint size={16} />识别与溯源</button>
     </nav>
     <div className="artwork-view">
-      {/* 切换作品时按 key={artworkId} 整块重置这三个标签页，与过去整棵工作区重挂载的行为一致；
-          素材板窗格不带 key，跨作品保留渲染器与 GPU 设备（见文档 keep-alive 语义）。 */}
-      {view === "history" && <div key={artworkId} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}
-      {view === "publish" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} branchesLoading={branchesLoading} branchesError={branchesError} onRetryBranches={summary.retry} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
-      {view === "identify" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>}
+      {/* 三个标签页同一时刻只挂一个，共用一个边界：崩掉只影响当前页，切到别的标签页
+          （resetKeys 含 view）即自动复挂，不必手动点重试。 */}
+      <ErrorBoundary
+        label={`artwork-view:${view}`}
+        resetKeys={[artworkId, view]}
+        fallback={(state) => <SectionErrorFallback title="当前页面渲染出错" {...state} />}
+      >
+        {/* 切换作品时按 key={artworkId} 整块重置这三个标签页，与过去整棵工作区重挂载的行为一致；
+            素材板窗格不带 key，跨作品保留渲染器与 GPU 设备（见文档 keep-alive 语义）。 */}
+        {view === "history" && <div key={artworkId} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}
+        {view === "publish" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="publish" artworkTitle={title} branches={branches} selectedBranchId={branchId} branchesLoading={branchesLoading} branchesError={branchesError} onRetryBranches={summary.retry} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
+        {view === "identify" && <div key={artworkId} className="workspace-view-pane"><AuthenticityModule mode="identify" artworkTitle={title} branches={branches} selectedBranchId={branchId} selectedRecordId={initialRecordId} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} /></div>}
+      </ErrorBoundary>
       {/* 素材板保持挂载：切换视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源。
           与 Client 的 keep-alive 一致，非活跃时用 visibility 隐藏而不是 display:none，
           这样画布始终保有布局尺寸，渲染器初始化即可按最小包围框完成视图适配。 */}
@@ -105,11 +115,21 @@ export function ArtworkWorkspace({
         aria-hidden={view !== "pin-board"}
         inert={view !== "pin-board"}
       >
-        <PinBoardModule
-          artworkId={artworkId}
-          active={view === "pin-board"}
-          settings={pinBoardSettings}
-        />
+        {/* 素材板边界放在定位窗格**内部**：它是唯一跨视图常驻、持有 GPU 设备与编辑会话的
+            模块，历史页崩掉不能顺手把它一起卸载；兜底也必须留在窗格内，否则它会落到
+            `.artwork-view` 的常规流里，被占满高度的当前页顶出可视区。卸载时未保存改动
+            交给后台结算队列，重试后按快照还原。 */}
+        <ErrorBoundary
+          label={`pin-board:${artworkId}`}
+          resetKeys={[artworkId]}
+          fallback={(state) => <SectionErrorFallback title="素材板渲染出错" {...state} />}
+        >
+          <PinBoardModule
+            artworkId={artworkId}
+            active={view === "pin-board"}
+            settings={pinBoardSettings}
+          />
+        </ErrorBoundary>
       </div>
     </div>
   </div>;

@@ -58,6 +58,23 @@ entries for the reader; they are not a template every entry has to fill.
   loops check between items). A cancelled import rolls back entirely — no half
   batch of items and no orphaned DDS files — while a cancelled bitmap export
   keeps the PNGs already written.
+- Layered React error boundaries, because a single throw while rendering used
+  to unmount the whole tree: the window went blank and, since it has no
+  decorations and `F5` / `Ctrl+R` is cancelled on purpose, could not even be
+  dragged or closed. The root boundary wraps every provider — all three context
+  hooks throw when their provider is missing, so a boundary placed inside them
+  would miss exactly those errors — and its fallback draws its own drag strip
+  and window buttons. A workspace boundary keeps the library and title bar
+  usable when one artwork crashes; inside it the three tabs share one view
+  boundary, so a broken history page no longer takes the tab bar with it, and
+  the pin-board pane keeps its own boundary because it is the one module that
+  stays mounted across views and holds the GPU device and the edit session.
+  Every fallback logs `[boundary]` with the message, the throwing component and
+  the stack, then offers retry first: retry only remounts the failed subtree,
+  whereas a full reload would discard the in-memory pending pin-board settle
+  queue, so reload sits behind it with "open log directory". Boundaries clear
+  themselves when their `resetKeys` change, so switching artwork or tab
+  recovers without a click.
 
 ### Changed
 
@@ -122,6 +139,18 @@ entries for the reader; they are not a template every entry has to fill.
   scan, confirm cleanup, and rescan empty. C3's memory and snapshot allowances
   are now labelled catastrophic bounds rather than proof of streaming;
   tightening them waits for a release-profile measurement.
+- Each React context now lives in its own module (`appRuntimeContext.ts`,
+  `noticeContext.ts`, `runtimeProgressContext.ts`) instead of sharing a file
+  with its provider. Saving a provider file during development re-executes that
+  module, which produced a fresh context object while consumers still held the
+  old `useContext`; they read `null`, threw, and took the whole tree down with
+  them (the pin-board renderer teardown on 2026-10-21). Hot updates no longer
+  change the context identity.
+- The minimize / maximize / close buttons are one `WindowControls` component
+  shared by the title bar and the root fallback, instead of two hand-copied
+  blocks of markup that could drift apart. Both now fetch the window object on
+  click rather than at import, so rendering the title bar no longer depends on
+  the Tauri window API being present.
 
 ### Added
 

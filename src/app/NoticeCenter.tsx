@@ -1,19 +1,11 @@
 import {
-  createContext,
-  useContext,
   useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 import { AlertCircle, X } from "lucide-react";
-
-interface NoticeContextValue {
-  /** `null` 关闭提示；同一时刻只保留一条，与 0.2 的行为一致。 */
-  notify: (message: string | null) => void;
-}
-
-const NoticeContext = createContext<NoticeContextValue | null>(null);
+import { NoticeContext, type NoticeContextValue } from "./noticeContext";
 
 const NOTICE_DURATION_MS = 7_000;
 
@@ -47,12 +39,4 @@ export function NoticeCenter({ children }: { children: ReactNode }) {
       )}
     </NoticeContext.Provider>
   );
-}
-
-export function useNotice(): NoticeContextValue {
-  const context = useContext(NoticeContext);
-  if (!context) {
-    throw new Error("useNotice 必须在 NoticeCenter 内使用");
-  }
-  return context;
 }

@@ -175,6 +175,25 @@ button { color: inherit; }
 .notice button { display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0; border-radius: 5px; color: var(--muted); background: transparent; cursor: pointer; }
 .notice button:hover { color: var(--text); background: var(--surface-subtle); }
 .notice > i { position: absolute; right: 0; bottom: 0; left: 0; height: 3px; background: var(--danger); transform-origin: left; animation: notice-timeout 7s linear forwards; }
+
+/* 错误边界兜底。根兜底自带顶条：此时 AppShell 的标题栏已随组件树卸载，无边框窗口
+   必须有自己的拖拽区与窗口按钮，否则用户拖不动也关不掉这块界面。 */
+.app-fatal { display: grid; grid-template-rows: 48px minmax(0, 1fr); width: 100%; height: 100%; background: var(--surface); }
+.app-fatal-topbar .brand-block svg { color: var(--danger); }
+.app-fatal-hint { align-self: center; color: var(--muted); font-size: 12px; }
+.app-fatal-body { display: grid; place-items: center; padding: 32px; overflow: auto; }
+.app-fatal-panel { display: grid; gap: 12px; width: min(560px, 100%); padding: 22px 24px 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface-subtle); }
+.app-fatal-heading { display: flex; align-items: center; gap: 9px; color: var(--danger); }
+.app-fatal-heading h2 { margin: 0; color: var(--text); font-size: 15px; font-weight: 600; }
+.app-fatal-panel p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+.app-fatal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.app-fatal-note { font-size: 11px; }
+.app-fatal-detail summary { color: var(--muted); font-size: 11px; cursor: pointer; }
+.app-fatal-detail pre { max-height: 220px; margin: 8px 0 0; padding: 10px 12px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--surface); font-size: 11px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.section-fallback { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: start; gap: 12px; margin: 16px; padding: 14px 16px; border: 1px solid color-mix(in srgb, var(--danger) 42%, var(--border)); border-left: 4px solid var(--danger); border-radius: 7px; background: var(--surface); }
+.section-fallback > svg { margin-top: 1px; color: var(--danger); }
+.section-fallback strong { display: block; font-size: 13px; }
+.section-fallback p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 @keyframes notice-in { from { opacity: 0; transform: translateY(14px) scale(.98); } to { opacity: 1; transform: none; } }
 @keyframes notice-out { to { opacity: 0; transform: translateY(8px); } }
 @keyframes notice-timeout { from { transform: scaleX(1); } to { transform: scaleX(0); } }

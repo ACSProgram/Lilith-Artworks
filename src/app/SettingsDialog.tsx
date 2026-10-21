@@ -30,8 +30,8 @@ import {
 } from "lucide-react";
 import packageInfo from "../../package.json";
 import { appApi } from "./api";
-import { useAppRuntime } from "./AppRuntimeProvider";
-import { useNotice } from "./NoticeCenter";
+import { useAppRuntime } from "./appRuntimeContext";
+import { useNotice } from "./noticeContext";
 import { SETTINGS_PAGES } from "./useSettingsController";
 import {
   PIN_BOARD_ARRANGEMENT_GAP_RATIO_MAX,

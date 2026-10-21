@@ -1,29 +1,15 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  type ReactNode,
-} from "react";
+import { useEffect, type ReactNode } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { appApi } from "./api";
-import { useNotice } from "./NoticeCenter";
+import { AppRuntimeContext } from "./appRuntimeContext";
+import { useNotice } from "./noticeContext";
 import { RuntimeProgressProvider } from "./RuntimeProgressProvider";
-import { useSettingsController, type SettingsController } from "./useSettingsController";
-import {
-  useRepositoryMaintenance,
-  type RepositoryMaintenance,
-} from "./useRepositoryMaintenance";
+import { useSettingsController } from "./useSettingsController";
+import { useRepositoryMaintenance } from "./useRepositoryMaintenance";
 import { preparePinBoardRuntimeChange } from "../modules/pin-board/lifecycle";
 import { diagnosticsLog } from "../shared/diagnostics";
 import { errorMessage } from "../shared/errors";
 import { setRuntimeEventRepositoryKey } from "../shared/useRuntimeSubscription";
-
-export interface AppRuntime {
-  settings: SettingsController;
-  maintenance: RepositoryMaintenance;
-}
-
-const AppRuntimeContext = createContext<AppRuntime | null>(null);
 
 const SETTLE_TIMEOUT_MS = 5_000;
 
@@ -119,12 +105,4 @@ function AppRuntimeState({ children }: { children: ReactNode }) {
       {children}
     </AppRuntimeContext.Provider>
   );
-}
-
-export function useAppRuntime(): AppRuntime {
-  const context = useContext(AppRuntimeContext);
-  if (!context) {
-    throw new Error("useAppRuntime 必须在 AppRuntimeProvider 内使用");
-  }
-  return context;
 }

@@ -80,13 +80,33 @@ Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权�
 `ConfirmDialog` 的 danger / emphasis 两档警示样式都在 `index.css` 里，各模块共用同一套，不要再按
 模块作用域重写一遍。
 
+**错误边界**：`src/app/ErrorBoundary.tsx` 是全项目唯一的 class 组件，React 没有函数式等价物。
+兜底 UI 在 `ErrorFallback.tsx`，分根兜底（铺满窗口）与区块兜底（只占出错区域）两种。挂载四处：
+`App` 最外层（**所有 provider 之外**，因为三个 context hook 都在 provider 缺失时抛错，边界放在
+里面就兜不住）、`App` 注入的 Artwork 工作区、`ArtworkWorkspace` 里三个标签页共用的视图层，以及
+素材板窗格内部。素材板单独一层是因为它是唯一跨视图常驻、持有 GPU 设备与编辑会话的模块，历史页
+崩掉不能把它一起卸载；视图层则让某个标签页崩掉时标签栏与素材板仍然可用。区块兜底必须留在它替换
+的那块区域里（素材板那层因此放在定位窗格**内部**），否则会落进常规流、被占满高度的当前页挤出
+可视区。根兜底的窗口按钮与标题栏共用 `WindowControls.tsx`，两处标记不会各自跑偏。边界只接
+渲染、构造与生命周期里的同步异常；事件回调、Promise 拒绝和 effect 的异步失败仍由 `notify` 与
+`shared/diagnostics.ts` 的全局捕获负责，不要在边界里重复处理。三条硬约定：捕获后必须写
+`[boundary]` 日志（含消息、出错组件与堆栈）并给出可见出口，缺一不可；根兜底要自带可拖拽顶条与
+窗口按钮——窗口是无边框的，真正的标题栏在 `AppShell` 里会随组件树一起卸载；「重试」只重挂失败的
+子树，整页重载会丢掉只在内存里的素材板待结算队列，所以重载只能作为次选。`resetKeys` 变化时边界
+自动复挂，切换作品或标签页不需要用户点重试。
+
+**上下文模块**：`appRuntimeContext.ts`、`noticeContext.ts`、`runtimeProgressContext.ts` 各自只放
+context 与消费 hook，Provider 组件留在单独文件。context 与 Provider 同文件时，开发模式保存文件会
+热更新该模块、生成一个新的 context 对象，仍持有旧 `useContext` 的消费者读到 `null` 后抛错，整棵
+React 树随之卸载（2026-10-21 素材板渲染器被卸载即由此触发）。新增 context 时按同样方式拆分。
+
 ## 应用生命周期
 
 主窗口使用无原生装饰的 48px 应用顶栏，窗口拖动、最小化、最大化/还原与关闭通过受限的 Tauri window capability 调用。应用启用 Tauri single-instance 插件；再次启动时只聚焦并恢复现有主窗口，不创建第二个窗口。关闭按钮仍触发 Rust `CloseRequested`，默认只隐藏到系统托盘；托盘左键或“打开”命令恢复窗口，只有托盘“退出”或关闭到托盘设置被禁用时才结束进程。窗口隐藏期间备份调度器继续运行。真正退出分两段：原生端保存窗口状态后向 webview 发送 `app_shutdown_requested` 并启动 15 秒兜底强退计时器；webview 收到事件后结算素材板（保存并截断步骤历史，`preparePinBoardRuntimeChange`），无论成败都调用 `confirm_app_shutdown` 确认。原生端确认后设置不可逆的 `shutting_down` 状态、请求取消活动操作、停止并等待调度线程，最后等待共享操作锁释放再调用 `app.exit`；排队任务在拿到锁后只返回取消错误，活动任务完成临时文件和事务清理前不会退出。webview 未能在时限内确认（挂起或崩溃）时由兜底计时器强制退出，保证窗口始终可以关闭。两条退出路径最终都会走到 `RunEvent::Exit`，本次运行的拖放暂存目录在那里删除（见 `docs/modules/authenticity.md`）。关闭链路的异常接入结构化诊断：前端记录结算结果、耗时与超过 5 秒仍未完成的 `[watchdog]` 告警；原生端记录 15 秒确认超时，以及确认后等待活动操作或仓库操作锁超过阈值时的 `[watchdog]` 记录。这些记录只补充证据，不改变既有的等待与兜底语义。
 
 WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewShortcuts.ts` 在应用层拦截，且只取消默认行为、不停止事件传播，使素材板“锁定画板”等模块快捷键仍能复用同一组合键（与 Lilith Client 的实现一致）。
 
-前端运行时由 `NoticeCenter` 包住 `AppRuntimeProvider`：`AppRuntimeProvider` 装配
+前端运行时在根错误边界内由 `NoticeCenter` 包住 `AppRuntimeProvider`：`AppRuntimeProvider` 装配
 `useSettingsController`、`useRepositoryMaintenance` 与 `RuntimeProgressProvider`，并注册
 退出结算监听；`AppShell` 渲染 `SettingsDialog` 与工作区。`App` 只负责提供者装配、工作区路由与
 两条 webview 快捷键拦截，不再持有设置、维护进度、提示或关闭结算状态。

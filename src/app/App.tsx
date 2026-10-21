@@ -3,8 +3,12 @@ import { LoaderCircle } from "lucide-react";
 import { LibraryModule } from "../modules/library/LibraryModule";
 import { ArtworkWorkspace } from "./ArtworkWorkspace";
 import { appApi } from "./api";
-import { AppRuntimeProvider, useAppRuntime } from "./AppRuntimeProvider";
-import { NoticeCenter, useNotice } from "./NoticeCenter";
+import { AppRuntimeProvider } from "./AppRuntimeProvider";
+import { useAppRuntime } from "./appRuntimeContext";
+import { ErrorBoundary } from "./ErrorBoundary";
+import { AppFatalFallback, SectionErrorFallback } from "./ErrorFallback";
+import { NoticeCenter } from "./NoticeCenter";
+import { useNotice } from "./noticeContext";
 import { SettingsDialog } from "./SettingsDialog";
 import { WindowTitleBar } from "./WindowTitleBar";
 import { preventWebViewFileDrop, preventWebViewReload } from "./webviewShortcuts";
@@ -12,14 +16,20 @@ import { preventWebViewFileDrop, preventWebViewReload } from "./webviewShortcuts
 /**
  * 应用入口只负责组合运行时与渲染工作区。设置、维护、进度、提示各自有独立
  * provider/controller，`App` 不再持有跨领域状态。
+ *
+ * 根错误边界包在**所有 provider 之外**：三个 context hook 都在 provider 缺失时 `throw`，
+ * 边界若放在它们里面就兜不住。这里同时是「窗口永远可用」的最后一道保证——组件树整棵
+ * 卸载后，兜底面自带的顶条仍能拖动与关闭这个无边框窗口。
  */
 export function App() {
   return (
-    <NoticeCenter>
-      <AppRuntimeProvider>
-        <AppShell />
-      </AppRuntimeProvider>
-    </NoticeCenter>
+    <ErrorBoundary label="root" fallback={AppFatalFallback}>
+      <NoticeCenter>
+        <AppRuntimeProvider>
+          <AppShell />
+        </AppRuntimeProvider>
+      </NoticeCenter>
+    </ErrorBoundary>
   );
 }
 
@@ -76,21 +86,29 @@ function AppShell() {
           onAcknowledgeBackupDisableNotices={appApi.acknowledgeBackupDisableNotices}
           onOpenBackupDisableNotice={appApi.getBackupDisableNoticeTarget}
           renderArtworkWorkspace={(workspace) => (
-            <ArtworkWorkspace
-              artworkId={workspace.artworkId}
-              initialView={workspace.initialView}
-              initialBranchId={workspace.initialBranchId}
-              initialRecordId={workspace.initialRecordId}
-              navigationKey={workspace.navigationKey}
-              pinBoardSettings={pinBoardSettings}
-              onError={notify}
-              onRetryFileCleanup={appApi.retryFileCleanup}
-              onNavigateRecord={(record) => workspace.onNavigateRecord({
-                artworkId: record.artworkId,
-                branchId: record.branchId,
-                recordId: record.id,
-              })}
-            />
+            // 工作区边界：某个作品的界面崩掉时，作品库与标题栏仍然可用，用户可以
+            // 直接选别的作品继续工作；切换作品后 resetKeys 变化会自动复挂。
+            <ErrorBoundary
+              label={`workspace:${workspace.artworkId}`}
+              resetKeys={[workspace.artworkId, workspace.navigationKey]}
+              fallback={(state) => <SectionErrorFallback title="作品工作区渲染出错" {...state} />}
+            >
+              <ArtworkWorkspace
+                artworkId={workspace.artworkId}
+                initialView={workspace.initialView}
+                initialBranchId={workspace.initialBranchId}
+                initialRecordId={workspace.initialRecordId}
+                navigationKey={workspace.navigationKey}
+                pinBoardSettings={pinBoardSettings}
+                onError={notify}
+                onRetryFileCleanup={appApi.retryFileCleanup}
+                onNavigateRecord={(record) => workspace.onNavigateRecord({
+                  artworkId: record.artworkId,
+                  branchId: record.branchId,
+                  recordId: record.id,
+                })}
+              />
+            </ErrorBoundary>
           )}
         />
       )}

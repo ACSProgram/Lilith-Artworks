@@ -36,6 +36,19 @@ alpha3 的验收状态：阶段 7、8、9 的 GUI 手工验收均已通过（阶
 `manual` 档（8 GiB）按既定口径**只在正式发布前跑一次**，属发布动作而不是开发期待办，见
 `docs/guides/release-policy.md`。
 
+## 错误边界与上下文拆分的验收（2026-10-21 记入）
+
+`src/app/ErrorBoundary.tsx` 的自动验证已通过（`tsc --noEmit`、`vitest run src/app`），以下界面
+行为仍待维护者实测：
+
+- 根兜底：在开发模式临时让某个顶层组件 `throw`，确认整窗兜底的顶条可拖动、三个窗口按钮可用、
+  「重试」能恢复界面、「打开日志目录」能打开目录（这一步只在 Tauri 宿主里成立）。
+- 区块兜底：让某作品的历史页渲染抛错，确认作品库与标题栏仍可操作、切到别的标签页自动恢复；
+  让素材板抛错，确认标签栏与历史页仍可用、兜底卡片出现在素材板窗格内而不是被当前页挤出可视区。
+- 热更新：开发模式保存 `NoticeCenter.tsx` / `AppRuntimeProvider.tsx` / `RuntimeProgressProvider.tsx`，
+  确认界面不再整棵卸载（拆分 context 模块要解决的正是这个问题）。
+- 日志：上述异常在日志里留下 `[boundary] <label> caught: ...`，`grep -E '\[boundary\]'` 能筛到。
+
 ## 测试体检的遗留项（2026-10-21 记入）
 
 `docs/planning/test-audit-2026-10-21.md` 的处理项已分两批落地。第一批（已提交 `6f7e492`）见

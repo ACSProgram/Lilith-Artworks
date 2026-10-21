@@ -1,7 +1,5 @@
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -9,35 +7,17 @@ import {
   type ReactNode,
 } from "react";
 import { appApi } from "./api";
+import {
+  IDLE_BACKUP_RUNTIME,
+  RuntimeProgressContext,
+  type RuntimeProgressContextValue,
+} from "./runtimeProgressContext";
 import { useRuntimeSubscription } from "../shared/useRuntimeSubscription";
-import type { BackupRuntimeStatus } from "./types";
-
-export const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
-  busy: false,
-  activeBranchId: null,
-  taskKind: null,
-  operation: null,
-  progressLabel: null,
-  progressCurrent: 0,
-  progressTotal: 0,
-  automaticScheduling: false,
-  completionRevision: 0,
-};
 
 /** 事件丢失或后台调度任务（无 coordinator 事件）时的兜底快照间隔。 */
 const RUNTIME_POLL_INTERVAL_MS = 3_000;
 /** 多个进度事件合并成一次状态读取，避免每个事件都打一次 IPC。 */
 const RUNTIME_EVENT_REFRESH_MS = 150;
-
-interface RuntimeProgressContextValue {
-  runtime: BackupRuntimeStatus;
-  cancelPending: boolean;
-  refresh: () => Promise<BackupRuntimeStatus>;
-  setPolling: (active: boolean) => void;
-  cancel: () => Promise<boolean>;
-}
-
-const RuntimeProgressContext = createContext<RuntimeProgressContextValue | null>(null);
 
 /**
  * 共享运行态。设置页与维护操作只在需要时打开订阅（`setPolling`）：
@@ -129,12 +109,4 @@ export function RuntimeProgressProvider({ children }: { children: ReactNode }) {
       {children}
     </RuntimeProgressContext.Provider>
   );
-}
-
-export function useRuntimeProgress(): RuntimeProgressContextValue {
-  const context = useContext(RuntimeProgressContext);
-  if (!context) {
-    throw new Error("useRuntimeProgress 必须在 RuntimeProgressProvider 内使用");
-  }
-  return context;
 }
