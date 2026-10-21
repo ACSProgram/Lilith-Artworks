@@ -70,6 +70,13 @@ entries for the reader; they are not a template every entry has to fill.
   and front-end tests for the pin-board background-save indicator hook and for
   culling a long stroke segment by segment across the viewport.
 
+### Fixed
+
+- RustSec advisories RUSTSEC-2026-0381/0382/0383: the lock file moves
+  `rustls-webpki` to 0.103.16 and `webpki-roots` / `webpki-root-certs` to
+  1.0.10, all within existing semver ranges, so `dependency-audit` stops
+  failing without adding rows to the CI ignore lists.
+
 ## 0.3.0-alpha.5 - 2026-10-21
 
 ### Added
