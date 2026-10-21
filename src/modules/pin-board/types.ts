@@ -40,7 +40,8 @@ export interface PinBoardSummary {
   sortOrder: number;
   deleted: boolean;
   deletedAt: number | null;
-  imageCount: number;
+  /** 条目记录数，覆盖全部 kind（位图 / 文字 / 笔迹）。 */
+  itemCount: number;
   createdMs: number;
   updatedMs: number;
 }

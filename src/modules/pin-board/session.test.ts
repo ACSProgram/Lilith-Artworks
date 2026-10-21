@@ -48,12 +48,4 @@ describe("pin-board process sessions", () => {
     expect(getBoardSession("artwork-e", 5)?.selectedImageIds).toEqual([8, 9]);
     expect(getBoardSession("artwork-e", 5)?.visibleLayers).toEqual([true, true, true, true]);
   });
-
-  it("drops sessions when the artwork workspace unmounts", async () => {
-    setSelectedBoardId("artwork-f", 3);
-    const { dropArtworkSessions } = await import("./session");
-    dropArtworkSessions("artwork-f");
-
-    expect(getSelectedBoardId("artwork-f")).toBeNull();
-  });
 });

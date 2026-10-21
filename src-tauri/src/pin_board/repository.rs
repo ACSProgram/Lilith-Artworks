@@ -47,7 +47,8 @@ pub(crate) struct PinBoardSummary {
     sort_order: i64,
     deleted: bool,
     deleted_at: Option<i64>,
-    image_count: i64,
+    /// 条目记录数，覆盖全部 kind（位图 / 文字 / 笔迹）。
+    item_count: i64,
     created_ms: i64,
     updated_ms: i64,
 }
@@ -236,7 +237,7 @@ pub(crate) fn create_board(
         sort_order: next_order,
         deleted: false,
         deleted_at: None,
-        image_count: 0,
+        item_count: 0,
         created_ms: now,
         updated_ms: now,
     })
@@ -304,7 +305,7 @@ fn row_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<PinBoardSummary> {
         sort_order: row.get(4)?,
         deleted: deleted_at.is_some(),
         deleted_at,
-        image_count: row.get(6)?,
+        item_count: row.get(6)?,
         created_ms: row.get(7)?,
         updated_ms: row.get(8)?,
     })
@@ -619,7 +620,7 @@ fn initial_revision() -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 画板内容（图片与历史）
+// 画板内容（条目与历史）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -924,10 +925,15 @@ pub(crate) fn load_view(
     })
 }
 
-fn validate_editable(item: &EditablePinBoardItem) -> Result<(), String> {
-    // 0–2 是图片与文字共用的三层；3 只有笔迹能落——笔迹固定占标注层，由
-    // `effective_layer` 在写入前强制改写，不接受前端传入的其它值。
-    if item.layer > stroke::STROKE_LAYER {
+fn validate_editable(item: &EditablePinBoardItem, kind: i64) -> Result<(), String> {
+    // 位图与文字共用 0–2 三层；3 只留给笔迹。笔迹的图层由 `effective_layer` 在
+    // 写入前强制改写，调用方传 0–2 不会被采纳，传 3（其固化位）也合法；>= 4 拒绝。
+    let layer_limit = if kind == ITEM_KIND_STROKE {
+        stroke::STROKE_LAYER
+    } else {
+        stroke::STROKE_LAYER - 1
+    };
+    if item.layer > layer_limit {
         return Err(format!("条目 {} 的图层无效", item.item_id));
     }
     if item
@@ -984,7 +990,6 @@ pub(crate) fn save_board(
 
     let mut requested = std::collections::HashMap::with_capacity(items.len());
     for item in items {
-        validate_editable(item)?;
         if requested.insert(item.item_id, item).is_some() {
             return Err("保存请求包含重复条目".into());
         }
@@ -1001,6 +1006,7 @@ pub(crate) fn save_board(
             continue;
         };
         found += 1;
+        validate_editable(editable, state.kind)?;
         if !same_state(state, editable) {
             changed.insert(*item_id);
         }
@@ -1284,7 +1290,7 @@ fn record_initial_state(
     kind: i64,
     editable: &EditablePinBoardItem,
 ) -> Result<(), String> {
-    validate_editable(editable)?;
+    validate_editable(editable, kind)?;
     let layer = effective_layer(kind, editable.layer) as i64;
     let transform = serde_json::to_string(&ImageTransform {
         points: editable.points,
@@ -1752,7 +1758,7 @@ pub(crate) fn import_images(
     Ok((view, item_ids))
 }
 
-/// 导入剪贴板位图（含“添加文字”生成的 PNG）。
+/// 导入剪贴板位图（拖入导入的字节也走这条路径）。
 pub(crate) fn import_clipboard_image(
     connection: &mut Connection,
     root: &Path,
@@ -2285,8 +2291,8 @@ pub(crate) fn read_texture(
     let file_path = file_path.ok_or("位图条目缺少文件记录")?;
     let canonical = bitmap_source_path(root, &context, item_id, &file_path)?;
     let max_dimension = max_dimension.clamp(dds::MIN_TEXTURE_DIMENSION, dds::MAX_TEXTURE_DIMENSION);
-    let key = (board_id, item_id, max_dimension);
-    if let Some(cached) = dds::texture_cache_get(key) {
+    let key = dds::TextureCacheKey::new(root, board_id, item_id, max_dimension);
+    if let Some(cached) = dds::texture_cache_get(&key) {
         return Ok(cached);
     }
     let bytes = dds::read_limited(&canonical, dds::MAX_DDS_BYTES, "DDS 图片")?;
@@ -2970,6 +2976,63 @@ mod tests {
         let error =
             save_board(&mut connection, &root, board.board_id, &invalid, &revision).unwrap_err();
         assert!(error.contains("图层无效"), "{error}");
+    }
+
+    #[test]
+    fn bitmap_and_text_items_cannot_claim_the_annotation_layer() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "图层板").unwrap();
+        let bitmap_id = insert_live_bitmap(
+            &connection,
+            board.board_id,
+            &root,
+            &artwork_id,
+            0.0,
+            100.0,
+            40.0,
+            20.0,
+        );
+        let revision = board_revision(&connection, board.board_id);
+        let (_, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "文字",
+            20.0,
+            "#00FF00",
+            "left",
+            80.0,
+            30.0,
+            300.0,
+            200.0,
+            &revision,
+        )
+        .unwrap();
+        let view = load_view(&connection, &root, board.board_id).unwrap();
+
+        // 3 是笔迹的固化位，位图与文字只用 0–2：写成 3 必须被拒，而不是静默落库
+        // 后与「标注层只装笔迹」的渲染约定自相矛盾。
+        for item_id in [bitmap_id, text_ids[0]] {
+            let item = view
+                .items
+                .iter()
+                .find(|item| item.item_id == item_id)
+                .unwrap();
+            let items = vec![EditablePinBoardItem {
+                item_id: item.item_id,
+                order: item.order,
+                layer: stroke::STROKE_LAYER,
+                deleted: false,
+                points: item.points,
+                uv: item.uv,
+            }];
+            let revision = board_revision(&connection, board.board_id);
+            let error =
+                save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap_err();
+            assert!(error.contains("图层无效"), "{error}");
+        }
     }
 
     #[test]

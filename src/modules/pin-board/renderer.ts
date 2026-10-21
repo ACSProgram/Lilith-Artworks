@@ -196,7 +196,8 @@ type HistoryEntry = {
 };
 
 export interface PinBoardInteractionState {
-  imageCount: number;
+  /** 画板内未删除的条目数，覆盖全部 kind（位图 / 文字 / 笔迹）。 */
+  itemCount: number;
   selectedCount: number;
   /** 选中里可参与阵列排序的位图数量（文字条目不参与）。 */
   arrangeableCount: number;
@@ -235,8 +236,6 @@ export interface PinBoardContextMenuRequest {
   canEditSelection: boolean;
 }
 
-const PREVIEW_TEXTURE_DIMENSION = PIN_BOARD_MIN_PREVIEW_DIMENSION;
-const TEXTURE_LOAD_MEMORY_BUDGET_BYTES = PIN_BOARD_TEXTURE_LOAD_BUDGET_BYTES;
 const TEXTURE_LOAD_CONCURRENCY = 2;
 const VIEWPORT_LOAD_DELAY_MS = 90;
 const MIN_VIEWPORT_HEIGHT = 20;
@@ -1852,7 +1851,7 @@ export class PinBoardRenderer {
   get interactionState(): PinBoardInteractionState {
     const selected = this.selectedImages();
     return {
-      imageCount: this.images.filter((image) => !image.deleted).length,
+      itemCount: this.images.filter((image) => !image.deleted).length,
       selectedCount: selected.length,
       arrangeableCount: selected.filter((image) => image.kind === "bitmap").length,
       // 单条导出与系统剪贴板复制只认位图：文字与笔迹的入口一律置灰。
@@ -4017,11 +4016,11 @@ export class PinBoardRenderer {
       // 即使高清纹理尚未加载也能立即绘制，不闪烁。缩略图失败按维度记录，
       // 不会阻止更高分辨率的重试。
       if (!this.previewTextures.has(image.itemId)
-        && !this.failedAtOrAbove(image.itemId, PREVIEW_TEXTURE_DIMENSION)) {
+        && !this.failedAtOrAbove(image.itemId, PIN_BOARD_MIN_PREVIEW_DIMENSION)) {
         list.push({
           image,
-          maxDimension: PREVIEW_TEXTURE_DIMENSION,
-          estimatedBytes: estimatedLoadBytes(image, PREVIEW_TEXTURE_DIMENSION),
+          maxDimension: PIN_BOARD_MIN_PREVIEW_DIMENSION,
+          estimatedBytes: estimatedLoadBytes(image, PIN_BOARD_MIN_PREVIEW_DIMENSION),
           priority,
           isPreview: true,
         });
@@ -4072,7 +4071,7 @@ export class PinBoardRenderer {
         while (activeCount < TEXTURE_LOAD_CONCURRENCY && nextIndex < candidates.length) {
           const candidate = candidates[nextIndex];
           if (activeCount > 0
-            && activeBytes + candidate.estimatedBytes > TEXTURE_LOAD_MEMORY_BUDGET_BYTES) break;
+            && activeBytes + candidate.estimatedBytes > PIN_BOARD_TEXTURE_LOAD_BUDGET_BYTES) break;
           nextIndex += 1;
           activeCount += 1;
           activeBytes += candidate.estimatedBytes;

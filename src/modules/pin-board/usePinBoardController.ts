@@ -35,7 +35,7 @@ const IMAGE_PATH_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif|tga|dds)$/i;
 const DROP_IMAGE_PATTERN = /\.(?:png|jpe?g|webp|bmp|gif)$/i;
 
 const DEFAULT_INTERACTION: PinBoardInteractionState = {
-  imageCount: 0,
+  itemCount: 0,
   selectedCount: 0,
   arrangeableCount: 0,
   exportableCount: 0,

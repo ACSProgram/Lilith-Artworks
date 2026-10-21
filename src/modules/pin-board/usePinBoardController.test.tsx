@@ -50,7 +50,7 @@ const board: PinBoardSummary = {
   sortOrder: 0,
   deleted: false,
   deletedAt: null,
-  imageCount: 0,
+  itemCount: 0,
   createdMs: 0,
   updatedMs: 0,
 };
@@ -67,7 +67,7 @@ const view: PinBoardView = {
 function fakeRenderer(): PinBoardRenderer {
   return {
     interactionState: {
-      imageCount: 0,
+      itemCount: 0,
       selectedCount: 0,
       arrangeableCount: 0,
       exportableCount: 0,

@@ -1565,7 +1565,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <strong>{title}</strong>
             <span>
               {view
-                ? `${renderer ? interaction.imageCount : view.items.filter((image) => !image.deleted).length} 个条目${view.missingTextures ? `，其中 ${view.missingTextures} 个位图缺失` : ""}`
+                ? `${renderer ? interaction.itemCount : view.items.filter((image) => !image.deleted).length} 个条目${view.missingTextures ? `，其中 ${view.missingTextures} 个位图缺失` : ""}`
                 : "选择画板"}
             </span>
           </div>
@@ -1590,7 +1590,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || editingBlocked || transferProgress !== null} onClick={() => void importImages()} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
             <button className="icon-button" disabled={!renderer || editingBlocked || transferProgress !== null} onClick={openTextDialog} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.exportableCount === 0 || editingBlocked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.imageCount === 0 || editingBlocked || transferProgress !== null} onClick={() => setExportDialogOpen(true)} title="导出画布 PNG" aria-label="导出画布 PNG"><ImageDown size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.itemCount === 0 || editingBlocked || transferProgress !== null} onClick={() => setExportDialogOpen(true)} title="导出画布 PNG" aria-label="导出画布 PNG"><ImageDown size={17} /></button>
             <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer || interaction.exporting} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
             <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={() => void toggleFullscreen()} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", settings.fullscreenShortcut)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
             <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={() => void save()} title="保存画板" aria-label="保存画板"><Save size={17} /></button>

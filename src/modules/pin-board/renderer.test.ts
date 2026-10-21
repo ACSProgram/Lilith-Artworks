@@ -1140,7 +1140,7 @@ describe("pin-board additive marquee selection", () => {
 type BoardSwitchRenderer = {
   loadBoard: (view: PinBoardView, session: null, stagePrevious?: boolean) => boolean;
   currentBoardId: number;
-  interactionState: { dirty: boolean; imageCount: number };
+  interactionState: { dirty: boolean; itemCount: number };
 };
 
 const SWITCH_QUAD: PinBoardItem["points"] = [[0, 0], [10, 0], [10, 10], [0, 10]];
@@ -1224,7 +1224,7 @@ describe("pin-board renderer board switch", () => {
 
     // 快照回到渲染器手里：画布恢复成离开时的内容，改动仍算未保存。
     expect(pendingSettleState().count).toBe(0);
-    expect(renderer.interactionState.imageCount).toBe(2);
+    expect(renderer.interactionState.itemCount).toBe(2);
     expect(renderer.interactionState.dirty).toBe(true);
   });
 });

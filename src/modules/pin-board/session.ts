@@ -16,6 +16,9 @@ export interface PinBoardViewSession {
 /**
  * 进程内画板会话：跨工作区视图切换保留，不承诺跨应用重启恢复。
  * 仓库/作品以 id 为键，切换作品时模块随工作区整体卸载。
+ *
+ * 会话只按需增长、不做淘汰：每条只有几个标量，规模受「本次运行访问过的画板数」
+ * 约束，因此不需要（也没有）按作品清理的入口。
  */
 const boardSessions = new Map<string, PinBoardViewSession>();
 const selectedBoardIds = new Map<string, number>();
@@ -66,9 +69,4 @@ export function setBoardSession(
     selectedImageIds: [...session.selectedImageIds],
     visibleLayers: normalizeLayerVisibility(session.visibleLayers),
   });
-}
-
-export function dropArtworkSessions(artworkId: string) {
-  boardSessions.delete(artworkId);
-  selectedBoardIds.delete(artworkId);
 }

@@ -8,6 +8,20 @@
 
 ## 当前批次状态
 
+2026-10-21 素材板结构收尾（批次一，本次提交）：按
+`pin-board-structural-cleanup-plan-2026-10-21.md` 落实批次一。两处正确性修复：纹理结果缓存键加入
+仓库根路径（切仓库后画板/条目 id 从头复用不再串图；键同时从四元组改为具名字段结构、根路径按
+`PathBuf` 原样比较），`validate_editable` 按条目 kind 收紧图层契约（位图与文字的 layer 3 被拒，
+笔迹仍由 `effective_layer` 强制标注层）。卫生清理：删除 `session.ts` 的 `dropArtworkSessions`
+及其测试（并在模块注释里说明会话不做淘汰的理由）、`strokeGeometry.ts` 的 `STROKE_LAYER` 与
+`MAX_STROKE_WIDTH`（与 `strokeDrawing.ts` 的 500 同名不同义）、renderer 的两层纹理别名，清理
+`stroke.rs` 的「阶段 2」注释与不再需要的 `allow(dead_code)`；`imageCount` 在 `PinBoardSummary`、
+`PinBoardInteractionState` 与原生 `item_count` 一并改名为 `itemCount`；同步过期注释与模块/架构
+文档（补充缓存键构成、位图/文字占标注层被拒的契约与测试覆盖），并清掉本文件与 `todo.md` 中
+已归档素材板批次的表层段落。自动验证已通过（`cargo fmt --check`、`cargo test --lib pin_board`
+88 用例、`npm run test:pin-board` 24 文件 / 256 用例、`npx tsc --noEmit`、`git diff --check`）。
+批次二、三仍按计划文件执行。
+
 2026-10-21 素材板图层开关与锁定解耦（本次提交）：图层面板此前跟着按钮组共用的
 `editingBlocked`（锁定或导出）走，锁定状态下四个开关一并置灰——那是整画布导出引入统一禁用
 条件时把 `locked` 顺带并进来的结果，计划与模块文档都只要求「导出期间禁用图层面板」。现改为
@@ -31,17 +45,6 @@ Provider 同文件时，开发模式保存 Provider 会热更新出新的 contex
 自动验证已通过（`tsc --noEmit`、`vitest run src/app`），**兜底界面的观感、真实崩溃恢复与
 热更新不再卸载界面仍待人工确认**（验收项在 `todo.md`）。
 
-2026-10-21 素材板整画布导出（计划阶段 2，已实现、人工验收通过并归档）：
-`archive/pin-board-copy-eraser-export-plan-2026-10-21.md` 的阶段 2 落地——离屏 `rgba8unorm`
-渲染通道、
-按导出倍率重载纹理（含淘汰保护）、行带分块与回读、原生流式拼装 PNG（`canvas_export.rs`，
-不取仓库写租约与操作锁）、导出对话框与进度/取消/锁定，另有导入与导出图片的取消和三条链路共用
-的进度条；入口文案按维护者要求定为「导出画布」。实施记录、两轮交互修订与验收结论见
-`archive/handoff-log-2026-10-21.md` 第 12 节与
-`archive/pin-board-copy-eraser-export-plan-2026-10-21.md`；行为变化见 `CHANGELOG.md` 的
-`## Unreleased`，模块口径见 `docs/modules/pin-board.md` 的「整画布导出」。该计划两个阶段
-至此全部完成，无遗留验收项。
-
 2026-10-21 本地 CI 预检（本批次）：新增 `npm run ci:local`（`tools/ci/local-ci.mjs`），
 只覆盖日常检查之外的 CI 门槛——workflow 审计列表一致性、平台分支检查、两条 npm 审计、
 RustSec 审计、发布元数据、许可证一致性、headless 测试目标预编译与九组便宜压力测试；
@@ -62,17 +65,6 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 （`cargo check --tests`），未实际运行——这符合大文件组的既有口径，不是压力测试结果。
 逐项状态见体检报告顶部的「处理状态」注记；行为变化见 `CHANGELOG.md` 的 `## Unreleased`。
 剩余项（3.7 实际收紧、C9/C10 与 4.8 实跑、4.6 暂缓）在 `todo.md`。
-
-2026-10-21 alpha5 收口（人工验收全部通过并归档，已切分 `0.3.0-alpha.5`）：素材板笔迹、形状与
-图层（alpha5）阶段 1–5 的人工验收全部通过——渲染观感、绘制交互与浮动工具条、图层可见性
-（含「混选整组拒绝改图层」与「新条目自动打开隐藏层」两项设计的确认）、线宽滑条新映射手感、
-真实数位笔的压感手感，以及性能项按维护者口径关闭（逐档帧率人工测量不可行，实际绘制大量笔迹
-无卡顿；打开耗时与 Rust 侧批量读写由 P9 发布档自动压测覆盖）。同批搭车批次的验收一并通过：
-备份检查元数据的状态行显示与重启持久化、手动重查分支按链校验的耗时。一条已确认的验收限制：
-维护者的数位笔驱动无法开启「鼠标模式」，`pressure` 恒 0.5 回退等宽一项未实测。逐项结论见
-`archive/handoff-log-2026-10-21.md`；实现口径见 `docs/modules/pin-board.md` 与
-`archive/pin-board-strokes-plan-2026-10-20.md`，行为变化见 `CHANGELOG.md` 的
-`## 0.3.0-alpha.5 - 2026-10-21`。
 
 2026-10-21 版本切分 `0.3.0-alpha.5`（未打标签）：`CHANGELOG.md` 的 `## Unreleased` 落为带
 日期的 `## 0.3.0-alpha.5 - 2026-10-21` 小节并按「CHANGELOG 写法」再压缩一遍，顶部重留空的

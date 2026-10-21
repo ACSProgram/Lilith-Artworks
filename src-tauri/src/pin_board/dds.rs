@@ -8,7 +8,7 @@ use std::{
     collections::HashMap,
     fs,
     io::{Cursor, Write},
-    path::Path,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicU64, Ordering},
         Mutex, OnceLock,
@@ -27,7 +27,7 @@ pub(crate) const MAX_SOURCE_PIXELS: u64 = 96_000_000;
 pub(crate) const MAX_DDS_SOURCE_PIXELS: u64 = 268_435_456;
 pub(crate) const DXGI_FORMAT_BC7_UNORM: u32 = 98;
 pub(crate) const DDS_DX10_HEADER_BYTES: usize = 148;
-/// 单块画板的条目上限（位图与文字合计，规划确认的规模假设）。
+/// 单块画板的条目上限（全部 kind：位图、文字与笔迹合计）。
 pub(crate) const MAX_BOARD_ITEMS: usize = 20_000;
 pub(crate) const MAX_IMPORT_FILES: usize = 256;
 pub(crate) const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
@@ -55,7 +55,28 @@ pub(crate) struct TextureCacheEntry {
     pub(crate) last_used: u64,
 }
 
-pub(crate) type TextureCacheKey = (i64, i64, u32);
+/// 纹理结果缓存的键。仓库根参与键——切换仓库后画板与条目 id 会从头复用，只按
+/// (画板, 条目, 请求长边) 命中会把上一个仓库的解码结果当成本仓库的。字段各自具名，
+/// 调用处因此不会把画板 id 与条目 id 写反；根路径按 `PathBuf` 原样比较，不做
+/// 有损字符串转换。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TextureCacheKey {
+    root: PathBuf,
+    board_id: i64,
+    item_id: i64,
+    max_dimension: u32,
+}
+
+impl TextureCacheKey {
+    pub(crate) fn new(root: &Path, board_id: i64, item_id: i64, max_dimension: u32) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            board_id,
+            item_id,
+            max_dimension,
+        }
+    }
+}
 
 static TEXTURE_CACHE: OnceLock<Mutex<HashMap<TextureCacheKey, TextureCacheEntry>>> =
     OnceLock::new();
@@ -65,12 +86,12 @@ fn texture_cache_tick() -> u64 {
     TEXTURE_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed)
 }
 
-pub(crate) fn texture_cache_get(key: TextureCacheKey) -> Option<Vec<u8>> {
+pub(crate) fn texture_cache_get(key: &TextureCacheKey) -> Option<Vec<u8>> {
     let cache = TEXTURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match cache.get_mut(&key) {
+    match cache.get_mut(key) {
         Some(entry) => {
             entry.last_used = texture_cache_tick();
             Some(entry.bytes.clone())
@@ -108,7 +129,7 @@ fn texture_cache_evict(cache: &mut HashMap<TextureCacheKey, TextureCacheEntry>, 
         let victim = cache
             .iter()
             .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(key, _)| *key);
+            .map(|(key, _)| key.clone());
         match victim {
             Some(key) => {
                 cache.remove(&key);
@@ -613,6 +634,10 @@ mod tests {
 
     use crate::fuzz_support::{mutated, mutated_header, random_bytes};
 
+    fn cache_key(root: &str, board_id: i64, item_id: i64, max_dimension: u32) -> TextureCacheKey {
+        TextureCacheKey::new(Path::new(root), board_id, item_id, max_dimension)
+    }
+
     #[test]
     fn evicts_oldest_texture_cache_entries_first() {
         let mut cache: HashMap<TextureCacheKey, TextureCacheEntry> = HashMap::new();
@@ -633,21 +658,60 @@ mod tests {
                 texture_cache_evict(cache, budget_bytes);
             };
 
-        insert((1, 1, 256), 40 * 1024 * 1024, 96 * 1024 * 1024, &mut cache);
-        insert((1, 2, 256), 40 * 1024 * 1024, 96 * 1024 * 1024, &mut cache);
-        insert((1, 3, 256), 40 * 1024 * 1024, 96 * 1024 * 1024, &mut cache);
+        let budget = 96 * 1024 * 1024;
+        insert(
+            cache_key("root-a", 1, 1, 256),
+            40 * 1024 * 1024,
+            budget,
+            &mut cache,
+        );
+        insert(
+            cache_key("root-a", 1, 2, 256),
+            40 * 1024 * 1024,
+            budget,
+            &mut cache,
+        );
+        insert(
+            cache_key("root-a", 1, 3, 256),
+            40 * 1024 * 1024,
+            budget,
+            &mut cache,
+        );
 
         // 120 MiB 超过 96 MiB 预算：淘汰最久未使用的一条（40 MiB）后回到预算内。
-        assert!(cache.contains_key(&(1, 3, 256)));
-        assert!(cache.contains_key(&(1, 2, 256)));
-        assert!(!cache.contains_key(&(1, 1, 256)));
+        assert!(cache.contains_key(&cache_key("root-a", 1, 3, 256)));
+        assert!(cache.contains_key(&cache_key("root-a", 1, 2, 256)));
+        assert!(!cache.contains_key(&cache_key("root-a", 1, 1, 256)));
     }
 
     #[test]
     fn texture_cache_round_trips_payloads() {
-        texture_cache_store((7, 3, 256), vec![1, 2, 3, 4], 96 * 1024 * 1024);
-        assert_eq!(texture_cache_get((7, 3, 256)), Some(vec![1, 2, 3, 4]));
-        assert_eq!(texture_cache_get((7, 4, 256)), None);
+        texture_cache_store(
+            cache_key("root-a", 7, 3, 256),
+            vec![1, 2, 3, 4],
+            96 * 1024 * 1024,
+        );
+        assert_eq!(
+            texture_cache_get(&cache_key("root-a", 7, 3, 256)),
+            Some(vec![1, 2, 3, 4])
+        );
+        assert_eq!(texture_cache_get(&cache_key("root-a", 7, 4, 256)), None);
+    }
+
+    #[test]
+    fn texture_cache_separates_repository_roots() {
+        // 切仓库后画板与条目 id 会复用：同一 (board, item, dim) 在另一个仓库必须
+        // 不命中，否则会读到上一个仓库的解码结果。
+        texture_cache_store(
+            cache_key("root-a", 7, 3, 256),
+            vec![1, 2, 3, 4],
+            96 * 1024 * 1024,
+        );
+        assert_eq!(texture_cache_get(&cache_key("root-b", 7, 3, 256)), None);
+        assert_eq!(
+            texture_cache_get(&cache_key("root-a", 7, 3, 256)),
+            Some(vec![1, 2, 3, 4])
+        );
     }
 
     #[test]

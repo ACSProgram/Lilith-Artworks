@@ -39,19 +39,20 @@ pub(crate) const MAX_STROKE_EXTENT: f64 = 1_000_000.0;
 pub(crate) const MAX_STROKE_WIDTH: f64 = 1000.0;
 
 pub(crate) const TOOL_PEN: u8 = 0;
-// 工具编号与前端 `strokeGeometry.ts` 的 `STROKE_TOOL` 一一对应。本批次只用到
-// `TOOL_PEN` 的分支判断，其余编号是给阶段 2 的 SDF 渲染准备的，先按契约登记。
-#[allow(dead_code)]
+// 形状工具编号与前端 `strokeGeometry.ts` 的 `STROKE_TOOL` 一一对应，是
+// `pin_board_strokes.tool` 的既有取值。原生侧只按 `TOOL_COUNT` 校验范围，具体编号
+// 只在测试里按名断言，因此不进入非测试构建。
+#[cfg(test)]
 pub(crate) const TOOL_LINE: u8 = 1;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) const TOOL_ARROW: u8 = 2;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) const TOOL_RECT: u8 = 3;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) const TOOL_ELLIPSE: u8 = 4;
 const TOOL_COUNT: u8 = 5;
 
-#[allow(dead_code)]
+#[cfg(test)]
 const FLAG_DIRECTION_MASK: u8 = 0b0000_0011;
 const FLAG_PRESSURE: u8 = 0b0000_0100;
 /// flags 的高 5 位保留，读侧要求为 0：将来加标志时旧程序会拒绝而不是误读。
@@ -67,7 +68,7 @@ pub(crate) struct StrokeHeader {
 
 impl StrokeHeader {
     /// 形状方向位（`0..=3`，起点落在包围盒的哪个角）。仅形状有意义。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn direction(self) -> u8 {
         self.flags & FLAG_DIRECTION_MASK
     }

@@ -75,9 +75,19 @@ entries for the reader; they are not a template every entry has to fill.
   queue, so reload sits behind it with "open log directory". Boundaries clear
   themselves when their `resetKeys` change, so switching artwork or tab
   recovers without a click.
+- Tests: a damaged head snapshot under changed content (R7); a large-file commit
+  killed in the middle of the snapshot pipeline (C9); the 4 MiB pipeline
+  boundary at 4 MiB - 1, 4 MiB and 4 MiB + 1 bytes, with snapshot and delta
+  restored byte for byte (C10); application-layer coverage that a manual commit
+  clears the quick-hit counter on success and leaves it alone on failure or
+  cancellation; and front-end coverage for the background-save indicator hook
+  and for culling a long stroke segment by segment across the viewport.
 
 ### Changed
 
+- The pin-board board summary's `imageCount` is renamed `itemCount` (native field
+  `item_count`): it counts every kind — bitmaps, text and strokes — not bitmaps
+  alone.
 - The pin-board stroke style label is now "大小" instead of "线宽": the value is
   both the pen width and the eraser diameter. Internal identifiers keep the
   `strokeWidth` name.
@@ -99,46 +109,22 @@ entries for the reader; they are not a template every entry has to fill.
   is gone, `exportableCount` counts bitmaps only, and the export and
   system-clipboard actions are disabled together when the selection has no
   bitmap.
-- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in a
-  single batch. The one-off `stress_baseline` group is deleted — its
-  real-repository numbers are archived in `0.3-baseline-2026-10-18.md` and
-  long-term regression stays with `stress_bench` and the synthetic scenarios —
-  together with the 0.2.0-era debug profile in `perf-baseline.json`. The strict
-  performance gate gains an explicit direction: latency keys still require
-  `measured <= baseline * factor`, throughput keys (restore MiB/s) now require
-  `measured >= baseline / factor`, so a faster restore is no longer reported as
-  a regression, and a record-only gate covers derived per-item timings whose
-  resolution is too coarse for any threshold.
-- C7 also cancels the sixth commit checkpoint (the in-transaction "rows written,
-  not yet committed" marker), and its loop is driven by `COMMIT_CHECKPOINTS`, so
-  a new boundary fails the test instead of silently going uncovered. J5 matches
-  the current cross-process lock wording (`仓库正在被另一个进程写入`) instead of
-  the retired content-probe message, so refusals are counted in the right bucket
-  again.
-- A batch of assertions now measures what its name claims. D1's deep-chain
-  memory ceiling drops from 256 MiB to 64 MiB against 37.5 MiB of tested
-  payload (17 MiB peak measured on a debug build); K2 asserts exactly three
-  titles beyond the fixture's default (two emoji, one CJK) and that no leading
-  or trailing space survives; J2 adds a 30-second ceiling plus per-call timings
-  (reported, not gated); G2 is renamed to say it only checks that stage timings
-  were reported; and two front-end tests are renamed to match what they assert
-  and given the assertions they lacked.
-- The remaining test-audit items land in a second batch. H3's pin-board DDS
-  memory ceiling drops from 512 MiB to 64 MiB (12.5 MiB measured on a debug
-  build) and now fails on Windows when the peak reading is absent instead of
-  skipping the assertion, the 180-second guard around 20 rapid commits is
-  removed because it could not detect a regression, and the native arrange
-  command gains unit coverage for its three rejection paths and the corner
-  order it returns. The gate guard now scans every top-level `tests/*.rs` file
-  and keys its requirement to whether a target spawns a process
-  (`stress_support`, `CARGO_BIN_EXE_`, `Command::new`) rather than to the
-  `stress_` prefix, so a future process-spawning test cannot escape gating while
-  pure-logic integration tests stay runnable without the feature; its
-  self-check now calls the same predicates instead of a local copy. C9 gains
-  the scratch-file closed loop: backdate the residue past the grace window,
-  scan, confirm cleanup, and rescan empty. C3's memory and snapshot allowances
-  are now labelled catastrophic bounds rather than proof of streaming;
-  tightening them waits for a release-profile measurement.
+- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in two
+  batches. The one-off `stress_baseline` group and the 0.2.0-era debug profile are
+  deleted, with long-term regression left to `stress_bench` and the synthetic
+  scenarios. The strict performance gate now states a direction per key (latency
+  `<=`, throughput `>=`, so a faster restore is not a regression) and derived
+  per-item timings are record-only; C7 cancels its sixth checkpoint from
+  `COMMIT_CHECKPOINTS`, and J5 matches the current cross-process lock wording.
+- Assertions now measure what their names claim: D1's memory ceiling drops to
+  64 MiB (17 MiB measured) and H3's to 64 MiB (12.5 MiB measured), K2 asserts the
+  exact titles and trims, J2 adds a 30-second ceiling plus reported timings, G2 is
+  renamed to what it checks, and the 180-second rapid-commit guard is removed
+  because it could not detect a regression. The gate guard scans every top-level
+  `tests/*.rs` and keys to whether a target spawns a process; the native arrange
+  command gains boundary coverage; C9 gains the scratch-file cleanup loop; and
+  C3's memory and snapshot allowances are labelled catastrophic bounds rather
+  than proof of streaming.
 - Each React context now lives in its own module (`appRuntimeContext.ts`,
   `noticeContext.ts`, `runtimeProgressContext.ts`) instead of sharing a file
   with its provider. Saving a provider file during development re-executes that
@@ -158,23 +144,16 @@ entries for the reader; they are not a template every entry has to fill.
   left, the backup and chain states beside them - so interval, check mode and
   the success time are no longer repeated three times over in one line.
 
-### Added
-
-- Tests: committing changed content over a damaged head snapshot (stress_damage
-  R7: a readable error, history not advanced, repository reopenable, the damaged
-  node still refused on restore); a large-file commit killed in the middle of
-  the parallel snapshot pipeline (stress_large C9, which watches the snapshot
-  scratch file grow before killing, then asserts no partial snapshot or delta, a
-  repository that still reopens and verifies, and a following commit that the
-  orphaned scratch file does not block); the 4 MiB pipeline boundary at
-  4 MiB - 1, 4 MiB and 4 MiB + 1 bytes (C10, snapshot and delta paths restored
-  byte for byte); application-layer tests that a manual commit clears the
-  quick-hit counter on success and leaves it alone on failure or cancellation;
-  and front-end tests for the pin-board background-save indicator hook and for
-  culling a long stroke segment by segment across the viewport.
-
 ### Fixed
 
+- The pin-board texture result cache is keyed by repository root together with
+  board, item and requested dimension. Switching repositories restarts board and
+  item ids from scratch, so the old key could hand one repository's decoded
+  texture to an item in another.
+- Bitmap and text items can no longer be saved on layer 3. That layer belongs to
+  strokes, whose layer is still forced there; a bitmap or text item claiming it
+  is now rejected instead of being written into a state the layer model says
+  cannot exist.
 - The pin-board layer panel no longer greys out on a locked board. Its switches
   only need the renderer and are blocked during whole-board export, which renders
   the frame captured when it starts; lock was folded into the shared "editing

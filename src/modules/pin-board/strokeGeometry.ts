@@ -21,10 +21,7 @@ export const MAX_STROKE_POINTS = 4096;
 export const STROKE_HEADER_BYTES = 8;
 export const STROKE_POINT_BYTES = 5;
 export const MAX_STROKE_GEOMETRY_BYTES = STROKE_HEADER_BYTES + MAX_STROKE_POINTS * STROKE_POINT_BYTES;
-/** 笔迹固定落在标注层，永远在所有图片与文字之上，不可调整。 */
-export const STROKE_LAYER = 3;
 export const MAX_STROKE_EXTENT = 1_000_000;
-export const MAX_STROKE_WIDTH = 1000;
 
 export const STROKE_TOOL = {
   pen: 0,

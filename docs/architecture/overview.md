@@ -195,8 +195,9 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 素材板导入/导出的进度不再使用 `Channel`：命令在 `CommandContext` 上报告进度并广播
 `operationProgress`，controller 按 `domain = pinBoard` 消费；`Channel` 只保留给需要传输
-大块载荷的通道。Pin-board 的生命周期结算由 controller 注册，画板切换、仓库切换与退出
-仍走 `preparePinBoardRuntimeChange` 的既有语义。
+大块载荷的通道。Pin-board 的生命周期结算由 controller 注册：画板切换只做同步的状态交接，
+未保存改动经后台结算队列写回，不调用 `preparePinBoardRuntimeChange`；仓库切换与退出仍
+走该入口。
 
 ## 日志与诊断
 
@@ -266,7 +267,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 - History node：不可变提交，只有一个父节点，可以被多个后继节点引用；创建分支是从选定节点派生新的 branch/head。
 - Final artifact：分支可选的一份最终成品，固定关联进入发布状态时的 head。存在时分支被冻结，该 head 是强制检查点。
 - Certification record：不可变导出快照，固定关联 final artifact、branch 和发布节点，记录 TrustMark ID、输出文件摘要、C2PA manifest 与验证状态。
-- Pin board：Artwork 内平铺一层的画板聚合，拥有条目记录（位图/文字）、step 历史、图层/顺序与回收站状态；不进入分支历史，位图条目的 DDS 实体存于 `boards/`，文字条目只存数据库。
+- Pin board：Artwork 内平铺一层的画板聚合，拥有条目记录（位图/文字/笔迹）、step 历史、图层/顺序与回收站状态；不进入分支历史，位图条目的 DDS 实体存于 `boards/`，文字与笔迹条目只存数据库。
 
 作品树删除使用数据库软删除。删除一个分组会把其完整子树作为同一个回收站根保存，恢复时优先回到原父分组，原父级不可用时回到根级。只有回收站中的永久删除才清理项目元数据。Artwork 内部的历史节点裁剪属于版本图操作，不进入项目回收站。
 

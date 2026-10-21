@@ -3,6 +3,9 @@
 ## 上下文入口
 
 - 页面、工具栏、快捷键绑定：`src/modules/pin-board/PinBoardModule.tsx`
+- 画板列表与选择、保存/导入/导出状态、生命周期参与者：`usePinBoardController.ts`
+- 后台结算队列与其展示状态：`pendingSettle.ts`、`usePendingSettle.ts`
+- 侧栏拖放排序的纯函数（插到目标行前/后、无变化时返回 null）：`boardOrder.ts`
 - WebGPU/Canvas 渲染与编辑状态：`renderer.ts`
 - 纹理请求尺寸与两级缓存预算：`texturePolicy.ts`
 - 纯几何：`geometry.ts`
@@ -33,11 +36,11 @@
 
 ## 数据所有权与边界
 
-素材板是第五个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
+素材板是第四个领域模块，以 **Artwork 为单位**：一个 Artwork 内多块画板，平铺一层，无文件夹层级；列表顺序由 `sort_order` 决定，可在侧栏拖放调整。画板不纳入分支历史（不进增量提交、不参与恢复/裁剪）。
 
 整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字与笔迹条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字与笔迹条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
-前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为 controller 与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存/导入/导出状态、错误状态，并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者；`PinBoardModule.tsx` 只负责视图、弹窗与局部交互，`PinBoardRenderer` 只处理 GPU、画板装载与绘制。导入/导出/文字的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
+前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为 controller 与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存/导入/导出状态、错误状态，并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者；`PinBoardModule.tsx` 只负责视图、弹窗与局部交互，`PinBoardRenderer` 只处理 GPU、画板装载与绘制。导入/导出的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。添加文字是一次瞬时命令、没有原生进度事件，只在等待期间用同一条本地传输条显示「正在添加文字」。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
 
 模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。
 
@@ -90,7 +93,7 @@ SQLite:
 
 - `revision` 每次画板内容写库（`save_pin_board`/`finalize_pin_board`）后单调更新，用于保存冲突检测；`reorder_pin_boards` 只调整 `sort_order`，`rename_pin_board` 只更新 `name` 与 `updated_ms`，都不改 `revision`，因此重排或改名不会让已打开画板的下一次保存被误判为冲突；
 - 笔迹是第三种条目（`kind = 2`）：只落数据库，不建纹理、不落实体文件，因此不进入 DDS 引用清单、清理、scrub、孤儿扫描、磁盘空间统计与系统剪贴板复制（系统剪贴板仍只认位图）；**画板内复制/粘贴支持三种条目**（载荷只记来源，见「命令面」）；
-- 笔迹的 `layer` 固定为标注层 3，永远在所有图片与文字之上：`save_pin_board` 忽略前端传入的 `layer` 并强制写 3（防御性契约，配单测；同一份几何下只改 `layer` 不算改动、不产生新步骤），超出 0–3 的取值仍被拒绝，文字与图片照旧使用 0–2；
+- 笔迹的 `layer` 固定为标注层 3，永远在所有图片与文字之上：`save_pin_board` 忽略前端传入的 `layer` 并强制写 3（防御性契约，配单测；同一份几何下只改 `layer` 不算改动、不产生新步骤），超出 0–3 的取值仍被拒绝；位图与文字只用 0–2，写成 3 会被拒绝而不是落库（`validate_editable` 按条目 kind 判定），否则「标注层只装笔迹」的渲染约定会出现反例；
 - 笔迹几何的 BLOB 布局、长度/点数校验与批量打包口径由 `stroke.rs` 与 `strokeGeometry.ts` 两侧各持一份，任何一侧改动都要同步另一侧与各自测试；单笔点数上限 4096，编码侧超出即拒绝，抽稀与重采样由 `strokeSampling.ts` 在编码前完成；形状（直线/箭头/矩形/椭圆）不带点数据，两端点由包围盒与方向位推出，退化包围盒（水平或垂直线）由前端按线宽膨胀后再存，读侧拒绝零尺寸；
 - DDS 落盘（`persist_dds_file`）会先确保画板目录存在，仓库数据迁移后目录缺失时自动补建；
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
@@ -137,8 +140,8 @@ SQLite:
 「大小」，环形光标因此改一下就能看到。
 
 **线宽上限 500，滑条走指数映射**（`MIN/MAX_STROKE_WIDTH`、`strokeWidthFromSlider` /
-`strokeWidthToSlider`，刻度 0–`STROKE_WIDTH_SLIDER_STEPS`）。上限比前端几何契约与原生端
-`MAX_STROKE_WIDTH`（1000）保守一档，不必改 schema。滑条位置与线宽之间是指数关系，行程再按
+`strokeWidthToSlider`，刻度 0–`STROKE_WIDTH_SLIDER_STEPS`）。上限比原生端
+`stroke::MAX_STROKE_WIDTH`（1000）保守一档，不必改 schema。滑条位置与线宽之间是指数关系，行程再按
 `t^0.75` 往细线端挪一点：细线端每前进 10% 线宽乘约 1.9 倍，粗线端只乘约 1.6 倍（纯指数下整条
 滑条都是 1.86 倍，右半段因此一拖就窜）。1–20 这段最常调，占到约 38% 的行程，200 以上那一段
 占最后两成。线性滑条会把九成行程分给一辈子用不到的粗线，这是改用非线性的原因；数值框仍可手输
@@ -309,8 +312,9 @@ SQLite:
 **倍率与上限**：1 世界单位 = 1 像素记作 1x。倍率**可手动填**（0.01–8），默认值是「1x 与塞进
 建议上限取小」（内容 45000 宽、上限 20000 → 0.44），填过之后以填的为准。建议上限只按最长边、
 取素材板设置的「纹理缓存等级」（低 10000 / 中 20000 / 高 30000 像素），超过它**只提示不拦截**
-——对话框显示警告、主按钮改成「仍要导出」，导出照常进行。真正的硬上限是边长 65535 与总像素
-10 亿（与原生侧 `MAX_OUTPUT_PIXELS` 同口径），只用来挡住荒谬输入，撞上时倍率被收敛且输入框回写
+——对话框显示警告、主按钮改成「仍要导出」，导出照常进行。真正的硬上限是前端自设的边长 65535
+（`CANVAS_EXPORT_HARD_MAX_DIMENSION`）与总像素 10 亿（与原生侧 `MAX_OUTPUT_PIXELS` 同口径；
+原生侧只校验总像素，不另设边长上限），只用来挡住荒谬输入，撞上时倍率被收敛且输入框回写
 收敛后的值；收敛按**最终整数尺寸**算——取整可能把乘积顶过像素上限（边长 √10 亿见方的内容两边
 各向上取整就多出十几万像素），此时从长边扣掉多出来的像素，返回的倍率也改成该尺寸对应的值，
 因此「前端算得出来、原生拒绝」不会发生，块→世界的映射与「输出 W×H」也严格一致。倍率、输出
@@ -342,7 +346,8 @@ SQLite:
 
 加载失败只记日志、保留现有纹理：不为一张位图的高清版本让整次导出失败。
 
-**分块与回读**：块宽 `min(8192, 剩余宽度)`，行带高度
+**分块与回读**：块宽 `min(8192, 设备允许的单张纹理边长, 剩余宽度)`——8192 是
+`maxTextureDimension2D` 的通用上限，渲染器按设备实际上报值再收敛（`tileWidthLimit`）——行带高度
 `clamp(floor(32 MiB / (输出宽 × 4)), 128, 2048)`（8000 宽 → 1048，20000 → 419，30000 → 279）。
 按「行带优先、行内从左到右」推进：每块设一次视口、渲染到同一张导出纹理、`copyTextureToBuffer`
 （`bytesPerRow` 按 256 对齐）→ `mapAsync` → 去掉行尾 padding → 交给原生端。常驻内存因此只有
@@ -387,7 +392,7 @@ SQLite:
 
 - `load_pin_board`、`save_pin_board`（`items` 为纯变换 DTO）、`finalize_pin_board`
 - `paste_pin_board_items`（画板内粘贴）、`import_pin_board_images`（文件路径）、`import_pin_board_clipboard_image`（剪贴板位图素材，也承接拖入导入的字节）——三者统一写入归一化 BC7 DDS，导入/导出进度经 `CommandContext` 广播 `AppEvent.operationProgress` 回传（不再使用 `Channel`，只保留给需要传输大块载荷的通道）
-- `create_pin_board_text`（文本、字号、颜色、对齐、前端度量宽高与中心点）——文字条目只落数据库，不生成图片；创建后 0.3 不支持改字/改色/改字号
+- `create_pin_board_text`（文本、字号、颜色、对齐、前端度量宽高与中心点）——文字条目只落数据库，不生成图片；创建后不支持改字/改色/改字号
 - `create_pin_board_stroke`（工具、颜色、线宽、包围盒、几何 BLOB、中心点与 revision）——原生端按读侧口径校验几何与包围盒后才落库，图层不由调用方决定（强制写标注层），几何走普通参数通道：`Uint8Array` 由 IPC 的 JSON 序列化还原成数字数组并落成 `Vec<u8>`，单笔 4096 点约 75 KB，不值得为此另开原始载荷通道
 - `read_pin_board_strokes`（整板笔迹几何的二进制载荷，布局见 `stroke::encode_batch`：`u32 条目数` + 每条目 `itemId / tool / color / strokeWidth / 宽高 / geometryLen / bytes`）——前端一次解析成 `Map<itemId, StrokeGeometry>`，不经 JSON；含已删除但尚未结算的条目，可见性以 `load_pin_board` 的 `deleted` 为准
 - `export_pin_board_images`（位图条目解码为 PNG 到用户选择目录）、`read_pin_board_image_png`（系统剪贴板复制，仅位图）、`read_pin_board_texture`（位图读取 DDS；文字与笔迹返回「没有 DDS」信号，由前端自行绘制）
@@ -438,7 +443,7 @@ SQLite:
 
 交互层（renderer、几何、纹理策略、会话、快捷键、画布交互）原样迁移，未重写。要点：
 
-- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `dds.rs`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；
+- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `dds.rs`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；Rust 结果缓存的键是「仓库根 + 画板 + 条目 + 请求长边」——切换仓库后画板与条目 id 会从头复用，键里少了仓库就会把上一个仓库的解码结果交给本仓库的条目；
 - 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录（对应 DDS 的删除走 `pending_file_cleanup` 提交后重放，见上节）；
 - 编辑自动保存：设置页「自动保存」开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。
 - 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
@@ -449,8 +454,8 @@ SQLite:
 - Ctrl+A 全选**整个画板**（全部未删除图片，不限视口），实现为 `renderer.selectAll()`；选中态属于视图状态，因此不调整图片顺序、也不标记 dirty，锁定时不生效；
 - 加选与框选：`Ctrl`/`Cmd` 或 `Shift` 都是加选修饰键（`selection.isAdditiveSelectionModifier`）。按住修饰键点击图片切换单张选中；在空白处拖拽做框选，按住修饰键时以当前选中为基底累加——可连续多次框选，已选中的不取消、框到的新图加入，不按修饰键则替换选择。命中由 `selection.marqueeSelection` 计算，笔迹按墨迹判、位图与文字按四角框判（见「点选与框选的命中」），只并入命中的未删除条目；拖拽中若选中集合未变（`selection.sameSelection`），只更新框选矩形叠加层，跳过重排、重绘与状态广播；
 - Shift 旋转吸附图片的**绝对角度**（0°/15°/30°…，由 `geometry.snapRotationDelta` 反推增量），而非本次拖拽的增量，使已带偏角的图片能被精确转回 0°；
-- “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。栅格化按字形墨迹（`actualBoundingBoxAscent/Descent`）把文字块在每个 1.3 倍行盒内垂直居中，并以此定位基线——此前用 `textBaseline = "top"` 把行高余量全留在下方，文字因此整体偏上、顶部越出纹理被裁掉；显示纹理走这条绘制路径（单条导出已删除，不再有第二条栅格化路径），存量条目也会按新定位重绘。对话框提供内容预览、字号步进与内置取色器（饱和度/亮度面板、色相条、十六进制输入和预设色），不再调用系统取色器。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计；**文字的单条导出已删除**（阶段 2 的整画布导出会一并覆盖文字，不必前端另栅格化一份独立 PNG），系统剪贴板复制也只支持位图。文字条目仍可参与画板内复制/粘贴；
-- 笔迹条目（`kind = stroke`）已能画、能读、能选中：几何契约由 `stroke.rs` / `strokeGeometry.ts` 两侧持有，`create_pin_board_stroke` 与 `read_pin_board_strokes` 已可用，渲染走 `strokeRender.ts` 的 SDF 管线（见「渲染」），绘制交互与工具条见「绘制」，选中、移动、旋转、缩放、翻转、删除与撤销复用图片的条目路径；笔迹固定在标注层，右键菜单的「图层」项在选中含笔迹时置灰（原生端保存时也强制写 3），不会产生「改完重开又回去」的状态。四个图层的可见性开关见「图层可见性」。压感、采样光滑、逐段裁剪与开发期自检入口已随阶段 5 落地（见「绘制」与「快速验证」）；发布前的
+- “添加文字”创建 `kind = text` 条目：前端用 `textLayout.ts` 的固定字体族度量逻辑宽高并持久化，渲染器按请求长边（受纹理像素预算约束）用同一套度量在 2D canvas 栅格化后上传纹理；缩放只改变四边形，文字随四边形精确缩放。栅格化按字形墨迹（`actualBoundingBoxAscent/Descent`）把文字块在每个 1.3 倍行盒内垂直居中，并以此定位基线——此前用 `textBaseline = "top"` 把行高余量全留在下方，文字因此整体偏上、顶部越出纹理被裁掉；显示纹理走这条绘制路径（单条导出已删除，不再有第二条栅格化路径），存量条目也会按新定位重绘。对话框提供内容预览、字号步进与内置取色器（饱和度/亮度面板、色相条、十六进制输入和预设色），不再调用系统取色器。文字条目没有 DDS，也不参与 DDS 引用、清理、scrub、磁盘空间统计；**文字的单条导出已删除**（整画布导出已覆盖文字，因此不需要前端另栅格化一份独立 PNG），系统剪贴板复制也只支持位图。文字条目仍可参与画板内复制/粘贴；
+- 笔迹条目（`kind = stroke`）已能画、能读、能选中：几何契约由 `stroke.rs` / `strokeGeometry.ts` 两侧持有，`create_pin_board_stroke` 与 `read_pin_board_strokes` 已可用，渲染走 `strokeRender.ts` 的 SDF 管线（见「渲染」），绘制交互与工具条见「绘制」，选中、移动、旋转、缩放、翻转、删除与撤销复用图片的条目路径；笔迹固定在标注层，右键菜单的「图层」项在选中含笔迹时置灰（原生端保存时也强制写 3），不会产生「改完重开又回去」的状态。四个图层的可见性开关见「图层可见性」。压感、采样光滑、逐段裁剪与开发期自检入口已落地（见「绘制」与「快速验证」）；发布前的
   `manual` 档压力测试按 `docs/guides/release-policy.md` 由维护者在正式发布前运行；
 - 打开画板按未删除图片的最小包围框自动适配视图；“重置视图”回到该包围框；
 - 全屏为窗口状态：模块在挂载时与原生全屏标志对齐，Escape 与全屏快捷键只在模块活跃时生效；
@@ -468,5 +473,5 @@ SQLite:
   「采样管道」「草稿 + 编码」「整板缓冲构建」的耗时，结果打 `console.table` 并返回同一份对象。
   它不写仓库、不碰 GPU，只能回答 CPU 侧成本；帧率要在真实适配器上手工看（见
   `docs/guides/validation.md` 的压力测试分层）。
-- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰、画板 CRUD/回收站/排序、v1/v4/v5→v6 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字与笔迹条目（BLOB 边界、标注层强制、批量二进制打包、坏几何报错）、画板内粘贴（三类条目混合、保持相对位置、一次事务一次 revision、源画板在回收站/源条目已删除/kind 不一致/数量超限）、整画布导出的流式 PNG（尺寸与像素、多块拼一条行带、乱序/越界/字节数不符拒绝、缺行拒绝、取消删除临时文件、仓库边界拒绝、重名不覆盖、文件名清洗、强杀残留清理）、图片传输的取消（导入取消整笔回滚且不留 DDS、导出取消不写文件、取消信号复位）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
+- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰与跨仓库键隔离、画板 CRUD/回收站/排序、v1/v4/v5→v6 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字与笔迹条目（BLOB 边界、标注层强制、位图/文字占标注层被拒、批量二进制打包、坏几何报错）、画板内粘贴（三类条目混合、保持相对位置、一次事务一次 revision、源画板在回收站/源条目已删除/kind 不一致/数量超限）、整画布导出的流式 PNG（尺寸与像素、多块拼一条行带、乱序/越界/字节数不符拒绝、缺行拒绝、取消删除临时文件、仓库边界拒绝、重名不覆盖、文件名清洗、强杀残留清理）、图片传输的取消（导入取消整笔回滚且不留 DDS、导出取消不写文件、取消信号复位）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

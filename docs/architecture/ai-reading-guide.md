@@ -9,7 +9,7 @@
 | 作品树、搜索、拖放、回收站 | `docs/modules/library.md` | `src/modules/library/`、`src-tauri/src/library/` |
 | 分支、提交、创建分支、恢复、精简、检查点、节点缩略图 | `docs/modules/history-and-backup.md` | `src/modules/history/`、`src-tauri/src/history/`、`src-tauri/src/backup/`、`src-tauri/src/preview/` |
 | 发布、成品、C2PA、TrustMark、识别 | `docs/modules/authenticity.md` | `src/modules/authenticity/`、`src-tauri/src/authenticity/` |
-| 素材板、画板、图片导入导出、画板回收站 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
+| 素材板、画板、图片导入导出、画板回收站、笔迹、图层、整画布导出 | `docs/modules/pin-board.md` | `src/modules/pin-board/`、`src-tauri/src/pin_board/` |
 | 设置、托盘、窗口生命周期 | `docs/architecture/overview.md` | `src-tauri/src/app/`、`src-tauri/src/lib.rs` |
 | 仓储空间状态（数据库记录口径、磁盘扫描） | `docs/modules/history-and-backup.md` 的「仓储空间状态」 | `src-tauri/src/storage_overview.rs`、`src/app/RepositoryStoragePanel.tsx` |
 | 确认弹窗、滑动确认等无领域语义的共享 UI | `docs/architecture/overview.md` 的「前端共享控件」 | `src/shared/` |
