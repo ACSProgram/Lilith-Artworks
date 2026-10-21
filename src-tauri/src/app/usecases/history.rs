@@ -208,11 +208,11 @@ pub(crate) fn delete_branch(
     })
 }
 
-/// 手动重查分支：前台立即校验整条链，而不是只清错误等空闲调度。
+/// 手动重查分支：前台立即按链校验整条分支，而不是只清错误等空闲调度。
 ///
-/// 低频率的自动节奏下，手动入口必须即时；出问题的节点写入自己的
-/// `verify_error`，被它挡住的上游节点写入「无法检查」，两者都不中止后续节点，
-/// 最终返回刷新后的历史让状态行展示派生结果。
+/// 低频率的自动节奏下，手动入口必须即时；head、检查点与分支起点各自作为起点，
+/// 共享前缀只解析一次。出问题的节点写入自己的 `verify_error`，被它挡住的上游节点
+/// 写入「无法检查」，两者都不中止后续节点，最终返回刷新后的历史让状态行展示派生结果。
 pub(crate) fn reverify_branch(
     context: &CommandContext,
     branch_id: &str,
@@ -222,29 +222,21 @@ pub(crate) fn reverify_branch(
         let artwork_id = history::load_branch(root, branch_id)
             .map_err(CommandError::from)?
             .artwork_id;
-        let chain = history::branch_chain_ids(root, branch_id).map_err(CommandError::from)?;
         history::clear_branch_verify_errors(root, branch_id).map_err(CommandError::from)?;
-        let total = chain.len() as u64;
-        for (index, history_id) in chain.iter().enumerate() {
-            context.report_progress("正在校验分支历史", index as u64, total);
-            let outcome = backup::verify_history_node(root, history_id, context.cancel());
-            if context.is_cancelled() {
-                return Err(CommandError::cancelled("分支校验已取消"));
-            }
-            let verified_ms = storage::now_ms().map_err(CommandError::from)?;
-            match outcome {
-                Ok(()) => {
-                    history::mark_node_verified(root, history_id, verified_ms)
-                        .map_err(CommandError::from)?;
+        let total = match backup::verify_branch_history(
+            root,
+            branch_id,
+            context.cancel(),
+            |current, total| context.report_progress("正在校验分支历史", current, total),
+        ) {
+            Ok(total) => total,
+            Err(error) => {
+                if context.is_cancelled() {
+                    return Err(CommandError::cancelled("分支校验已取消"));
                 }
-                Err(failure) => {
-                    let message = failure.message_for(history_id);
-                    log::warn!("branch reverify failed for history node {history_id}: {message}");
-                    history::mark_node_verify_error(root, history_id, &message)
-                        .map_err(CommandError::from)?;
-                }
+                return Err(CommandError::from(error));
             }
-        }
+        };
         context.report_progress("分支校验完成", total, total);
         history::list(root, &artwork_id).map_err(CommandError::from)
     });

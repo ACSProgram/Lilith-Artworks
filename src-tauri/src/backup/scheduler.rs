@@ -2648,7 +2648,11 @@ mod tests {
         let second_id = commit_node(&root, &branch_id, "Second");
 
         assert_eq!(
-            history::branch_chain_ids(&root, &branch_id).unwrap(),
+            history::branch_verification_inventory(&root, &branch_id)
+                .unwrap()
+                .into_iter()
+                .map(|node| node.id)
+                .collect::<Vec<_>>(),
             [first_id.clone(), second_id.clone()]
         );
 

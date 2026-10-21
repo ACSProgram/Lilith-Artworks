@@ -1193,6 +1193,136 @@ mod tests {
     }
 
     #[test]
+    fn branch_reverify_marks_every_node_verified() {
+        let (_directory, root, source, artwork_id, branch_id) = create_fixture();
+        run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        fs::write(&source, vec![b'C'; 96 * 1024]).unwrap();
+        run_backup(
+            &root,
+            &branch_id,
+            "Third",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(history::count_pending_verify_nodes(&root).unwrap(), 3);
+
+        let total = super::super::restore::verify_branch_history(
+            &root,
+            &branch_id,
+            &CancelToken::standalone(),
+            |_, _| {},
+        )
+        .unwrap();
+
+        assert_eq!(total, 3);
+        assert_eq!(history::count_pending_verify_nodes(&root).unwrap(), 0);
+        let branch = history::list(&root, &artwork_id)
+            .unwrap()
+            .branches
+            .remove(0);
+        assert!(branch.verified_ms.is_some());
+        assert!(branch.verify_error.is_none());
+    }
+
+    /// 分支重查与全库扫描同一套归因：坏掉的 head 自己算失败，被它挡住的更早
+    /// 节点写「无法检查」，再往前的检查点仍能独立验证通过。
+    #[test]
+    fn branch_reverify_blocks_ancestors_of_a_missing_head_without_failing_them() {
+        let (_directory, root, source, artwork_id, branch_id) = create_fixture();
+        let first_id = run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
+        fs::write(&source, vec![b'B'; 96 * 1024]).unwrap();
+        let second_id = run_backup(
+            &root,
+            &branch_id,
+            "Second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
+        fs::write(&source, vec![b'C'; 96 * 1024]).unwrap();
+        let head_id = run_backup(
+            &root,
+            &branch_id,
+            "Third",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
+
+        // 把根节点固化成检查点，验证链在 snapshot 祖先处停止：head 丢了只挡住
+        // 中间节点，不该把有独立物化起点的根节点一起判成「无法检查」。
+        super::super::restore::ensure_checkpoint(
+            &root,
+            &first_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let snapshot = history::load_node(&root, &head_id)
+            .unwrap()
+            .snapshot_path
+            .unwrap();
+        fs::remove_file(storage::resolve_path(&root, &snapshot).unwrap()).unwrap();
+
+        super::super::restore::verify_branch_history(
+            &root,
+            &branch_id,
+            &CancelToken::standalone(),
+            |_, _| {},
+        )
+        .unwrap();
+
+        let listing = history::list(&root, &artwork_id).unwrap();
+        let node = |id: &str| listing.nodes.iter().find(|node| node.id == id).unwrap();
+        assert_eq!(
+            node(&head_id).verify_issue,
+            Some(history::NodeVerifyIssue::Missing)
+        );
+        assert_eq!(
+            node(&second_id).verify_issue,
+            Some(history::NodeVerifyIssue::Unverifiable)
+        );
+        assert_eq!(node(&first_id).verify_issue, None);
+        assert!(node(&first_id).verified_ms.is_some());
+    }
+
+    #[test]
     fn unchanged_backup_keeps_a_valid_head_snapshot() {
         let (_directory, root, _source, _artwork_id, branch_id) = create_fixture();
         let first = run_backup(

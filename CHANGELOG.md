@@ -154,6 +154,12 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- Manual branch reverification now walks each chain once from its snapshots,
+  matching the full repository scan. Every head, checkpoint and branch start is
+  an independent starting point, and the branch-scoped inventory reads only that
+  branch's ancestor chain, so a shared prefix is resolved once instead of once
+  per node. Results and failure attribution are unchanged: the truly broken node
+  is marked missing or damaged, and the versions it blocks stay 「无法检查」.
 - Quick checks now perform an adaptive full audit. `branches.quick_hit_count`
   counts consecutive fingerprint hits. When the counter plus one reaches a
   threshold computed at each scheduled check — 8 × queue factor × size factor,

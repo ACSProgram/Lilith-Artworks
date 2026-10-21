@@ -425,9 +425,10 @@ impl VerifyFailure {
 
 /// 物化单个历史节点并校验其完整性：沿链解析、与数据库摘要比对、逐块验哈希。
 ///
-/// 这是空闲增量批次与手动重查使用的单节点内核，只读、不写任何状态；调用方负责
-/// 用 [`VerifyFailure::message_for`] 把结果写入节点级校验列。全库扫描不走这里，
-/// 它按链一次走完（见 [`scrub_history`]）。
+/// 这是空闲增量批次使用的单节点内核，只读、不写任何状态；调用方负责用
+/// [`VerifyFailure::message_for`] 把结果写入节点级校验列。手动重查与全库扫描
+/// 按链一次走完（见 [`walk_verification_inventory`]），只有没有可达 snapshot
+/// 的孤立节点才退回这里。
 pub(crate) fn verify_history_node(
     root: &Path,
     history_id: &str,
@@ -488,12 +489,82 @@ impl ScrubOutcome {
 pub(crate) fn scrub_history(
     root: &Path,
     cancel: &CancelToken,
-    mut progress: impl FnMut(u64, u64),
+    progress: impl FnMut(u64, u64),
 ) -> Result<u64, String> {
     let inventory = history::verification_inventory(root)?;
     let total = inventory.len() as u64;
+    let mut failures = 0_u64;
+    let mut first_error: Option<String> = None;
+
+    walk_verification_inventory(root, inventory, cancel, progress, |history_id, outcome| {
+        record_scrub_outcome(root, history_id, outcome, &mut failures, &mut first_error)
+    })?;
+
+    match first_error {
+        None => Ok(total),
+        Some(error) if failures == 1 => Err(error),
+        Some(error) => Err(format!(
+            "{error}（另有 {} 个历史节点校验失败）",
+            failures - 1
+        )),
+    }
+}
+
+/// 手动重查一条分支：与 [`scrub_history`] 共用按链遍历，只是范围收在分支祖先链内。
+///
+/// 分支内每个持有 snapshot 的节点（head、检查点、分支起点）都是独立起点，从它
+/// 沿父链走到下一个 snapshot 或根节点；共享前缀只解析一次。结论写回节点级校验
+/// 状态，失败归因与全库扫描一致。返回本次覆盖的节点数，供调用方收尾进度。
+pub(crate) fn verify_branch_history(
+    root: &Path,
+    branch_id: &str,
+    cancel: &CancelToken,
+    progress: impl FnMut(u64, u64),
+) -> Result<u64, String> {
+    let inventory = history::branch_verification_inventory(root, branch_id)?;
+    let total = inventory.len() as u64;
+    let mut failed = 0_u64;
+    let mut blocked = 0_u64;
+
+    walk_verification_inventory(root, inventory, cancel, progress, |history_id, outcome| {
+        let Some(message) = apply_outcome(root, history_id, outcome)? else {
+            return Ok(());
+        };
+        match outcome {
+            ScrubOutcome::Failed(_) => {
+                failed += 1;
+                log::warn!("branch reverify failed for history node {history_id}: {message}");
+            }
+            ScrubOutcome::Blocked(_) => {
+                blocked += 1;
+                log::warn!("branch reverify could not verify history node {history_id}: {message}");
+            }
+            ScrubOutcome::Verified => {}
+        }
+        Ok(())
+    })?;
+
+    log::info!(
+        "branch history reverified: branch_id={branch_id}, nodes={total}, failed={failed}, blocked={blocked}"
+    );
+    Ok(total)
+}
+
+/// 按链走完一份节点清单，把结论交给调用方写入。
+///
+/// 从每个持有 snapshot 的节点出发沿父链往上走一趟，走过的节点顺带拿到结论；
+/// 新的起点先走，走到已有确定结论的节点、或自带 snapshot 的祖先就停。没有
+/// 可达 snapshot 的孤立节点退回单节点内核，归因仍然准确。
+fn walk_verification_inventory(
+    root: &Path,
+    inventory: Vec<history::VerifyChainNode>,
+    cancel: &CancelToken,
+    mut progress: impl FnMut(u64, u64),
+    mut record: impl FnMut(&str, &ScrubOutcome) -> Result<(), String>,
+) -> Result<(), String> {
+    let total = inventory.len() as u64;
     if total == 0 {
-        return Ok(0);
+        return Ok(());
     }
     let nodes: HashMap<&str, &history::VerifyChainNode> = inventory
         .iter()
@@ -513,9 +584,6 @@ pub(crate) fn scrub_history(
             .then_with(|| right.id.cmp(&left.id))
     });
 
-    let mut failures = 0_u64;
-    let mut first_error: Option<String> = None;
-
     for start in starts {
         ensure_not_cancelled(cancel)?;
         let walked = walk_chain(root, start, &nodes, &outcomes, cancel)?;
@@ -526,7 +594,7 @@ pub(crate) fn scrub_history(
                 continue;
             }
             ensure_not_cancelled(cancel)?;
-            record_scrub_outcome(root, &history_id, &outcome, &mut failures, &mut first_error)?;
+            record(&history_id, &outcome)?;
             outcomes.insert(history_id, outcome);
             // 进度按「已有确定结论的节点数」报：被更深的链推翻过一次的灰色节点不会
             // 让进度倒退，也不会把同一节点算两遍。
@@ -545,19 +613,16 @@ pub(crate) fn scrub_history(
             Ok(()) => ScrubOutcome::Verified,
             Err(failure) => ScrubOutcome::Failed(failure),
         };
-        record_scrub_outcome(root, &node.id, &outcome, &mut failures, &mut first_error)?;
+        // 取消发生在单节点内核内部时，它表现为一次失败；这里不能把取消写成损坏。
+        if cancel.is_cancelled() {
+            return Err("操作已取消".into());
+        }
+        record(&node.id, &outcome)?;
         outcomes.insert(node.id.clone(), outcome);
         progress(outcomes.len() as u64, total);
     }
 
-    match first_error {
-        None => Ok(total),
-        Some(error) if failures == 1 => Err(error),
-        Some(error) => Err(format!(
-            "{error}（另有 {} 个历史节点校验失败）",
-            failures - 1
-        )),
-    }
+    Ok(())
 }
 
 fn record_scrub_outcome(
@@ -567,22 +632,39 @@ fn record_scrub_outcome(
     failures: &mut u64,
     first_error: &mut Option<String>,
 ) -> Result<(), String> {
+    let Some(message) = apply_outcome(root, history_id, outcome)? else {
+        return Ok(());
+    };
+    match outcome {
+        ScrubOutcome::Failed(_) => {
+            log::warn!("repository scrub failed for history node {history_id}: {message}");
+            *failures += 1;
+            first_error.get_or_insert(message);
+        }
+        ScrubOutcome::Blocked(_) => {
+            log::warn!("repository scrub could not verify history node {history_id}: {message}");
+        }
+        ScrubOutcome::Verified => {}
+    }
+    Ok(())
+}
+
+/// 写入一个节点的校验结论；确认有问题时返回可对外的文案，通过时返回 `None`。
+fn apply_outcome(
+    root: &Path,
+    history_id: &str,
+    outcome: &ScrubOutcome,
+) -> Result<Option<String>, String> {
     match outcome {
         ScrubOutcome::Verified => {
             let verified_ms = storage::now_ms()?;
-            history::mark_node_verified(root, history_id, verified_ms)
+            history::mark_node_verified(root, history_id, verified_ms)?;
+            Ok(None)
         }
-        ScrubOutcome::Failed(failure) => {
+        ScrubOutcome::Failed(failure) | ScrubOutcome::Blocked(failure) => {
             let message = failure.message_for(history_id);
-            log::warn!("repository scrub failed for history node {history_id}: {message}");
-            *failures += 1;
-            first_error.get_or_insert_with(|| message.clone());
-            history::mark_node_verify_error(root, history_id, &message)
-        }
-        ScrubOutcome::Blocked(failure) => {
-            let message = failure.message_for(history_id);
-            log::warn!("repository scrub could not verify history node {history_id}: {message}");
-            history::mark_node_verify_error(root, history_id, &message)
+            history::mark_node_verify_error(root, history_id, &message)?;
+            Ok(Some(message))
         }
     }
 }

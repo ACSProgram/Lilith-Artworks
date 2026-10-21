@@ -446,18 +446,54 @@ pub(crate) fn store_thumbnail(
 /// 边记录时兜底。
 pub(crate) fn verification_inventory(root: &Path) -> Result<Vec<VerifyChainNode>, String> {
     let connection = storage::open(root)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
-                    COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
-                    node.created_ms
-             FROM history_nodes node
-             LEFT JOIN history_edges edge ON edge.child_history_id = node.id
-             ORDER BY node.created_ms, node.id",
-        )
-        .map_err(storage::database_error)?;
+    collect_verify_nodes(
+        &connection,
+        "SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
+                COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
+                node.created_ms
+         FROM history_nodes node
+         LEFT JOIN history_edges edge ON edge.child_history_id = node.id
+         ORDER BY node.created_ms, node.id",
+        &[],
+    )
+}
+
+/// 单条分支祖先链的节点元数据，字段口径与 [`verification_inventory`] 一致，
+/// 只是范围收在该分支 head 到根节点之间。手动重查按这条链走，不读取其它分支。
+pub(crate) fn branch_verification_inventory(
+    root: &Path,
+    branch_id: &str,
+) -> Result<Vec<VerifyChainNode>, String> {
+    let connection = storage::open(root)?;
+    collect_verify_nodes(
+        &connection,
+        "WITH RECURSIVE ancestors(id) AS (
+             SELECT head_history_id FROM branches
+             WHERE id = ?1 AND head_history_id IS NOT NULL
+             UNION ALL
+             SELECT node.parent_id
+             FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
+             WHERE node.parent_id IS NOT NULL
+         )
+         SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
+                COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
+                node.created_ms
+         FROM history_nodes node
+         JOIN ancestors ON ancestors.id = node.id
+         LEFT JOIN history_edges edge ON edge.child_history_id = node.id
+         ORDER BY node.created_ms, node.id",
+        &[&branch_id],
+    )
+}
+
+fn collect_verify_nodes(
+    connection: &rusqlite::Connection,
+    sql: &str,
+    params: &[&dyn rusqlite::ToSql],
+) -> Result<Vec<VerifyChainNode>, String> {
+    let mut statement = connection.prepare(sql).map_err(storage::database_error)?;
     let nodes = statement
-        .query_map([], |row| {
+        .query_map(params, |row| {
             Ok(VerifyChainNode {
                 id: row.get(0)?,
                 parent_id: row.get(1)?,
@@ -1926,32 +1962,6 @@ pub(crate) fn latest_history_write_ms(root: &Path) -> Result<Option<i64>, String
             row.get(0)
         })
         .map_err(storage::database_error)
-}
-
-/// 分支 head 到根节点的整条历史链，按 `created_ms` 从旧到新排序。
-pub(crate) fn branch_chain_ids(root: &Path, branch_id: &str) -> Result<Vec<String>, String> {
-    let connection = storage::open(root)?;
-    let mut statement = connection
-        .prepare(
-            "WITH RECURSIVE ancestors(id) AS (
-               SELECT head_history_id FROM branches
-               WHERE id = ?1 AND head_history_id IS NOT NULL
-               UNION ALL
-               SELECT node.parent_id
-               FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
-               WHERE node.parent_id IS NOT NULL
-             )
-             SELECT node.id
-             FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
-             ORDER BY node.created_ms, node.id",
-        )
-        .map_err(storage::database_error)?;
-    let ids = statement
-        .query_map([branch_id], |row| row.get(0))
-        .map_err(storage::database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(storage::database_error)?;
-    Ok(ids)
 }
 
 /// 清除整条分支链的失败摘要，使这些节点重新进入自动队列；已通过校验的状态保留。
