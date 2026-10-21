@@ -754,7 +754,10 @@ describe("pin-board renderer autosave", () => {
       resizeObserver: { disconnect: vi.fn() },
       themeObserver: { disconnect: vi.fn() },
       onSessionChange: vi.fn(),
-      gpu: { viewportBuffer: { destroy: vi.fn() } },
+      gpu: {
+        viewportBuffer: { destroy: vi.fn() },
+        exportViewportBuffer: { destroy: vi.fn() },
+      },
       textures: new Map(),
       previewTextures: new Map(),
       worldUnitsPerCssPixel: () => 1,

@@ -29,3 +29,20 @@ export function invokeCommand<T>(command: string, args?: Record<string, unknown>
     throw normalizeCommandError(error);
   });
 }
+
+/**
+ * 以原始字节作为请求体调用命令（Tauri v2 的 `InvokeBody::Raw`）。
+ *
+ * 大块二进制（素材板整画布导出的分块 RGBA）走这条路：JSON 序列化会把每个字节变成
+ * 一个数字，几十 MB 的块光是编码就要几百 MB 内存。短参数（块的坐标与尺寸）走 header，
+ * 值必须是 ASCII 短字符串。错误归一化与 `invokeCommand` 保持一致。
+ */
+export function invokeCommandWithBody<T>(
+  command: string,
+  body: Uint8Array | ArrayBuffer,
+  headers: Record<string, string>,
+): Promise<T> {
+  return invoke<T>(command, body, { headers }).catch((error: unknown) => {
+    throw normalizeCommandError(error);
+  });
+}

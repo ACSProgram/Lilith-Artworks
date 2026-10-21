@@ -61,6 +61,8 @@ export interface PinBoardTransferProgress {
   label: string;
   current: number;
   total: number;
+  /** 这次传输能否中途取消：导入/导出图片与整画布导出可以，加文字这类瞬时动作不行。 */
+  cancellable?: boolean;
 }
 
 export type PinBoardTextAlign = "left" | "center" | "right";

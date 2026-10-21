@@ -224,6 +224,7 @@ pub(crate) fn import_images(
     gap_ratio: f64,
     expected_revision: &str,
     on_progress: impl FnMut(usize, usize),
+    should_cancel: impl Fn() -> bool,
 ) -> Result<(PinBoardView, Vec<i64>), CommandError> {
     context.run_repository_write(|session| {
         let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
@@ -237,6 +238,7 @@ pub(crate) fn import_images(
             gap_ratio,
             expected_revision,
             on_progress,
+            should_cancel,
         )
         .map_err(CommandError::from)
     })
@@ -375,6 +377,7 @@ pub(crate) fn export_images(
     item_ids: &[i64],
     output_directory: &str,
     on_progress: impl FnMut(usize, usize),
+    should_cancel: impl Fn() -> bool,
 ) -> Result<usize, CommandError> {
     context.run_repository_write(|session| {
         let connection = storage::open(session.root()).map_err(CommandError::from)?;
@@ -385,6 +388,7 @@ pub(crate) fn export_images(
             item_ids,
             output_directory,
             on_progress,
+            should_cancel,
         )
         .map_err(CommandError::from)
     })

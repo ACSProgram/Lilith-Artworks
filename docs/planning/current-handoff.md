@@ -8,6 +8,17 @@
 
 ## 当前批次状态
 
+2026-10-21 素材板整画布导出（计划阶段 2，已实现、人工验收通过并归档）：
+`archive/pin-board-copy-eraser-export-plan-2026-10-21.md` 的阶段 2 落地——离屏 `rgba8unorm`
+渲染通道、
+按导出倍率重载纹理（含淘汰保护）、行带分块与回读、原生流式拼装 PNG（`canvas_export.rs`，
+不取仓库写租约与操作锁）、导出对话框与进度/取消/锁定，另有导入与导出图片的取消和三条链路共用
+的进度条；入口文案按维护者要求定为「导出画布」。实施记录、两轮交互修订与验收结论见
+`archive/handoff-log-2026-10-21.md` 第 12 节与
+`archive/pin-board-copy-eraser-export-plan-2026-10-21.md`；行为变化见 `CHANGELOG.md` 的
+`## Unreleased`，模块口径见 `docs/modules/pin-board.md` 的「整画布导出」。该计划两个阶段
+至此全部完成，无遗留验收项。
+
 2026-10-21 本地 CI 预检（本批次）：新增 `npm run ci:local`（`tools/ci/local-ci.mjs`），
 只覆盖日常检查之外的 CI 门槛——workflow 审计列表一致性、平台分支检查、两条 npm 审计、
 RustSec 审计、发布元数据、许可证一致性、headless 测试目标预编译与九组便宜压力测试；
@@ -88,9 +99,6 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 
 ## 下一步
 
-- 素材板计划的阶段 2（整画布导出）待开工，口径见
-  `pin-board-copy-eraser-export-plan-2026-10-21.md`；阶段 1 已实现、人工验收通过并归档
-  （`archive/handoff-log-2026-10-21.md` 第 11 节）。
 - 测试体检第二批的收尾：随发布前压力测试轮运行 C9/C10（含 4.8 新增的临时文件清理闭环），并用
   同一轮发布档 C3 实测收紧 3.7 的内存与快照上界。验收项见 `todo.md`。
 - 自动备份调度修复的阶段 2–5 待人工验证：GUI 手工验收（静默窗、调度器代价感知、让位不空转、

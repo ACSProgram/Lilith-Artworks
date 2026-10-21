@@ -396,6 +396,10 @@ pub fn run() {
                 backup_state,
                 event_sink,
             ));
+            // 整画布导出的会话表：单并发，不参与仓库锁，随进程存活。
+            application.manage(pin_board::PinBoardCanvasExportState::default());
+            // 图片传输（导入/导出图片）的取消信号：同样是进程级、单并发。
+            application.manage(pin_board::PinBoardTransferCancel::default());
             let resource_dir = application.path().resource_dir()?;
             // 只认随包资源目录。曾经保留一条 `CARGO_MANIFEST_DIR` 的编译期回退路径，
             // 那条路径会把开发机目录写进发布产物，也让「模型是否被替换」的判断多一个

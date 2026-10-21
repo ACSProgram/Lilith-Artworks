@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 use super::dds;
 use super::stroke;
+use super::transfer::TRANSFER_CANCELLED;
 use crate::{cleanup, storage};
 
 pub(crate) const BOARD_DIRECTORY: &str = "boards";
@@ -1442,7 +1443,10 @@ fn resolve_clipboard_sources(
             return Err(format!("源条目 {} 已删除", item.source_item_id));
         }
         if state.kind != expected_kind {
-            return Err(format!("源条目 {} 的类型与复制记录不一致", item.source_item_id));
+            return Err(format!(
+                "源条目 {} 的类型与复制记录不一致",
+                item.source_item_id
+            ));
         }
         let payload = match state.kind {
             ITEM_KIND_BITMAP => {
@@ -1482,10 +1486,11 @@ fn resolve_clipboard_sources(
                     )
                     .optional()
                     .map_err(storage::database_error)?;
-                let geometry =
-                    geometry.ok_or_else(|| format!("笔迹条目 {} 缺少几何数据", item.source_item_id))?;
-                stroke::validate_geometry(&geometry)
-                    .map_err(|error| format!("笔迹条目 {} 的几何无效：{error}", item.source_item_id))?;
+                let geometry = geometry
+                    .ok_or_else(|| format!("笔迹条目 {} 缺少几何数据", item.source_item_id))?;
+                stroke::validate_geometry(&geometry).map_err(|error| {
+                    format!("笔迹条目 {} 的几何无效：{error}", item.source_item_id)
+                })?;
                 ClipboardPayload::Stroke {
                     payload,
                     width: state.width,
@@ -1664,6 +1669,7 @@ pub(crate) fn import_images(
     gap_ratio: f64,
     expected_revision: &str,
     mut on_progress: impl FnMut(usize, usize),
+    should_cancel: impl Fn() -> bool,
 ) -> Result<(PinBoardView, Vec<i64>), String> {
     if paths.is_empty() || paths.len() > dds::MAX_IMPORT_FILES {
         return Err("导入文件数量无效".into());
@@ -1683,16 +1689,15 @@ pub(crate) fn import_images(
 
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let kinds = vec![ITEM_KIND_BITMAP; total];
-    let setup = begin_item_mutation(
-        &transaction,
-        root,
-        board_id,
-        expected_revision,
-        &kinds,
-    )?;
+    let setup = begin_item_mutation(&transaction, root, board_id, expected_revision, &kinds)?;
     let mut created_files = dds::CreatedFiles::default();
     let mut imported: Vec<(i64, u32, u32)> = Vec::with_capacity(total);
     for (index, source) in paths.iter().enumerate() {
+        // 取消在条目边界生效：整笔事务回滚、已写出的 DDS 由 `CreatedFiles` 一起删掉，
+        // 画板上不会留下半批条目——导入要么全成、要么什么都没发生。
+        if should_cancel() {
+            return Err(TRANSFER_CANCELLED.into());
+        }
         let source = PathBuf::from(source);
         let extension = source
             .extension()
@@ -1996,13 +2001,7 @@ pub(crate) fn create_strokes(
 
     let transaction = connection.transaction().map_err(storage::database_error)?;
     let kinds = vec![ITEM_KIND_STROKE; strokes.len()];
-    let setup = begin_item_mutation(
-        &transaction,
-        root,
-        board_id,
-        expected_revision,
-        &kinds,
-    )?;
+    let setup = begin_item_mutation(&transaction, root, board_id, expected_revision, &kinds)?;
     for (index, stroke) in strokes.iter().enumerate() {
         let item_id = setup.item_ids[index];
         transaction
@@ -2180,6 +2179,7 @@ pub(crate) fn export_images(
     item_ids: &[i64],
     output_directory: &str,
     mut on_progress: impl FnMut(usize, usize),
+    should_cancel: impl Fn() -> bool,
 ) -> Result<usize, String> {
     if item_ids.is_empty() {
         return Err("没有可导出的条目".into());
@@ -2196,6 +2196,11 @@ pub(crate) fn export_images(
     on_progress(0, total);
     let mut exported = 0usize;
     for (index, item_id) in item_ids.iter().enumerate() {
+        // 取消在条目边界生效：已经写出的 PNG 都是完整文件，保留即可（用户拿到的是一
+        // 部分导出），错误文案交给前端改写成「已取消导出」。
+        if should_cancel() {
+            return Err(TRANSFER_CANCELLED.into());
+        }
         let (kind, file_path) = item_kind_and_file(connection, board_id, *item_id)?;
         if kind != ITEM_KIND_BITMAP {
             on_progress(index + 1, total);
@@ -2360,6 +2365,7 @@ mod tests {
             0.0,
             &revision,
             |_, _| {},
+            || false,
         )
         .unwrap_err();
         assert!(import_error.contains("作品仓库内部"), "{import_error}");
@@ -2373,9 +2379,88 @@ mod tests {
             &[1],
             &display_path(&inside_output),
             |_, _| {},
+            || false,
         )
         .unwrap_err();
         assert!(export_error.contains("作品仓库内部"), "{export_error}");
+    }
+
+    #[test]
+    fn cancelling_an_import_leaves_the_board_untouched() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "板").unwrap();
+        let revision: String = connection
+            .query_row(
+                "SELECT revision FROM pin_boards WHERE id = ?1",
+                [board.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // 源图不存在也无所谓：取消检查在解码之前，先于一切文件读写。
+        let source = directory.path().join("source.png");
+
+        let error = import_images(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[display_path(&source)],
+            0.0,
+            0.0,
+            0.0,
+            &revision,
+            |_, _| {},
+            || true,
+        )
+        .unwrap_err();
+        assert_eq!(error, TRANSFER_CANCELLED);
+
+        // 整笔回滚：条目与 DDS 都不该留下（画板目录压根没被创建）。
+        let board_directory = root
+            .join("artworks")
+            .join(&artwork_id)
+            .join(BOARD_DIRECTORY)
+            .join(board.board_id.to_string());
+        assert!(
+            !board_directory.exists() || fs::read_dir(&board_directory).unwrap().next().is_none(),
+            "取消的导入不得留下 DDS"
+        );
+        let item_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pin_board_items WHERE board_id = ?1",
+                [board.board_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(item_count, 0, "取消的导入不得写入条目");
+    }
+
+    #[test]
+    fn cancelling_an_export_stops_before_the_first_item() {
+        let (directory, connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let mut connection = connection;
+        let board = create_board(&mut connection, &artwork_id, "板").unwrap();
+        let output = directory.path().join("out");
+        fs::create_dir(&output).unwrap();
+
+        let error = export_images(
+            &connection,
+            &root,
+            board.board_id,
+            &[1],
+            &display_path(&output),
+            |_, _| {},
+            || true,
+        )
+        .unwrap_err();
+        assert_eq!(error, TRANSFER_CANCELLED);
+        assert!(
+            fs::read_dir(&output).unwrap().next().is_none(),
+            "取消的导出不得写出任何文件"
+        );
     }
 
     #[test]
@@ -2660,7 +2745,8 @@ mod tests {
                 board.board_id,
                 &item_ids,
                 export_directory.to_str().unwrap(),
-                |_, _| {}
+                |_, _| {},
+                || false,
             )
             .unwrap(),
             0
@@ -2983,7 +3069,8 @@ mod tests {
                 board.board_id,
                 &item_ids,
                 export_directory.to_str().unwrap(),
-                |_, _| {}
+                |_, _| {},
+                || false,
             )
             .unwrap(),
             0
@@ -3644,7 +3731,10 @@ mod tests {
         assert!(((min_y + max_y) / 2.0 - 500.0).abs() < 1e-6);
 
         // 一次事务只推进一个步骤：三个条目共用同一个 step，step 0 仍保留删除态默认节点。
-        assert_ne!(target_revision, board_revision(&connection, target.board_id));
+        assert_ne!(
+            target_revision,
+            board_revision(&connection, target.board_id)
+        );
         assert_eq!(
             scalar_for_board(
                 &connection,
@@ -3753,7 +3843,14 @@ mod tests {
             points: state.transform.points,
             uv: state.transform.uv,
         };
-        save_board(&mut connection, &root, source.board_id, &[editable], &revision).unwrap();
+        save_board(
+            &mut connection,
+            &root,
+            source.board_id,
+            &[editable],
+            &revision,
+        )
+        .unwrap();
 
         let clipboard = vec![clipboard_item("text", source.board_id, text_id)];
         let target_revision = board_revision(&connection, target.board_id);

@@ -1,7 +1,8 @@
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { invokeCommand } from "../../shared/tauri";
+import { invokeCommand, invokeCommandWithBody } from "../../shared/tauri";
 import type { PinBoardStrokeTool } from "./strokeGeometry";
+import type { CanvasExportTile } from "./exportPolicy";
 import type {
   PinBoardArrangeItem,
   PinBoardArrangeResult,
@@ -153,6 +154,36 @@ export const pinBoardApi = {
     invokeCommand<Uint8Array>("read_pin_board_image_png", { boardId, itemId }),
   readPinBoardTexture: (boardId: number, itemId: number, maxDimension: number) =>
     invokeCommand<Uint8Array>("read_pin_board_texture", { boardId, itemId, maxDimension }),
+  /**
+   * 整画布导出的四个命令共用一个单并发会话：`begin` 建临时文件与 PNG 头，`write` 逐块
+   * 送原始 RGBA（坐标走 header），`finish` 写 IEND 并原子改名，`cancel` 丢弃会话。
+   * 整段流程不写仓库，也不取仓库写租约。
+   */
+  beginPinBoardCanvasExport: (
+    outputDirectory: string,
+    fileName: string,
+    width: number,
+    height: number,
+  ) => invokeCommand<void>("begin_pin_board_canvas_export", {
+    outputDirectory, fileName, width, height,
+  }),
+  writePinBoardCanvasExportTile: (tile: CanvasExportTile, rgba: Uint8Array) =>
+    invokeCommandWithBody<void>("write_pin_board_canvas_export_tile", rgba, {
+      x: String(tile.x),
+      y: String(tile.y),
+      width: String(tile.width),
+      height: String(tile.height),
+    }),
+  finishPinBoardCanvasExport: () =>
+    invokeCommand<string>("finish_pin_board_canvas_export"),
+  cancelPinBoardCanvasExport: () =>
+    invokeCommand<void>("cancel_pin_board_canvas_export"),
+  /**
+   * 原生侧图片传输（导入/导出图片）的取消信号：原生循环在每条目边界检查，
+   * 导入还会整笔回滚。整画布导出不用它（那条链路由渲染器逐块推进、自己检查取消）。
+   */
+  cancelPinBoardTransfer: () =>
+    invokeCommand<void>("cancel_pin_board_transfer"),
 };
 
 /** 文件对话框与窗口状态属于模块的 Tauri 访问边界，组件通过 api.ts 间接调用。 */

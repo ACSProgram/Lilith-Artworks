@@ -7,13 +7,17 @@
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
 pub(crate) mod arrange;
+pub(crate) mod canvas_export;
 mod contracts;
 pub(crate) mod dds;
 pub(crate) mod repository;
 pub(crate) mod scrub;
 mod stroke;
+pub(crate) mod transfer;
 
+pub(crate) use canvas_export::PinBoardCanvasExportState;
 pub(crate) use contracts::PinBoardReferenceInventory;
+pub(crate) use transfer::PinBoardTransferCancel;
 
 use std::path::Path;
 
@@ -243,6 +247,7 @@ pub(crate) async fn paste_pin_board_items(
 #[tauri::command]
 pub(crate) async fn import_pin_board_images(
     coordinator: State<'_, OperationCoordinator>,
+    cancel: State<'_, PinBoardTransferCancel>,
     window: tauri::WebviewWindow,
     board_id: i64,
     paths: Vec<String>,
@@ -257,6 +262,8 @@ pub(crate) async fn import_pin_board_images(
         path_scope::ensure_authorized(&window.fs_scope(), Path::new(path), "导入图片")?;
     }
     let coordinator = coordinator.inner().clone();
+    cancel.reset();
+    let cancelled = cancel.flag();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
             context.report_progress("正在导入图片", 0, 0);
@@ -271,6 +278,7 @@ pub(crate) async fn import_pin_board_images(
                 |current, total| {
                     context.report_progress("正在导入图片", current as u64, total as u64)
                 },
+                || transfer::is_cancelled(&cancelled),
             )?;
             Ok(PinBoardMutationResult { view, item_ids })
         })
@@ -406,6 +414,7 @@ pub(crate) async fn read_pin_board_strokes(
 #[tauri::command]
 pub(crate) async fn export_pin_board_images(
     coordinator: State<'_, OperationCoordinator>,
+    cancel: State<'_, PinBoardTransferCancel>,
     window: tauri::WebviewWindow,
     board_id: i64,
     item_ids: Vec<i64>,
@@ -417,6 +426,8 @@ pub(crate) async fn export_pin_board_images(
         "导出位置",
     )?;
     let coordinator = coordinator.inner().clone();
+    cancel.reset();
+    let cancelled = cancel.flag();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
             usecases::pin_board::export_images(
@@ -427,10 +438,23 @@ pub(crate) async fn export_pin_board_images(
                 |current, total| {
                     context.report_progress("正在导出图片", current as u64, total as u64)
                 },
+                || transfer::is_cancelled(&cancelled),
             )
         })
         .await
         .map_err(String::from)
+}
+
+/// 取消正在进行的图片传输（导入/导出图片）。
+///
+/// 整画布导出不经过这里：那条例程由前端逐块推进，取消标记在渲染器里。多调一次没有
+/// 副作用——没有传输时只留下一个会在下一次传输开始时复位的标记。
+#[tauri::command]
+pub(crate) async fn cancel_pin_board_transfer(
+    cancel: State<'_, PinBoardTransferCancel>,
+) -> Result<(), String> {
+    cancel.request();
+    Ok(())
 }
 
 #[tauri::command]

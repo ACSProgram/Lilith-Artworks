@@ -34,6 +34,30 @@ entries for the reader; they are not a template every entry has to fill.
   mixed selection is atomic; the clipboard payload only records
   `{ kind, sourceBoardId, sourceItemId }` and the native side reads the source
   item's current state instead of trusting possibly-stale front-end sizes.
+- Whole-board PNG export. Every visible item — bitmaps, text and strokes — can
+  now be written into one transparent PNG, cropped to the content bounds with a
+  10 px margin by default (0–64 px adjustable). The factor is a free number
+  (0.01–8) whose default is "1x or whatever fits the suggested longest edge",
+  and the pixel width and the factor are two views of the same value: editing
+  either one updates the other. The suggested edge comes from the texture cache
+  level (10000 / 20000 / 30000 px) and is advisory only — going over it shows a
+  warning and keeps the export, while a hard cap (65535 px per edge, 1e9 pixels)
+  still converges absurd input. The file name defaults to the board name and is
+  editable. There is no duration estimate: it was never accurate enough to be
+  worth the space. Rendering uses a separate offscreen `rgba8unorm` pass (same
+  shaders, copies of the pipelines with only the target format changed), so the
+  screen path is untouched; bitmaps are re-requested at display size × export
+  factor while the items of the current tile are protected from eviction. The
+  image is streamed to the native side as row bands: the front end reads each
+  tile back, a `png` writer assembles rows, and the file is published atomically.
+  Export takes no repository write lease or operation lock and locks the board
+  while it runs. The blank-area context menu has the same entry as the toolbar.
+- One shared transfer bar for import, export and whole-board export: label,
+  progress, percentage and a cancel button on a single row. Import and export of
+  bitmaps can now be cancelled too (`cancel_pin_board_transfer`; the native
+  loops check between items). A cancelled import rolls back entirely — no half
+  batch of items and no orphaned DDS files — while a cancelled bitmap export
+  keeps the PNGs already written.
 
 ### Changed
 

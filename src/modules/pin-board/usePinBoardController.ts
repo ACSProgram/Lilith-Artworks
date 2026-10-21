@@ -9,6 +9,7 @@ import {
   pickPinBoardImagePaths,
 } from "./api";
 import { reorderBoardIds, type BoardDropPosition } from "./boardOrder";
+import { canvasExportMaxDimension, type CanvasExportPlan } from "./exportPolicy";
 import { normalizeLayerVisibility } from "./layers";
 import { registerPinBoardLifecycleParticipant } from "./lifecycle";
 import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
@@ -47,6 +48,7 @@ const DEFAULT_INTERACTION: PinBoardInteractionState = {
   zoomPercent: 100,
   tool: "select",
   visibleLayers: normalizeLayerVisibility(null),
+  exporting: false,
 };
 
 async function clipboardImageBytes(): Promise<number[] | null> {
@@ -107,6 +109,21 @@ export interface PinBoardController {
   commitStroke: (request: StrokeCommitRequest) => void;
   deleteImages: () => void;
   exportImages: () => Promise<void>;
+  /** 当前设置下的建议上限（整画布导出）。 */
+  canvasExportLimit: number;
+  /** 按倍率与边距算出导出计划：对话框的「输出尺寸」与真正的导出共用它。 */
+  canvasExportPlan: (scale: number, margin: number) => CanvasExportPlan | null;
+  /** 对话框的默认倍率：1x 与「最长边塞进建议上限」取小。 */
+  canvasExportAutoScale: (margin: number) => number;
+  /** 整画布导出：把可见内容导成一张透明 PNG。 */
+  exportCanvas: (request: {
+    directory: string;
+    fileName: string;
+    scale: number;
+    margin: number;
+  }) => Promise<void>;
+  /** 取消当前传输（导入/导出图片、整画布导出）：渲染器与原生循环在下一块/下一条目生效。 */
+  cancelTransfer: () => void;
 }
 
 /**
@@ -131,6 +148,11 @@ export function usePinBoardController({
   const rendererRef = useRef<PinBoardRenderer | null>(null);
   const clipboardRef = useRef<PinBoardClipboardItem[]>([]);
   const transferBusyRef = useRef(false);
+  /**
+   * 传输的取消标记：导入/导出图片由原生循环检查，整画布导出由渲染器逐块检查。
+   * 一次只跑一个传输，因此一个布尔就够，每次传输开始时复位。
+   */
+  const transferCancelRef = useRef(false);
   /** 当前传输的 operation id：首个进度事件到达后锁定，其它操作的进度直接丢弃。 */
   const transferOperationId = useRef<string | null>(null);
   const reorderBusyRef = useRef(false);
@@ -179,6 +201,14 @@ export function usePinBoardController({
     rendererRef.current?.setActive(active);
   }, [active]);
 
+  /**
+   * 离开工作区（切标签页、切作品）视为「用户离开该画板」：中止在途的传输，
+   * 由渲染器在下一块之前停下并丢弃临时文件。
+   */
+  useEffect(() => {
+    if (!active) transferCancelRef.current = true;
+  }, [active]);
+
   useEffect(() => {
     rendererRef.current?.setArrangementGapRatio(settings.arrangementGapRatio);
   }, [settings.arrangementGapRatio]);
@@ -204,11 +234,13 @@ export function usePinBoardController({
       && event.operationId !== transferOperationId.current) {
       return;
     }
-    setTransferProgress({
+    setTransferProgress((current) => ({
       label: event.phase ?? "正在处理图片",
       current: event.current ?? 0,
       total: event.total ?? 0,
-    });
+      // 可取消性由发起方决定，原生进度事件只更新数字。
+      cancellable: current?.cancellable ?? false,
+    }));
   });
 
   const refreshBoards = useCallback(async () => {
@@ -555,7 +587,13 @@ export function usePinBoardController({
         paths = await pickPinBoardImagePaths();
         if (paths.length === 0) return;
       }
-      setTransferProgress({ label: "正在导入图片", current: 0, total: paths.length });
+      transferCancelRef.current = false;
+      setTransferProgress({
+        label: "正在导入图片",
+        current: 0,
+        total: paths.length,
+        cancellable: true,
+      });
       await replaceAfterImageMutation((renderer, revision) => {
         const [centerX, centerY] = renderer.placementPoint;
         return pinBoardApi.importPinBoardImages(
@@ -567,6 +605,8 @@ export function usePinBoardController({
           revision,
         );
       }, (count) => `已导入 ${count} 张图片`);
+      // 取消时原生侧整笔回滚（不会留下半批条目），这里只把状态文案说清楚。
+      if (transferCancelRef.current) setStatus("已取消导入");
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
@@ -582,7 +622,7 @@ export function usePinBoardController({
   ) => {
     const current = rendererRef.current;
     if (!current || selected === null || transferBusyRef.current) return;
-    if (current.interactionState.locked) {
+    if (current.interactionState.locked || current.interactionState.exporting) {
       setStatus("画板已锁定，无法导入图片");
       return;
     }
@@ -593,14 +633,22 @@ export function usePinBoardController({
     }
     transferBusyRef.current = true;
     transferOperationId.current = null;
+    transferCancelRef.current = false;
     current.setPlacementFromClient(clientX, clientY);
     let [centerX, centerY] = current.placementPoint;
     try {
       let imported = 0;
       for (const file of images) {
+        // 拖入的图片是前端逐张落库的，取消就是不再发起下一张（已落库的保留）。
+        if (transferCancelRef.current) break;
         const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
         if (bytes.length === 0) continue;
-        setTransferProgress({ label: "正在导入图片", current: imported, total: images.length });
+        setTransferProgress({
+          label: "正在导入图片",
+          current: imported,
+          total: images.length,
+          cancellable: true,
+        });
         const result = await replaceAfterImageMutation(
           (renderer, revision) => pinBoardApi.importPinBoardClipboardImage(
             selected,
@@ -627,7 +675,8 @@ export function usePinBoardController({
           centerX += placedWidth + placedHeight * settings.arrangementGapRatio;
         }
       }
-      if (imported > 0) setStatus(`已导入 ${imported} 张图片`);
+      if (transferCancelRef.current) setStatus(`已取消导入，本次导入 ${imported} 张图片`);
+      else if (imported > 0) setStatus(`已导入 ${imported} 张图片`);
     } catch (error) {
       setStatus(errorMessage(error));
     } finally {
@@ -748,7 +797,13 @@ export function usePinBoardController({
     try {
       const directory = await pickPinBoardExportDirectory();
       if (!directory || !await current.save()) return;
-      setTransferProgress({ label: "正在导出图片", current: 0, total: itemIds.length });
+      transferCancelRef.current = false;
+      setTransferProgress({
+        label: "正在导出图片",
+        current: 0,
+        total: itemIds.length,
+        cancellable: true,
+      });
       const count = await pinBoardApi.exportPinBoardImages(
         selected,
         itemIds,
@@ -756,12 +811,87 @@ export function usePinBoardController({
       );
       setStatus(`已导出 ${count} 个条目`);
     } catch (error) {
-      setStatus(errorMessage(error));
+      setStatus(transferCancelRef.current ? "已取消导出" : errorMessage(error));
     } finally {
       setTransferProgress(null);
       transferBusyRef.current = false;
     }
   }, [selected]);
+
+  /** 整画布导出的建议上限：取素材板设置的纹理缓存等级。 */
+  const canvasExportLimit = canvasExportMaxDimension(settings.textureCacheLevel);
+
+  const canvasExportPlan = useCallback((scale: number, margin: number) => (
+    rendererRef.current?.canvasExportPlan(scale, margin, canvasExportLimit) ?? null
+  ), [canvasExportLimit]);
+
+  const canvasExportAutoScale = useCallback((margin: number) => (
+    rendererRef.current?.canvasExportAutoScale(margin, canvasExportLimit) ?? 1
+  ), [canvasExportLimit]);
+
+  /**
+   * 取消当前传输。
+   *
+   * 两条链路的取消方式不同：整画布导出由渲染器逐块检查标记（下一块之前停下并丢弃
+   * 临时文件），导入/导出图片则由原生循环在条目边界检查；这里同时置位，多调一次
+   * 原生取消是无害的（没有传输时它只留下一个会在下次开始时复位的标记）。
+   */
+  const cancelTransfer = useCallback(() => {
+    transferCancelRef.current = true;
+    void pinBoardApi.cancelPinBoardTransfer().catch(() => undefined);
+  }, []);
+
+  /**
+   * 整画布导出：可见内容离屏渲染成一块块 RGBA，由原生端流式拼成一张透明 PNG。
+   *
+   * 导出的是渲染器内存里的当前状态，**不落库**，因此整段流程不产生仓库写操作、
+   * 也不取仓库写锁。期间渲染器置 `exporting`：画板锁定、指针与快捷键不响应。
+   */
+  const exportCanvas = useCallback(async (request: {
+    directory: string;
+    fileName: string;
+    scale: number;
+    margin: number;
+  }) => {
+    const current = rendererRef.current;
+    if (!current || transferBusyRef.current || current.interactionState.locked) return;
+    const plan = current.canvasExportPlan(request.scale, request.margin, canvasExportLimit);
+    if (!plan) {
+      setStatus("画板没有可导出的内容");
+      return;
+    }
+    // 文件名由对话框给出，原生端会清掉非法字符并在重名时追加序号。
+    const fileName = request.fileName.trim();
+    transferBusyRef.current = true;
+    transferCancelRef.current = false;
+    setTransferProgress({
+      label: "正在导出画板",
+      current: 0,
+      total: plan.totalTiles,
+      cancellable: true,
+    });
+    try {
+      const path = await current.exportCanvas(plan, {
+        directory: request.directory,
+        fileName,
+        onProgress: (sent, total) => setTransferProgress({
+          label: "正在导出画板",
+          current: sent,
+          total,
+          cancellable: true,
+        }),
+        isCancelled: () => transferCancelRef.current,
+      });
+      setStatus(`已导出 ${plan.width}×${plan.height} 的 PNG：${path}`);
+    } catch (error) {
+      setStatus(transferCancelRef.current ? "已取消导出" : `导出失败：${errorMessage(error)}`);
+    } finally {
+      setTransferProgress(null);
+      transferBusyRef.current = false;
+      transferCancelRef.current = false;
+      setInteraction(rendererRef.current?.interactionState ?? DEFAULT_INTERACTION);
+    }
+  }, [canvasExportLimit]);
 
   return {
     boards,
@@ -797,5 +927,10 @@ export function usePinBoardController({
     commitStroke,
     deleteImages,
     exportImages,
+    canvasExportLimit,
+    canvasExportPlan,
+    canvasExportAutoScale,
+    exportCanvas,
+    cancelTransfer,
   };
 }

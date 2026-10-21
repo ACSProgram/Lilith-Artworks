@@ -1029,6 +1029,8 @@ fn import_board_images(
             0.0,
             revision,
             |_current, _total| {},
+            // 无头进程没有取消入口：一次调用跑完。
+            || false,
         )
     })?;
     let view = serde_json::to_value(&view)

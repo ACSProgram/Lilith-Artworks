@@ -9,7 +9,9 @@ import {
   Expand,
   FlipHorizontal2,
   FlipVertical2,
+  FolderOpen,
   Fullscreen,
+  ImageDown,
   Images,
   LayoutGrid,
   Layers3,
@@ -56,12 +58,22 @@ import { ContextMenu, type ContextMenuItem } from "../../shared/ui/ContextMenu";
 import { PromptDialog } from "../../shared/ui/PromptDialog";
 import {
   getPinBoardWindowFullscreen,
+  pickPinBoardExportDirectory,
   setPinBoardWindowFullscreen,
 } from "./api";
 import type { BoardDropPosition } from "./boardOrder";
+import {
+  CANVAS_EXPORT_DEFAULT_MARGIN,
+  CANVAS_EXPORT_MAX_MARGIN,
+  CANVAS_EXPORT_MAX_SCALE,
+  CANVAS_EXPORT_MIN_SCALE,
+  clampCanvasExportMargin,
+  type CanvasExportPlan,
+} from "./exportPolicy";
 import type {
   PinBoardModuleSettings,
   PinBoardSummary,
+  PinBoardTransferProgress,
   PinBoardView,
 } from "./types";
 import {
@@ -601,6 +613,329 @@ function PinBoardTextDialog({
 /** 图层菜单在选中含笔迹时的置灰说明：笔迹固定在标注层，原生端保存时也会强制写 3。 */
 const STROKE_LAYER_LOCKED_TITLE = "笔迹固定在标注层，取消选中笔迹后再改图层";
 
+/** 倍率输入框的文本：最多四位小数并去掉尾随零（0.4400 → 0.44，2.0000 → 2）。 */
+function formatScaleText(scale: number): string {
+  return scale.toFixed(4).replace(/\.?0+$/, "");
+}
+
+/**
+ * 整画布导出对话框。
+ *
+ * 三个数字互相咬合：**倍率**是唯一的事实来源，**输出宽度**是它的另一种写法，改哪
+ * 一个都会把另一个算回来；**边距**只改变画布范围，因此宽度随之变化而倍率不动。
+ * 默认倍率由 `autoScale` 给出（1x 与「塞进建议上限」取小），填过之后以填的为准——
+ * 建议上限只提示，不再偷偷压倍率。
+ *
+ * 「输出尺寸」与实际写出的 PNG 共用渲染器的 `canvasExportPlan`，所以对话框说
+ * 20000 宽，文件就是 20000 宽。
+ */
+function PinBoardExportDialog({
+  limit,
+  boardName,
+  planFor,
+  autoScale,
+  onStart,
+  onClose,
+}: {
+  limit: number;
+  boardName: string;
+  planFor: (scale: number, margin: number) => CanvasExportPlan | null;
+  autoScale: (margin: number) => number;
+  onStart: (request: {
+    directory: string;
+    fileName: string;
+    scale: number;
+    margin: number;
+  }) => void;
+  onClose: () => void;
+}) {
+  const [directory, setDirectory] = useState<string | null>(null);
+  const [fileName, setFileName] = useState(boardName);
+  const [margin, setMargin] = useState(CANVAS_EXPORT_DEFAULT_MARGIN);
+  const [marginText, setMarginText] = useState(String(CANVAS_EXPORT_DEFAULT_MARGIN));
+  const [scale, setScale] = useState(() => autoScale(CANVAS_EXPORT_DEFAULT_MARGIN));
+  const [scaleText, setScaleText] = useState(() => formatScaleText(scale));
+  const plan = planFor(scale, margin);
+  const [widthText, setWidthText] = useState(() => (plan ? String(plan.width) : ""));
+  const [picking, setPicking] = useState(false);
+  /** 含边距的内容宽度（世界单位）：宽度与倍率互换时用得到。 */
+  const paddedWidth = plan ? plan.bounds.maxX - plan.bounds.minX : 0;
+  const ready = directory !== null && plan !== null && fileName.trim() !== "";
+
+  const chooseDirectory = async () => {
+    if (picking) return;
+    setPicking(true);
+    try {
+      const picked = await pickPinBoardExportDirectory();
+      if (picked) setDirectory(picked);
+    } catch {
+      // 选择器不可用时保持原状，用户可以重试。
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  /** 把倍率写进两个输入框：宽度按同一份计划回算，不会出现「说的和算的不一致」。 */
+  const applyScale = (next: number) => {
+    setScale(next);
+    setScaleText(formatScaleText(next));
+    const nextPlan = planFor(next, margin);
+    if (nextPlan) setWidthText(String(nextPlan.width));
+  };
+
+  const inputScale = (raw: string) => {
+    setScaleText(raw);
+    const parsed = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(parsed) || parsed <= 0) return;
+    const next = Math.min(CANVAS_EXPORT_MAX_SCALE, Math.max(CANVAS_EXPORT_MIN_SCALE, parsed));
+    setScale(next);
+    const nextPlan = planFor(next, margin);
+    if (nextPlan) setWidthText(String(nextPlan.width));
+    // 只在上限夹过时改写输入框，避免打字过程中光标被挪走。
+    if (next !== parsed) setScaleText(formatScaleText(next));
+  };
+
+  /**
+   * 失焦时把倍率对齐到**实际生效**的值：撞上硬上限（边长或总像素）时计划里的倍率会被
+   * 收敛，输入框要跟着显示收敛后的数字。打字过程中不回写，否则「99」在敲下「9」时就被
+   * 改写成收敛值，后面的字符再也输不进去。
+   */
+  const commitScale = () => {
+    const nextPlan = planFor(scale, margin);
+    applyScale(nextPlan ? nextPlan.scale : scale);
+  };
+
+  /**
+   * 宽度输入只是倍率的另一种写法：换算出的倍率同样落在 0.01–8 之间，否则很小的
+   * 宽度会让倍率显示出「0」这种既不可读也不合法的值（失焦时按实际计划回写宽度）。
+   */
+  const inputWidth = (raw: string) => {
+    setWidthText(raw);
+    const parsed = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(parsed) || parsed < 1 || paddedWidth <= 0) return;
+    const next = Math.min(
+      CANVAS_EXPORT_MAX_SCALE,
+      Math.max(CANVAS_EXPORT_MIN_SCALE, parsed / paddedWidth),
+    );
+    setScale(next);
+    setScaleText(formatScaleText(next));
+  };
+
+  /** 边距只改画布范围：倍率不动，输出宽度按同一倍率重算。 */
+  const applyMargin = (next: number) => {
+    setMargin(next);
+    const nextPlan = planFor(scale, next);
+    if (nextPlan) setWidthText(String(nextPlan.width));
+  };
+
+  const inputMargin = (raw: string) => {
+    setMarginText(raw);
+    const parsed = Number(raw);
+    if (raw.trim() === "" || !Number.isFinite(parsed)) return;
+    if (parsed < 0 || parsed > CANVAS_EXPORT_MAX_MARGIN) return;
+    applyMargin(Math.round(parsed));
+  };
+
+  const commitMargin = (raw: string) => {
+    const parsed = Number(raw);
+    const next = raw.trim() !== "" && Number.isFinite(parsed)
+      ? clampCanvasExportMargin(parsed)
+      : margin;
+    setMarginText(String(next));
+    applyMargin(next);
+  };
+
+  return (
+    <div
+      className="modal-backdrop pin-board-text-backdrop"
+      role="presentation"
+      onPointerDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <form
+        className="modal pin-board-export-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pin-board-export-title"
+        onKeyDown={(event) => {
+          if (event.key === "Escape") onClose();
+        }}
+        onSubmit={(event) => {
+          event.preventDefault();
+          if (!ready || !directory) return;
+          onStart({
+            directory,
+            fileName: fileName.trim(),
+            scale,
+            margin,
+          });
+        }}
+      >
+        <header className="pin-board-text-header">
+          <span className="pin-board-text-header-icon" aria-hidden="true">
+            <ImageDown size={18} />
+          </span>
+          <div className="pin-board-text-heading">
+            <h2 id="pin-board-export-title">导出画布</h2>
+            <p>把当前画板的全部可见内容合成一张透明 PNG</p>
+          </div>
+          <button className="icon-button" type="button" onClick={onClose} title="关闭" aria-label="关闭">
+            <X size={17} />
+          </button>
+        </header>
+        <div className="pin-board-text-body">
+          <div className="pin-board-text-field">
+            <span className="pin-board-text-label"><span>导出位置</span></span>
+            <div className="pin-board-export-path">
+              <span title={directory ?? undefined}>
+                {directory ?? "尚未选择文件夹"}
+              </span>
+              <button type="button" className="secondary-button" disabled={picking} onClick={() => void chooseDirectory()}>
+                <FolderOpen size={14} aria-hidden="true" />
+                选择…
+              </button>
+            </div>
+          </div>
+          <div className="pin-board-text-field">
+            <span className="pin-board-text-label"><span>文件名</span></span>
+            <div className="pin-board-export-input">
+              <input
+                type="text"
+                value={fileName}
+                maxLength={80}
+                spellCheck={false}
+                aria-label="导出文件名"
+                onChange={(event) => setFileName(event.target.value)}
+              />
+              <span className="pin-board-export-suffix">.png</span>
+            </div>
+          </div>
+          <div className="pin-board-export-grid">
+            <div className="pin-board-text-field">
+              <span className="pin-board-text-label"><span>倍率</span></span>
+              <div className="pin-board-export-input">
+                <input
+                  type="number"
+                  min={CANVAS_EXPORT_MIN_SCALE}
+                  max={CANVAS_EXPORT_MAX_SCALE}
+                  step={0.01}
+                  value={scaleText}
+                  aria-label="导出倍率"
+                  onChange={(event) => inputScale(event.target.value)}
+                  onBlur={commitScale}
+                />
+                <span className="pin-board-export-suffix">×</span>
+              </div>
+            </div>
+            <div className="pin-board-text-field">
+              <span className="pin-board-text-label"><span>宽度（像素）</span></span>
+              <div className="pin-board-export-input">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={widthText}
+                  aria-label="导出宽度"
+                  disabled={!plan}
+                  onChange={(event) => inputWidth(event.target.value)}
+                  onBlur={() => {
+                    if (plan) setWidthText(String(plan.width));
+                  }}
+                />
+              </div>
+            </div>
+            <div className="pin-board-text-field">
+              <span className="pin-board-text-label"><span>边距（像素）</span></span>
+              <div className="pin-board-export-input">
+                <input
+                  type="number"
+                  min={0}
+                  max={CANVAS_EXPORT_MAX_MARGIN}
+                  step={1}
+                  value={marginText}
+                  aria-label="导出边距"
+                  onChange={(event) => inputMargin(event.target.value)}
+                  onBlur={(event) => commitMargin(event.target.value)}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="pin-board-export-summary" aria-live="polite">
+            {plan ? (
+              <>
+                <div>
+                  <span>输出尺寸</span>
+                  <strong>{plan.width} × {plan.height} 像素</strong>
+                </div>
+              </>
+            ) : (
+              <p className="pin-board-export-empty">当前画板没有可见内容，无法导出。</p>
+            )}
+          </div>
+          {plan?.overLimit && (
+            <div className="pin-board-export-warning" role="alert">
+              <AlertTriangle size={15} aria-hidden="true" />
+              <span>
+                最长边超过建议上限 {limit} 像素（取素材板设置里的纹理缓存等级），导出会更慢。
+              </span>
+            </div>
+          )}
+          <p className="pin-board-export-hint">
+            同目录已有同名文件时自动追加序号，不会覆盖。
+          </p>
+        </div>
+        <footer className="modal-footer">
+          <button className="secondary-button" type="button" onClick={onClose}>取消</button>
+          <button className="primary-button" type="submit" disabled={!ready}>
+            {plan?.overLimit ? "仍要导出" : "开始导出"}
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+/**
+ * 传输进度条：导入图片、导出图片与整画布导出共用同一条。
+ *
+ * 一行放下四件事——在做什么、走了多少、百分比、取消。取消和进度条同排，是因为用户
+ * 点它的时机正是「盯着这条进度不想再等了」；不可取消的传输（加文字这类瞬时动作）
+ * 不渲染按钮，避免点了没反应的假入口。
+ */
+function PinBoardTransferProgress({
+  progress,
+  onCancel,
+}: {
+  progress: PinBoardTransferProgress;
+  onCancel: () => void;
+}) {
+  const total = Math.max(progress.total, 1);
+  const percent = Math.min(100, Math.max(0, Math.round((progress.current / total) * 100)));
+  return (
+    <div className="pin-board-transfer" role="status">
+      <LoaderCircle className="spin" size={14} aria-hidden="true" />
+      <span className="pin-board-transfer-label">{progress.label}</span>
+      <span
+        className="pin-board-transfer-track"
+        role="progressbar"
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-valuenow={percent}
+        aria-label={progress.label}
+      >
+        <span className="pin-board-transfer-fill" style={{ width: `${percent}%` }} />
+      </span>
+      <span className="pin-board-transfer-percent">{percent}%</span>
+      {progress.cancellable && (
+        <button type="button" className="pin-board-transfer-cancel" onClick={onCancel}>
+          取消
+        </button>
+      )}
+    </div>
+  );
+}
+
 function PinBoardContextMenu({
   request,
   renderer,
@@ -612,6 +947,7 @@ function PinBoardContextMenu({
   onImport,
   onAddText,
   onExport,
+  onExportCanvas,
   onDelete,
   onToggleFullscreen,
   onClose,
@@ -626,6 +962,7 @@ function PinBoardContextMenu({
   onImport: () => void;
   onAddText: () => void;
   onExport: () => void;
+  onExportCanvas: () => void;
   onDelete: () => void;
   onToggleFullscreen: () => void;
   onClose: () => void;
@@ -652,6 +989,7 @@ function PinBoardContextMenu({
         { key: "paste", label: "粘贴画板条目", icon: <ClipboardPaste size={16} />, disabled: !request.canEditBoard || !canPaste, onClick: onPaste },
         { key: "import", label: "导入图片", icon: <Upload size={16} />, disabled: !request.canEditBoard, onClick: onImport },
         { key: "text", label: "添加文字", icon: <Type size={16} />, disabled: !request.canEditBoard, onClick: onAddText },
+        { key: "export-canvas", label: "导出画布", icon: <ImageDown size={16} />, disabled: !request.canEditBoard, disabledTitle: "画板已锁定，无法导出", onClick: onExportCanvas },
         { key: "sep-view", divider: true },
         { key: "reset-view", label: "重置视图", icon: <LocateFixed size={16} />, onClick: () => renderer.resetViewport() },
         {
@@ -708,7 +1046,17 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     commitStroke,
     deleteImages,
     exportImages,
+    canvasExportLimit,
+    canvasExportPlan,
+    canvasExportAutoScale,
+    exportCanvas,
+    cancelTransfer,
   } = usePinBoardController({ artworkId, active, settings });
+  /**
+   * 编辑入口的统一禁用条件：锁定与整画布导出期间都不允许改动画板。导出渲染的是
+   * 「点下那一刻的画面」，中途改动会让输出与用户看到的对不上。
+   */
+  const editingBlocked = interaction.locked || interaction.exporting;
   /**
    * 渲染器创建失败的常驻原因。素材板完全依赖 WebGPU，创建失败后画布不会再可用，
    * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
@@ -721,6 +1069,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [sidebar, setSidebar] = useState(getSidebarVisible);
   const [fullscreen, setFullscreen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
+  const [exportDialogOpen, setExportDialogOpen] = useState(false);
   const [textOptions, setTextOptions] = useState({ fontSize: 48, color: "#000000" });
   /** 标注样式：工具栏的取色器与「大小」输入共同决定下一笔的外观（大小同时是橡皮直径）。 */
   const [strokeStyle, setStrokeStyle] = useState({
@@ -821,7 +1170,9 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     // 必须取消默认行为，否则浏览器会把它当成导航并拒绝这次放置。
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
-    if (renderer && !renderer.interactionState.locked) setDropActive(true);
+    if (renderer && !renderer.interactionState.locked && !renderer.interactionState.exporting) {
+      setDropActive(true);
+    }
   }, [renderer]);
 
   const handleStageDragLeave = useCallback((event: ReactDragEvent<HTMLDivElement>) => {
@@ -1075,7 +1426,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
                     type="button"
                     key={board.boardId}
                     className={`pin-board-tree-row${board.boardId === selected ? " active" : ""}${dragging ? " dragging" : ""}${dropPosition ? ` drop-${dropPosition}` : ""}`}
-                    draggable={boards.length > 1 && transferProgress === null}
+                    draggable={boards.length > 1 && transferProgress === null && !interaction.exporting}
+                    disabled={interaction.exporting}
                     onClick={() => {
                       setContextMenu(null);
                       void selectBoard(board);
@@ -1207,24 +1559,25 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || !interaction.canUndo} onClick={() => run(() => renderer?.undo())} title="撤销" aria-label="撤销"><Undo2 size={17} /></button>
             <button className="icon-button" disabled={!renderer || !interaction.canRedo} onClick={() => run(() => renderer?.redo())} title="恢复" aria-label="恢复"><Redo2 size={17} /></button>
             <span className="pin-board-divider" />
-            <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.zoomOut())} title="缩小视图" aria-label="缩小视图"><ZoomOut size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.zoomOut())} title="缩小视图" aria-label="缩小视图"><ZoomOut size={17} /></button>
             <span className="pin-board-zoom">{interaction.zoomPercent}%</span>
-            <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.zoomIn())} title="放大视图" aria-label="放大视图"><ZoomIn size={17} /></button>
-            <button className="icon-button" disabled={!renderer} onClick={() => run(() => renderer?.resetViewport())} title="重置视图" aria-label="重置视图"><LocateFixed size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1 / 1.1))} title="缩小图片" aria-label="缩小图片"><Shrink size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.scaleSelected(1.1))} title="放大图片" aria-label="放大图片"><Expand size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.rotateSelected(-5))} title="逆时针旋转" aria-label="逆时针旋转"><RotateCcw size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.rotateSelected(5))} title="顺时针旋转" aria-label="顺时针旋转"><RotateCw size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(true))} title="水平翻转" aria-label="水平翻转"><FlipHorizontal2 size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(false))} title="垂直翻转" aria-label="垂直翻转"><FlipVertical2 size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.arrangeableCount < 2 || interaction.locked} onClick={() => run(() => void renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={copyImages} title="复制画板条目" aria-label="复制画板条目"><Copy size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.exportableCount === 0 || interaction.locked} onClick={() => void copyImageToClipboard()} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
-            <button className="icon-button" disabled={!renderer || clipboardCount === 0 || interaction.locked} onClick={pasteItems} title="粘贴画板条目" aria-label="粘贴画板条目"><ClipboardPaste size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={() => void importImages()} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={openTextDialog} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.exportableCount === 0 || interaction.locked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
-            <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
+            <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.zoomIn())} title="放大视图" aria-label="放大视图"><ZoomIn size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.resetViewport())} title="重置视图" aria-label="重置视图"><LocateFixed size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.scaleSelected(1 / 1.1))} title="缩小图片" aria-label="缩小图片"><Shrink size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.scaleSelected(1.1))} title="放大图片" aria-label="放大图片"><Expand size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.rotateSelected(-5))} title="逆时针旋转" aria-label="逆时针旋转"><RotateCcw size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.rotateSelected(5))} title="顺时针旋转" aria-label="顺时针旋转"><RotateCw size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.flipSelected(true))} title="水平翻转" aria-label="水平翻转"><FlipHorizontal2 size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.flipSelected(false))} title="垂直翻转" aria-label="垂直翻转"><FlipVertical2 size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.arrangeableCount < 2 || editingBlocked} onClick={() => run(() => void renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={copyImages} title="复制画板条目" aria-label="复制画板条目"><Copy size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.exportableCount === 0 || editingBlocked} onClick={() => void copyImageToClipboard()} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
+            <button className="icon-button" disabled={!renderer || clipboardCount === 0 || editingBlocked} onClick={pasteItems} title="粘贴画板条目" aria-label="粘贴画板条目"><ClipboardPaste size={17} /></button>
+            <button className="icon-button" disabled={!renderer || editingBlocked || transferProgress !== null} onClick={() => void importImages()} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
+            <button className="icon-button" disabled={!renderer || editingBlocked || transferProgress !== null} onClick={openTextDialog} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.exportableCount === 0 || editingBlocked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.imageCount === 0 || editingBlocked || transferProgress !== null} onClick={() => setExportDialogOpen(true)} title="导出画布 PNG" aria-label="导出画布 PNG"><ImageDown size={17} /></button>
+            <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer || interaction.exporting} onClick={toggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
             <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={() => void toggleFullscreen()} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", settings.fullscreenShortcut)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
             <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={() => void save()} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
           </div>
@@ -1261,13 +1614,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           </div>
         )}
         {transferProgress && (
-          <div className="pin-board-transfer-progress" role="status">
-            <div>
-              <span>{transferProgress.label}</span>
-              <strong>{Math.round((transferProgress.current / Math.max(transferProgress.total, 1)) * 100)}%</strong>
-            </div>
-            <progress value={transferProgress.current} max={Math.max(transferProgress.total, 1)} />
-          </div>
+          <PinBoardTransferProgress progress={transferProgress} onCancel={cancelTransfer} />
         )}
         <div
           className={`pin-board-stage${dropActive ? " drop-active" : ""}`}
@@ -1294,7 +1641,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
               visibility={interaction.visibleLayers}
               counts={interaction.layerCounts}
               onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
-              disabled={!renderer}
+              disabled={!renderer || editingBlocked}
             />
           )}
           {unavailable ? (
@@ -1338,7 +1685,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <div className="pin-board-drawbar" role="toolbar" aria-label="标注工具">
               <StrokeToolGroup
                 tool={interaction.tool}
-                disabled={!renderer || interaction.locked}
+                disabled={!renderer || editingBlocked}
                 onSelect={setTool}
               />
               <span className="pin-board-divider" />
@@ -1360,6 +1707,19 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             initialColor={textOptions.color}
             onSubmit={submitText}
             onClose={closeTextDialog}
+          />
+        )}
+        {exportDialogOpen && (
+          <PinBoardExportDialog
+            limit={canvasExportLimit}
+            boardName={title}
+            planFor={canvasExportPlan}
+            autoScale={canvasExportAutoScale}
+            onStart={(request) => {
+              setExportDialogOpen(false);
+              void exportCanvas(request);
+            }}
+            onClose={() => setExportDialogOpen(false)}
           />
         )}
         {labelPrompt && (
@@ -1392,6 +1752,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             onImport={() => void importImages()}
             onAddText={openTextDialog}
             onExport={() => void exportImages()}
+            onExportCanvas={() => {
+              setContextMenu(null);
+              setExportDialogOpen(true);
+            }}
             onDelete={deleteImages}
             onToggleFullscreen={() => void toggleFullscreen()}
             onClose={() => setContextMenu(null)}

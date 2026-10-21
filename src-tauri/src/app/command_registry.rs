@@ -102,9 +102,15 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::pin_board::create_pin_board_stroke,
         crate::pin_board::read_pin_board_strokes,
         crate::pin_board::export_pin_board_images,
+        crate::pin_board::cancel_pin_board_transfer,
         crate::pin_board::read_pin_board_image_png,
         crate::pin_board::read_pin_board_texture,
         crate::pin_board::read_pin_board_clipboard_paths,
         crate::pin_board::arrange_pin_board_images,
+        // Pin-board 整画布导出：一组共用单并发会话的命令，像素走原始请求体。
+        crate::pin_board::canvas_export::begin_pin_board_canvas_export,
+        crate::pin_board::canvas_export::write_pin_board_canvas_export_tile,
+        crate::pin_board::canvas_export::finish_pin_board_canvas_export,
+        crate::pin_board::canvas_export::cancel_pin_board_canvas_export,
     ]
 }

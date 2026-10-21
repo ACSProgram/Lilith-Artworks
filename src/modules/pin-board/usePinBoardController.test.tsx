@@ -171,6 +171,8 @@ describe("usePinBoardController", () => {
       label: "正在导入图片",
       current: 1,
       total: 2,
+      // 可取消性由发起方决定（这里是一次路径导入），原生进度事件只更新数字。
+      cancellable: true,
     });
 
     await act(async () => {

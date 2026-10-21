@@ -105,8 +105,8 @@
   background: var(--surface);
 }
 .pin-board-workspace.fullscreen { position: fixed; z-index: 2000; inset: 0; width: 100vw; height: 100vh; background: var(--surface); }
-.pin-board-workspace.fullscreen .pin-board-toolbar,
-.pin-board-workspace.fullscreen .pin-board-transfer-progress { display: none; }
+/* 全屏只收起工具栏；传输进度留着——它是导出期间唯一的取消入口。 */
+.pin-board-workspace.fullscreen .pin-board-toolbar { display: none; }
 
 .pin-board-toolbar {
   display: flex;
@@ -238,16 +238,72 @@
 }
 .pin-board-settle-retry:hover { background: var(--surface); }
 
-.pin-board-transfer-progress {
-  display: grid;
-  gap: 6px;
-  padding: 8px 14px;
+/* 传输进度：导入/导出图片与整画布导出共用同一条，一行放下状态、进度与取消。
+   取消与进度同排——用户点它的时机正是「盯着这条进度不想再等了」。 */
+.pin-board-transfer {
+  display: flex;
+  height: 36px;
+  box-sizing: border-box;
+  flex: none;
+  align-items: center;
+  gap: 10px;
+  padding: 0 14px;
   border-bottom: 1px solid var(--border);
   background: var(--surface-subtle);
+  color: var(--pb-text-soft);
+  font-size: 12px;
 }
-.pin-board-transfer-progress div { display: flex; align-items: center; justify-content: space-between; color: var(--pb-text-soft); font-size: 12px; }
-.pin-board-transfer-progress strong { color: var(--text); font-variant-numeric: tabular-nums; }
-.pin-board-transfer-progress progress { width: 100%; height: 6px; overflow: hidden; border: 0; border-radius: 3px; background: var(--border); }
+.pin-board-transfer > svg { flex: none; color: var(--pb-text-faint); }
+.pin-board-transfer-label {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pin-board-transfer-track {
+  position: relative;
+  min-width: 60px;
+  height: 5px;
+  flex: 1;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 12%, transparent);
+}
+.pin-board-transfer-fill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 160ms ease-out;
+}
+.pin-board-transfer-percent {
+  min-width: 32px;
+  flex: none;
+  color: var(--text);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.pin-board-transfer-cancel {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 6px;
+  color: var(--pb-text-soft);
+  background: var(--surface);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: color 120ms, border-color 120ms, background 120ms;
+}
+.pin-board-transfer-cancel:hover {
+  border-color: var(--pb-text-soft);
+  color: var(--text);
+  background: var(--surface-subtle);
+}
+.pin-board-transfer-cancel:active { transform: translateY(0.5px); }
 
 .pin-board-stage {
   display: grid;
@@ -814,6 +870,112 @@
 .pin-board-color-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pin-board-color-preset[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent); }
 .pin-board-text-dialog .modal-footer { border-radius: 0 0 7px 7px; }
+
+/* 整画布导出对话框：沿用添加文字卡片的骨架，多出位置、倍率、摘要与超限警告。 */
+.pin-board-export-dialog { width: min(520px, 100%); }
+.pin-board-export-path {
+  display: flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 6px 0 12px;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  background: var(--control-bg);
+}
+.pin-board-export-path > span {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--pb-text-soft);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pin-board-export-path .secondary-button { min-height: 28px; flex: none; font-size: 12px; }
+/* 文件名独占一行；倍率、宽度、边距三等分，输入框因此都很短，不会被拉成一条长条。 */
+.pin-board-export-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 12px;
+}
+.pin-board-export-input {
+  display: flex;
+  height: 38px;
+  align-items: center;
+  gap: 4px;
+  padding: 0 10px;
+  border: 1px solid var(--control-border);
+  border-radius: 9px;
+  background: var(--control-bg);
+}
+.pin-board-export-input:focus-within {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.pin-board-export-input input {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  color: var(--text);
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+}
+.pin-board-export-input input:disabled { color: var(--pb-text-faint); }
+/* 数字输入框的上下箭头在这么窄的格子里会盖住数字，统一收掉。 */
+.pin-board-export-input input::-webkit-outer-spin-button,
+.pin-board-export-input input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+.pin-board-export-input input[type="number"] { -moz-appearance: textfield; }
+.pin-board-export-suffix {
+  flex: none;
+  color: var(--pb-text-faint);
+  font-size: 11px;
+}
+.pin-board-export-summary {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-subtle);
+}
+.pin-board-export-summary div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+}
+.pin-board-export-summary span { color: var(--pb-text-soft); }
+.pin-board-export-summary strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pin-board-export-empty { margin: 0; color: var(--pb-text-soft); font-size: 12px; }
+.pin-board-export-warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid color-mix(in srgb, #d97706 40%, var(--border));
+  border-radius: 9px;
+  color: var(--text);
+  background: color-mix(in srgb, #d97706 12%, transparent);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.pin-board-export-warning svg { flex: none; margin-top: 2px; color: #b45309; }
+.pin-board-export-hint { margin: 0; color: var(--pb-text-faint); font-size: 11px; line-height: 1.6; }
 
 /* 共享右键菜单与模态对话框（ContextMenu/Modal/PromptDialog 专用）。 */
 .modal-backdrop {

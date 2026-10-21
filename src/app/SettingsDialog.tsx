@@ -553,7 +553,10 @@ export function SettingsDialog() {
                     <span className="settings-row-icon"><Layers aria-hidden="true" size={17} /></span>
                     <span className="settings-row-copy is-descriptive">
                       <strong>纹理缓存等级</strong>
-                      <small>决定素材板可常驻的纹理数量与内存占用。</small>
+                      <small>
+                        决定素材板可常驻的纹理数量与内存占用；同时决定导出画布时的最长边
+                        （10000 / 20000 / 30000 像素）。
+                      </small>
                     </span>
                     <div
                       className="segmented-control pin-board-cache-control"
