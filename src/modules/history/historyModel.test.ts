@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { ArtworkBranch, HistoryNode } from "./types";
 import {
-  buildBranchLine, canCompact, checkModeLabel, describeLastCheck, formatCheckElapsed,
+  buildBranchLine, canCompact, checkModeLabel, describeCheckRun, formatCheckElapsed, formatClockTime,
   isRenamedNode, mergeNodeVerifyStates, needsCompactSecondConfirm, suggestedRestorePath,
 } from "./historyModel";
 
@@ -73,15 +73,22 @@ describe("history model", () => {
   });
 
   it("describes the last automatic check with its mode and elapsed time", () => {
-    expect(describeLastCheck(branch)).toBeNull();
-    expect(describeLastCheck({ ...branch, lastCheckMode: "quick", lastCheckElapsedMs: 12 }))
-      .toBe("上次自动检查：快速检查命中（12 ms）");
-    expect(describeLastCheck({ ...branch, lastCheckMode: "fallback", lastCheckElapsedMs: 65_000 }))
-      .toBe("上次自动检查：快速检查退回全量（1 分 5 秒）");
-    expect(describeLastCheck({ ...branch, lastCheckMode: "full", lastCheckElapsedMs: 1_500 }))
-      .toBe("上次自动检查：全量检查（1.5 秒）");
-    expect(describeLastCheck({ ...branch, lastCheckMode: "full" }))
-      .toBe("上次自动检查：全量检查");
+    expect(describeCheckRun(branch)).toBeNull();
+    expect(describeCheckRun({ ...branch, lastCheckMode: "quick", lastCheckElapsedMs: 12 }))
+      .toBe("快速检查命中 12 ms");
+    expect(describeCheckRun({ ...branch, lastCheckMode: "fallback", lastCheckElapsedMs: 65_000 }))
+      .toBe("快速检查退回全量 1 分 5 秒");
+    expect(describeCheckRun({ ...branch, lastCheckMode: "full", lastCheckElapsedMs: 1_500 }))
+      .toBe("全量检查 1.5 秒");
+    expect(describeCheckRun({ ...branch, lastCheckMode: "full" })).toBe("全量检查");
+  });
+
+  it("keeps status times short: clock today, month and day across days", () => {
+    const now = new Date(2026, 9, 21, 18, 0, 0).getTime();
+    expect(formatClockTime(new Date(2026, 9, 21, 16, 48, 51).getTime(), now)).toBe("16:48");
+    expect(formatClockTime(new Date(2026, 9, 20, 9, 5, 0).getTime(), now)).toBe("10/20 09:05");
+    expect(formatClockTime(new Date(2025, 11, 31, 23, 59, 0).getTime(), now))
+      .toBe("2025/12/31 23:59");
   });
 
   it("formats elapsed times at human scales", () => {

@@ -151,6 +151,12 @@ entries for the reader; they are not a template every entry has to fill.
   blocks of markup that could drift apart. Both now fetch the window object on
   click rather than at import, so rendering the title bar no longer depends on
   the Tauri window API being present.
+- The branch band condenses automatic backup: the two toggles stack under a
+  timer icon, the interval sits next to the switch it belongs to, the quick
+  check hint reads "跳过未改动文件", and the status sentence is replaced by a
+  two-column table - "上次检查时间 / 快速检查命中" with aligned values on the
+  left, the backup and chain states beside them - so interval, check mode and
+  the success time are no longer repeated three times over in one line.
 
 ### Added
 

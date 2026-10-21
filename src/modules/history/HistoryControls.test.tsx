@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { BranchScheduleStatus, BranchSettings, ConfirmDialog } from "./HistoryControls";
+import { formatClockTime } from "./historyModel";
 import type { ArtworkBranch, HistoryNode } from "./types";
 
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
@@ -245,26 +246,36 @@ describe("BranchScheduleStatus", () => {
     expect(await screen.findByTitle("已复制")).toBeTruthy();
   });
 
-  it("mentions quick check for branches that opted in", () => {
+  it("leaves the interval and the quick-check toggle out of the status line", () => {
     render(<BranchScheduleStatus branch={{ ...branch(true), backupQuickEnabled: true }} />);
-    expect(screen.getByText(/每 10 分钟自动备份 · 快速检查/)).toBeTruthy();
+
+    expect(screen.getByText("自动备份正常")).toBeTruthy();
+    // 间隔与检查方式已经在上方控件里，状态行不再复述一遍。
+    expect(screen.queryByText(/分钟自动备份/)).toBeNull();
+    expect(screen.queryByText(/快速检查/)).toBeNull();
   });
 
-  it("shows how the last automatic check ran and what it cost", () => {
+  it("puts the check time and the check mode in one aligned column", () => {
+    const lastSuccessMs = Date.now() - 60_000;
     render(<BranchScheduleStatus branch={{
       ...branch(true),
-      lastSuccessMs: Date.UTC(2026, 9, 21, 8, 0, 0),
+      lastSuccessMs,
       lastCheckMode: "quick",
       lastCheckElapsedMs: 12,
     }} />);
 
-    expect(screen.getByText(/最近成功 .* · 上次自动检查：快速检查命中（12 ms）/)).toBeTruthy();
+    // 时间与方式各占一行，标签带冒号、值成列对齐，不再是「最近成功 … · 上次自动检查：…」一句话。
+    expect(document.querySelector(".branch-status-value")?.textContent)
+      .toBe(formatClockTime(lastSuccessMs));
+    expect(screen.getByText("快速检查命中：")).toBeTruthy();
+    expect(screen.getByText("12 ms")).toBeTruthy();
+    expect(screen.queryByText(/最近成功|上次自动检查/)).toBeNull();
   });
 
-  it("shows the oldest chain verification time when no node failed", () => {
+  it("shows the chain verification time when no node failed", () => {
     render(<BranchScheduleStatus branch={{ ...branch(true), verifiedMs: Date.UTC(2026, 9, 19, 8, 0, 0) }} />);
 
-    expect(screen.getByText(/历史节点全部正常 · /)).toBeTruthy();
+    expect(screen.getByText("历史节点正常")).toBeTruthy();
   });
 
   it("describes unreadable nodes in plain words and re-queues them", async () => {
@@ -286,7 +297,7 @@ describe("BranchScheduleStatus", () => {
     render(<BranchScheduleStatus branch={verifyFailedBranch} onReverify={onReverify} />);
 
     // 备份状态正常时仍独立显示节点问题，并且只说「有几个节点出了问题」。
-    expect(screen.getByText(/每 10 分钟自动备份/)).toBeTruthy();
+    expect(screen.getByText("自动备份正常")).toBeTruthy();
     expect(screen.getByText("2 个历史节点文件丢失或损坏")).toBeTruthy();
     // 链上有文件丢失时整行转红，和节点卡片同一个意思。
     expect(screen.getByText("2 个历史节点文件丢失或损坏").closest(".branch-schedule")?.classList.contains("missing")).toBe(true);

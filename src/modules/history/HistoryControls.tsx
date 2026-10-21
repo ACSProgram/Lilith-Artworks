@@ -1,13 +1,14 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle, Ban, Check, ChevronDown, CircleHelp, Copy, Eraser, FileOutput, FilePenLine,
-  FolderOpen, GitBranch, GitFork, LoaderCircle, Trash2, X,
+  FolderOpen, GitBranch, GitFork, LoaderCircle, Timer, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { ConfirmDialog as SharedConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
 import { appApi } from "../../app/api";
-import { describeLastCheck } from "./historyModel";
+import { checkModeLabel, describeCheckRun, formatCheckElapsed, formatClockTime } from "./historyModel";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
 
 type SaveState = "saved" | "dirty" | "saving" | "error";
@@ -35,19 +36,39 @@ export function BranchScheduleStatus({
     }
   };
 
-  const lastCheckDetail = describeLastCheck(branch);
-  const successSummary = branch.lastSuccessMs
-    ? `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}${lastCheckDetail ? ` · ${lastCheckDetail}` : ""}`
-    : "等待首次检查";
-  const status = branch.finalArtifactLocked
-    ? `成品已锁定 · 已发布 ${branch.publishedCount} 条`
-    : branch.lastError && !branch.backupEnabled
-      ? `自动备份已关闭（连续 ${branch.consecutiveBackupFailures} 次失败）`
-      : branch.lastError
-        ? "备份失败，将按策略重试"
-        : branch.backupEnabled
-          ? `每 ${branch.backupIntervalMinutes} 分钟自动备份${branch.backupQuickEnabled ? " · 快速检查" : ""} · ${successSummary}`
-          : "自动备份已关闭";
+  // 状态块排成「时间 / 状态」两列：左列是上次检查时间与检查方式（值与冒号对齐），
+  // 右列两行状态并列。间隔与两个开关已经在上方控件里，这里不再复述。
+  const checkRun = describeCheckRun(branch);
+  const successTime = branch.lastSuccessMs == null ? null : formatClockTime(branch.lastSuccessMs);
+  const successTitle = branch.lastSuccessMs == null
+    ? undefined
+    : `最近成功 ${new Date(branch.lastSuccessMs).toLocaleString()}`;
+  const checkTitle = checkRun == null ? undefined : `上次自动检查：${checkRun}`;
+
+  const backupRow: { icon: ReactNode; label: string; error: boolean } =
+    branch.finalArtifactLocked
+      ? { icon: <Ban aria-hidden="true" size={16} />, label: `成品已锁定 · 已发布 ${branch.publishedCount} 条`, error: false }
+      : branch.lastError && !branch.backupEnabled
+        ? { icon: <AlertTriangle aria-hidden="true" size={16} />, label: `自动备份已关闭（连续 ${branch.consecutiveBackupFailures} 次失败）`, error: true }
+        : branch.lastError
+          ? { icon: <AlertTriangle aria-hidden="true" size={16} />, label: "备份失败，将按策略重试", error: true }
+          : branch.backupEnabled
+            ? { icon: <Check aria-hidden="true" size={16} />, label: "自动备份正常", error: false }
+            : { icon: null, label: "自动备份已关闭", error: false };
+
+  // 左列只放「什么时候」和「上一次怎么查的」：失败或关闭时时间要说明是哪次成功，
+  // 否则单看一个时刻会被误读成刚刚。
+  const successFailed = Boolean(branch.lastError) || !branch.backupEnabled;
+  const successDetail = successTime
+    ?? (branch.backupEnabled && !branch.lastError && !branch.finalArtifactLocked ? "暂无" : "");
+  const checkDetail = branch.backupEnabled && !branch.finalArtifactLocked && branch.lastCheckMode
+    ? {
+      label: `${checkModeLabel(branch.lastCheckMode)}：`,
+      value: branch.lastCheckElapsedMs == null
+        ? "—"
+        : formatCheckElapsed(branch.lastCheckElapsedMs),
+    }
+    : null;
 
   // 两类问题分开数：确认坏掉的和没有结论的不能混成一句，否则用户会以为都坏了。
   const verifySummary = [
@@ -59,81 +80,90 @@ export function BranchScheduleStatus({
       : null,
   ].filter(Boolean).join(" · ");
 
-  return <>
-    <div className={`branch-schedule${branch.lastError ? " error" : ""}`}>
-      {branch.finalArtifactLocked
-        ? <Ban aria-hidden="true" size={16} />
-        : branch.lastError
-          ? <AlertTriangle aria-hidden="true" size={16} />
-          : branch.backupEnabled
-            ? <Check aria-hidden="true" size={16} />
-            : null}
-      <span className="branch-schedule-summary">{status}</span>
-      {branch.lastError && <details className="branch-error-details">
-        <summary className="icon-button" role="button" aria-label="查看备份失败详情" title="查看备份失败详情">
-          <ChevronDown aria-hidden="true" size={14} />
-        </summary>
-        <div className="branch-error-popover">
-          <header>
-            <strong>备份失败详情</strong>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="复制备份失败详情"
-              title={copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
-              onClick={() => void copyText(branch.lastError, setCopyState)}
-            >
-              {copyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
-            </button>
-          </header>
-          <pre>{branch.lastError}</pre>
-          {copyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
-        </div>
-      </details>}
+  return <div className="branch-status">
+    <div className="branch-status-details">
+      {successDetail && <div className="branch-status-detail" title={successTitle}>
+        <span className="branch-status-label">{successFailed ? "上次成功时间：" : "上次检查时间："}</span>
+        <span className="branch-status-value">{successDetail}</span>
+      </div>}
+      {checkDetail && <div className="branch-status-detail" title={checkTitle}>
+        <span className="branch-status-label">{checkDetail.label}</span>
+        <span className="branch-status-value">{checkDetail.value}</span>
+      </div>}
     </div>
-    {!branch.verifyError && branch.verifiedMs != null && <div className="branch-schedule verify-ok">
-      <Check aria-hidden="true" size={16} />
-      <span className="branch-schedule-summary">历史节点全部正常 · {new Date(branch.verifiedMs).toLocaleString()}</span>
-    </div>}
-    {branch.verifyError && <div className={`branch-schedule verify-error ${branch.verifyIssue ?? "damaged"}`}>
-      {branch.verifyIssue === "unverifiable"
-        ? <CircleHelp aria-hidden="true" size={16} />
-        : <AlertTriangle aria-hidden="true" size={16} />}
-      <span className="branch-schedule-summary">{verifySummary}</span>
-      <details className="branch-error-details">
-        <summary className="icon-button" role="button" aria-label="查看历史节点问题" title="查看历史节点问题">
-          <ChevronDown aria-hidden="true" size={14} />
-        </summary>
-        <div className="branch-error-popover">
-          <header>
-            <strong>历史节点问题</strong>
-            <button
-              className="icon-button"
-              type="button"
-              aria-label="复制历史节点问题详情"
-              title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择文本" : "复制详细信息"}
-              onClick={() => void copyText(branch.verifyError, setVerifyCopyState)}
-            >
-              {verifyCopyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
-            </button>
-          </header>
-          <details className="branch-verify-details" open>
-            <summary>详情信息</summary>
-            <pre>{branch.verifyError}</pre>
-          </details>
-          {verifyCopyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
-          <div className="branch-verify-actions">
-            <small>自动检查不会反复重试出问题的节点，需要你主动再查一次。</small>
-            {onReverify && <button
-              className="secondary-button"
-              type="button"
-              onClick={() => void onReverify(branch.id)}
-            >重新检查此分支</button>}
+    <div className="branch-status-states">
+      <div className={`branch-schedule${backupRow.error ? " error" : ""}`}>
+        {backupRow.icon}
+        <span className="branch-schedule-summary">{backupRow.label}</span>
+        {branch.lastError && <details className="branch-error-details">
+          <summary className="icon-button" role="button" aria-label="查看备份失败详情" title="查看备份失败详情">
+            <ChevronDown aria-hidden="true" size={14} />
+          </summary>
+          <div className="branch-error-popover">
+            <header>
+              <strong>备份失败详情</strong>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="复制备份失败详情"
+                title={copyState === "copied" ? "已复制" : copyState === "failed" ? "复制失败，请手动选择错误文本" : "复制完整错误"}
+                onClick={() => void copyText(branch.lastError, setCopyState)}
+              >
+                {copyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+              </button>
+            </header>
+            <pre>{branch.lastError}</pre>
+            {copyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
           </div>
-        </div>
-      </details>
-    </div>}
-  </>;
+        </details>}
+      </div>
+      {!branch.verifyError && branch.verifiedMs != null && <div
+        className="branch-schedule verify-ok"
+        title={`上次检查 ${new Date(branch.verifiedMs).toLocaleString()}`}
+      >
+        <Check aria-hidden="true" size={16} />
+        <span className="branch-schedule-summary">历史节点正常</span>
+      </div>}
+      {branch.verifyError && <div className={`branch-schedule verify-error ${branch.verifyIssue ?? "damaged"}`}>
+        {branch.verifyIssue === "unverifiable"
+          ? <CircleHelp aria-hidden="true" size={16} />
+          : <AlertTriangle aria-hidden="true" size={16} />}
+        <span className="branch-schedule-summary">{verifySummary}</span>
+        <details className="branch-error-details">
+          <summary className="icon-button" role="button" aria-label="查看历史节点问题" title="查看历史节点问题">
+            <ChevronDown aria-hidden="true" size={14} />
+          </summary>
+          <div className="branch-error-popover">
+            <header>
+              <strong>历史节点问题</strong>
+              <button
+                className="icon-button"
+                type="button"
+                aria-label="复制历史节点问题详情"
+                title={verifyCopyState === "copied" ? "已复制" : verifyCopyState === "failed" ? "复制失败，请手动选择文本" : "复制详细信息"}
+                onClick={() => void copyText(branch.verifyError, setVerifyCopyState)}
+              >
+                {verifyCopyState === "copied" ? <Check aria-hidden="true" size={14} /> : <Copy aria-hidden="true" size={14} />}
+              </button>
+            </header>
+            <details className="branch-verify-details" open>
+              <summary>详情信息</summary>
+              <pre>{branch.verifyError}</pre>
+            </details>
+            {verifyCopyState === "failed" && <small role="status">复制失败，请手动选择错误文本。</small>}
+            <div className="branch-verify-actions">
+              <small>自动检查不会反复重试出问题的节点，需要你主动再查一次。</small>
+              {onReverify && <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void onReverify(branch.id)}
+              >重新检查此分支</button>}
+            </div>
+          </div>
+        </details>
+      </div>}
+    </div>
+  </div>;
 }
 
 export function BranchSettings({
@@ -283,46 +313,51 @@ export function BranchSettings({
       </div>
     </div>
     <div className="branch-backup-controls">
-      <label className="switch-field">
-        <span className="switch-copy">
-          <strong>自动备份</strong>
-          <small>{!hasSource ? "未选择工作文件" : effectiveEnabled ? "按间隔运行" : "当前已关闭"}</small>
-        </span>
-        <input
-          aria-label="自动备份"
-          className="switch-input"
-          type="checkbox"
-          checked={effectiveEnabled}
-          disabled={disabled || branch.finalArtifactLocked || !hasSource}
-          onChange={(event) => setEnabled(event.target.checked)}
-        />
-      </label>
-      <label className="interval-field">
-        <span>间隔</span>
-        <input
-          type="number"
-          min={1}
-          max={10_080}
-          value={interval}
-          disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
-          onChange={(event) => setInterval(Number(event.target.value))}
-        />
-        <span>分钟</span>
-      </label>
-      <label className="switch-field">
-        <span className="switch-copy">
-          <strong>快速检查</strong>
-          <small>{!hasSource || !effectiveEnabled ? "随自动备份生效" : quick ? "先比大小与修改时间" : "每次全量校验"}</small>
-        </span>
-        <input
-          aria-label="快速检查"
-          className="switch-input"
-          type="checkbox"
-          checked={quick}
-          disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
-          onChange={(event) => setQuick(event.target.checked)}
-        />
-      </label>
+      <Timer aria-hidden="true" size={18} />
+      <div className="backup-toggles">
+        <div className="backup-toggle-row">
+          <label className="backup-toggle">
+            <span>自动备份</span>
+            <input
+              aria-label="自动备份"
+              className="switch-input"
+              type="checkbox"
+              checked={effectiveEnabled}
+              disabled={disabled || branch.finalArtifactLocked || !hasSource}
+              onChange={(event) => setEnabled(event.target.checked)}
+            />
+          </label>
+          <label className="backup-interval">
+            <span>每</span>
+            <input
+              aria-label="间隔"
+              type="number"
+              min={1}
+              max={10_080}
+              value={interval}
+              disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
+              onChange={(event) => setInterval(Number(event.target.value))}
+            />
+            <span>分钟</span>
+          </label>
+        </div>
+        <div className="backup-toggle-row">
+          <label className="backup-toggle">
+            <span>快速检查</span>
+            <input
+              aria-label="快速检查"
+              className="switch-input"
+              type="checkbox"
+              checked={quick}
+              disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
+              onChange={(event) => setQuick(event.target.checked)}
+            />
+          </label>
+          <span className="backup-toggle-hint">
+            {!effectiveEnabled ? "随自动备份生效" : quick ? "跳过未改动文件" : "每次全量校验"}
+          </span>
+        </div>
+      </div>
     </div>
   </div>;
 }

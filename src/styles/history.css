@@ -60,7 +60,7 @@
 
 .branch-band {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(220px, auto);
   align-items: center;
   gap: 16px;
   padding: 10px 20px;
@@ -89,14 +89,22 @@
 .branch-source-actions { display: flex; align-items: center; gap: 6px; }
 .branch-source-file .icon-button { width: 30px; height: 28px; border: 1px solid var(--control-border); }
 .branch-source-file .branch-source-pick { min-height: 28px; padding: 0 10px; font-size: 11px; }
-.branch-backup-controls { display: flex; align-items: end; gap: 8px; padding-left: 18px; border-left: 1px solid var(--border); }
-.interval-field { display: grid; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; }
-.branch-title-field input, .interval-field input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
-.branch-title-field input:disabled, .interval-field input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
-.interval-field { grid-template-columns: 54px auto; }
-.interval-field > span:first-child { grid-column: 1 / -1; }
-.interval-field input { width: 54px; }
-.interval-field > span:last-child { font-size: 10px; }
+/* 自动备份控件与左侧分支标题同高对齐：图标同位、两个开关上下叠，间隔贴着自动备份。 */
+.branch-backup-controls { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 9px; padding-left: 18px; border-left: 1px solid var(--border); }
+.branch-backup-controls > svg { color: var(--accent); }
+.backup-toggles { display: grid; gap: 5px; min-width: 0; }
+.backup-toggle-row { display: grid; grid-template-columns: minmax(94px, auto) minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+.backup-toggle { display: flex; align-items: center; justify-content: space-between; gap: 10px; height: 26px; padding: 0 6px 0 9px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--surface-subtle); font-size: 10px; font-weight: 650; white-space: nowrap; }
+.backup-toggle:has(.switch-input:disabled) { color: var(--muted); }
+.backup-toggle .switch-input { width: 30px !important; height: 17px !important; }
+.backup-toggle .switch-input::after { width: 11px; height: 11px; }
+.backup-toggle .switch-input:checked::after { transform: translateX(13px); }
+.backup-interval { display: flex; align-items: center; gap: 5px; min-width: 0; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.backup-interval input { width: 56px; min-width: 0; height: 26px; padding: 0 6px; border: 1px solid var(--control-border); border-radius: 5px; color: var(--text); background: var(--control-bg); font-size: 11px; font-variant-numeric: tabular-nums; }
+.backup-interval input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
+.backup-toggle-hint { overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.branch-title-field input { min-width: 0; height: 34px; padding: 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); }
+.branch-title-field input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
 
 .switch-field {
   display: flex;
@@ -122,6 +130,14 @@
 .save-state.dirty { color: var(--warning); }
 
 .branch-status-actions { position: relative; display: flex; flex-direction: column; align-items: flex-end; justify-content: center; gap: 8px; min-width: 0; }
+/* 状态块排成「时间 / 状态」两列小表：左列标签与值对齐，右列两行状态并列。
+   两列之间只留固定间距，不按剩余宽度摊开，否则行数一变列距就忽宽忽窄。 */
+.branch-status { display: grid; grid-template-columns: max-content max-content; align-items: start; justify-content: start; gap: 8px 18px; max-width: 100%; min-width: 0; }
+.branch-status-details, .branch-status-states { display: grid; grid-auto-rows: 18px; align-content: start; min-width: 0; }
+.branch-status-states { justify-items: start; }
+.branch-status-detail { display: grid; grid-template-columns: max-content auto; align-items: center; min-width: 0; line-height: 18px; }
+.branch-status-label { min-width: 7em; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.branch-status-value { overflow: hidden; color: var(--text); font-size: 9px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
 .branch-status-actions .branch-schedule { max-width: 100%; }
 .branch-schedule { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; white-space: nowrap; }
 .branch-schedule svg { color: var(--accent); }
@@ -175,7 +191,7 @@
 .commit-control input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
 .commit-feedback { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 9px; }
 .commit-feedback.muted { color: var(--muted); }
-.branch-title-field input:focus, .interval-field input:focus, .commit-control input:focus, .history-header-actions select:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
+.branch-title-field input:focus, .backup-interval input:focus, .commit-control input:focus, .history-header-actions select:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
 
 .compact-mode-bar {
   display: flex;

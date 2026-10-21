@@ -98,16 +98,31 @@ export function formatCheckElapsed(elapsedMs: number): string {
 }
 
 /**
- * 分支状态行里的「上次自动检查」说明。只有调度器成功完成过一次检查时才有值；
- * 手动提交不写检查方式与耗时，因此不会把人工操作说成自动检查。
+ * 分支状态行里的「上次检查怎么跑、花了多久」。只有调度器成功完成过一次检查时才
+ * 有值；手动提交不写检查方式与耗时，因此不会把人工操作说成自动检查。
  */
-export function describeLastCheck(branch: ArtworkBranch): string | null {
+export function describeCheckRun(branch: ArtworkBranch): string | null {
   if (!branch.lastCheckMode) return null;
   const label = checkModeLabel(branch.lastCheckMode);
-  const detail = branch.lastCheckElapsedMs == null
+  return branch.lastCheckElapsedMs == null
     ? label
-    : `${label}（${formatCheckElapsed(branch.lastCheckElapsedMs)}）`;
-  return `上次自动检查：${detail}`;
+    : `${label} ${formatCheckElapsed(branch.lastCheckElapsedMs)}`;
+}
+
+/**
+ * 状态行里的时间只到分钟：当天省掉日期，跨天才补月日，避免整串重复。
+ * 完整时间交给提示气泡，行内不再排一遍日期。
+ */
+export function formatClockTime(ms: number, now = Date.now()): string {
+  const date = new Date(ms);
+  const current = new Date(now);
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  const sameDay = date.getFullYear() === current.getFullYear()
+    && date.getMonth() === current.getMonth()
+    && date.getDate() === current.getDate();
+  if (sameDay) return clock;
+  const monthDay = `${date.getMonth() + 1}/${date.getDate()}`;
+  return date.getFullYear() === current.getFullYear() ? `${monthDay} ${clock}` : `${date.getFullYear()}/${monthDay} ${clock}`;
 }
 
 export function canCompact(node: HistoryNode, history: ArtworkHistory): boolean {
