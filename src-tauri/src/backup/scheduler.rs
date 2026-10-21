@@ -49,6 +49,15 @@ const IDLE_VERIFY_BATCH_BUDGET: Duration = Duration::from_secs(30);
 /// aging（防饥饿）：每连续完成 N 次自动备份后，若已有就绪的完整性检查，先让
 /// 一批检查插队。维护者 2026-10-18 定稿为按次数、N = 4，不引入时钟规则。
 const IDLE_VERIFY_AGING_RUNS: u32 = 4;
+/// 快速命中计数的基准阈值：空闲的小仓库每 8 次检查做一次内容确认
+/// （第 8 次本身是全量，中间最多放过 7 次指纹）。
+const AUDIT_BASE_HITS: u32 = 8;
+/// 全量确认代价的分档基线。256 MiB 以下一次全量通常在一秒内，超过后按档
+/// 推迟；分档上限为 4，避免大文件在忙时把阈值抬得过高。
+const AUDIT_SIZE_BASE_BYTES: i64 = 256 * 1024 * 1024;
+/// 无论后台多忙，每条分支大约每七天必须完整读一次内容。它按当前有效间隔
+/// 折算成检查次数，不追踪墙钟时间，因此只是近似上限。
+const AUDIT_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 pub(crate) fn run(state: BackupState, app: AppHandle, events: SharedEventSink) {
     let mut automatic_since_verify = 0_u32;
@@ -158,7 +167,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle, events: SharedEventSink) {
             .collect::<HashMap<_, _>>();
         // deadline 优先：候选按 due_at、上次检查时间与分支 ID 排序；失败退避已
         // 写在分支自己的 retry_at 里，因此一个分支失败不会阻塞其它到期分支。
-        let (due, next_due) = select_due_branch(branches, now, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now, &state);
         let selection = if idle_integrity_enabled {
             // 锁外只判断「有没有待查节点」与仓库静默时长；具体校验哪些节点由
             // `run_verify_batch_locked` 在锁内重新读取。
@@ -269,6 +278,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle, events: SharedEventSink) {
                                 root,
                                 &state,
                                 &branch_id,
+                                due_count,
                                 app_state.last_user_activity_ms(),
                                 app_state.chunk_write_options(),
                             ))
@@ -418,12 +428,12 @@ impl PartialOrd for DeadlineEntry {
     }
 }
 
-/// 从候选集合中取出最早到期的一条；同时给出下一次到期时刻。
+/// 从候选集合中取出最早到期的一条；同时给出下一次到期时刻与本轮到期分支数。
 fn select_due_branch(
     branches: Vec<ScheduledBranch>,
     now: i64,
     state: &BackupState,
-) -> (Option<String>, Option<i64>) {
+) -> (Option<String>, Option<i64>, usize) {
     let mut heap = BinaryHeap::new();
     for branch in branches {
         // 手动提交优先：该分支本轮不自动备份，由手动提交完成后的唤醒接管。
@@ -442,13 +452,14 @@ fn select_due_branch(
             branch,
         });
     }
+    let due_count = heap.iter().filter(|entry| entry.due_at <= now).count();
     let next_due = heap.peek().map(|entry| entry.due_at);
     let due = if heap.peek().is_some_and(|entry| entry.due_at <= now) {
         heap.pop().map(|entry| entry.branch.id)
     } else {
         None
     };
-    (due, next_due)
+    (due, next_due, due_count)
 }
 
 /// 第二优先级是否先于本轮自动备份执行：没有到期备份时始终优先；有到期备份时
@@ -731,6 +742,7 @@ fn run_scheduled_backup(
     root: &Path,
     state: &BackupState,
     branch_id: &str,
+    due_branches: usize,
     last_user_activity_ms: Option<i64>,
     options: ChunkWriteOptions,
 ) -> Result<BackupCommitResult, AutomaticBackupError> {
@@ -766,11 +778,27 @@ fn run_scheduled_backup(
         return Err(AutomaticBackupError::ForegroundWaiting);
     }
     // 快速检查：分支开启快速检查时，先只比较大小与修改时间；完全一致视为内容
-    // 未变化，任何不一致都退回下方全量检查和备份流程。全局设置只在分支创建时
-    // 提供初始值，不参与这里的判定。
+    // 未变化，任何不一致都退回下方全量检查和备份流程。连续命中达到按当前
+    // 负载算出的阈值时跳过指纹，主动做一次全量内容确认，收窄整秒盲区。
+    // 全局设置只在分支创建时提供初始值，不参与这里的判定。
     let checked_started = Instant::now();
     let mut check_mode = CheckMode::Full;
-    if branch.quick_enabled {
+    let force_audit = if branch.quick_enabled {
+        let threshold = audit_threshold(&branch, due_branches, state);
+        // 阈值是两次全量确认之间最多允许的检查次数：本次命中后就会达到
+        // 阈值时，本次直接做全量，不再放过指纹。
+        let force = branch.quick_hit_count.saturating_add(1) >= threshold;
+        if force {
+            log::info!(
+                "backup forced-audit: branch_id={branch_id}, quick_hits={}, threshold={threshold}, due_branches={due_branches}",
+                branch.quick_hit_count
+            );
+        }
+        force
+    } else {
+        false
+    };
+    if branch.quick_enabled && !force_audit {
         let outcome = worker::quick_check_outcome(root, branch_id).map_err(|error| {
             AutomaticBackupError::Failed {
                 error,
@@ -887,26 +915,72 @@ fn record_check_result(
     }
 }
 
-/// 下一次自动备份的截止时刻。实际间隔取 `max(用户设置的间隔, 2 × 上次耗时)`：
-/// 一次检查比间隔还长时，等它跑完再等同样长的时间，避免连续满负荷。耗时优先
-/// 取本进程刚记下的值，没有时回退到库里的上次成功检查，因此重启后第一轮不会
-/// 丢掉代价感知。
+/// 实际检查间隔取 `max(用户设置的间隔, 2 × 上次耗时)`：一次检查比间隔还长时，
+/// 等它跑完再等同样长的时间，避免连续满负荷。耗时优先取本进程刚记下的值，
+/// 没有时回退到库里的上次成功检查，因此重启后第一轮不会丢掉代价感知。
+fn effective_interval_ms(branch: &ScheduledBranch, state: &BackupState) -> i64 {
+    let nominal = i64::from(branch.interval_minutes).saturating_mul(60_000);
+    let last_elapsed_ms = state
+        .check_elapsed(&branch.id)
+        .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
+        .or(branch.last_check_elapsed_ms);
+    last_elapsed_ms
+        .map(|elapsed| nominal.max(elapsed.saturating_mul(2)))
+        .unwrap_or(nominal)
+}
+
+/// 下一次自动备份的截止时刻。
 fn due_at_ms(branch: &ScheduledBranch, now: i64, state: &BackupState) -> i64 {
     branch.retry_at_ms.unwrap_or_else(|| {
         branch.last_check_ms.map_or(now, |checked| {
-            let nominal = i64::from(branch.interval_minutes) * 60_000;
-            let last_elapsed_ms = state
-                .check_elapsed(&branch.id)
-                .map(|elapsed| i64::try_from(elapsed.as_millis()).unwrap_or(i64::MAX))
-                .or(branch.last_check_elapsed_ms);
-            let effective = last_elapsed_ms
-                .map(|elapsed| nominal.max(elapsed.saturating_mul(2)))
-                .unwrap_or(nominal);
             checked
-                .saturating_add(effective)
+                .saturating_add(effective_interval_ms(branch, state))
                 .saturating_add(jitter_ms(&branch.id))
         })
     })
+}
+
+/// 本轮到期队列的推迟档位：0–7 条视为正常，8 条起每翻倍加一档。
+fn audit_queue_factor(due_branches: usize) -> u32 {
+    match due_branches {
+        0..=7 => 1,
+        8..=15 => 2,
+        16..=31 => 3,
+        32..=63 => 4,
+        64..=127 => 5,
+        128..=255 => 6,
+        256..=511 => 7,
+        _ => 8,
+    }
+}
+
+/// 全量确认代价的档位：按上次全量时的工作文件大小分档，未知按最小档。
+fn audit_size_factor(last_source_size: Option<i64>) -> u32 {
+    let size = last_source_size.unwrap_or(0).max(0);
+    if size <= AUDIT_SIZE_BASE_BYTES {
+        1
+    } else if size <= AUDIT_SIZE_BASE_BYTES * 2 {
+        2
+    } else if size <= AUDIT_SIZE_BASE_BYTES * 4 {
+        3
+    } else {
+        4
+    }
+}
+
+/// 两次全量内容确认之间最多允许的检查次数。当前连续命中数 + 1 达到该值
+/// 时，本次检查跳过指纹直接做全量。
+///
+/// 三个因子分别对应：空闲时保持最小确认频率、忙时把额外的全量推迟到队列
+/// 消化之后、大文件减少全量次数；最后用七天年龄上限兜底。检查间隔很长时
+/// 年龄上限会低于基准值，允许阈值小于 8——此时「七天一次」优先于最小次数。
+fn audit_threshold(branch: &ScheduledBranch, due_branches: usize, state: &BackupState) -> u32 {
+    let target = AUDIT_BASE_HITS
+        .saturating_mul(audit_queue_factor(due_branches))
+        .saturating_mul(audit_size_factor(branch.last_source_size));
+    let interval_ms = effective_interval_ms(branch, state).max(1);
+    let age_cap = u32::try_from((AUDIT_MAX_AGE_MS / interval_ms).max(1)).unwrap_or(u32::MAX);
+    target.min(age_cap).max(1)
 }
 
 fn jitter_ms(branch_id: &str) -> i64 {
@@ -998,6 +1072,23 @@ mod tests {
             .unwrap();
     }
 
+    fn quick_hits(root: &Path, branch_id: &str) -> u32 {
+        history::load_scheduled(root, branch_id)
+            .unwrap()
+            .unwrap()
+            .quick_hit_count
+    }
+
+    fn set_quick_hits(root: &Path, branch_id: &str, hits: u32) {
+        crate::storage::open(root)
+            .unwrap()
+            .execute(
+                "UPDATE branches SET quick_hit_count = ?2 WHERE id = ?1",
+                rusqlite::params![branch_id, hits],
+            )
+            .unwrap();
+    }
+
     fn fixture() -> (
         tempfile::TempDir,
         std::path::PathBuf,
@@ -1042,6 +1133,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1068,6 +1160,190 @@ mod tests {
             .remove(0);
         assert_eq!(branch.last_check_mode, Some(CheckMode::Quick));
         assert_eq!(branch.last_check_elapsed_ms, elapsed);
+        assert_eq!(quick_hits(&root, &branch_id), 1);
+    }
+
+    #[test]
+    fn quick_hits_accumulate_and_a_full_check_clears_them() {
+        let (_directory, root, source, _artwork_id, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        make_due(&root, &branch_id);
+        run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            1,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(quick_hits(&root, &branch_id), 1);
+
+        make_due(&root, &branch_id);
+        run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            1,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(quick_hits(&root, &branch_id), 2);
+
+        // 同尺寸但内容不同：指纹不一致退回全量，计数清零。
+        fs::write(&source, b"scheduled CONTENT").unwrap();
+        make_due(&root, &branch_id);
+        run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            1,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        assert_eq!(quick_hits(&root, &branch_id), 0);
+    }
+
+    #[test]
+    fn reaching_the_audit_threshold_skips_the_quick_check() {
+        let (_directory, root, _source, artwork_id, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        // 空闲小仓库的阈值是 8：已有 7 次命中时，第 8 次检查直接做全量。
+        set_quick_hits(&root, &branch_id, 7);
+        make_due(&root, &branch_id);
+
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            1,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        // 内容没变，所以不产生节点；但这次走的是全量确认，计数归零。
+        assert!(!result.created);
+        assert!(result.unchanged);
+        assert_eq!(history::list(&root, &artwork_id).unwrap().nodes.len(), 1);
+        assert_eq!(check_metadata(&root, &branch_id).0.as_deref(), Some("full"));
+        assert_eq!(quick_hits(&root, &branch_id), 0);
+    }
+
+    #[test]
+    fn one_below_the_audit_threshold_still_uses_the_quick_check() {
+        let (_directory, root, _source, _artwork_id, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "First",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        set_quick_hits(&root, &branch_id, 6);
+        make_due(&root, &branch_id);
+
+        let result = run_scheduled_backup(
+            &root,
+            &BackupState::default(),
+            &branch_id,
+            1,
+            None,
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        assert!(result.unchanged);
+        assert_eq!(
+            check_metadata(&root, &branch_id).0.as_deref(),
+            Some("quick")
+        );
+        assert_eq!(quick_hits(&root, &branch_id), 7);
+    }
+
+    #[test]
+    fn audit_threshold_scales_with_queue_and_source_size() {
+        let state = BackupState::default();
+        let mut branch = scheduled_branch("audit", Some(0), None);
+        branch.quick_enabled = true;
+        branch.last_source_size = Some(100 * 1024 * 1024);
+
+        assert_eq!(audit_threshold(&branch, 0, &state), 8);
+        assert_eq!(audit_threshold(&branch, 7, &state), 8);
+        assert_eq!(audit_threshold(&branch, 8, &state), 16);
+        assert_eq!(audit_threshold(&branch, 16, &state), 24);
+
+        // 2 GiB 进入最大尺寸档：目标值 8 × 队列档 × 4。
+        branch.last_source_size = Some(2 * 1024 * 1024 * 1024);
+        assert_eq!(audit_threshold(&branch, 40, &state), 8 * 4 * 4);
+        // 200 条到期时目标值是 8 × 6 × 4 = 192，被 60 分钟间隔的七天上限
+        // （168 次）截断。
+        assert_eq!(audit_threshold(&branch, 200, &state), 168);
+    }
+
+    #[test]
+    fn audit_threshold_allows_fewer_than_eight_hits_for_long_intervals() {
+        let state = BackupState::default();
+        let mut branch = scheduled_branch("audit", Some(0), None);
+        branch.quick_enabled = true;
+        branch.last_source_size = Some(2 * 1024 * 1024 * 1024);
+
+        // 每日检查：七天上限只允许 7 次，低于基准 8。
+        branch.interval_minutes = 24 * 60;
+        assert_eq!(audit_threshold(&branch, 0, &state), 7);
+
+        // 每周检查：每轮都必须完整确认。
+        branch.interval_minutes = 7 * 24 * 60;
+        assert_eq!(audit_threshold(&branch, 0, &state), 1);
+    }
+
+    #[test]
+    fn reset_quick_hit_count_clears_the_persisted_value() {
+        let (_directory, root, _source, _artwork_id, branch_id) = fixture();
+        set_quick_hits(&root, &branch_id, 5);
+        history::reset_quick_hit_count(&root, &branch_id).unwrap();
+        assert_eq!(quick_hits(&root, &branch_id), 0);
+    }
+
+    #[test]
+    fn audit_factors_use_doubling_steps() {
+        assert_eq!(audit_queue_factor(0), 1);
+        assert_eq!(audit_queue_factor(7), 1);
+        assert_eq!(audit_queue_factor(8), 2);
+        assert_eq!(audit_queue_factor(15), 2);
+        assert_eq!(audit_queue_factor(16), 3);
+        assert_eq!(audit_queue_factor(512), 8);
+
+        let base = AUDIT_SIZE_BASE_BYTES;
+        assert_eq!(audit_size_factor(None), 1);
+        assert_eq!(audit_size_factor(Some(base)), 1);
+        assert_eq!(audit_size_factor(Some(base + 1)), 2);
+        assert_eq!(audit_size_factor(Some(base * 2)), 2);
+        assert_eq!(audit_size_factor(Some(base * 2 + 1)), 3);
+        assert_eq!(audit_size_factor(Some(base * 4)), 3);
+        assert_eq!(audit_size_factor(Some(base * 4 + 1)), 4);
+        assert_eq!(audit_size_factor(Some(base * 32)), 4);
     }
 
     #[test]
@@ -1087,6 +1363,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1127,6 +1404,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1170,6 +1448,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1218,6 +1497,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1231,6 +1511,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         )
@@ -1261,7 +1542,8 @@ mod tests {
         // 且不计入失败、不推进检查时间。
         let waiting = state.begin_foreground_wait();
 
-        let yielded = run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1);
+        let yielded =
+            run_scheduled_backup(&root, &state, &branch_id, 1, None, ChunkWriteOptions::V1);
 
         assert!(
             matches!(yielded, Err(AutomaticBackupError::ForegroundWaiting)),
@@ -1277,7 +1559,8 @@ mod tests {
         assert!(branch.last_error.is_none());
 
         let result =
-            run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1).unwrap();
+            run_scheduled_backup(&root, &state, &branch_id, 1, None, ChunkWriteOptions::V1)
+                .unwrap();
         assert!(result.unchanged);
     }
 
@@ -1297,12 +1580,14 @@ mod tests {
         let state = BackupState::default();
         state.begin_manual_request(&branch_id);
 
-        let deferred = run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1);
+        let deferred =
+            run_scheduled_backup(&root, &state, &branch_id, 1, None, ChunkWriteOptions::V1);
 
         assert!(matches!(deferred, Err(AutomaticBackupError::Deferred)));
         state.end_manual_request(&branch_id);
         let result =
-            run_scheduled_backup(&root, &state, &branch_id, None, ChunkWriteOptions::V1).unwrap();
+            run_scheduled_backup(&root, &state, &branch_id, 1, None, ChunkWriteOptions::V1)
+                .unwrap();
         assert!(result.unchanged);
     }
 
@@ -1337,6 +1622,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &artwork.branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         );
@@ -1416,8 +1702,14 @@ mod tests {
         let state = BackupState::default();
         let now = storage::now_ms().unwrap();
 
-        let deferred =
-            run_scheduled_backup(&root, &state, &branch_id, Some(now), ChunkWriteOptions::V1);
+        let deferred = run_scheduled_backup(
+            &root,
+            &state,
+            &branch_id,
+            1,
+            Some(now),
+            ChunkWriteOptions::V1,
+        );
         assert!(matches!(deferred, Err(AutomaticBackupError::UserActive)));
 
         // 让位不算失败，也不推进检查时间。
@@ -1442,6 +1734,7 @@ mod tests {
             &root,
             &state,
             &branch_id,
+            1,
             Some(now - USER_ACTIVITY_SILENCE_MS),
             ChunkWriteOptions::V1,
         )
@@ -1510,6 +1803,8 @@ mod tests {
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms: Some(10),
             last_check_elapsed_ms: None,
+            quick_hit_count: 0,
+            last_source_size: None,
             interval_minutes: 120,
             quick_enabled: false,
             retry_at_ms: Some(42),
@@ -1543,6 +1838,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         );
@@ -1597,6 +1893,7 @@ mod tests {
             &root,
             &BackupState::default(),
             &artwork.branch_id,
+            1,
             None,
             ChunkWriteOptions::V1,
         );
@@ -1631,6 +1928,7 @@ mod tests {
                     &root,
                     &operation_state,
                     &artwork.branch_id,
+                    1,
                     None,
                     ChunkWriteOptions::V1,
                 )
@@ -1803,6 +2101,8 @@ mod tests {
             source_path: r"C:\work\artwork.bin".into(),
             last_check_ms,
             last_check_elapsed_ms: None,
+            quick_hit_count: 0,
+            last_source_size: None,
             interval_minutes: 60,
             quick_enabled: false,
             retry_at_ms,
@@ -1822,18 +2122,20 @@ mod tests {
             scheduled_branch("tie-b", Some(1), Some(now + 1_000)),
         ];
 
-        let (due, next_due) = select_due_branch(branches, now, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now, &state);
         assert_eq!(due.as_deref(), Some("first"));
         assert_eq!(next_due, Some(now - 100));
+        assert_eq!(due_count, 1);
 
         // 下一次调用时已取出的分支不再出现；tie-b 的上次检查更早，先于 tie-a。
         let branches = vec![
             scheduled_branch("tie-a", Some(2), Some(now + 1_000)),
             scheduled_branch("tie-b", Some(1), Some(now + 1_000)),
         ];
-        let (due, next_due) = select_due_branch(branches, now + 1_000, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now + 1_000, &state);
         assert_eq!(due.as_deref(), Some("tie-b"));
         assert_eq!(next_due, Some(now + 1_000));
+        assert_eq!(due_count, 2);
     }
 
     #[test]
@@ -1846,14 +2148,16 @@ mod tests {
             scheduled_branch("failed", Some(1), Some(now + 30_000)),
             scheduled_branch("healthy", Some(1), Some(now - 1)),
         ];
-        let (due, next_due) = select_due_branch(branches, now, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now, &state);
         assert_eq!(due.as_deref(), Some("healthy"));
         assert_eq!(next_due, Some(now - 1));
+        assert_eq!(due_count, 1);
 
         let branches = vec![scheduled_branch("failed", Some(1), Some(now + 30_000))];
-        let (due, next_due) = select_due_branch(branches, now, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now, &state);
         assert!(due.is_none());
         assert_eq!(next_due, Some(now + 30_000));
+        assert_eq!(due_count, 0);
     }
 
     #[test]
@@ -1866,10 +2170,11 @@ mod tests {
             scheduled_branch("automatic", Some(1), Some(now + 1_000)),
         ];
 
-        let (due, next_due) = select_due_branch(branches, now, &state);
+        let (due, next_due, due_count) = select_due_branch(branches, now, &state);
         state.end_manual_request("manual");
         assert!(due.is_none());
         assert_eq!(next_due, Some(now + 1_000));
+        assert_eq!(due_count, 0);
     }
 
     #[test]

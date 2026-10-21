@@ -793,10 +793,30 @@ pub(crate) fn record_check_result(
     elapsed_ms: i64,
     mode: CheckMode,
 ) -> Result<(), String> {
+    // 只有快速命中代表「这次又是靠指纹放过的」，计数递增；任何一次全量
+    // （内容包括变化、快速检查退回全量或主动强制确认）都完整读过文件，
+    // 盲区归零。
+    let quick = i64::from(mode == CheckMode::Quick);
     storage::open(root)?
         .execute(
-            "UPDATE branches SET last_check_elapsed_ms = ?2, last_check_mode = ?3 WHERE id = ?1",
-            params![branch_id, elapsed_ms.max(0), mode.as_str()],
+            "UPDATE branches SET
+                last_check_elapsed_ms = ?2,
+                last_check_mode = ?3,
+                quick_hit_count = CASE WHEN ?4 <> 0 THEN quick_hit_count + 1 ELSE 0 END
+             WHERE id = ?1",
+            params![branch_id, elapsed_ms.max(0), mode.as_str(), quick],
+        )
+        .map_err(storage::database_error)?;
+    Ok(())
+}
+
+/// 完整确认过工作文件后清零连续快速命中计数。任何提交（含手动提交）无论是否
+/// 产生新节点都已经读过整份文件，因此与自动全量检查一样清掉盲区。
+pub(crate) fn reset_quick_hit_count(root: &Path, branch_id: &str) -> Result<(), String> {
+    storage::open(root)?
+        .execute(
+            "UPDATE branches SET quick_hit_count = 0 WHERE id = ?1 AND quick_hit_count <> 0",
+            [branch_id],
         )
         .map_err(storage::database_error)?;
     Ok(())
@@ -1779,7 +1799,7 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
         .prepare(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
                     b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
-                    b.last_check_elapsed_ms
+                    b.last_check_elapsed_ms, b.quick_hit_count, b.last_source_size
          FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
          WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
            AND TRIM(b.source_path) <> ''
@@ -1795,6 +1815,8 @@ pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String
                 source_path: row.get(1)?,
                 last_check_ms: row.get(2)?,
                 last_check_elapsed_ms: row.get(7)?,
+                quick_hit_count: row.get(8)?,
+                last_source_size: row.get(9)?,
                 interval_minutes: row.get(3)?,
                 quick_enabled: row.get::<_, i64>(4)? != 0,
                 retry_at_ms: row.get(5)?,
@@ -1814,7 +1836,7 @@ pub(crate) fn load_scheduled(
         .query_row(
             "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
                     b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
-                    b.last_check_elapsed_ms
+                    b.last_check_elapsed_ms, b.quick_hit_count, b.last_source_size
              FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
              WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
                AND TRIM(b.source_path) <> ''
@@ -1827,6 +1849,8 @@ pub(crate) fn load_scheduled(
                     source_path: row.get(1)?,
                     last_check_ms: row.get(2)?,
                     last_check_elapsed_ms: row.get(7)?,
+                    quick_hit_count: row.get(8)?,
+                    last_source_size: row.get(9)?,
                     interval_minutes: row.get(3)?,
                     quick_enabled: row.get::<_, i64>(4)? != 0,
                     retry_at_ms: row.get(5)?,

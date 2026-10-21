@@ -148,12 +148,24 @@ entries for the reader; they are not a template every entry has to fill.
   `pin_board_items` and SQLite rewrites them when a table is renamed; the migration
   runs with foreign keys off, checks them before committing and rolls back whole on
   failure, so a v5 repository still opens as v5. The three scheduler columns are
-  created here; check elapsed and mode were wired to the scheduler and history UI
-  in a follow-up (see below), while `quick_hit_count` still has no reader or
-  writer and reads as 0.
+  created here; later batches wired all of them: elapsed and mode appear in the
+  scheduler and history UI, and `quick_hit_count` drives the adaptive forced
+  audit described below.
 
 ### Changed
 
+- Quick checks now perform an adaptive full audit. `branches.quick_hit_count`
+  counts consecutive fingerprint hits. When the counter plus one reaches a
+  threshold computed at each scheduled check — 8 × queue factor × size factor,
+  approximately capped by seven days divided by the effective interval and never
+  below 1 — the scheduler skips the fingerprint and reads the file in full,
+  so the N-th check between audits is the audit itself. The queue factor adds
+  one step each time the due backlog doubles from 8, and the size factor steps
+  at 256 MiB, 512 MiB and 1 GiB. A quick hit increments the counter; every
+  full check, fallback and successful manual commit clears it. This bounds the
+  fingerprint's same-second blind spot without adding full reads to a busy
+  backlog, and long intervals may use a threshold below 8 so the seven-day
+  ceiling still wins.
 - Automatic backup checks now remember their cost and path. After every successful
   scheduled check the scheduler stores the elapsed time and whether it was a
   quick hit, a quick check that fell back to a full read, or a full check in

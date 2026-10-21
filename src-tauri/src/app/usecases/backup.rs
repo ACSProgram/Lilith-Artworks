@@ -40,8 +40,15 @@ pub(crate) fn commit(
             context.cancel(),
             context.chunk_write_options(),
         );
-        if let Err(error) = result.as_ref() {
-            history::mark_error(session.root(), branch_id, &error.to_string());
+        match &result {
+            // 经此入口的成功提交无论是否产生新节点都完整读过工作文件，连续
+            // 快速命中计数随之归零；下一次自动检查重新从零开始积累。
+            Ok(_) => {
+                if let Err(error) = history::reset_quick_hit_count(session.root(), branch_id) {
+                    log::warn!("failed to reset quick hit count for branch {branch_id}: {error}");
+                }
+            }
+            Err(error) => history::mark_error(session.root(), branch_id, &error.to_string()),
         }
         result.map_err(backup_error)
     });

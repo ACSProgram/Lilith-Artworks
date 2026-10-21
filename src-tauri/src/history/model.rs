@@ -233,6 +233,11 @@ pub(crate) struct ScheduledBranch {
     /// 上一次成功检查的耗时。有内存记录时优先用内存，没有时用它让代价感知
     /// 在重启后继续生效。
     pub(crate) last_check_elapsed_ms: Option<i64>,
+    /// 连续快速命中的次数。命中数加一达到调度器按当前负载算出的阈值时，
+    /// 本次检查跳过指纹直接做全量内容确认。
+    pub(crate) quick_hit_count: u32,
+    /// 上次全量检查时工作文件的大小，用于估算一次全量确认的代价。
+    pub(crate) last_source_size: Option<i64>,
     pub(crate) interval_minutes: u32,
     pub(crate) quick_enabled: bool,
     pub(crate) retry_at_ms: Option<i64>,

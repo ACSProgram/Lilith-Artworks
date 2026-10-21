@@ -760,10 +760,10 @@ fn migrate_v4_to_v5(connection: &mut Connection) -> Result<(), String> {
 ///   （重启后仍然记得，不必重新学习）；
 /// - `last_check_mode`：上一次成功自动检查的方式（`quick` / `full` / `fallback`），
 ///   供分支状态行显示；
-/// - `quick_hit_count`：连续快速命中次数，供「每 N 次强制一次全量」收窄整秒盲区。
+/// - `quick_hit_count`：连续快速命中次数；达到调度器按当前负载算出的阈值时
+///   跳过一次指纹检查、改为全量确认，用于收窄整秒盲区。
 ///
-/// 迁移只负责建列：前两列随后已接进调度器与历史页，`quick_hit_count` 仍没有
-/// 读写方（见 `docs/planning/todo.md` 的「快速命中计数与周期性强制全量」）。
+/// 迁移只负责建列；三列均由后续批次接进调度器与历史页。
 fn migrate_v5_to_v6(connection: &mut Connection) -> Result<(), String> {
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
