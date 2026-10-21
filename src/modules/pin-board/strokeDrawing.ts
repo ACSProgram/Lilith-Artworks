@@ -36,9 +36,17 @@ export type PinBoardTool = "select" | StrokeToolName;
 /** 标注的默认颜色取偏红的高对比色：在多数参考图上都能看清，又不至于像纯红那样刺眼。 */
 export const DEFAULT_STROKE_COLOR = "#e5484d";
 export const DEFAULT_STROKE_WIDTH = 6;
-/** 线宽是世界单位（与图片像素同量级），输入框与原生端上限取更保守的一档。 */
+/**
+ * 线宽是世界单位（与图片像素同量级）。上限取 500：大幅面画布上做粗标注够用，
+ * 仍比原生端与数据库 CHECK 的 1000 保守一档，不必为此改 schema。
+ */
 export const MIN_STROKE_WIDTH = 1;
-export const MAX_STROKE_WIDTH = 64;
+export const MAX_STROKE_WIDTH = 500;
+/**
+ * 线宽滑条的内部刻度数。滑条位置与线宽之间走指数映射：500 倍的范围里，线宽 1–20
+ * 这一段最常调，必须占到足够的行程，而大线宽那一段差几十个单位也看不出来。
+ */
+export const STROKE_WIDTH_SLIDER_STEPS = 1000;
 /**
  * 最小拖拽距离（CSS 像素）。低于它按「误点」处理：单击不留下一个看不见的条目，
  * 形状也拿不到退化的包围盒。
@@ -75,6 +83,45 @@ export function toolForShortcut(key: string): PinBoardTool | null {
 export function clampStrokeWidth(width: number): number {
   if (!Number.isFinite(width)) return DEFAULT_STROKE_WIDTH;
   return Math.min(MAX_STROKE_WIDTH, Math.max(MIN_STROKE_WIDTH, width));
+}
+
+/** 线宽范围比，指数映射的底数。 */
+const STROKE_WIDTH_RANGE_RATIO = MAX_STROKE_WIDTH / MIN_STROKE_WIDTH;
+
+/**
+ * 滑条位置的压缩指数。位置先做 `t^0.75` 再进指数映射：纯指数下每前进 10% 线宽都乘
+ * 1.86 倍，粗线端（右半段）因此窜得太快；压缩后右半段每 10% 只乘约 1.6 倍，200–500
+ * 那一段的行程从 15% 放宽到 19%。代价是细线端略陡，1–20 仍占约 38% 行程，一档一档
+ * 调够用。
+ */
+const STROKE_WIDTH_SLIDER_CURVE = 0.75;
+
+/**
+ * 滑条位置（0–`STROKE_WIDTH_SLIDER_STEPS`）→ 线宽。
+ *
+ * 指数映射：位置每前进 10%，线宽乘 `RANGE_RATIO ^ 0.1`（本范围约 1.86 倍），再按
+ * `t^0.75` 把行程往细线端挪一点（见 `STROKE_WIDTH_SLIDER_CURVE`）——实际效果是细线
+ * 端每 10% 乘约 1.9 倍、粗线端约 1.6 倍。1–20 这段因此占到约 38% 的行程，可以一档一
+ * 档地调；200 以上那一段占最后两成，反正那里差几十个单位也看不出来。取整后再夹一次
+ * 范围，两端始终是 1 与上限。
+ */
+export function strokeWidthFromSlider(position: number): number {
+  if (!Number.isFinite(position)) return DEFAULT_STROKE_WIDTH;
+  const track = Math.min(1, Math.max(0, position / STROKE_WIDTH_SLIDER_STEPS));
+  const curved = track ** STROKE_WIDTH_SLIDER_CURVE;
+  return clampStrokeWidth(Math.round(MIN_STROKE_WIDTH * STROKE_WIDTH_RANGE_RATIO ** curved));
+}
+
+/**
+ * 线宽 → 滑条位置（`strokeWidthFromSlider` 的反函数，供滑条显示）。
+ *
+ * 反解分两步：先取对数得到压缩后的位置，再开 `1 / STROKE_WIDTH_SLIDER_CURVE` 次方还原。
+ */
+export function strokeWidthToSlider(width: number): number {
+  const value = clampStrokeWidth(width);
+  const curved = Math.log(value / MIN_STROKE_WIDTH) / Math.log(STROKE_WIDTH_RANGE_RATIO);
+  const position = Math.min(1, Math.max(0, curved)) ** (1 / STROKE_WIDTH_SLIDER_CURVE);
+  return Math.round(position * STROKE_WIDTH_SLIDER_STEPS);
 }
 
 /** 一次绘制的草稿：世界坐标，与视口无关（缩放/平移不影响已采样的点）。 */

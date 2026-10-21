@@ -141,7 +141,7 @@ describe("pin-board stroke local mapping", () => {
 });
 
 describe("pin-board stroke primitives", () => {
-  it("builds one tapered capsule per pen segment", () => {
+  it("builds one mitered quad per pen segment", () => {
     const item = strokeItem();
     const geometry = geometryFor(STROKE_TOOL.pen, [
       { u: 0, v: 0, pressure: 0 },
@@ -175,7 +175,32 @@ describe("pin-board stroke primitives", () => {
     expectFinite(batch);
   });
 
-  it("extends a segment past both ends so the round caps are not clipped", () => {
+  it("shares join vertices between neighbouring segments", () => {
+    // 三段折线：相邻段的接缝必须用同一对顶点，重叠一次就会让细线在采样间隔上发花。
+    const item = strokeItem({ width: 100, height: 100, strokeWidth: 4 });
+    const geometry = geometryFor(STROKE_TOOL.pen, [
+      { u: 0.1, v: 0.1, pressure: 0 },
+      { u: 0.5, v: 0.5, pressure: 0 },
+      { u: 0.9, v: 0.1, pressure: 0 },
+    ]);
+
+    const batch = buildStrokeBatch([entry(item, geometry)], { pixelsPerWorldUnit: 1 });
+
+    expect(batch.primitiveCount).toBe(2);
+    // 每段 4 个顶点，顺序是 [起点左, 终点左, 终点右, 起点右]。
+    const endLeft = vertex(batch, 1);
+    const endRight = vertex(batch, 2);
+    const nextStartLeft = vertex(batch, 4);
+    const nextStartRight = vertex(batch, 7);
+    expect(endLeft.slice(0, 4)).toEqual(nextStartLeft.slice(0, 4));
+    expect(endRight.slice(0, 4)).toEqual(nextStartRight.slice(0, 4));
+    // 斜接顶点比圆头更靠外：转角处两段的外侧顶点到采样点的距离大于半径。
+    const radius = endLeft[10];
+    const jointDistance = Math.hypot(endLeft[2] - 50, endLeft[3] - 50);
+    expect(jointDistance).toBeGreaterThan(radius);
+  });
+
+  it("extends the stroke ends past the caps so the round ends are not clipped", () => {
     const item = strokeItem({ strokeWidth: 4 });
     const geometry = geometryFor(STROKE_TOOL.pen, [
       { u: 0.1, v: 0.1, pressure: 0 },
@@ -274,6 +299,14 @@ describe("pin-board stroke primitives", () => {
     expect(values[6]).toBe(97);
     expect(values[7]).toBe(97);
     expect(values[10]).toBe(3);
+    // 四边形必须比路径再外扩「半个线宽 + 羽化余量」：路径已在 3，墨迹外沿在 0，
+    // 四边形要落到 -1，否则外侧半个线宽会被裁掉（落地后矩形突然变细就是这条漏了）。
+    const xs = [0, 1, 2, 3].map((index) => vertex(batch, index)[2]);
+    const ys = [0, 1, 2, 3].map((index) => vertex(batch, index)[3]);
+    expect(Math.min(...xs)).toBeCloseTo(-1);
+    expect(Math.max(...xs)).toBeCloseTo(101);
+    expect(Math.min(...ys)).toBeCloseTo(-1);
+    expect(Math.max(...ys)).toBeCloseTo(101);
   });
 
   it("uses the box center and radii for an ellipse", () => {
@@ -288,6 +321,13 @@ describe("pin-board stroke primitives", () => {
     expect(values[5]).toBe(50);
     expect(values[6]).toBe(47);
     expect(values[7]).toBe(47);
+    // 墨迹外沿在 50 ± 50：四边形必须完全盖住它，否则椭圆会被自己的方框切掉两端。
+    const xs = [0, 1, 2, 3].map((index) => vertex(batch, index)[2]);
+    const ys = [0, 1, 2, 3].map((index) => vertex(batch, index)[3]);
+    expect(Math.min(...xs)).toBeLessThanOrEqual(0);
+    expect(Math.max(...xs)).toBeGreaterThanOrEqual(100);
+    expect(Math.min(...ys)).toBeLessThanOrEqual(0);
+    expect(Math.max(...ys)).toBeGreaterThanOrEqual(100);
   });
 
   it("survives a stroke whose points are all identical", () => {

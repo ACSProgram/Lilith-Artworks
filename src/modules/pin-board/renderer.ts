@@ -364,9 +364,15 @@ fn sdTriangle(p: vec2f, p0: vec2f, p1: vec2f, p2: vec2f) -> f32 {
     let halfSize = abs(input.anchorB - input.anchorA) * 0.5;
     dist = abs(sdBox(input.local - center, halfSize)) - input.radius.x;
   } else if (kind < 2.5) {
+    // 椭圆：用「隐函数值 / 梯度长度」近似距离。早先用 min(radii) 缩放隐函数，长短轴
+    // 差距越大越低估距离，笔画的左右两端会明显变粗并被四边形切平；这个近似在常见的
+    // 长短轴比例下误差只有几个百分点，扁椭圆不会在两端变粗（极端细长的仍有偏差）。
     let radii = max(input.anchorB, vec2f(1e-4));
-    let scaled = (input.local - input.anchorA) / radii;
-    dist = abs((length(scaled) - 1.0) * min(radii.x, radii.y)) - input.radius.x;
+    let p = input.local - input.anchorA;
+    let k0 = length(p / radii);
+    let k1 = length(p / (radii * radii));
+    let approx = k0 * (k0 - 1.0) / max(k1, 1e-8);
+    dist = abs(approx) - input.radius.x;
   } else {
     dist = sdTriangle(input.local, input.anchorA, input.anchorB, input.anchorC);
   }
@@ -1573,6 +1579,9 @@ export class PinBoardRenderer {
   /**
    * 切换工具。切到绘制工具时清空选中与框选残留：绘制中不该继续显示变换手柄，
    * 也不该把上一轮的拖拽快照带进来。锁定时只能停在 `select`。
+   *
+   * 结尾要 `emitState()`：光标类名（`.tool-pen`）在那一处统一切换，否则选了画笔
+   * 还要等下一次 pointerdown 才换成笔尖。
    */
   setTool(tool: PinBoardTool) {
     if (!this.loaded || this.locked || this.tool === tool) return;
@@ -1587,6 +1596,7 @@ export class PinBoardRenderer {
       this.setLayerVisible(STROKE_LAYER, true);
     }
     this.refreshSelectionVisuals();
+    this.emitState();
   }
 
   /**
@@ -2067,6 +2077,8 @@ export class PinBoardRenderer {
   private emitState() {
     if (this.destroyed || !this.loaded) return;
     this.canvas.classList.toggle("locked", this.locked);
+    // 画笔用笔尖光标，其余工具保持十字（见 pin-board.css 的 `.tool-pen`）。
+    this.canvas.classList.toggle("tool-pen", this.tool === "pen");
     this.updateSelectionOverlay();
     this.persistSession();
     this.onState(this.interactionState);

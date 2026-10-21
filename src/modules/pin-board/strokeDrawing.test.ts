@@ -5,12 +5,15 @@ import {
   DEFAULT_STROKE_WIDTH,
   MAX_STROKE_WIDTH,
   MIN_STROKE_WIDTH,
+  STROKE_WIDTH_SLIDER_STEPS,
   beginStrokeDraft,
   clampStrokeWidth,
   constrainShapeEnd,
   extendStrokeDraft,
   resolveStrokeDraft,
   strokeDraftPoints,
+  strokeWidthFromSlider,
+  strokeWidthToSlider,
   toolForShortcut,
   type StrokeCommit,
   type StrokeToolName,
@@ -69,6 +72,31 @@ describe("pin-board drawing tools", () => {
     expect(clampStrokeWidth(10_000)).toBe(MAX_STROKE_WIDTH);
     expect(clampStrokeWidth(Number.NaN)).toBe(DEFAULT_STROKE_WIDTH);
     expect(clampStrokeWidth(12)).toBe(12);
+  });
+
+  it("maps the width slider exponentially so the thin end keeps its travel", () => {
+    // 两端必须正好落在范围内。
+    expect(strokeWidthFromSlider(0)).toBe(MIN_STROKE_WIDTH);
+    expect(strokeWidthFromSlider(STROKE_WIDTH_SLIDER_STEPS)).toBe(MAX_STROKE_WIDTH);
+    // 单调不减，且中段远小于线性映射的 (MIN + MAX) / 2。
+    let previous = 0;
+    for (let step = 0; step <= STROKE_WIDTH_SLIDER_STEPS; step += 25) {
+      const width = strokeWidthFromSlider(step);
+      expect(width).toBeGreaterThanOrEqual(previous);
+      previous = width;
+    }
+    const middle = strokeWidthFromSlider(STROKE_WIDTH_SLIDER_STEPS / 2);
+    expect(middle).toBeLessThan((MIN_STROKE_WIDTH + MAX_STROKE_WIDTH) / 2);
+    // 1–20 这段最常调，应当占到足够的行程（本映射下约 38%）。
+    expect(strokeWidthToSlider(20)).toBeGreaterThan(STROKE_WIDTH_SLIDER_STEPS * 0.3);
+    // 粗线端不能挤在最后一小段里：200–500 至少占两成行程，右半段才不会一拖就窜。
+    expect(STROKE_WIDTH_SLIDER_STEPS - strokeWidthToSlider(200)).toBeGreaterThan(
+      STROKE_WIDTH_SLIDER_STEPS * 0.18,
+    );
+    // 往返一致：滑条位置 → 线宽 → 滑条位置不会跑掉。
+    for (const width of [1, 2, 6, 20, 64, 120, 500]) {
+      expect(strokeWidthFromSlider(strokeWidthToSlider(width))).toBe(width);
+    }
   });
 });
 

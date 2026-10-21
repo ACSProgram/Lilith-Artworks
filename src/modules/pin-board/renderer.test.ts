@@ -67,6 +67,15 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
   return renderer;
 }
 
+/**
+ * 原型上的 `emitState`。替身默认把它换成 mock（大部分用例只关心「有没有发出状态」），
+ * 需要验证它自己的行为时（光标类名）用这个函数换回来——`emitState` 是私有方法，
+ * 只能从原型上取。
+ */
+const realEmitState = (PinBoardRenderer.prototype as unknown as {
+  emitState(this: PinBoardRenderer): void;
+}).emitState;
+
 function boardImage(itemId: number, points: PinBoardItem["points"], deleted = false): PinBoardItem {
   return {
     boardId: 1,
@@ -1376,6 +1385,25 @@ describe("pin-board drawing interaction", () => {
     expect((renderer as unknown as { tool: string }).tool).toBe("pen");
     expect(selectedIds.size).toBe(0);
     expect(marqueeBaseIds.size).toBe(0);
+  });
+
+  it("switches the canvas cursor class with the pen tool", () => {
+    const toggle = vi.fn();
+    const renderer = drawingRenderer({
+      canvas: { ...fakeCanvas(), classList: { add: vi.fn(), remove: vi.fn(), toggle } },
+      // 真实的 emitState：光标类名就在里面切换，mock 掉就什么也测不到。
+      emitState: realEmitState,
+      updateSelectionOverlay: vi.fn(),
+      persistSession: vi.fn(),
+      onState: vi.fn(),
+    });
+
+    renderer.setTool("pen");
+    expect(toggle).toHaveBeenCalledWith("tool-pen", true);
+
+    // 其余工具保持十字：类名撤掉即可，不需要逐工具写光标。
+    renderer.setTool("rect");
+    expect(toggle).toHaveBeenLastCalledWith("tool-pen", false);
   });
 
   it("cancels an in-flight drawing instead of committing it", () => {

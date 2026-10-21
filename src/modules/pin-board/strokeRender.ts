@@ -6,6 +6,16 @@
  * 片元着色器在**局部坐标**里算距离场并做 1 px 羽化，因此缩放 10%–800% 时边缘始终
  * 清晰，也不会像「按包围盒开 RGBA 纹理」那样为细长笔迹浪费显存。
  *
+ * 两个覆盖口径不能省：
+ *
+ * - 四边形的**外扩量必须含半个线宽**。距离场是以中心线/路径为基准的，墨迹在路径
+ *   两侧各占半个线宽；只按羽化宽度外扩会把外侧半个线宽整条裁掉（矩形落地后突然
+ *   变细、椭圆被方框切掉左右两端，都是这个原因）。
+ * - 自由笔的相邻段必须**首尾相接**而不是叠在一起。每段各自带一个圆头，两段的重叠
+ *   区会把 1 px 羽化混合两次：整条笔迹在重叠处比单段更实，细线缩小时就会沿采样
+ *   间隔出现一串亮点（看起来像虚线）。这里改成按角平分线算「斜接」偏移，相邻段
+ *   共用同一对顶点，边缘因此只被算一次。
+ *
  * 坐标约定：
  *
  * - 局部坐标以条目包围盒为界，`x ∈ [0, width]`、`y ∈ [0, height]`，原点在包围盒
@@ -46,6 +56,19 @@ export const STROKE_VERTEX_BYTES = STROKE_VERTEX_FLOATS * 4;
 export const STROKE_OUTLINE_VERTICES = 5;
 /** 抗锯齿外扩的最小世界尺寸，避免极小的 `pixelsPerWorldUnit` 把外扩算成 0。 */
 const STROKE_MIN_AA_WORLD_UNITS = 1e-4;
+/**
+ * 椭圆四边形的额外外扩倍数。椭圆距离场用的是「隐函数 / 梯度」近似，长短轴差距越大
+ * 低估得越多，所以按半个线宽的 1.6 倍留余量：常见的扁椭圆（长短轴差二十倍以内、线宽
+ * 明显小于短半径）都盖得住；再极端的细椭圆仍会被切掉一点，那是近似本身的局限，不是
+ * 外扩量不够。
+ */
+const ELLIPSE_AA_MARGIN = 1.6;
+/**
+ * 斜接长度上限（相对半径）。`r / cos(θ/2)` 在转角超过约 96° 时会长过 1.5r，这时
+ * 宁可把外侧尖角切平一点（斜切），也不让斜接顶点拉出一根长刺。采样管道保留 75° 以上
+ * 的尖角（`splitAtCorners`），所以真实笔迹里确实会碰到这种转角。
+ */
+const MITRE_LIMIT = 1.5;
 /** 亚像素点合并的下限：比这更近的点在几何上已经没有意义。 */
 const MIN_POINT_DISTANCE = 1e-6;
 
@@ -374,22 +397,105 @@ function penPrimitives(
     point: [sample.u * item.width, sample.v * item.height] as Point,
     radius: strokePointRadius(item.strokeWidth, sample.pressure, geometry.hasPressure),
   }));
-  // 低缩放下把亚像素间隔的点并掉：既省线段，也避免逐段独立绘制在极短段上抖动。
-  const kept = decimateStrokeSamples(entries, 1 / pixelsPerWorldUnit);
+  // 低缩放下把亚像素间隔的点并掉：既省线段，也避免极短段上算出的斜接方向乱跳。
+  // 抽稀的阈值在高缩放下可能小于 `MIN_POINT_DISTANCE`，所以再滤一遍完全重合的点：
+  // 零长度的段既没有法线，也会让斜接退化成一条刺。
+  const kept = decimateStrokeSamples(entries, 1 / pixelsPerWorldUnit)
+    .filter((entry, index, all) => index === 0 || isDistinct(all[index - 1].point, entry.point));
+  // 所有点重合时没有可画的线段（斜接偏移也拿不到方向），整笔跳过。
+  if (kept.length < 2) return [];
+  // 每个采样点算一对「斜接」顶点，相邻两段共用，因此面片首尾相接、互不重叠。
+  const joints = kept.map((_, index) => joinVertices(kept, index, pad));
   const primitives: StrokePrimitive[] = [];
   for (let index = 1; index < kept.length; index += 1) {
     const previous = kept[index - 1];
     const current = kept[index];
-    const segment = segmentPrimitive(
-      previous.point,
-      current.point,
-      previous.radius,
-      current.radius,
-      pad,
-    );
-    if (segment) primitives.push(segment);
+    const start = joints[index - 1];
+    const end = joints[index];
+    primitives.push({
+      kind: STROKE_PRIMITIVE_KIND.segment,
+      quad: [start.left, end.left, end.right, start.right],
+      a: previous.point,
+      b: current.point,
+      c: previous.point,
+      radius: [previous.radius, current.radius],
+    });
   }
   return primitives;
+}
+
+/**
+ * 采样点两侧的顶点：内点按两侧法线的角平分线斜接（斜接长度 `r / cos(θ/2)`，即到两条
+ * 偏移线的交点），首尾点则沿切线外扩一个半径，让圆头完整落在四边形里。两种情形都再
+ * 向外加一个 `pad`，给 1 px 羽化留出余量。
+ */
+function joinVertices(
+  entries: readonly { point: Point; radius: number }[],
+  index: number,
+  pad: number,
+): { left: Point; right: Point } {
+  const point = entries[index].point;
+  const radius = Math.max(entries[index].radius, 0);
+  const previous = entries[index - 1];
+  const next = entries[index + 1];
+  const dirIn = previous ? unitVector(previous.point, point) : null;
+  const dirOut = next ? unitVector(point, next.point) : null;
+  if (!dirIn || !dirOut) {
+    // 端点：法线取唯一一侧的段，沿切线方向多扩一个半径，圆头才不会被切平。
+    const direction = dirOut ?? dirIn;
+    // 两侧都没有方向只剩一个孤立点，没有可画的面积（`penPrimitives` 已过滤掉）。
+    if (!direction) return { left: point, right: point };
+    const normal = perpendicular(direction);
+    const extent = radius + pad;
+    // 起点朝切线反方向外扩（dirIn 为空），终点朝切线正方向外扩。
+    const along = dirIn ? 1 : -1;
+    return {
+      left: [
+        point[0] + normal[0] * extent + direction[0] * along * extent,
+        point[1] + normal[1] * extent + direction[1] * along * extent,
+      ],
+      right: [
+        point[0] - normal[0] * extent + direction[0] * along * extent,
+        point[1] - normal[1] * extent + direction[1] * along * extent,
+      ],
+    };
+  }
+  const normalIn = perpendicular(dirIn);
+  const normalOut = perpendicular(dirOut);
+  let miterX = normalIn[0] + normalOut[0];
+  let miterY = normalIn[1] + normalOut[1];
+  const length = Math.hypot(miterX, miterY);
+  if (length < 1e-6) {
+    // 180° 折返：角平分线退化，按单侧法线处理（斜接长度由 `MITRE_LIMIT` 兜住）。
+    miterX = normalOut[0];
+    miterY = normalOut[1];
+  } else {
+    miterX /= length;
+    miterY /= length;
+  }
+  const cosHalf = Math.max(miterX * normalIn[0] + miterY * normalIn[1], 0);
+  const miterLength = Math.min(radius / Math.max(cosHalf, 0.25), radius * MITRE_LIMIT);
+  const extent = miterLength + pad;
+  return {
+    left: [point[0] + miterX * extent, point[1] + miterY * extent],
+    right: [point[0] - miterX * extent, point[1] - miterY * extent],
+  };
+}
+
+function unitVector(from: Point, to: Point): Point | null {
+  const deltaX = to[0] - from[0];
+  const deltaY = to[1] - from[1];
+  const length = Math.hypot(deltaX, deltaY);
+  if (!(length >= MIN_POINT_DISTANCE)) return null;
+  return [deltaX / length, deltaY / length];
+}
+
+function perpendicular([x, y]: Point): Point {
+  return [-y, x];
+}
+
+function isDistinct(a: Point, b: Point): boolean {
+  return Math.hypot(b[0] - a[0], b[1] - a[1]) >= MIN_POINT_DISTANCE;
 }
 
 function segmentPrimitive(
@@ -503,7 +609,8 @@ function rectPrimitive(
   const max: Point = [item.width - insetX, item.height - insetY];
   return {
     kind: STROKE_PRIMITIVE_KIND.box,
-    quad: boundsQuad([min, max], pad),
+    // 外扩量是「半个线宽 + 羽化余量」：只按羽化外扩会把外侧半个线宽裁掉。
+    quad: boundsQuad([min, max], halfWidth + pad),
     a: min,
     b: max,
     c: min,
@@ -523,10 +630,11 @@ function ellipsePrimitive(
   ];
   return {
     kind: STROKE_PRIMITIVE_KIND.ellipse,
+    // 椭圆距离场是近似值，长短轴差距大时会略低估距离；外扩多留一点余量，避免边缘被四边形切平。
     quad: boundsQuad([
       [center[0] - radii[0], center[1] - radii[1]],
       [center[0] + radii[0], center[1] + radii[1]],
-    ], pad),
+    ], halfWidth * ELLIPSE_AA_MARGIN + pad),
     a: center,
     b: radii,
     c: center,

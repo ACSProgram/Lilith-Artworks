@@ -82,7 +82,10 @@ import {
   DEFAULT_STROKE_WIDTH,
   MAX_STROKE_WIDTH,
   MIN_STROKE_WIDTH,
+  STROKE_WIDTH_SLIDER_STEPS,
   clampStrokeWidth,
+  strokeWidthFromSlider,
+  strokeWidthToSlider,
   type PinBoardTool,
   type StrokeCommitRequest,
 } from "./strokeDrawing";
@@ -208,6 +211,10 @@ function StrokeToolGroup({ tool, disabled, onSelect }: {
  *
  * 滑条负责快速调粗细，数值框负责精确值：两者写同一份状态，滑条拖动时数值框
  * 实时跟随；数值框在失焦或回车时才收敛，输入过程中允许暂时不合法。
+ *
+ * 滑条走**指数映射**（`strokeWidthFromSlider`）：线宽范围 1–500，线性滑条会把
+ * 九成行程分给「一辈子用不到」的粗线；指数映射让 1–20 这段占到约 38% 行程，并把
+ * 粗线端压平一点，右半段不会一拖就窜。
  */
 function StrokeStyleControls({
   color,
@@ -234,12 +241,13 @@ function StrokeStyleControls({
         <input
           type="range"
           className="pin-board-stroke-width-range"
-          min={MIN_STROKE_WIDTH}
-          max={MAX_STROKE_WIDTH}
+          min={0}
+          max={STROKE_WIDTH_SLIDER_STEPS}
           step={1}
-          value={width}
+          value={strokeWidthToSlider(width)}
           aria-label="笔迹线宽滑条"
-          onChange={(event) => onWidthInput(Number(event.target.value))}
+          aria-valuetext={`线宽 ${width}`}
+          onChange={(event) => onWidthInput(strokeWidthFromSlider(Number(event.target.value)))}
         />
         <input
           type="number"

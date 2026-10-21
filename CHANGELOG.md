@@ -154,6 +154,19 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- The pin board's stroke-width slider is exponential and the width now goes up
+  to 500 instead of 64, so annotations stay visible on large boards. A linear
+  slider across that range would give nine tenths of its travel to widths nobody
+  uses, so the position is mapped exponentially and then flattened toward the
+  coarse end (`t^0.75`): each tenth of the track multiplies the width by about
+  1.9 at the thin end and by about 1.6 at the coarse end, where a plain
+  exponential would multiply by 1.86 everywhere and race through the right half.
+  1–20 — the range that actually gets adjusted — keeps about 38% of the track,
+  and 200–500 widens from 15% to 19% so the last stretch no longer jumps. The
+  numeric field still accepts an exact integer. The pen tool now shows a pen-nib
+  cursor with its hotspot on the tip; the other drawing tools keep the crosshair,
+  the cursor stays a nib while the stroke is being drawn, and it switches as soon
+  as the tool is picked rather than on the next pointer press.
 - Manual branch reverification now walks each chain once from its snapshots,
   matching the full repository scan. Every head, checkpoint and branch start is
   an independent starting point, and the branch-scoped inventory reads only that
@@ -219,6 +232,28 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
+- A rectangle no longer becomes thinner the moment it is committed, and an
+  ellipse is no longer cut by a box along its long axis. Both distance-field
+  primitives were drawn into a quad that only extended one device pixel past the
+  path, while the ink itself occupies half the stroke width on each side, so the
+  outer half of the stroke fell outside the quad: the rectangle's preview showed
+  the full width and the stored item showed roughly half of it, and the ellipse
+  lost its left and right extremes to a straight cut. The quad now extends by
+  half the stroke width plus the anti-aliasing pad, and the ellipse's distance
+  approximation uses the implicit value divided by its gradient instead of
+  scaling by the shorter radius, which had made flat ellipses thicker at both
+  ends the flatter they got.
+- Thin pin-board strokes no longer look dashed when zoomed out, and their edges
+  no longer look beaded. A freehand stroke was built from one capsule per
+  segment, and neighbouring capsules overlapped by a full round cap: two
+  anti-aliasing fringes blending over each other read as more opaque than the
+  true union (0.75 instead of 0.5), so a sub-pixel stroke alternated between
+  darker and lighter pixels at the sampling interval — measured 0.65–0.88 alpha
+  along a line whose coverage should have been uniform, and now flat at 0.65.
+  Segments now share a mitered pair of vertices at each sample, so every edge is
+  evaluated once; the two stroke ends keep their round caps. Joined geometry also
+  removes most of the overlapping fragments, so the stroke pass costs slightly
+  less fill than before.
 - Pin-board saves no longer fail with "画板已被其他窗口修改" after the first
   stroke, and drawing no longer stops accepting new strokes afterwards. The
   create commands advance the backend revision, but the renderer updated only
