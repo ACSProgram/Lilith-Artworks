@@ -15,140 +15,112 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+## 0.3.0-alpha.5 - 2026-10-21
+
 ### Added
 
 - Pin-board layers can be switched off one at a time: a floating panel in the
   canvas's top-left corner lists the bottom, middle, top and annotation layers
-  with an eye toggle each, and collapses to a single button when not in use.
-  Text follows the 0–2 layer it sits on. The switches are view
-  state only — per board, held in the in-process session, never written to the
-  repository and never marking the board dirty, so hiding a layer to look at the
-  artwork underneath does not become a write. Every path that decides what can
-  be seen, picked or acted on goes through the same filter: the visible set, the
-  marquee input, `Ctrl+A`, the content bounds used by "reset view" and the
-  selection itself, so a hidden layer can no longer be clicked, framed,
-  select-all'ed, deleted or exported while staying invisible, and hiding the
-  annotation layer keeps the reset from fitting the view to empty space. Hiding
-  a layer also drops its items from the selection. Drawing tools turn the
-  annotation layer back on, and a newly created item reveals its own layer, so
-  "added" never means "added somewhere you cannot see". The collapsed button
-  is highlighted while any layer is hidden. A stroke selection greys out the
-  context menu's layer items — the annotation layer is fixed — and a mixed
-  selection refuses the move outright rather than silently moving only the
-  images. Bringing an item to the front now promotes it within its own group,
-  so picking a stroke no longer rewrites the `sort_order` of every item on the
-  board.
+  with an eye toggle each, and collapses to a single button when not in use
+  (highlighted while any layer is hidden). The switches are view state only —
+  per board, held in the in-process session, never written to the repository and
+  never marking the board dirty. Visibility, marquee input, `Ctrl+A`, the
+  reset-view bounds and the selection itself all go through the same filter, so
+  a hidden layer cannot be clicked, framed, select-all'ed, deleted or exported,
+  and hiding the annotation layer keeps "reset view" from fitting the view to
+  empty space. Hiding a layer also drops its items from the selection. Drawing
+  tools turn the annotation layer back on, and a newly created item reveals its
+  own layer, so "added" never means "added somewhere you cannot see". A stroke
+  selection greys out the context menu's layer items — the annotation layer is
+  fixed — and a mixed selection refuses the move outright rather than silently
+  moving only the images. Bringing an item to the front now promotes it within
+  its own group, so picking a stroke no longer rewrites every item's
+  `sort_order`.
 - The pin board can now be annotated: a floating pill docked near the bottom of
   the canvas offers a pointer and five drawing tools — freehand pen, line, arrow,
   rectangle and ellipse — with a colour picker, a stroke-width slider and a
-  numeric width field, and the keys `V` / `P` / `L` / `A` / `R` / `O` switch tools
-  without leaving the canvas. `T` collapses and restores the pill, which stays
-  available in fullscreen as well. The pill carries no visibility button: a
-  button that hides its own container leaves the shortcut as the only way back,
-  so hiding and showing share one symmetric control. Selecting a tool is itself
-  the mode — the pointer selects and every drawing tool draws. The colour
-  popover is portalled to the page root and
-  placed from the trigger's viewport rect, because the pill scrolls horizontally
-  and clipped an inline popover. While a drawing tool is
-  active, pressing the pointer starts a stroke instead of selecting or marqueeing,
-  and picking a tool drops the current selection, the drag snapshot and the
-  marquee base so no leftover handles or half-finished selection follow the
-  pointer. The stroke under construction is painted on a 2D canvas overlay in
-  world units — so its width and shape already match what the renderer will
-  produce — and the GPU stroke buffer is rebuilt only once, after the stroke is
-  stored; holding shift constrains a pen stroke to a straight line, a rectangle
-  to a square, an ellipse to a circle and a line or arrow to 45° steps. Releasing
-  the pointer encodes the bounding box and geometry blob and hands them to the
-  controller, which saves pending edits first and then creates the item through a
-  serial queue: two strokes committing at once would carry the same revision and
-  the second would be rejected. The preview stays on screen until the new stroke
-  reaches the buffer, so a stroke does not blink out for the length of a save and
-  a re-read, and it is dropped when the commit fails or the board is switched
-  away. A drag shorter than three CSS pixels counts as a misclick and creates
-  nothing, and a cancelled pointer event is treated as a cancellation rather
-  than a commit. Drawing tools are disabled while the board is locked, and
-  locking returns the tool to the pointer.
+  numeric width field. `V` / `P` / `L` / `A` / `R` / `O` switch tools without
+  leaving the canvas, `T` collapses and restores the pill (also in fullscreen),
+  and selecting a tool is itself the mode: the pointer selects, every drawing
+  tool draws. Pressing the pointer starts a stroke instead of selecting or
+  marqueeing, and picking a tool drops the current selection, the drag snapshot
+  and the marquee base so no leftover handles follow the pointer. The stroke
+  under construction is painted on a 2D canvas overlay in world units, so its
+  width and shape already match what the renderer will produce; shift constrains
+  a pen stroke to a straight line, a rectangle to a square, an ellipse to a
+  circle and a line or arrow to 45° steps. Releasing the pointer encodes the
+  bounding box and geometry blob and hands them to the controller, which saves
+  pending edits first and then creates the item through a serial queue (two
+  strokes committing at once would carry the same revision). The preview stays
+  until the new stroke reaches the buffer and is dropped when the commit fails
+  or the board is switched away. A drag shorter than three CSS pixels counts as
+  a misclick, a cancelled pointer event is a cancellation rather than a commit,
+  and locking the board disables the drawing tools and returns to the pointer.
 - Pin-board items gain a third kind: annotations drawn with a pen, line, arrow,
   rectangle or ellipse. A stroke lives only in the database — `pin_board_strokes`
-  holds the tool, colour, stroke width, bounding box and a compact geometry blob,
-  and no texture or file is created — so strokes stay out of the DDS reference
-  list, cleanup, scrub, the orphan scan, disk accounting, in-board copy and the
-  system clipboard, which remain bitmap-only. The geometry is a small-endian,
-  versioned layout that both sides validate the same way: a freehand stroke
-  carries quantized points and pressure, a shape carries none and derives its two
-  ends from the bounding box plus a direction bit, and the encoder refuses more
-  than 4096 points, leaving distance-based thinning to the sampling layer.
-  `create_pin_board_stroke` passes the blob as an ordinary argument — a
-  `Uint8Array` arrives as a numeric array, about 75 KB at the limit, so no raw
-  channel is worth opening — and `read_pin_board_strokes` returns the whole board
-  as one binary payload that the renderer parses into a map without JSON. A stroke
-  always sits on the annotation layer: `save_pin_board` ignores the `layer` sent
-  by the front end and writes three, so sending a different layer alone is not a
-  change. The canvas now draws strokes that exist in the database (see the
-  following entries); the tools, the layer switches, the sampling pipeline and
-  pressure are covered below.
-- The pin board renders strokes with a signed-distance pipeline instead of a
-  texture per item. Every visible stroke is flattened into one interleaved vertex
-  buffer and drawn as a single indexed call after the bitmaps, because the
-  annotation layer always sits on top. Each primitive is a quad whose corners are
-  mapped from box space into world space by bilinear interpolation of the item's
-  four corners, so moving, rotating or scaling a stroke needs no extra transform
-  code, and a mirrored `uv` mirrors the stroke together with the item. The
-  fragment shader evaluates a tapered capsule for pen segments and lines, a box
-  or ellipse band for the two closed shapes and a triangle for the arrow head,
-  then feathers one device pixel using the world-to-pixel ratio carried in the
-  viewport uniform, which keeps edges clean from 10% to 800% zoom. Points below
-  the pixel spacing are merged by distance, erring towards keeping points rather
-  than clipping them, so a stroke stays connected when the board is zoomed out.
-  The buffer is rebuilt only when the visible stroke set or the zoom changes, and
-  it is dropped and rebuilt on device loss alongside the textures. Strokes are
-  excluded from the texture paths that would otherwise touch them — the load
-  queue, the placeholder overlay and the resident-byte estimate — so they never
-  request a DDS or show a failing placeholder, and they never enter the eviction
-  pass because they own no texture. Their selection outline comes from a separate
-  strip buffer that matches the bitmap outline, and picking a layer for a stroke
-  selection is a no-op because the annotation layer is fixed. Reading the geometry
-  happens after the board is shown, so switching boards still never waits on the
-  repository. Since strokes can now be selected, the export button counts bitmaps
-  and text only and stays disabled for a stroke-only selection, instead of opening
-  a directory picker that writes nothing.
+  holds the tool, colour, stroke width, bounding box and a compact versioned
+  geometry blob — so strokes stay out of the DDS reference list, cleanup, scrub,
+  the orphan scan, disk accounting, in-board copy and the system clipboard,
+  which remain bitmap-only. A freehand stroke carries quantized points and
+  pressure, a shape derives its two ends from the bounding box plus a direction
+  bit, and the encoder refuses more than 4096 points, leaving distance-based
+  thinning to the sampling layer. `create_pin_board_stroke` passes the blob as
+  an ordinary argument — a `Uint8Array` arrives as a numeric array, about 75 KB
+  at the limit, so no raw channel is worth opening — and `read_pin_board_strokes`
+  returns the whole board as one binary payload that the renderer parses without
+  JSON. A stroke always sits on the annotation layer: `save_pin_board` ignores
+  the `layer` sent by the front end and writes three, so sending a different
+  layer alone is not a change.
+- Strokes render through a signed-distance pipeline instead of a texture per
+  item. Every visible stroke is flattened into one interleaved vertex buffer and
+  drawn as a single indexed call after the bitmaps, because the annotation layer
+  always sits on top; each primitive is a quad whose corners are bilinearly
+  mapped from box space into world space, so moving, rotating, scaling or
+  mirroring a stroke needs no extra transform code. The fragment shader
+  evaluates a tapered capsule for pen segments and lines, a box or ellipse band
+  for the two closed shapes and a triangle for the arrow head, then feathers one
+  device pixel, which keeps edges clean from 10% to 800% zoom; points closer
+  than the pixel spacing are merged towards keeping points, so a stroke stays
+  connected when zoomed out. The buffer rebuilds only when the visible stroke
+  set or the zoom changes, and strokes are excluded from the texture paths
+  entirely — no DDS requests, no failing placeholder, no eviction pass. Their
+  selection outline comes from a separate strip buffer that matches the bitmap
+  outline, geometry is read after the board is shown so switching boards never
+  waits on the repository, and the export button counts bitmaps and text only,
+  staying disabled for a stroke-only selection instead of opening a directory
+  picker that writes nothing.
 - Freehand strokes are sampled before they are stored, so fast drawing keeps its
-  detail and zoomed-in strokes stay smooth. Each pointer move contributes every
-  point from `getCoalescedEvents()`, which Chromium otherwise merges down to about
-  60 Hz, and the pointer-up position is added as the final point so a quick lift
-  no longer cuts off the last few pixels. The raw trail is deduplicated, thinned
-  with Ramer–Douglas–Peucker, split at sharp corners, interpolated with a
-  centripetal Catmull-Rom spline converted to cubic Béziers, resampled at an even
-  arc length and finally given pressure smoothing plus a taper at both ends. The
-  tolerance (1 CSS pixel) and the step (2 CSS pixels) are converted to world units
-  with the zoom the stroke was drawn at, so density follows the zoom on screen;
-  long strokes widen the step and are decimated one last time rather than being
-  rejected at the 4096-point limit. Pressure is judged for the whole stroke: the
-  flag is set only for a pen that actually reported non-zero pressure, and once
-  set, a zero inside the stroke means "barely pressed" and draws the thinnest
-  ramp instead of falling back to full width — the old per-point fallback made a
-  light touch come out thickest. A pen preview is now a widened ink outline built
+  detail and zoomed-in strokes stay smooth. Every pointer move contributes all
+  points from `getCoalescedEvents()` (Chromium otherwise merges them down to
+  about 60 Hz) and the pointer-up position is added, so quick strokes lose no
+  points; the trail is then deduplicated, thinned with Ramer–Douglas–Peucker,
+  split at sharp corners, interpolated with a centripetal Catmull-Rom spline,
+  resampled at an even arc length and given pressure smoothing plus a taper at
+  both ends. Tolerance (1 CSS pixel) and step (2 CSS pixels) are converted with
+  the zoom the stroke was drawn at, so density follows the screen; long strokes
+  widen the step rather than being rejected at the 4096-point limit. Pressure is
+  judged for the whole stroke: the flag is set only for a pen that actually
+  reported non-zero pressure, a zero inside the stroke then means "barely
+  pressed" and draws the thinnest ramp (the old per-point fallback made a light
+  touch come out thickest), and the pen preview is a widened ink outline built
   with the same radius formula as the shader, so releasing the pointer no longer
-  changes the width, while a mouse still previews a constant-width polyline.
-- Stroke rendering now culls per primitive against an over-scanned viewport and
-  remembers the box it was built for. Primitives wholly outside the box write no
-  vertices, so a long stroke only pays for the part that is on screen; panning
-  within half a viewport reuses the buffer, and leaving that box rebuilds it even
-  when the set of visible items has not changed — otherwise the culled gap in a
-  board-spanning stroke would be exposed by the pan. A development-only console
-  entry, `__lilithPinBoardStrokeProbe({ strokes, pointsPerStroke })`, generates
-  synthetic strokes and times sampling, encoding and buffer building without
-  touching the repository or the GPU; frame rate still has to be checked by hand
-  on a real adapter.
-- The repository schema is v6, reached by a single v5 → v6 migration that also
-  widens the pin-board tables (`kind` accepts 2, `history.layer` accepts 3) and
-  adds `branches.last_check_elapsed_ms`, `branches.last_check_mode` (quick / full /
-  fallback) and `branches.quick_hit_count` for the backup scheduler. The four
-  pin-board tables are rebuilt together, because their foreign keys point at
-  `pin_board_items` and SQLite rewrites them when a table is renamed; the migration
-  runs with foreign keys off, checks them before committing and rolls back whole on
-  failure, so a v5 repository still opens as v5. The three scheduler columns are
-  created here; later batches wired all of them: elapsed and mode appear in the
+  changes the width.
+- Stroke rendering culls per primitive against an over-scanned viewport and
+  remembers the box it was built for: primitives wholly outside write no
+  vertices, panning within half a viewport reuses the buffer, and leaving the
+  box rebuilds it even when the visible set has not changed — otherwise a pan
+  would expose the culled gap in a board-spanning stroke. A development-only
+  console entry, `__lilithPinBoardStrokeProbe({ strokes, pointsPerStroke })`,
+  times sampling, encoding and buffer building without touching the repository
+  or the GPU.
+- The repository schema is v6, reached by a single v5 → v6 migration that widens
+  the pin-board tables (`kind` accepts 2, `history.layer` accepts 3) and adds
+  `branches.last_check_elapsed_ms`, `last_check_mode` (quick / full / fallback)
+  and `quick_hit_count` for the backup scheduler. The four pin-board tables are
+  rebuilt together, because their foreign keys point at `pin_board_items`; the
+  migration runs with foreign keys off, checks them before committing and rolls
+  back whole on failure, so a v5 repository still opens as v5. The three
+  scheduler columns are wired by later entries: elapsed and mode appear in the
   scheduler and history UI, and `quick_hit_count` drives the adaptive forced
   audit described below.
 
@@ -158,53 +130,46 @@ entries for the reader; they are not a template every entry has to fill.
   to 500 instead of 64, so annotations stay visible on large boards. A linear
   slider across that range would give nine tenths of its travel to widths nobody
   uses, so the position is mapped exponentially and then flattened toward the
-  coarse end (`t^0.75`): each tenth of the track multiplies the width by about
-  1.9 at the thin end and by about 1.6 at the coarse end, where a plain
-  exponential would multiply by 1.86 everywhere and race through the right half.
-  1–20 — the range that actually gets adjusted — keeps about 38% of the track,
-  and 200–500 widens from 15% to 19% so the last stretch no longer jumps. The
-  numeric field still accepts an exact integer. The pen tool now shows a pen-nib
-  cursor with its hotspot on the tip; the other drawing tools keep the crosshair,
-  the cursor stays a nib while the stroke is being drawn, and it switches as soon
-  as the tool is picked rather than on the next pointer press.
+  coarse end (`t^0.75`): 1–20 — the range that actually gets adjusted — keeps
+  about 38% of the track, 200–500 widens from 15% to 19%, and the numeric field
+  still accepts an exact integer. The pen tool now shows a pen-nib cursor with
+  its hotspot on the tip, switching as soon as the tool is picked and staying a
+  nib while the stroke is drawn; the other drawing tools keep the crosshair.
 - Manual branch reverification now walks each chain once from its snapshots,
-  matching the full repository scan. Every head, checkpoint and branch start is
-  an independent starting point, and the branch-scoped inventory reads only that
-  branch's ancestor chain, so a shared prefix is resolved once instead of once
+  matching the full repository scan: every head, checkpoint and branch start is
+  an independent starting point, the branch-scoped inventory reads only that
+  branch's ancestor chain, and a shared prefix is resolved once instead of once
   per node. Results and failure attribution are unchanged: the truly broken node
   is marked missing or damaged, and the versions it blocks stay 「无法检查」.
 - Quick checks now perform an adaptive full audit. `branches.quick_hit_count`
-  counts consecutive fingerprint hits. When the counter plus one reaches a
+  counts consecutive fingerprint hits; when the counter plus one reaches a
   threshold computed at each scheduled check — 8 × queue factor × size factor,
   approximately capped by seven days divided by the effective interval and never
-  below 1 — the scheduler skips the fingerprint and reads the file in full,
-  so the N-th check between audits is the audit itself. The queue factor adds
-  one step each time the due backlog doubles from 8, and the size factor steps
-  at 256 MiB, 512 MiB and 1 GiB. A quick hit increments the counter; every
-  full check, fallback and successful manual commit clears it. This bounds the
-  fingerprint's same-second blind spot without adding full reads to a busy
-  backlog, and long intervals may use a threshold below 8 so the seven-day
-  ceiling still wins.
-- Automatic backup checks now remember their cost and path. After every successful
-  scheduled check the scheduler stores the elapsed time and whether it was a
-  quick hit, a quick check that fell back to a full read, or a full check in
-  `branches.last_check_elapsed_ms` / `last_check_mode`. The due time keeps using
-  `max(interval, 2 × elapsed)` and now falls back to the persisted measurement
-  when the process has none, so a restart no longer resets the widened interval
-  for one round. The branch status row appends this to "last success" as e.g.
-  「上次自动检查：快速检查命中（12 ms）」. Manual commits only move the success time
-  and leave these two columns untouched. A failed metadata write logs a warning
+  below 1 — the scheduler skips the fingerprint and reads the file in full, so
+  the N-th check between audits is the audit itself. The queue factor adds one
+  step each time the due backlog doubles from 8, the size factor steps at
+  256 MiB, 512 MiB and 1 GiB, and every full check, fallback and successful
+  manual commit clears the counter. This bounds the fingerprint's same-second
+  blind spot without adding full reads to a busy backlog.
+- Automatic backup checks now remember their cost and path in
+  `branches.last_check_elapsed_ms` / `last_check_mode` (quick hit, a quick check
+  that fell back to a full read, or a full check). The due time keeps using
+  `max(interval, 2 × elapsed)` and falls back to the persisted measurement when
+  the process has none, so a restart no longer resets the widened interval for
+  one round. The branch status row appends this to "last success" as e.g.
+  「上次自动检查：快速检查命中（12 ms）」; manual commits only move the success time and
+  leave the two columns untouched, and a failed metadata write logs a warning
   instead of turning an already successful check into a failure.
 - The headless test entry point now creates strokes and reads them back for the
   stress suites: `create-board-stroke` writes one stroke from a geometry file or
   hex bytes, `create-board-strokes` writes a batch from a small-endian spec file
   in a single transaction, and `read-board-strokes` reports the payload's item
   count, byte length and SHA-256 instead of dumping megabytes through JSON. The
-  batch path shares the same validation and insert code as the GUI's single
-  creation, so the measured write cost is the product path. `stress_pin_board`
-  gains H4 (geometry blob boundaries, including the accepted 4096-point limit)
-  and H5 (batch round-trip compared byte for byte plus whole-batch rollback), and
-  `stress_bench` gains P9 (500 / 2000 / 5000 strokes written and read back).
+  batch path shares the GUI's validation and insert code, so the measured write
+  cost is the product path. `stress_pin_board` gains H4 (geometry blob
+  boundaries, including the accepted 4096-point limit) and H5 (byte-for-byte
+  batch round-trip plus whole-batch rollback), and `stress_bench` gains P9
+  (500 / 2000 / 5000 strokes written and read back).
 - The pin board's `阵列排序` is rewritten, and the placement math now lives in a
   single native implementation (`src-tauri/src/pin_board/arrange.rs`) shared by
   arrange, paste and import. The old code had two defects: it derived the gap
@@ -212,23 +177,20 @@ entries for the reader; they are not a template every entry has to fill.
   different zoom levels, and it sorted each row by width after wrapping, which
   scrambled the relative positions the user had set — most visibly when the
   last row held a single image, that lone item was lifted to the top and
-  centred. The new algorithm fixes the order before laying out and only once:
-  the common height is the median of the source heights, the order is reading
-  order (banded by y, then by x inside a band), wrapping uses dynamic
-  programming that minimises each row's deviation from the target width, and
-  the block is then translated back onto the trimmed bounding box's centre. The
-  overall aspect ratio follows the original selection and the row count is
-  `sqrt(count / aspect)`, so a single line stays one row and a column stays one
-  image per row; a lone outlier changes neither the shape nor drags the block
-  away. Arrange only handles bitmaps: text items no longer take part, because
-  stretching their quad does not change `fontSize`, so the glyphs would be
-  distorted.
+  centred. The new algorithm fixes the order once before laying out: the common
+  height is the median of the source heights, the order is reading order
+  (banded by y, then by x inside a band), wrapping uses dynamic programming that
+  minimises each row's deviation from the target width, and the block is then
+  translated back onto the trimmed bounding box's centre, so a single line stays
+  one row and a lone outlier changes neither the shape nor the block's place.
+  Arrange only handles bitmaps: stretching a text item's quad does not change
+  `fontSize`, so the glyphs would be distorted.
 - The `阵列图片间距` setting is now a percentage of the common image height
-  (`arrangementGapRatio`, default 6%, range 0–20%); `0` makes images touch and
-  can be used for contact-sheet layouts. Arrange and import share the same
-  value. After the rename the old `arrangementGapPx` key in an existing settings
-  file is ignored silently by the container-level `#[serde(default)]`, so the
-  settings version does not need to be bumped.
+  (`arrangementGapRatio`, default 6%, range 0–20%; `0` makes images touch, e.g.
+  for contact-sheet layouts). Arrange and import share the same value, and the
+  old `arrangementGapPx` key in an existing settings file is ignored silently by
+  the container-level `#[serde(default)]`, so the settings version does not need
+  to be bumped.
 
 ### Fixed
 
@@ -240,7 +202,7 @@ entries for the reader; they are not a template every entry has to fill.
   the full width and the stored item showed roughly half of it, and the ellipse
   lost its left and right extremes to a straight cut. The quad now extends by
   half the stroke width plus the anti-aliasing pad, and the ellipse's distance
-  approximation uses the implicit value divided by its gradient instead of
+  approximation divides the implicit value by its gradient length instead of
   scaling by the shorter radius, which had made flat ellipses thicker at both
   ends the flatter they got.
 - Thin pin-board strokes no longer look dashed when zoomed out, and their edges
@@ -248,12 +210,11 @@ entries for the reader; they are not a template every entry has to fill.
   segment, and neighbouring capsules overlapped by a full round cap: two
   anti-aliasing fringes blending over each other read as more opaque than the
   true union (0.75 instead of 0.5), so a sub-pixel stroke alternated between
-  darker and lighter pixels at the sampling interval — measured 0.65–0.88 alpha
-  along a line whose coverage should have been uniform, and now flat at 0.65.
-  Segments now share a mitered pair of vertices at each sample, so every edge is
-  evaluated once; the two stroke ends keep their round caps. Joined geometry also
-  removes most of the overlapping fragments, so the stroke pass costs slightly
-  less fill than before.
+  darker and lighter pixels at the sampling interval. Segments now share a
+  mitered pair of vertices at each sample, so every edge is evaluated once; the
+  two stroke ends keep their round caps, and joined geometry removes most
+  overlapping fragments, so the stroke pass costs slightly less fill than
+  before.
 - Pin-board saves no longer fail with "画板已被其他窗口修改" after the first
   stroke, and drawing no longer stops accepting new strokes afterwards. The
   create commands advance the backend revision, but the renderer updated only
@@ -263,8 +224,7 @@ entries for the reader; they are not a template every entry has to fill.
   mutation result now advances the ledger as well, and loading a board records
   the revision it was loaded with.
 - Creating an item through a create command no longer selects it while a
-  drawing tool is active. The selection box could not be dragged in tool mode —
-  the pointer went straight to the next stroke — so it just sat on the canvas
+  drawing tool is active — the selection box could not be dragged in tool mode
   and covered the next mark. Switching back to the pointer still selects items
   created in select mode.
 - The arrange path's common height is the median of the source heights instead

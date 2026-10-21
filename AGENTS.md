@@ -38,7 +38,7 @@
 - 表层文档只保留当前状况、未完成事项与规划：`docs/planning/current-handoff.md` 只写当前批次状态与当前基线，`docs/planning/todo.md` 只写未完成、未验证与待决策事项。
 - 历史增量一律归 `docs/planning/archive/`：已完成批次、已通过的人工验收和被替代的计划搬入归档（按日期归入已有日志，并同步更新 `docs/planning/archive/README.md` 的索引），同时从 `current-handoff.md` 与 `todo.md` 中删除，不在表层留下“已通过”的痕迹。
 - 代码入口或契约改变时同步更新模块文档。不要把“计划实现”写成“已经验收”。
-- 版本号**滞后**：日常改动不改动五处版本字段，也不新建版本小节；改动一律写入 `CHANGELOG.md` 顶部的 `## Unreleased` 暂存段，绝不写回带日期的版本小节。切版本与打标签由用户单独决定。条目按改动分量写（大改多写、小改一两句），不套固定模板，完整口径见 `docs/guides/release-policy.md` 的「CHANGELOG 写法」。
+- 版本号**滞后**：日常改动不改动五处版本字段，也不新建版本小节；改动一律写入 `CHANGELOG.md` 顶部的 `## Unreleased` 暂存段，绝不写回带日期的版本小节。切版本与打标签由用户单独决定。条目按改动分量写（大改多写、小改一两句），不套固定模板；切版本把 `Unreleased` 落成带日期小节时，按发行政策对该小节做小结与压缩（仅针对冗余内容，不为压缩而压缩），完整口径见 `docs/guides/release-policy.md` 的「CHANGELOG 写法」。
 - 默认做与改动匹配的类型、格式和静态检查；完整编译、GUI 流程与大文件测试由用户明确安排。`src-tauri/tests/` 下的压力测试（取消、崩溃、大文件端到端）只在发布前由用户显式发起，日常开发与任何收尾阶段都不运行，详见 `docs/guides/validation.md` 的「压力测试：只在发布前运行」。
 
 ## Git 管理
