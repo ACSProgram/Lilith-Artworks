@@ -1,12 +1,17 @@
-//! 门控守护：`tests/stress_*.rs` 必须都带 `#![cfg(feature = "headless")]`。
+//! 门控守护：`tests/` 顶层会启动无头子进程的测试必须带 `#![cfg(feature = "headless")]`。
 //!
-//! Cargo 会自动发现 `tests/` 下的**每一个** `.rs` 文件并运行，因此一个压力测试目标放在
-//! 这里就等于「默认参与裸 `cargo test`」。`#![cfg(feature = "headless")]` 是唯一的门控：
-//! 不带该 feature 时目标被编译为空，既不构建无头二进制、也不启动任何进程。
+//! Cargo 会自动发现 `tests/` 下的**每一个** `.rs` 文件并运行，因此一个会启动子进程的
+//! 测试目标放在这里就等于「默认参与裸 `cargo test`」。`#![cfg(feature = "headless")]`
+//! 是唯一的门控：不带该 feature 时目标被编译为空，既不构建无头二进制、也不启动任何进程。
 //!
 //! 这一行若漏写，裸 `cargo test` 就会去启动应用——`--headless` 被忽略，debug 构建加载
 //! devUrl，在 CI 或本地弹出一个「找不到网页」的 GUI 窗口并挂住。Cargo 不会替我们检查
 //! 这件事（文件放在 `tests/` 就等于默认参与），所以用这个守护测试把它钉死。
+//!
+//! 扫描范围是 `tests/` 顶层全部 `.rs`（守护自身除外），而不是只认 `stress_` 前缀：不带
+//! 前缀、但会用 `stress_support` 或无头二进制的测试同样会拉起子进程。反过来，**不带门控的
+//! 文件不得出现启动子进程的标记**——如果把门控强加给纯逻辑集成测试，它们会在裸
+//! `cargo test` 下被编译为空，反而永远不运行。
 //!
 //! 本文件**自身**不带 `headless` 门控：它必须在裸 `cargo test` 下运行，这正是它要守护的
 //! 那个场景。它只读 `tests/` 目录与文件文本，不启动任何进程。
@@ -15,15 +20,28 @@
 
 use std::{fs, path::PathBuf};
 
-/// 压力测试目标必须逐字包含的门控行。
+/// 会启动子进程的测试目标必须逐字包含的门控行。
 const REQUIRED_GATE: &str = "#![cfg(feature = \"headless\")]";
+
+/// 会启动子进程的标记：出现任一条就说明这个目标需要门控。
+const SPAWN_MARKERS: [&str; 3] = ["CARGO_BIN_EXE_", "mod stress_support;", "Command::new("];
+
+/// 目标是否写了门控行（按整行比对，注释里的提及不算）。
+fn has_gate(source: &str) -> bool {
+    source.lines().any(|line| line.trim() == REQUIRED_GATE)
+}
+
+/// 目标是否会拉起子进程：被测二进制、`stress_support` 的进程封装或裸 `Command`。
+fn spawns_process(source: &str) -> bool {
+    SPAWN_MARKERS.iter().any(|marker| source.contains(marker))
+}
 
 fn tests_directory() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-/// 收集 `tests/` 顶层所有 `stress_*.rs` 目标（不含子目录，也不含本文件）。
-fn stress_targets() -> Vec<(String, PathBuf)> {
+/// 收集 `tests/` 顶层所有 `.rs` 目标（不含子目录，也不含本文件）。
+fn test_targets() -> Vec<(String, PathBuf)> {
     let mut targets = Vec::new();
     let entries = fs::read_dir(tests_directory()).expect("无法读取 tests 目录");
     for entry in entries.flatten() {
@@ -32,7 +50,7 @@ fn stress_targets() -> Vec<(String, PathBuf)> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with("stress_") && name.ends_with(".rs") {
+        if name.ends_with(".rs") && name != "gate_guard.rs" {
             targets.push((name, path));
         }
     }
@@ -40,13 +58,13 @@ fn stress_targets() -> Vec<(String, PathBuf)> {
     targets
 }
 
-/// 每个 `stress_*.rs` 都必须带门控行；漏写时给出可行动的失败信息。
+/// 会启动子进程的目标必须带门控行；纯逻辑集成测试不受此限制。
 #[test]
-fn every_stress_target_is_gated_behind_the_headless_feature() {
-    let targets = stress_targets();
+fn every_process_spawning_test_target_is_gated_behind_the_headless_feature() {
+    let targets = test_targets();
     assert!(
         !targets.is_empty(),
-        "未在 {} 找到任何 stress_*.rs 目标——守护测试自身可能失效",
+        "未在 {} 找到任何测试目标——守护测试自身可能失效",
         tests_directory().display()
     );
 
@@ -54,20 +72,22 @@ fn every_stress_target_is_gated_behind_the_headless_feature() {
     for (name, path) in &targets {
         let source = fs::read_to_string(path)
             .unwrap_or_else(|error| panic!("无法读取 {}：{error}", path.display()));
-        if !source.lines().any(|line| line.trim() == REQUIRED_GATE) {
+        let gated = has_gate(&source);
+        let spawns = spawns_process(&source);
+        if spawns && !gated {
             missing.push(name.clone());
         }
     }
 
     assert!(
         missing.is_empty(),
-        "以下压力测试目标缺少门控行 `{REQUIRED_GATE}`：{missing:?}\n\
+        "以下会启动子进程的测试目标缺少门控行 `{REQUIRED_GATE}`：{missing:?}\n\
          漏写会让裸 `cargo test` 去启动 GUI（`--headless` 被忽略，弹出「找不到网页」窗口）。\
          在文件开头补上这一行即可。"
     );
 }
 
-/// 压力测试目标不得自建临时空间或自行选择输出文件。
+/// 测试目标不得自建临时空间或自行选择输出文件。
 ///
 /// 全部临时空间与产物必须落在**本次构建的 target 目录**下：工作区经
 /// `stress_support::Workspace`（`<target>/stress/workspaces/`），报告与账本经
@@ -77,17 +97,17 @@ fn every_stress_target_is_gated_behind_the_headless_feature() {
 ///
 /// 允许的例外是测试夹具自己的确定性样本（`tests/fixtures/`），在模块顶部的注释里说明。
 #[test]
-fn stress_targets_do_not_create_their_own_temp_space() {
+fn test_targets_do_not_create_their_own_temp_space() {
     const FORBIDDEN: [&str; 4] = [
         "env::temp_dir(",
         "tempfile::tempdir(",
         "tempfile::tempdir_in(",
         "tempdir_in(",
     ];
-    let targets = stress_targets();
+    let targets = test_targets();
     assert!(
         !targets.is_empty(),
-        "未在 {} 找到任何 stress_*.rs 目标——本守护测试自身可能失效",
+        "未在 {} 找到任何测试目标——本守护测试自身可能失效",
         tests_directory().display()
     );
 
@@ -104,7 +124,7 @@ fn stress_targets_do_not_create_their_own_temp_space() {
 
     assert!(
         offenders.is_empty(),
-        "以下压力测试目标自行创建了临时空间：{offenders:?}\n\
+        "以下测试目标自行创建了临时空间：{offenders:?}\n\
          请改用 `stress_support::Workspace`（落在本次构建的 <target>/stress/ 下），\
          不要使用系统临时目录或自建临时目录。"
     );
@@ -112,12 +132,20 @@ fn stress_targets_do_not_create_their_own_temp_space() {
 
 /// 反向自检：守护测试必须能识别一个**确实缺少**门控的样本，否则它可能永远通过。
 ///
-/// 直接对一个临时构造的文本做判定，不写盘、不影响任何目标文件。
+/// 直接对一个临时构造的文本做判定，不写盘、不影响任何目标文件；判定复用守护测试自己的
+/// [`has_gate`] 与 [`spawns_process`]，因此自检覆盖的是真实判定路径，不是另抄一份。
 #[test]
 fn the_gate_check_would_actually_catch_a_missing_gate() {
     let without_gate = "//! 一个忘记写门控的目标\nmod stress_support;\n\n#[test]\nfn x() {}\n";
     let with_gate = format!("//! 注释\n{REQUIRED_GATE}\n\n#[test]\nfn x() {{}}\n");
-    let has_gate = |source: &str| source.lines().any(|line| line.trim() == REQUIRED_GATE);
-    assert!(!has_gate(without_gate), "缺少门控的样本必须被判为不合规");
+    let pure_logic = "//! 不启动进程的纯逻辑测试\n#[test]\nfn x() {}\n";
+    assert!(
+        spawns_process(without_gate) && !has_gate(without_gate),
+        "缺少门控且会启动子进程的样本必须被判为不合规"
+    );
     assert!(has_gate(&with_gate), "带门控的样本必须被判为合规");
+    assert!(
+        !spawns_process(pure_logic),
+        "纯逻辑集成测试不应被误判为必须门控"
+    );
 }

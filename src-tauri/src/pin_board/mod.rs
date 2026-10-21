@@ -591,3 +591,80 @@ pub(crate) fn arrange_pin_board_images(
         .map(|(item_id, points)| PinBoardArrangeResult { item_id, points })
         .collect())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(id: i64, width: f64, height: f64) -> PinBoardArrangeInput {
+        PinBoardArrangeInput {
+            item_id: id,
+            width,
+            height,
+            center_x: 0.0,
+            center_y: 0.0,
+        }
+    }
+
+    #[test]
+    fn arrange_command_rejects_fewer_than_two_items() {
+        for items in [Vec::new(), vec![item(1, 100.0, 100.0)]] {
+            let error = arrange_pin_board_images(items, arrange::DEFAULT_GAP_RATIO).unwrap_err();
+            assert_eq!(error, "至少需要两张图片才能阵列排序");
+        }
+    }
+
+    #[test]
+    fn arrange_command_rejects_gap_outside_the_shared_range() {
+        let items = || vec![item(1, 100.0, 100.0), item(2, 100.0, 100.0)];
+        for gap in [
+            -0.01,
+            arrange::MAX_GAP_RATIO + 0.01,
+            f64::NAN,
+            f64::INFINITY,
+        ] {
+            let error = arrange_pin_board_images(items(), gap).unwrap_err();
+            assert_eq!(error, "阵列间距超出允许范围", "gap={gap}");
+        }
+        // 边界值本身合法：设置项与命令共用同一个上限。
+        for gap in [0.0, arrange::MAX_GAP_RATIO] {
+            let arranged = arrange_pin_board_images(items(), gap).expect("边界间距应被接受");
+            assert_eq!(arranged.len(), 2);
+        }
+    }
+
+    #[test]
+    fn arrange_command_rejects_when_degenerate_items_leave_fewer_than_two() {
+        let items = vec![
+            item(1, 100.0, 100.0),
+            item(2, 0.0, 50.0),
+            item(3, f64::NAN, 50.0),
+        ];
+        let error = arrange_pin_board_images(items, arrange::DEFAULT_GAP_RATIO).unwrap_err();
+        assert_eq!(error, "可参与阵列排序的图片不足两张");
+    }
+
+    #[test]
+    fn arrange_command_returns_points_for_every_usable_item() {
+        let items = vec![
+            item(11, 200.0, 100.0),
+            item(12, 100.0, 100.0),
+            item(13, 50.0, 80.0),
+        ];
+        let arranged = arrange_pin_board_images(items, arrange::DEFAULT_GAP_RATIO)
+            .expect("三张合法图片应能阵列排序");
+        let ids = arranged
+            .iter()
+            .map(|arranged| arranged.item_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec![11, 12, 13]);
+        for arranged in &arranged {
+            // 四角点按「左上 → 右上 → 右下 → 左下」给出；画布 y 轴向上为正，所以下方
+            // 的角 y 更小。两条边都必须非零，否则这组点画不出图片。
+            let [left_top, right_top, right_bottom, left_bottom] = arranged.points;
+            assert!(right_top[0] > left_top[0], "右上角应在左上角右侧");
+            assert!(right_bottom[1] < right_top[1], "右下角应在右上角下方");
+            assert!(left_bottom[1] < left_top[1], "左下角应在左上角下方");
+        }
+    }
+}

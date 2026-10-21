@@ -20,7 +20,7 @@ mod stress_support;
 use std::fs;
 use std::path::PathBuf;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use stress_support::*;
@@ -90,23 +90,16 @@ fn a_killed_writer_does_not_leave_the_repository_locked() {
 /// 高频连续命令：快速连续提交后仓库最终一致。
 ///
 /// 每次提交是一个独立的写进程，因此这条用例同时也是「锁在每次结束后都被正确释放、
-/// 下一次能重新取得」的连续验证。末尾带一个效率护栏：20 次完整提交（每次一个进程）
-/// 不应慢到不可接受。
+/// 下一次能重新取得」的连续验证。
 #[test]
 fn rapid_sequential_commands_leave_the_repository_consistent() {
     let fixture = ArtworkFixture::new();
-    let started = Instant::now();
     for round in 0..20_u64 {
         fixture.commit(32 * 1024, round + 1, &format!("rapid {round}"));
     }
-    let elapsed = started.elapsed();
 
     assert_eq!(fixture.healthy(), 20);
     fixture.assert_repository_clean();
-    assert!(
-        elapsed < Duration::from_secs(180),
-        "20 次连续提交耗时过长：{elapsed:?}"
-    );
 }
 
 /// 读命令返回的树值（`data`），用于比较写进程持锁期间读到的状态是否与之前一致。

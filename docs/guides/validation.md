@@ -42,29 +42,32 @@
 ## 压力测试：便宜的分组进 CI，昂贵的仍只在发布前运行
 
 `src-tauri/tests/` 下的十二组压力测试（`stress_cancel` 取消边界、`stress_crash` 跨进程强杀、
-`stress_large` 大文件端到端与大文件中断（含 C9 并行管道中间强杀、C10 的 4 MiB 管道切换边界）、
-`stress_scale` 规模与灾备与参数边界、`stress_cleanup` 崩溃孤儿回收闭环、`stress_pin_board`
-画板 DDS 完整性、笔迹 BLOB 边界与批量读写、`stress_authenticity` 认证发布内存与回读、
-`stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏、画板 DDS 损坏与损坏后
-内容变化再提交 R7）、`stress_format` ChunkFile 格式矩阵——合成 `.clip` 容器感知分块（tile 结构 /
-无 tile / 截断回退 CDC）与 v1/v2 混存仓库的提交、恢复、检查点与跨格式物化，断言用磁盘事实
-（ChunkFile 公共头的版本 / chunker / adapter 字节，delta 先过 zstd 解压）逐提交核对、
-`stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、真并发结构写 +
-全库校验、写哨兵持有期间全库校验的明确拒绝）、`stress_input` 输入域极值与路径边界、
-`stress_bench` 核心算法性能基准（含笔迹批量读写））都以**真实可执行文件**驱动，只通过命令行、
-stdin 与磁盘事实断言。
+`stress_large` 大文件端到端与大文件中断（含 C9 并行管道中间强杀与残留临时文件的扫描清理闭环、
+C10 的 4 MiB 管道切换边界）、`stress_scale` 规模与灾备与参数边界、`stress_cleanup` 崩溃孤儿
+回收闭环、`stress_pin_board` 画板 DDS 完整性、笔迹 BLOB 边界与批量读写、`stress_authenticity`
+认证发布内存与回读、`stress_damage` 快照/增量/主库的损坏检测与恢复（含随机化单点损坏、画板
+DDS 损坏与损坏后内容变化再提交 R7）、`stress_format` ChunkFile 格式矩阵——合成 `.clip`
+容器感知分块（tile 结构 / 无 tile / 截断回退 CDC）与 v1/v2 混存仓库的提交、恢复、检查点与
+跨格式物化，断言用磁盘事实（ChunkFile 公共头的版本 / chunker / adapter 字节，delta 先过 zstd
+解压）逐提交核对、`stress_concurrency` 多进程哨兵锁、高频命令与多操作交错（写 + 读、读 + 读、
+真并发结构写 + 全库校验、写哨兵持有期间全库校验的明确拒绝）、`stress_input` 输入域极值与路径
+边界、`stress_bench` 核心算法性能基准（含笔迹批量读写））都以**真实可执行文件**驱动，只通过
+命令行、stdin 与磁盘事实断言。
 
-- **由 `headless` feature 门控**：所有 `stress_*.rs` 目标都以 `#![cfg(feature = "headless")]`
-  开头，不带该 feature 时它们编译为空目标。因此 `cargo test`（包括裸跑）既不会构建无头二进制、
-  也不会启动任何被测进程。原因：`cargo test` 会自动发现并运行 `tests/` 下的**每一个** `.rs`
-  文件，文件放在那里就等于默认参与裸 `cargo test`；而在没有该 feature 的构建上 `--headless`
-  会被忽略、应用直接以 GUI 启动（debug 档加载 `devUrl`，没有 `npm run dev` 时就是一个
-  「找不到网页」的窗口）。被测二进制在启动子进程前会做一次 `--headless help` 探针，指向未启用
-  该 feature 的构建会立即报错终止，而不是把 GUI 拉起来。
-  **新增 `tests/stress_*.rs` 时必须同样在文件开头写 `#![cfg(feature = "headless")]`**：
-  `tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言这一行存在，缺了会直接失败（该守护测试
-  自身不带门控，因此在裸 `cargo test` 下就运行），把「漏写门控 → 裸 `cargo test` 拉起 GUI」
-  这类事故挡在提交前。
+- **由 `headless` feature 门控**：所有会启动子进程的测试目标（当前就是全部 `stress_*.rs`）
+  都以 `#![cfg(feature = "headless")]` 开头，不带该 feature 时它们编译为空目标。因此
+  `cargo test`（包括裸跑）既不会构建无头二进制、也不会启动任何被测进程。原因：`cargo test`
+  会自动发现并运行 `tests/` 下的**每一个** `.rs` 文件，文件放在那里就等于默认参与裸
+  `cargo test`；而在没有该 feature 的构建上 `--headless` 会被忽略、应用直接以 GUI 启动
+  （debug 档加载 `devUrl`，没有 `npm run dev` 时就是一个「找不到网页」的窗口）。被测二进制
+  在启动子进程前会做一次 `--headless help` 探针，指向未启用该 feature 的构建会立即报错终止，
+  而不是把 GUI 拉起来。
+  **新增会启动子进程的集成测试时必须同样在文件开头写 `#![cfg(feature = "headless")]`**：
+  `tests/gate_guard.rs` 会扫描 `tests/` 顶层全部 `.rs`（守护自身除外），对出现
+  `stress_support`、`CARGO_BIN_EXE_` 或 `Command::new` 的目标断言这一行存在；不带门控的纯逻辑
+  集成测试不受此限制（否则它们会在裸 `cargo test` 下被编译为空、永远不运行）。缺了会直接失败
+  （该守护测试自身不带门控，因此在裸 `cargo test` 下就运行），把「漏写门控 → 裸 `cargo test`
+  拉起 GUI」这类事故挡在提交前。
 - **交互检查点只出现在边界，热循环只做静默观察**：取消观察分两层（`CancelToken::is_cancelled`
   与 `CancelToken::observed`）。显式边界（提交、恢复、精简、检查点、灾备的阶段边界）仍发一枚
   交互检查点，写一行 marker、并在 `--cancel-on-stdin` 下阻塞等判定；分块主循环（`ChunkTask`）
@@ -240,7 +243,8 @@ LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authent
 - **新增测试的纪律**：临时空间必须经 `stress_support::Workspace`，报告与账本必须经
   `stress_support::record*` / `append_ledger`；不要在 `tests/` 下自建临时目录、不要直接用
   `%TEMP%`（系统会回收它，实测出现过工作区中途消失导致场景失败），也不要在仓库其他位置新增
-  输出文件。`tests/gate_guard.rs` 会扫描全部 `stress_*.rs` 并断言它们没有使用系统临时目录。
+  输出文件。`tests/gate_guard.rs` 会扫描 `tests/` 顶层全部 `.rs` 并断言它们没有使用系统临时
+  目录。
 - **短生命周期的单元测试**：`src-tauri/src/**` 里的 `tempfile::tempdir()` 落在系统临时目录，
   进程正常结束时自动回收，是可接受用法；**跨进程、大文件或长时间的场景必须放 target 下**，
   不要把它们挪到 `%TEMP%`。

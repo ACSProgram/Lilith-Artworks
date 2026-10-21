@@ -460,10 +460,20 @@ fn h3_board_dds_scale_and_cancellation() {
     assert_eq!(report.data_u64("corrupt"), 0, "{}", report.describe());
     assert_eq!(report.data_u64("orphans"), 0, "{}", report.describe());
 
-    // 内存有界：debug 档基线约十几 MiB，数百张小图的检查不应出现与图片数成比例的放大。
-    if let Some(peak) = report.result["peakWorkingSetBytes"].as_u64() {
+    // 内存有界：debug 档实测约 12.5 MiB（2026-10-21 复跑 12.48–12.50 MiB），这里留约
+    // 五倍余量。300 张 32×32 的载荷本身不足 1 MiB，因此这个上界能拦住「按图片数整批留在
+    // 内存」的放大，而不是只拦灾难性失控。
+    // 峰值内存只有 Windows 读得到（`platform::process`）：在那里缺读数就意味着这条上界
+    // 从未生效，必须失败；其它平台没有这个字段，只能跳过。
+    let peak = report.result["peakWorkingSetBytes"].as_u64();
+    assert!(
+        peak.is_some() || !cfg!(windows),
+        "Windows 上缺少峰值内存读数，内存上界无法校验：\n{}",
+        report.describe()
+    );
+    if let Some(peak) = peak {
         assert!(
-            peak < 512 * MIB,
+            peak < 64 * MIB,
             "画板 DDS 检查峰值内存异常：{peak} 字节\n{}",
             report.describe()
         );

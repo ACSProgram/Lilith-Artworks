@@ -69,6 +69,10 @@ const SCENARIO_TIMEOUT: Duration = Duration::from_secs(3600);
 const LEDGER_TOLERANCE_RATIO: f64 = 0.10;
 const LEDGER_TOLERANCE_BYTES: u64 = MIB;
 /// snapshot 允许高出逻辑大小的比例（每块记录开销，v2 为 44 字节）加固定冗余。
+///
+/// 这是**灾难性上界**，不是流式证明：按 16 KiB 平均块计算，v2 的实际开销约 0.27%，
+/// 而这里允许到 2% + 1 MiB。收紧需要先有一轮发布档实测，暂留宽界只拦「快照≈两份逻辑
+/// 大小」这类数量级错误。
 const SNAPSHOT_OVERHEAD_RATIO: f64 = 0.02;
 const SNAPSHOT_OVERHEAD_BYTES: u64 = MIB;
 /// 小改动场景里 delta 总量相对改动量的允许倍数（内容定义分块在改动边界附近重新同步的开销）。
@@ -637,6 +641,10 @@ fn c2_large_file_compaction_keeps_restorable_history() {
 /// 允许的增量是「逻辑大小的 1/8 + 24 MiB」（固定项覆盖 debug 档运行时与 zstd 工作区）。
 /// 整文件入内存的实现会多出整整一个逻辑大小，因此在任何档位都会超出这个界。
 ///
+/// 这是**灾难性上界**，不是「流式处理」的证明：并行管道自身预算只有 16 MiB
+/// （`snapshot.rs`），而 4 GiB 档在这里允许约 536 MiB。收紧到与管道预算相称的量级需要
+/// 先有发布档实测；在那之前不要把这组数字当作「峰值内存与逻辑大小无关」的证据。
+///
 /// 峰值只有指向发布档才有参考价值：`LILITH_STRESS_BIN=target/release/lilith-artworks.exe`。
 #[test]
 fn c3_large_file_memory_does_not_follow_logical_size() {
@@ -1155,6 +1163,34 @@ fn artwork_temp_has_scratch(repository: &std::path::Path, min_bytes: u64) -> boo
     })
 }
 
+/// 作品 `temp/` 下全部 `.tmp*` 暂存文件的仓库相对路径。
+///
+/// 名字判定与领域一致（`history/contracts.rs` 的 `is_scratch_name`：`.tmp` 前缀且后缀非空），
+/// 否则这里的取集会与未引用扫描的报告范围对不上，闭环断言就失去意义。
+fn artwork_temp_scratch_paths(repository: &std::path::Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let Ok(artworks) = fs::read_dir(repository.join("artworks")) else {
+        return paths;
+    };
+    for artwork in artworks.flatten() {
+        let artwork_name = artwork.file_name().to_string_lossy().into_owned();
+        let Ok(files) = fs::read_dir(artwork.path().join("temp")) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            let is_scratch = name
+                .strip_prefix(".tmp")
+                .is_some_and(|suffix| !suffix.is_empty());
+            if is_scratch && file.file_type().map(|kind| kind.is_file()).unwrap_or(false) {
+                paths.push(format!("artworks/{artwork_name}/temp/{name}"));
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
 /// C9 大文件 × 并行快照管道中间强杀。
 ///
 /// C7 的强杀落在第 1 个检查点——闸门让进程停在「载入分支后」，快照还没开始写；而
@@ -1173,7 +1209,10 @@ fn artwork_temp_has_scratch(repository: &std::path::Path, min_bytes: u64) -> boo
 /// 1. 快照临时文件残留——这是「杀在管道里」的证据；产品契约承认这类崩溃残留：作品
 ///    `temp/` 下的 `.tmp*` 由未引用扫描报为候选（`history/contracts.rs` 的扫描目录），
 ///    经用户确认后清理，且 30 分钟宽限期会跳过刚写入的文件（`cleanup.rs` 的
-///    `SCAN_GRACE_MS`），因此**不断言它被立即清掉**；
+///    `SCAN_GRACE_MS`），因此**不断言它被立即清掉**；本用例随后把残留回拨到宽限期之外，
+///    走完「扫描发现 → 确认清理 → 再扫描」的跨进程闭环（仓库根 `temp/` 的启动清扫只扫
+///    根目录这一层——预览会话目录与根 `temp/` 的 `.tmp*`——不深入作品 `temp/`，因此
+///    管道残留只能靠未引用扫描回收）；
 /// 2. `snapshots/` 与 `deltas/` 无任何半成品：发布是对临时文件的原子改名，不会出现
 ///    半个快照或半个增量；
 /// 3. 仓库可重开、`verify` + `scrub` 通过、历史不推进；
@@ -1181,6 +1220,8 @@ fn artwork_temp_has_scratch(repository: &std::path::Path, min_bytes: u64) -> boo
 #[test]
 fn c9_large_file_parallel_pipeline_mid_kill() {
     const KILL_TRIGGER_BYTES: u64 = MIB;
+    // 把残留回拨到扫描宽限期（30 分钟）之外，留一倍余量。
+    const SCRATCH_BACKDATE_SECONDS: u64 = 2 * 60 * 60;
 
     let Some(mut scenario) = Scenario::new("C9 large file pipeline kill", ChangeProfile::Small)
     else {
@@ -1241,6 +1282,67 @@ fn c9_large_file_parallel_pipeline_mid_kill() {
         tier.name(),
         &killed,
         json!({ "logicalBytes": scenario.logical, "regionBytes": scenario.region_bytes() }),
+    );
+
+    // ③⁺ 残留临时文件的清理闭环：扫描发现 → 确认清理 → 再扫描为空。
+    // 扫描有 30 分钟宽限期，先把残留回拨到窗口之外。
+    let scratch = artwork_temp_scratch_paths(&scenario.repository);
+    assert!(
+        !scratch.is_empty(),
+        "强杀后必须能定位到残留的暂存文件，否则清理闭环失去前提"
+    );
+    for relative in &scratch {
+        backdate(
+            &scenario.repository.join(relative),
+            SCRATCH_BACKDATE_SECONDS,
+        );
+    }
+    let scan = scenario.command("scan-unreferenced").finish();
+    scan.expect_ok();
+    let candidates = scan
+        .data("candidates")
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|candidate| candidate["path"].as_str().unwrap_or_default().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        scan.data_u64("count"),
+        scratch.len() as u64,
+        "扫描应只报告强杀残留的暂存文件：{candidates:?}\n{}",
+        scan.describe()
+    );
+    for relative in &scratch {
+        assert!(
+            candidates.contains(relative),
+            "残留 {relative} 未被扫描报告：{candidates:?}"
+        );
+    }
+    let cleanup = scenario
+        .command("cleanup-unreferenced")
+        .arg("ids", candidates.join(","))
+        .finish();
+    cleanup.expect_ok();
+    assert_eq!(
+        cleanup.data_u64("cleanedCount"),
+        scratch.len() as u64,
+        "{}",
+        cleanup.describe()
+    );
+    for relative in &scratch {
+        assert!(
+            !scenario.repository.join(relative).exists(),
+            "残留 {relative} 应被确认清理删除"
+        );
+    }
+    let rescan = scenario.command("scan-unreferenced").finish();
+    rescan.expect_ok();
+    assert_eq!(
+        rescan.data_u64("count"),
+        0,
+        "清理后不应再有候选：\n{}",
+        rescan.describe()
     );
 
     // ④ 孤儿临时文件不阻塞后续提交；head 恢复与工作文件逐位一致。

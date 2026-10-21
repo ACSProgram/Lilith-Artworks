@@ -54,6 +54,22 @@ entries for the reader; they are not a template every entry has to fill.
   ships in the installer and the production audit stayed green throughout; 6.4.4
   is the last 6.x patch and drops `launch-editor` entirely, and both `vitest`
   and `@vitejs/plugin-react` accept vite 6.x, so nothing else moved.
+- The remaining test-audit items land in a second batch. H3's pin-board DDS
+  memory ceiling drops from 512 MiB to 64 MiB (12.5 MiB measured on a debug
+  build) and now fails on Windows when the peak reading is absent instead of
+  skipping the assertion, the 180-second guard around 20 rapid commits is
+  removed because it could not detect a regression, and the native arrange
+  command gains unit coverage for its three rejection paths and the corner
+  order it returns. The gate guard now scans every top-level `tests/*.rs` file
+  and keys its requirement to whether a target spawns a process
+  (`stress_support`, `CARGO_BIN_EXE_`, `Command::new`) rather than to the
+  `stress_` prefix, so a future process-spawning test cannot escape gating while
+  pure-logic integration tests stay runnable without the feature; its
+  self-check now calls the same predicates instead of a local copy. C9 gains
+  the scratch-file closed loop: backdate the residue past the grace window,
+  scan, confirm cleanup, and rescan empty. C3's memory and snapshot allowances
+  are now labelled catastrophic bounds rather than proof of streaming;
+  tightening them waits for a release-profile measurement.
 
 ### Added
 
