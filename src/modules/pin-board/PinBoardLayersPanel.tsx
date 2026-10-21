@@ -14,20 +14,24 @@ const LAYER_ROWS: { layer: number; label: string; swatch: string }[] = [
 ];
 
 /**
- * 画布左上角的图层浮层：收起后只剩一个按钮，展开是四个可见性开关。
+ * 画布左上角的图层浮层：收起后只剩一个按钮，展开是四个可见性开关与每层的条目数。
  *
  * 与标注工具条同属画布内的浮动控件，不占主工具栏：主工具栏已有二十来个按钮，
  * 再排四个会被横向滚动藏掉；全屏时工具栏整体隐藏，浮层仍然可用。
  *
  * 显隐是纯视图状态：不改模型、不标记 dirty，因此这里只回调 `onToggle`，
- * 由渲染器决定重绘与选中清理。
+ * 由渲染器决定重绘与选中清理。条目数由调用方按 layer 下标给出；数字带
+ * `aria-hidden`，否则四个开关的可访问名会变成「顶层 12」。
  */
 export function PinBoardLayersPanel({
   visibility,
+  counts,
   onToggle,
   disabled,
 }: {
   visibility: PinBoardLayerVisibility;
+  /** 每层未删除条目数（下标即 layer）；缺省或越界时不显示数字。 */
+  counts?: readonly number[];
   onToggle: (layer: number, visible: boolean) => void;
   disabled: boolean;
 }) {
@@ -55,6 +59,8 @@ export function PinBoardLayersPanel({
           </header>
           {LAYER_ROWS.map((row, index) => {
             const visible = isLayerVisible(visibility, row.layer);
+            // 标注层不显示数字：那一层只有笔迹，数字既不是用户关心的、也容易和层名混读。
+            const count = row.layer === STROKE_LAYER ? null : counts?.[row.layer];
             return (
               <Fragment key={row.layer}>
                 {index === 1 && <span className="pin-board-layers-divider" aria-hidden="true" />}
@@ -62,6 +68,7 @@ export function PinBoardLayersPanel({
                   type="button"
                   className={`pin-board-layer-row${visible ? "" : " hidden"}`}
                   aria-pressed={visible}
+                  aria-label={row.label}
                   disabled={disabled}
                   onClick={() => onToggle(row.layer, !visible)}
                   title={`${visible ? "隐藏" : "显示"}${row.label}`}
@@ -69,6 +76,9 @@ export function PinBoardLayersPanel({
                   {visible ? <Eye size={15} aria-hidden="true" /> : <EyeOff size={15} aria-hidden="true" />}
                   <span className={`pin-board-layer-swatch ${row.swatch}`} />
                   <span className="pin-board-layer-name">{row.label}</span>
+                  {count === undefined || count === null ? null : (
+                    <span className="pin-board-layer-count" aria-hidden="true">{count}</span>
+                  )}
                 </button>
               </Fragment>
             );

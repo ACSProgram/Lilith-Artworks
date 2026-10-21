@@ -2,7 +2,7 @@ use crate::{
     app::command_runtime::{CommandContext, CommandError},
     cleanup,
     pin_board::repository::{
-        self, EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView,
+        self, EditablePinBoardItem, PinBoardClipboardItem, PinBoardSummary, PinBoardView,
         SavePinBoardResult,
     },
     storage,
@@ -192,25 +192,23 @@ pub(crate) fn finalize_board(
     })
 }
 
-pub(crate) fn paste_images(
+pub(crate) fn paste_items(
     context: &CommandContext,
     board_id: i64,
-    images: &[PinBoardClipboardImage],
+    items: &[PinBoardClipboardItem],
     center_x: f64,
     center_y: f64,
-    gap_ratio: f64,
     expected_revision: &str,
 ) -> Result<(PinBoardView, Vec<i64>), CommandError> {
     context.run_repository_write(|session| {
         let mut connection = storage::open(session.root()).map_err(CommandError::from)?;
-        repository::paste_images(
+        repository::paste_items(
             &mut connection,
             session.root(),
             board_id,
-            images,
+            items,
             center_x,
             center_y,
-            gap_ratio,
             expected_revision,
         )
         .map_err(CommandError::from)
@@ -387,27 +385,6 @@ pub(crate) fn export_images(
             item_ids,
             output_directory,
             on_progress,
-        )
-        .map_err(CommandError::from)
-    })
-}
-
-pub(crate) fn write_item_png(
-    context: &CommandContext,
-    board_id: i64,
-    item_id: i64,
-    output_directory: &str,
-    bytes: &[u8],
-) -> Result<String, CommandError> {
-    context.run_repository_write(|session| {
-        let connection = storage::open(session.root()).map_err(CommandError::from)?;
-        repository::write_text_png(
-            &connection,
-            session.root(),
-            board_id,
-            item_id,
-            output_directory,
-            bytes,
         )
         .map_err(CommandError::from)
     })

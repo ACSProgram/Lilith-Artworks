@@ -5,6 +5,7 @@ import {
   ClipboardPaste,
   Copy,
   Download,
+  Eraser,
   Expand,
   FlipHorizontal2,
   FlipVertical2,
@@ -163,8 +164,8 @@ export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
 const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
 
 /**
- * 标注工具条：选择与五种绘制工具。快捷键与 `strokeDrawing.toolForShortcut` 同源，
- * 提示里的字母必须与那里一致。
+ * 标注工具条：选择、五种绘制工具与橡皮。快捷键与 `strokeDrawing.toolForShortcut`
+ * 同源，提示里的字母必须与那里一致。
  */
 const STROKE_TOOL_BUTTONS: Array<{
   tool: PinBoardTool;
@@ -174,6 +175,7 @@ const STROKE_TOOL_BUTTONS: Array<{
 }> = [
   { tool: "select", label: "选择", shortcut: "V", icon: MousePointer2 },
   { tool: "pen", label: "画笔", shortcut: "P", icon: Pencil },
+  { tool: "eraser", label: "橡皮", shortcut: "E", icon: Eraser },
   { tool: "line", label: "直线", shortcut: "L", icon: Slash },
   { tool: "arrow", label: "箭头", shortcut: "A", icon: MoveUpRight },
   { tool: "rect", label: "矩形", shortcut: "R", icon: Square },
@@ -207,12 +209,16 @@ function StrokeToolGroup({ tool, disabled, onSelect }: {
 }
 
 /**
- * 标注样式控件：取色器 + 线宽滑条与数值输入。
+ * 标注样式控件：取色器 + 大小滑条与数值输入。
  *
  * 滑条负责快速调粗细，数值框负责精确值：两者写同一份状态，滑条拖动时数值框
  * 实时跟随；数值框在失焦或回车时才收敛，输入过程中允许暂时不合法。
  *
- * 滑条走**指数映射**（`strokeWidthFromSlider`）：线宽范围 1–500，线性滑条会把
+ * 「大小」是画笔线宽与橡皮直径共用的同一个值：切换工具不记忆独立数值，橡皮的
+ * 环形光标直径就取自这里。内部标识符仍叫 `strokeWidth`——它描述的是笔迹线宽这一
+ * 物理量，改名的收益为零、噪音很大。
+ *
+ * 滑条走**指数映射**（`strokeWidthFromSlider`）：范围 1–500，线性滑条会把
  * 九成行程分给「一辈子用不到」的粗线；指数映射让 1–20 这段占到约 38% 行程，并把
  * 粗线端压平一点，右半段不会一拖就窜。
  */
@@ -237,7 +243,7 @@ function StrokeStyleControls({
     <div className="pin-board-stroke-style">
       <PinBoardColorPicker value={color} onChange={onColorChange} />
       <label className="pin-board-stroke-width">
-        <span>线宽</span>
+        <span>大小</span>
         <input
           type="range"
           className="pin-board-stroke-width-range"
@@ -245,8 +251,8 @@ function StrokeStyleControls({
           max={STROKE_WIDTH_SLIDER_STEPS}
           step={1}
           value={strokeWidthToSlider(width)}
-          aria-label="笔迹线宽滑条"
-          aria-valuetext={`线宽 ${width}`}
+          aria-label="大小滑条"
+          aria-valuetext={`大小 ${width}`}
           onChange={(event) => onWidthInput(strokeWidthFromSlider(Number(event.target.value)))}
         />
         <input
@@ -255,7 +261,7 @@ function StrokeStyleControls({
           max={MAX_STROKE_WIDTH}
           step={1}
           value={widthText}
-          aria-label="笔迹线宽"
+          aria-label="大小"
           onChange={(event) => onWidthTextChange(event.target.value)}
           onBlur={(event) => onWidthCommit(event.target.value)}
           onKeyDown={(event) => {
@@ -626,9 +632,10 @@ function PinBoardContextMenu({
 }) {
   const items: ContextMenuItem[] = request.targetImage
     ? [
-        { key: "copy-board", label: "复制画板图片", icon: <Copy size={16} />, onClick: onCopy },
-        { key: "copy-clipboard", label: "复制图片到剪贴板", icon: <ClipboardCopy size={16} />, disabled: request.selectedCount !== 1, onClick: onCopyClipboard },
-        { key: "export", label: "导出图片", icon: <Download size={16} />, onClick: onExport },
+        { key: "copy-board", label: "复制画板条目", icon: <Copy size={16} />, onClick: onCopy },
+        // 单条导出与系统剪贴板复制只认位图：选中文字或笔迹时两项一起置灰。
+        { key: "copy-clipboard", label: "复制图片到剪贴板", icon: <ClipboardCopy size={16} />, disabled: request.selectedCount !== 1 || request.exportableCount === 0, disabledTitle: "只有单个位图条目能复制到系统剪贴板", onClick: onCopyClipboard },
+        { key: "export", label: "导出图片", icon: <Download size={16} />, disabled: request.exportableCount === 0, disabledTitle: "只有位图条目能单条导出", onClick: onExport },
         { key: "sep-flip", divider: true },
         { key: "flip-h", label: "水平翻转", icon: <FlipHorizontal2 size={16} />, onClick: () => renderer.flipSelected(true) },
         { key: "flip-v", label: "垂直翻转", icon: <FlipVertical2 size={16} />, onClick: () => renderer.flipSelected(false) },
@@ -642,7 +649,7 @@ function PinBoardContextMenu({
         { key: "delete", label: "删除图片", icon: <Trash2 size={16} />, danger: true, onClick: onDelete },
       ]
     : [
-        { key: "paste", label: "粘贴画板图片", icon: <ClipboardPaste size={16} />, disabled: !request.canEditBoard || !canPaste, onClick: onPaste },
+        { key: "paste", label: "粘贴画板条目", icon: <ClipboardPaste size={16} />, disabled: !request.canEditBoard || !canPaste, onClick: onPaste },
         { key: "import", label: "导入图片", icon: <Upload size={16} />, disabled: !request.canEditBoard, onClick: onImport },
         { key: "text", label: "添加文字", icon: <Type size={16} />, disabled: !request.canEditBoard, onClick: onAddText },
         { key: "sep-view", divider: true },
@@ -693,7 +700,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     toggleLock,
     copyImages,
     copyImageToClipboard,
-    pasteImages,
+    pasteItems,
     importImages,
     importDroppedFiles,
     addText,
@@ -715,7 +722,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const [fullscreen, setFullscreen] = useState(false);
   const [textDialogOpen, setTextDialogOpen] = useState(false);
   const [textOptions, setTextOptions] = useState({ fontSize: 48, color: "#000000" });
-  /** 标注样式：工具栏的取色器与线宽输入共同决定下一笔的外观。 */
+  /** 标注样式：工具栏的取色器与「大小」输入共同决定下一笔的外观（大小同时是橡皮直径）。 */
   const [strokeStyle, setStrokeStyle] = useState({
     color: DEFAULT_STROKE_COLOR,
     width: DEFAULT_STROKE_WIDTH,
@@ -761,7 +768,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     renderer?.setStrokeStyle(strokeStyle.color, strokeStyle.width);
   }, [renderer, strokeStyle]);
 
-  /** 滑条直接写入线宽：非法值忽略，合法值取整并夹到前后端共同接受的范围。 */
+  /** 滑条直接写入「大小」（内部即线宽）：非法值忽略，合法值取整并夹到前后端共同接受的范围。 */
   const applyStrokeWidth = useCallback((width: number) => {
     if (!Number.isFinite(width)) return;
     const clamped = clampStrokeWidth(Math.round(width));
@@ -771,7 +778,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     ));
   }, []);
 
-  /** 线宽输入在失焦或回车时收敛到合法范围，输入过程中允许暂时不合法。 */
+  /** 「大小」输入在失焦或回车时收敛到合法范围，输入过程中允许暂时不合法。 */
   const commitStrokeWidth = useCallback((raw: string) => {
     if (raw.trim() === "" || !Number.isFinite(Number(raw))) {
       setStrokeWidthText(String(strokeStyle.width));
@@ -1001,12 +1008,12 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       } else if (key === "v" && clipboardCount > 0) {
         event.preventDefault();
         event.stopImmediatePropagation();
-        pasteImages();
+        pasteItems();
       }
     };
     window.addEventListener("keydown", keyDown, true);
     return () => window.removeEventListener("keydown", keyDown, true);
-  }, [active, clipboardCount, copyImages, pasteImages]);
+  }, [active, clipboardCount, copyImages, pasteItems]);
 
   useEffect(() => {
     const keyDown = (event: KeyboardEvent) => {
@@ -1211,9 +1218,9 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(true))} title="水平翻转" aria-label="水平翻转"><FlipHorizontal2 size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={() => run(() => renderer?.flipSelected(false))} title="垂直翻转" aria-label="垂直翻转"><FlipVertical2 size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.arrangeableCount < 2 || interaction.locked} onClick={() => run(() => void renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={copyImages} title="复制画板图片" aria-label="复制画板图片"><Copy size={17} /></button>
-            <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.locked} onClick={() => void copyImageToClipboard()} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
-            <button className="icon-button" disabled={!renderer || clipboardCount === 0 || interaction.locked} onClick={pasteImages} title="粘贴画板图片" aria-label="粘贴画板图片"><ClipboardPaste size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || interaction.locked} onClick={copyImages} title="复制画板条目" aria-label="复制画板条目"><Copy size={17} /></button>
+            <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.exportableCount === 0 || interaction.locked} onClick={() => void copyImageToClipboard()} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
+            <button className="icon-button" disabled={!renderer || clipboardCount === 0 || interaction.locked} onClick={pasteItems} title="粘贴画板条目" aria-label="粘贴画板条目"><ClipboardPaste size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={() => void importImages()} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.locked || transferProgress !== null} onClick={openTextDialog} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
             <button className="icon-button" disabled={!renderer || interaction.exportableCount === 0 || interaction.locked || transferProgress !== null} onClick={() => void exportImages()} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
@@ -1285,6 +1292,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           {view && !unavailable && (
             <PinBoardLayersPanel
               visibility={interaction.visibleLayers}
+              counts={interaction.layerCounts}
               onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
               disabled={!renderer}
             />
@@ -1380,7 +1388,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             canPaste={clipboardCount > 0}
             onCopy={copyImages}
             onCopyClipboard={() => void copyImageToClipboard()}
-            onPaste={pasteImages}
+            onPaste={pasteItems}
             onImport={() => void importImages()}
             onAddText={openTextDialog}
             onExport={() => void exportImages()}

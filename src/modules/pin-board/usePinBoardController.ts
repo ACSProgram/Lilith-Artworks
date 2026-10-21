@@ -15,13 +15,9 @@ import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
 import { getBoardSession, getSelectedBoardId, setSelectedBoardId } from "./session";
 import { strokeToolId, type PinBoardTool, type StrokeCommitRequest } from "./strokeDrawing";
 import { textureBudgetsForLevel } from "./texturePolicy";
-import {
-  exportTextMaxDimension,
-  measurePinBoardText,
-  rasterizePinBoardTextPng,
-} from "./textLayout";
+import { measurePinBoardText } from "./textLayout";
 import type {
-  PinBoardClipboardImage,
+  PinBoardClipboardItem,
   PinBoardModuleSettings,
   PinBoardMutationResult,
   PinBoardSummary,
@@ -42,6 +38,7 @@ const DEFAULT_INTERACTION: PinBoardInteractionState = {
   selectedCount: 0,
   arrangeableCount: 0,
   exportableCount: 0,
+  layerCounts: [0, 0, 0, 0],
   canUndo: false,
   canRedo: false,
   dirty: false,
@@ -101,7 +98,7 @@ export interface PinBoardController {
   toggleLock: () => void;
   copyImages: () => void;
   copyImageToClipboard: () => Promise<void>;
-  pasteImages: () => void;
+  pasteItems: () => void;
   importImages: () => Promise<void>;
   importDroppedFiles: (files: FileList, clientX: number, clientY: number) => Promise<void>;
   addText: (text: string, fontSize: number, color: string, placement: [number, number]) => Promise<void>;
@@ -132,7 +129,7 @@ export function usePinBoardController({
   const [interaction, setInteraction] = useState(DEFAULT_INTERACTION);
   const [renderer, setRenderer] = useState<PinBoardRenderer | null>(null);
   const rendererRef = useRef<PinBoardRenderer | null>(null);
-  const clipboardRef = useRef<PinBoardClipboardImage[]>([]);
+  const clipboardRef = useRef<PinBoardClipboardItem[]>([]);
   const transferBusyRef = useRef(false);
   /** 当前传输的 operation id：首个进度事件到达后锁定，其它操作的进度直接丢弃。 */
   const transferOperationId = useRef<string | null>(null);
@@ -470,29 +467,27 @@ export function usePinBoardController({
     setInteraction(current.interactionState);
   }, []);
 
+  /**
+   * 画板内复制。位图、文字与笔迹都能复制（载荷只记来源），因此「选中了什么就复制
+   * 什么」；没有可复制内容时直接返回，不写状态栏——灰掉的按钮点了没反应是预期。
+   */
   const copyImages = useCallback(() => {
     const current = rendererRef.current;
-    const selectedIds = current?.selectedImageIds() ?? [];
-    const images = current?.copySelection() ?? [];
-    if (images.length === 0) {
-      if (selectedIds.length > 0) setStatus("文字与笔迹条目暂不支持画板内复制。");
-      return;
-    }
-    clipboardRef.current = images;
-    setClipboardCount(images.length);
-    setStatus(`已复制 ${images.length} 张画板图片`);
+    const items = current?.copySelection() ?? [];
+    if (items.length === 0) return;
+    clipboardRef.current = items;
+    setClipboardCount(items.length);
+    setStatus(`已复制 ${items.length} 个条目`);
   }, []);
 
+  /**
+   * 复制单张位图到系统剪贴板。只有位图有这条路：文字与笔迹没有可贴到外部程序的
+   * 载荷，入口在界面上已经置灰，这里静默返回而不是弹提示。
+   */
   const copyImageToClipboard = useCallback(async () => {
     const current = rendererRef.current;
     const imageId = current?.copyImageToClipboardId() ?? null;
-    if (!current || selected === null) return;
-    if (imageId === null) {
-      if (current.selectedImageIds().length > 0) {
-        setStatus("文字与笔迹条目暂不支持复制到系统剪贴板。");
-      }
-      return;
-    }
+    if (!current || selected === null || imageId === null) return;
     try {
       const response = await pinBoardApi.readPinBoardImagePng(selected, imageId);
       const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
@@ -506,20 +501,23 @@ export function usePinBoardController({
     }
   }, [selected]);
 
-  const pasteImages = useCallback(() => {
+  /**
+   * 画板内粘贴：三类条目走同一条命令、一次事务，混合选择不会只粘进来一半。
+   * 落位由原生端按「整组保持相对位置」处理，所以这里不传阵列间距。
+   */
+  const pasteItems = useCallback(() => {
     if (clipboardRef.current.length === 0 || selected === null) return;
     void replaceAfterImageMutation((current, revision) => {
       const [centerX, centerY] = current.placementPoint;
-      return pinBoardApi.pastePinBoardImages(
+      return pinBoardApi.pastePinBoardItems(
         selected,
         clipboardRef.current,
         centerX,
         centerY,
-        settings.arrangementGapRatio,
         revision,
       );
-    }, (count) => `已粘贴 ${count} 张图片`);
-  }, [replaceAfterImageMutation, selected, settings.arrangementGapRatio]);
+    }, (count) => `已粘贴 ${count} 个条目`);
+  }, [replaceAfterImageMutation, selected]);
 
   const importImages = useCallback(async () => {
     const current = rendererRef.current;
@@ -742,7 +740,8 @@ export function usePinBoardController({
   const exportImages = useCallback(async () => {
     const current = rendererRef.current;
     if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
-    const itemIds = current.selectedImageIds();
+    // 只导出位图：文字与笔迹的单条导出已删除，统一由整画布导出覆盖。
+    const itemIds = current.exportableImageIds();
     if (itemIds.length === 0) return;
     transferBusyRef.current = true;
     transferOperationId.current = null;
@@ -750,23 +749,11 @@ export function usePinBoardController({
       const directory = await pickPinBoardExportDirectory();
       if (!directory || !await current.save()) return;
       setTransferProgress({ label: "正在导出图片", current: 0, total: itemIds.length });
-      let count = await pinBoardApi.exportPinBoardImages(
+      const count = await pinBoardApi.exportPinBoardImages(
         selected,
         itemIds,
         directory,
       );
-      // 文字条目由前端按导出倍率栅格化并编码 PNG，逐条写盘；位图由原生端解码。
-      for (const item of current.selectedTextItems()) {
-        setTransferProgress({ label: "正在导出文字", current: count, total: itemIds.length });
-        const png = await rasterizePinBoardTextPng(item, exportTextMaxDimension(item));
-        await pinBoardApi.writePinBoardItemPng(
-          selected,
-          item.itemId,
-          directory,
-          Array.from(png),
-        );
-        count += 1;
-      }
       setStatus(`已导出 ${count} 个条目`);
     } catch (error) {
       setStatus(errorMessage(error));
@@ -802,7 +789,7 @@ export function usePinBoardController({
     toggleLock,
     copyImages,
     copyImageToClipboard,
-    pasteImages,
+    pasteItems,
     importImages,
     importDroppedFiles,
     addText,

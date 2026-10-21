@@ -15,8 +15,49 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- Pin-board eraser (`E`). It only erases strokes, uses a ring cursor whose
+  diameter follows the shared "size" value and the viewport zoom, and hits in
+  world space by distance from the ink polyline (freehand pressure radii, the
+  four shape borders, and the arrow head triangle). Erasing tests the path swept
+  between two pointer samples rather than just the sample point: pointer moves
+  are coalesced to 60–120 Hz, so a fast rub could otherwise jump over thin ink
+  and erase nothing while a single click worked. One drag produces exactly one
+  undo entry; a click that touches no ink changes nothing.
+- The layer panel now shows the item count of each layer. Counts include items
+  on hidden layers (the number means "how much is on this layer", not "how much
+  is visible"); the annotation row stays count-free, and the number is
+  `aria-hidden` so the row's accessible name does not become "顶层 12".
+- In-board copy/paste covers bitmaps, text and strokes. `paste_pin_board_items`
+  writes the whole selection in one transaction with one revision bump, so a
+  mixed selection is atomic; the clipboard payload only records
+  `{ kind, sourceBoardId, sourceItemId }` and the native side reads the source
+  item's current state instead of trusting possibly-stale front-end sizes.
+
 ### Changed
 
+- The pin-board stroke style label is now "大小" instead of "线宽": the value is
+  both the pen width and the eraser diameter. Internal identifiers keep the
+  `strokeWidth` name.
+- Stroke selection follows the drawn ink instead of the bounding box. Point
+  selection measures the cursor's distance to the ink polyline, marquee
+  selection intersects that polyline with the box, and both add a minimum
+  tolerance of 3 CSS px so hairlines stay clickable. Framing the hollow inside
+  of a rectangle or ellipse no longer selects it, which also means clicking an
+  empty centre no longer does. Bitmaps and text keep their bounding quad —
+  bitmaps would need a texture read-back, and a text quad already hugs the
+  glyphs. The marquee still short-circuits on the ink box, so framing a large
+  area does not degrade into per-segment work.
+- Paste placement keeps the group's relative layout: the selection's bounding
+  box is centred on the drop point instead of re-flowing bitmaps through the
+  import arrangement, which used to break alignment on multi-select and shift
+  mixed selections.
+- Single-item export is bitmap-only. The text export path (front-end PNG
+  rasterisation plus `write_pin_board_item_png` and `repository::write_text_png`)
+  is gone, `exportableCount` counts bitmaps only, and the export and
+  system-clipboard actions are disabled together when the selection has no
+  bitmap.
 - The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in a
   single batch. The one-off `stress_baseline` group is deleted — its
   real-repository numbers are archived in `0.3-baseline-2026-10-18.md` and

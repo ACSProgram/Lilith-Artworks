@@ -559,7 +559,11 @@ export function shapeAnchors(
   }
 }
 
-function arrowHeadPoints(
+/**
+ * 箭头的杆末端与两个翼尖（局部坐标）。命中判定（`strokeHit.ts`）复用同一份头部
+ * 几何，避免「看得到的头」和「擦得到的头」各算一遍而慢慢漂移。
+ */
+export function arrowHeadPoints(
   start: Point,
   end: Point,
   strokeWidth: number,

@@ -46,6 +46,44 @@ describe("pin-board layers panel", () => {
     expect(screen.getByRole("button", { name: "底层" }).getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("shows per-layer item counts without changing the accessible names", () => {
+    const { rerender } = render(
+      <PinBoardLayersPanel
+        visibility={visibility()}
+        counts={[3, 0, 7, 12]}
+        onToggle={vi.fn()}
+        disabled={false}
+      />,
+    );
+
+    // 标注层不显示数字；其余三层按 layer 下标取数，0 也照常显示。
+    const counts = screen.getAllByText(/^\d+$/).map((node) => node.textContent);
+    expect(counts).toEqual(["7", "0", "3"]);
+    for (const node of screen.getAllByText(/^\d+$/)) {
+      expect(node.getAttribute("aria-hidden")).toBe("true");
+    }
+    // 数字不参与可访问名：四个开关仍以层名可达。
+    for (const name of ["标注层", "顶层", "中层", "底层"]) {
+      expect(screen.getByRole("button", { name })).toBeTruthy();
+    }
+
+    // 隐藏一层只改变外观，数字不动（口径是「这一层有多少条目」，不是「看得见多少」）。
+    rerender(
+      <PinBoardLayersPanel
+        visibility={visibility(0)}
+        counts={[3, 0, 7, 12]}
+        onToggle={vi.fn()}
+        disabled={false}
+      />,
+    );
+    expect(screen.getAllByText(/^\d+$/).map((node) => node.textContent)).toEqual(["7", "0", "3"]);
+  });
+
+  it("omits counts entirely when the caller passes none", () => {
+    render(<PinBoardLayersPanel visibility={visibility()} onToggle={vi.fn()} disabled={false} />);
+    expect(screen.queryAllByText(/^\d+$/)).toHaveLength(0);
+  });
+
   it("collapses to one button and comes back expanded", () => {
     render(
       <PinBoardLayersPanel visibility={visibility(0)} onToggle={vi.fn()} disabled={false} />,

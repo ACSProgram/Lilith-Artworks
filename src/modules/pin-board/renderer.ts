@@ -9,11 +9,10 @@ import {
 } from "./pendingSettle";
 import type {
   PinBoardArrangeResult,
-  PinBoardClipboardImage,
+  PinBoardClipboardItem,
   PinBoardEditableItem,
   PinBoardItem,
   PinBoardStrokeItem,
-  PinBoardTextItem,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
@@ -25,6 +24,7 @@ import {
   beginStrokeDraft,
   clampStrokeWidth,
   extendStrokeDraft,
+  isDrawingTool,
   isStrokeTool,
   resolveStrokeDraft,
   strokeDraftSamples,
@@ -33,6 +33,16 @@ import {
   type StrokeCommitRequest,
   type StrokeDraft,
 } from "./strokeDrawing";
+import {
+  STROKE_HIT_TOLERANCE_CSS_PIXELS,
+  buildStrokeWorldOutlines,
+  strokeHitBounds,
+  strokeHitByCircle,
+  strokeHitBySweep,
+  strokeIntersectsBounds,
+  strokeOutlineSignature,
+  type StrokeWorldOutline,
+} from "./strokeHit";
 import {
   STROKE_OUTLINE_VERTICES,
   STROKE_VERTEX_BYTES,
@@ -52,6 +62,7 @@ import {
   intersects,
   pointInQuad,
   quadCenter,
+  quadIntersectsBounds,
   rotateQuad,
   scaleQuad,
   screenToWorld,
@@ -172,15 +183,20 @@ export interface PinBoardInteractionState {
   selectedCount: number;
   /** 选中里可参与阵列排序的位图数量（文字条目不参与）。 */
   arrangeableCount: number;
-  /** 选中里可导出的条目数量（位图与文字；笔迹不参与导出）。 */
+  /**
+   * 选中里可导出的**位图**数量。文字与笔迹没有单条导出入口（它们由整画布导出覆盖），
+   * 因此这个值同时决定「导出图片」按钮与右键项的可用性。
+   */
   exportableCount: number;
+  /** 每层未删除条目数（下标即 layer，含标注层；隐藏层里的条目照样计入）。 */
+  layerCounts: number[];
   canUndo: boolean;
   canRedo: boolean;
   dirty: boolean;
   saving: boolean;
   locked: boolean;
   zoomPercent: number;
-  /** 当前工具：`select` 走选中/变换，其余五个进入绘制分支。 */
+  /** 当前工具：`select` 走选中/变换，其余工具独占指针（绘制或擦除）。 */
   tool: PinBoardTool;
   /** 图层可见性（下标 = layer）：界面据此渲染四个开关。 */
   visibleLayers: PinBoardLayerVisibility;
@@ -191,6 +207,8 @@ export interface PinBoardContextMenuRequest {
   clientY: number;
   selectedCount: number;
   arrangeableCount: number;
+  /** 选中里可导出的位图数量：0 时「导出图片」与「复制到剪贴板」置灰。 */
+  exportableCount: number;
   /** 选中里含笔迹：图层菜单据此置灰（笔迹固定在标注层，不能被改层）。 */
   selectionHasStroke: boolean;
   targetImage: boolean;
@@ -219,6 +237,8 @@ const GPU_RECOVERY_MAX_ATTEMPTS = 2;
 const GPU_RECOVERY_BACKOFF_MS = 600;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
+/** 橡皮环形光标的视觉最小直径（CSS 像素）：再小就看不见了。 */
+const ERASER_RING_MIN_CSS_PIXELS = 4;
 const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
 /**
  * 笔迹缓冲的超扫边距（视口宽高的比例）：四周各扩这么多，平移在这个范围内既不改
@@ -227,8 +247,8 @@ const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
  */
 const STROKE_OVERSCAN_RATIO = 0.5;
 
-/** 指针拖拽的进行中状态；`draw` 是绘制工具下的那一支。 */
-type DragMode = "pan" | "images" | "marquee" | "rotate" | "scale" | "draw";
+/** 指针拖拽的进行中状态；`draw` 是绘制工具下的那一支，`erase` 是橡皮。 */
+type DragMode = "pan" | "images" | "marquee" | "rotate" | "scale" | "draw" | "erase";
 /** 每种拖拽状态对应的画布光标类名。 */
 const DRAG_CURSOR_CLASS: Record<DragMode, string> = {
   pan: "dragging",
@@ -237,6 +257,7 @@ const DRAG_CURSOR_CLASS: Record<DragMode, string> = {
   rotate: "rotating-image",
   scale: "scaling-image",
   draw: "drawing",
+  erase: "erasing",
 };
 
 const SHADER = `
@@ -919,7 +940,7 @@ export class PinBoardRenderer {
   /** 可见笔迹的选中描边，按 `strokeOutlineIndex` 给出的槽位连续排布。 */
   private strokeOutlineBuffer: any = null;
   private readonly strokeOutlineIndex = new Map<number, number>();
-  /** 当前工具：绘制工具下指针按下进入绘制分支，不触发选中/框选。 */
+  /** 当前工具：绘制或擦除工具下指针按下独占该次拖拽，不触发选中/框选。 */
   private tool: PinBoardTool = "select";
   /**
    * 图层可见性：纯视图状态，随画板会话恢复，不写库也不标记 dirty。
@@ -932,6 +953,30 @@ export class PinBoardRenderer {
   private strokeWidthValue = DEFAULT_STROKE_WIDTH;
   /** 正在进行的绘制草稿（世界坐标）；`null` 表示没有绘制。 */
   private draft: StrokeDraft | null = null;
+  /**
+   * 橡皮擦的环形光标。CSS 的 `cursor` 只能给固定尺寸的图，直径要随「大小」与缩放
+   * 变化，因此用一个 DOM 空心圆跟随指针；`pointer-events: none`，不挡命中。
+   */
+  private readonly eraserRing: HTMLElement;
+  /** 指针最后一次落在画布上的位置（CSS 像素，相对画布左上角）；离开画布即清空。 */
+  private eraserPointer: Point | null = null;
+  /** 世界折线缓存：键是条目 id，签名见 `strokeOutlineSignature`。 */
+  private readonly strokeOutlineCache = new Map<
+    number,
+    { signature: string; outlines: StrokeWorldOutline[] }
+  >();
+  /** 本轮擦除已经删掉的条目：同一笔不重复处理，也用于判断「这轮有没有改动」。 */
+  private readonly eraseHitIds = new Set<number>();
+  /**
+   * 本轮擦除的候选（未删除、所在图层可见的笔迹）。按下时算一次就够：拖拽中整板条目
+   * 不会增减，逐帧重新过滤整板只是白白分配数组。
+   */
+  private eraseCandidates: PinBoardStrokeItem[] = [];
+  /**
+   * 上一帧的擦头位置。擦除按「这一点到上一点」扫过的区域判，而不是只判当前点：
+   * 指针事件会被合并到 60–120 Hz，只测采样点会让快速擦动跳过细笔迹。
+   */
+  private eraseFrom: Point | null = null;
 
   private constructor(
     private readonly canvas: HTMLCanvasElement,
@@ -972,8 +1017,14 @@ export class PinBoardRenderer {
     canvas.addEventListener("pointermove", this.pointerMove);
     canvas.addEventListener("pointerup", this.pointerUp);
     canvas.addEventListener("pointercancel", this.pointerCancel);
+    canvas.addEventListener("pointerleave", this.pointerLeave);
     canvas.addEventListener("wheel", this.wheel, { passive: false });
     canvas.addEventListener("contextmenu", this.contextMenu);
+    // 环形光标挂在画布外层：与占位层、绘制预览层同级，层级低于图层面板与标注工具条。
+    this.eraserRing = document.createElement("span");
+    this.eraserRing.className = "pin-board-eraser-ring";
+    this.eraserRing.hidden = true;
+    (canvas.parentElement ?? canvas).appendChild(this.eraserRing);
     this.resize();
 
     this.armDeviceLossHandler(gpu);
@@ -1141,6 +1192,7 @@ export class PinBoardRenderer {
     this.selectionElement.hidden = true;
     this.marqueeElement.hidden = true;
     this.selectionScreenQuad = null;
+    this.updateEraserRing();
     this.draw();
     this.onState(this.interactionState);
   }
@@ -1229,6 +1281,8 @@ export class PinBoardRenderer {
     this.strokeVersion += 1;
     this.destroyStrokeBuffers();
     this.strokeSignature = "";
+    this.strokeOutlineCache.clear();
+    this.resetEraseState();
   }
 
   private destroyStrokeBuffers() {
@@ -1278,6 +1332,31 @@ export class PinBoardRenderer {
   /** 设备像素 / 世界单位：抗锯齿羽化与笔迹 LOD 都按它换算。 */
   private devicePixelsPerWorldUnit(): number {
     return this.canvas.height / Math.max(this.viewport.height, 1e-6);
+  }
+
+  /**
+   * 同步橡皮环形光标的位置、直径与显隐。
+   *
+   * 直径按「大小 / 世界单位每 CSS 像素」换算：它表示的是世界里的擦头，不是固定像素
+   * 的图标，所以缩放变化后屏幕上的圆也必须跟着变。视觉最小值 4 px，再小就看不见；
+   * 锁定、退出橡皮、指针离开画布、设备不可用时一律隐藏。
+   */
+  private updateEraserRing() {
+    const ring = this.eraserRing;
+    const pointer = this.eraserPointer;
+    if (!pointer || this.locked || this.gpuUnavailable || this.tool !== "eraser" || !this.loaded) {
+      ring.hidden = true;
+      return;
+    }
+    const diameter = Math.max(
+      ERASER_RING_MIN_CSS_PIXELS,
+      this.strokeWidthValue / this.worldUnitsPerCssPixel(),
+    );
+    ring.hidden = false;
+    ring.style.width = `${diameter}px`;
+    ring.style.height = `${diameter}px`;
+    ring.style.left = `${pointer[0]}px`;
+    ring.style.top = `${pointer[1]}px`;
   }
 
   /** 笔迹缓冲的收集范围：视口四周各扩 `STROKE_OVERSCAN_RATIO`。 */
@@ -1502,8 +1581,12 @@ export class PinBoardRenderer {
     this.canvas.removeEventListener("pointermove", this.pointerMove);
     this.canvas.removeEventListener("pointerup", this.pointerUp);
     this.canvas.removeEventListener("pointercancel", this.pointerCancel);
+    this.canvas.removeEventListener("pointerleave", this.pointerLeave);
     this.canvas.removeEventListener("wheel", this.wheel);
     this.canvas.removeEventListener("contextmenu", this.contextMenu);
+    this.eraserRing.remove();
+    this.strokeOutlineCache.clear();
+    this.resetEraseState();
     this.clearPlaceholderOverlay();
     this.draft = null;
     this.clearStrokePreview();
@@ -1590,9 +1673,10 @@ export class PinBoardRenderer {
     this.dragBefore = [];
     this.marqueeBaseIds.clear();
     this.updateMarqueeOverlay(null);
-    if (isStrokeTool(tool)) this.selectedIds.clear();
-    // 选绘制工具时自动打开标注层：隐藏着还让人画，画完什么也看不见。
-    if (isStrokeTool(tool) && !isLayerVisible(this.visibleLayers, STROKE_LAYER)) {
+    // 绘制与擦除都独占指针，选中框既拖不动、又会挡住下一次操作。
+    if (isDrawingTool(tool)) this.selectedIds.clear();
+    // 选绘制或擦除工具时自动打开标注层：隐藏着还让人画/擦，画完什么也看不见。
+    if (isDrawingTool(tool) && !isLayerVisible(this.visibleLayers, STROKE_LAYER)) {
       this.setLayerVisible(STROKE_LAYER, true);
     }
     this.refreshSelectionVisuals();
@@ -1626,6 +1710,8 @@ export class PinBoardRenderer {
     this.strokeColor = /^#[0-9a-f]{6}$/i.test(color) ? color.toLowerCase() : DEFAULT_STROKE_COLOR;
     this.strokeWidthValue = clampStrokeWidth(width);
     if (this.draft) this.drawStrokePreview();
+    // 橡皮的直径与笔共用这一个「大小」，改它要立刻反映到环形光标上。
+    this.updateEraserRing();
   }
 
   /**
@@ -1667,7 +1753,9 @@ export class PinBoardRenderer {
       imageCount: this.images.filter((image) => !image.deleted).length,
       selectedCount: selected.length,
       arrangeableCount: selected.filter((image) => image.kind === "bitmap").length,
-      exportableCount: selected.filter((image) => image.kind !== "stroke").length,
+      // 单条导出与系统剪贴板复制只认位图：文字与笔迹的入口一律置灰。
+      exportableCount: selected.filter((image) => image.kind === "bitmap").length,
+      layerCounts: this.layerCounts(),
       canUndo: !this.locked && this.historyIndex > 0,
       canRedo: !this.locked && this.historyIndex < this.history.length,
       dirty: this.dirty,
@@ -1689,29 +1777,38 @@ export class PinBoardRenderer {
     return this.cursorWorld ? [...this.cursorWorld] as Point : [this.viewport.centerX, this.viewport.centerY];
   }
 
-  copySelection(): PinBoardClipboardImage[] {
+  /**
+   * 画板内复制的载荷：**只记来源**，不携带尺寸、变换或载荷内容。
+   *
+   * 位图的显示尺寸曾经由前端带上，但复制时前端拿到的尺寸与源条目的真实记录可能
+   * 不一致（画板被其他窗口改过、快照尚未落库）；统一让原生端读源条目现算，三条
+   * 复制路径因此只有一个事实来源。
+   */
+  copySelection(): PinBoardClipboardItem[] {
     if (this.locked) return [];
-    // 画板内复制/粘贴只承载位图；文字条目当前没有可复制的载荷通道。
     return this.selectedImages()
-      .filter((image) => image.kind === "bitmap")
       .sort((left, right) => left.order - right.order)
       .map((image) => ({
-        displayWidth: imageSize(image)[0],
-        displayHeight: imageSize(image)[1],
+        kind: image.kind,
         sourceBoardId: image.boardId,
         sourceItemId: image.itemId,
-        width: image.width,
-        height: image.height,
-        uv: cloneQuad(image.uv),
       }));
-  }
-
-  selectedTextItems(): PinBoardTextItem[] {
-    return this.selectedImages().filter((item): item is PinBoardTextItem => item.kind === "text");
   }
 
   selectedImageIds(): number[] {
     return this.selectedImages().map((image) => image.itemId);
+  }
+
+  /**
+   * 可单条导出的条目：只有位图。
+   *
+   * 文字与笔迹的单条导出已删除（整画布导出覆盖这两种内容），因此这里必须与
+   * `exportableCount` 同口径——否则混选时会把文字 id 交给只认位图的原生命令。
+   */
+  exportableImageIds(): number[] {
+    return this.selectedImages()
+      .filter((image) => image.kind === "bitmap")
+      .map((image) => image.itemId);
   }
 
   /**
@@ -2077,9 +2174,11 @@ export class PinBoardRenderer {
   private emitState() {
     if (this.destroyed || !this.loaded) return;
     this.canvas.classList.toggle("locked", this.locked);
-    // 画笔用笔尖光标，其余工具保持十字（见 pin-board.css 的 `.tool-pen`）。
+    // 画笔用笔尖光标，橡皮用一个 DOM 空心圆（见 `updateEraserRing`），其余工具保持十字。
     this.canvas.classList.toggle("tool-pen", this.tool === "pen");
+    this.canvas.classList.toggle("tool-eraser", this.tool === "eraser");
     this.updateSelectionOverlay();
+    this.updateEraserRing();
     this.persistSession();
     this.onState(this.interactionState);
   }
@@ -2187,12 +2286,16 @@ export class PinBoardRenderer {
     const rect = this.canvas.getBoundingClientRect();
     this.dragWorld = screenToWorld(event.clientX, event.clientY, rect, this.viewport);
     this.cursorWorld = this.dragWorld;
+    this.eraserPointer = [event.clientX - rect.left, event.clientY - rect.top];
+    this.updateEraserRing();
 
     if (event.button === 1 || this.locked) {
       this.dragMode = "pan";
-    } else if (isStrokeTool(this.tool)) {
-      // 绘制分支与选中/框选互斥：工具不是 select 时，按下只可能是要画一笔。
-      if (!this.beginDrawing(this.dragWorld, event)) return;
+    } else if (isDrawingTool(this.tool)) {
+      // 绘制与擦除都与选中/框选互斥：工具不是 select 时，按下只可能是要画一笔或擦一条。
+      if (this.tool === "eraser") {
+        if (!this.beginErasing(this.dragWorld)) return;
+      } else if (!this.beginDrawing(this.dragWorld, event)) return;
     } else if (this.rotationHandleHit(event.clientX, event.clientY)) {
       const selection = this.selectionWorldQuad();
       if (!selection) return;
@@ -2273,12 +2376,11 @@ export class PinBoardRenderer {
   };
 
   private readonly pointerMove = (event: PointerEvent) => {
-    this.cursorWorld = screenToWorld(
-      event.clientX,
-      event.clientY,
-      this.canvas.getBoundingClientRect(),
-      this.viewport,
-    );
+    const rect = this.canvas.getBoundingClientRect();
+    this.cursorWorld = screenToWorld(event.clientX, event.clientY, rect, this.viewport);
+    // 环形光标每个指针事件都要跟随：橡皮下用户靠它判断擦头大小与位置。
+    this.eraserPointer = [event.clientX - rect.left, event.clientY - rect.top];
+    this.updateEraserRing();
     if (!this.dragMode || this.dragPointerId !== event.pointerId) {
       const resizeHandle = this.resizeHandleAt(event.clientX, event.clientY);
       this.canvas.classList.toggle(
@@ -2296,7 +2398,6 @@ export class PinBoardRenderer {
       return;
     }
     if (this.dragMode === "pan") {
-      const rect = this.canvas.getBoundingClientRect();
       const unitsPerCssPixel = this.viewport.height / Math.max(rect.height, 1);
       this.viewport.centerX -= (event.clientX - this.pointerX) * unitsPerCssPixel;
       this.viewport.centerY += (event.clientY - this.pointerY) * unitsPerCssPixel;
@@ -2305,9 +2406,10 @@ export class PinBoardRenderer {
       this.refreshViewport(VIEWPORT_LOAD_DELAY_MS);
       this.emitState();
     } else {
-      const rect = this.canvas.getBoundingClientRect();
       const world = screenToWorld(event.clientX, event.clientY, rect, this.viewport);
-      if (this.dragMode === "draw") {
+      if (this.dragMode === "erase") {
+        this.eraseAt(world);
+      } else if (this.dragMode === "draw") {
         // 只更新草稿与 DOM 预览层：GPU 缓冲在落库后由 `applyMutationResult` 重建，
         // 不在每次 pointermove 重建整板笔迹。
         if (this.draft) {
@@ -2371,6 +2473,7 @@ export class PinBoardRenderer {
           this.images.filter((image) => isLayerVisible(this.visibleLayers, image.layer)),
           bounds,
           this.marqueeBaseIds,
+          (image) => this.itemIntersectsMarquee(image, bounds),
         );
         // 框选矩形是独立的 DOM 叠加层，每个指针事件都要跟随；但选中集合未变时
         // （例如拖过空白区域或已选中的图片）无需重排、重绘与广播状态。
@@ -2414,9 +2517,17 @@ export class PinBoardRenderer {
    */
   private readonly pointerCancel = (event: PointerEvent) => {
     if (!this.dragMode || this.dragPointerId !== event.pointerId) return;
+    // 绘制按取消处理（事件已不可信，不该拿半条轨迹建条目）；擦除与 `pointerup` 走
+    // 同一条提交路径——擦掉的内容不还原，否则用户会看到「擦掉的东西又回来了」。
     if (this.dragMode === "draw") this.cancelDrawing();
     else this.finishInteraction();
     event.preventDefault();
+  };
+
+  /** 指针离开画布：环形光标没有可跟随的位置，直接隐藏。 */
+  private readonly pointerLeave = () => {
+    this.eraserPointer = null;
+    this.updateEraserRing();
   };
 
   private finishInteraction() {
@@ -2426,7 +2537,14 @@ export class PinBoardRenderer {
       return;
     }
     const pointerId = this.dragPointerId;
-    if ((this.dragMode === "images" || this.dragMode === "rotate" || this.dragMode === "scale")
+    if (this.dragMode === "erase") {
+      // 一次拖拽 = 一条撤销记录：`before` 是按下时整板可见笔迹的快照。
+      const erased = [...this.eraseHitIds];
+      if (erased.length > 0) {
+        this.pushHistory(this.dragBefore, this.snapshot(erased));
+        this.afterModelChange(erased);
+      }
+    } else if ((this.dragMode === "images" || this.dragMode === "rotate" || this.dragMode === "scale")
       && this.dragBefore.length > 0) {
       const after = this.snapshot(this.dragBefore.map((image) => image.itemId));
       this.pushHistory(this.dragBefore, after);
@@ -2444,6 +2562,7 @@ export class PinBoardRenderer {
     this.dragPointerId = null;
     this.dragBefore = [];
     this.marqueeBaseIds.clear();
+    this.resetEraseState();
     this.canvas.classList.remove(
       "dragging",
       "moving-image",
@@ -2451,11 +2570,100 @@ export class PinBoardRenderer {
       "scaling-image",
       "selecting",
       "drawing",
+      "erasing",
       "over-rotate-handle",
       "over-resize-nwse",
       "over-resize-nesw",
     );
     this.emitState();
+  }
+
+  /**
+   * 开始擦除。按下时就判一次命中：环形光标给出的是「这里能点到什么」的预期，
+   * 单击笔迹却毫无反应会像失灵；继续拖拽则在 `pointerMove` 里增量擦。
+   *
+   * `before` 取**全部可见笔迹**的快照而不是逐条记录：一轮拖拽可能擦掉任意多条，
+   * 撤销必须一次全复原。画板里没有可见笔迹时不进入拖拽，什么状态都不改。
+   */
+  private beginErasing(world: Point): boolean {
+    if (!this.loaded || this.tool !== "eraser") return false;
+    const strokes = this.erasableStrokes();
+    if (strokes.length === 0) return false;
+    this.selectedIds.clear();
+    this.refreshSelectionVisuals();
+    this.dragBefore = this.snapshot(strokes.map((stroke) => stroke.itemId));
+    this.resetEraseState();
+    this.eraseCandidates = strokes;
+    this.dragMode = "erase";
+    this.eraseAt(world);
+    return true;
+  }
+
+  /** 清掉一轮擦除的临时状态：几何重读、销毁与交互结束时都要清，避免留着上一轮的引用。 */
+  private resetEraseState() {
+    this.eraseHitIds.clear();
+    this.eraseFrom = null;
+    this.eraseCandidates = [];
+  }
+
+  /** 可被擦除的笔迹：未删除、所在图层可见。位图与文字不参与擦除。 */
+  private erasableStrokes(): PinBoardStrokeItem[] {
+    return this.images.filter((image): image is PinBoardStrokeItem => (
+      image.kind === "stroke"
+      && !image.deleted
+      && image.available
+      && isLayerVisible(this.visibleLayers, image.layer)
+    ));
+  }
+
+  /**
+   * 擦掉擦头**扫过**的笔迹，返回本轮新擦掉的条目 id。
+   *
+   * 判的是「上一点 → 这一步」这段位移扫过的区域，而不是只判当前点：指针事件被合并到
+   * 约 60–120 Hz，快速擦动时相邻两帧可能隔几十个像素，细笔迹正好落在两次采样之间就
+   * 整条都擦不掉（表现为「反复擦没反应、点一下反而擦掉」）。见 `strokeHitBySweep`。
+   *
+   * 逐条先按「墨迹外框 + 擦头半径」与这一段的包围盒预筛，命中才解析几何；世界折线按
+   * 条目缓存。同一轮里已擦掉的条目不再重复处理。
+   */
+  private eraseAt(world: Point): number[] {
+    const radius = this.strokeWidthValue / 2;
+    const path = this.eraseFrom ? [this.eraseFrom, world] : [world];
+    this.eraseFrom = world;
+    const base = this.boundsBetween(path[0], path[path.length - 1]);
+    const sweep: Bounds = {
+      minX: base.minX - radius,
+      minY: base.minY - radius,
+      maxX: base.maxX + radius,
+      maxY: base.maxY + radius,
+    };
+    const erased: number[] = [];
+    for (const stroke of this.eraseCandidates) {
+      if (this.eraseHitIds.has(stroke.itemId)) continue;
+      const geometry = this.strokeGeometries.get(stroke.itemId);
+      if (!geometry) continue;
+      if (!intersects(strokeHitBounds(stroke, radius), sweep)) continue;
+      if (!strokeHitBySweep(this.strokeOutlines(stroke, geometry), path, radius)) continue;
+      stroke.deleted = true;
+      this.eraseHitIds.add(stroke.itemId);
+      erased.push(stroke.itemId);
+    }
+    // 只在新命中时重建整板缓冲：每个指针事件都重算一次会把大画板拖垮。
+    if (erased.length > 0) this.afterLiveChange(erased);
+    return erased;
+  }
+
+  /** 条目几何的世界折线（带缓存）；键含几何版本与变换签名，任一变化即失效。 */
+  private strokeOutlines(
+    item: PinBoardStrokeItem,
+    geometry: PinBoardStrokeGeometry,
+  ): StrokeWorldOutline[] {
+    const signature = strokeOutlineSignature(item, this.strokeVersion);
+    const cached = this.strokeOutlineCache.get(item.itemId);
+    if (cached && cached.signature === signature) return cached.outlines;
+    const outlines = buildStrokeWorldOutlines(item, geometry);
+    this.strokeOutlineCache.set(item.itemId, { signature, outlines });
+    return outlines;
   }
 
   /**
@@ -2707,12 +2915,15 @@ export class PinBoardRenderer {
       this.bringToFront([hit.itemId]);
       this.refreshSelectionVisuals();
     }
+    const selected = this.selectedImages();
     this.onContextMenu({
       clientX: event.clientX,
       clientY: event.clientY,
-      selectedCount: this.selectedImages().length,
-      arrangeableCount: this.selectedImages().filter((image) => image.kind === "bitmap").length,
-      selectionHasStroke: this.selectedImages().some((image) => image.kind === "stroke"),
+      selectedCount: selected.length,
+      arrangeableCount: selected.filter((image) => image.kind === "bitmap").length,
+      // 阵列排序与单条导出当前都只认位图，两处口径因此一致；分开写是因为语义不同。
+      exportableCount: selected.filter((image) => image.kind === "bitmap").length,
+      selectionHasStroke: selected.some((image) => image.kind === "stroke"),
       targetImage: Boolean(hit && !this.locked),
       canEditBoard: !this.locked,
       canEditSelection: !this.locked && this.selectedIds.size > 0,
@@ -2841,6 +3052,26 @@ export class PinBoardRenderer {
     return Math.min(MAX_VIEWPORT_HEIGHT, Math.max(MIN_VIEWPORT_HEIGHT, height));
   }
 
+  /**
+   * 每层未删除条目数（下标即 layer，含标注层）。
+   *
+   * 隐藏层里的条目**照样计入**：数字是「这一层里有多少东西」，不是「现在看得见多少」，
+   * 否则开关一次图层数字就跳一下，用户会以为内容被删了。标注层的数字界面不显示，
+   * 但数据仍然给全，免得以后要用时再造一套口径。
+   */
+  private layerCounts(): number[] {
+    const counts = new Array<number>(PIN_BOARD_LAYER_COUNT).fill(0);
+    for (const image of this.images) {
+      if (image.deleted) continue;
+      // 越界或非整数的 layer 直接跳过：宁可少一个数字，也不要写进错误的行。
+      if (!Number.isInteger(image.layer) || image.layer < 0 || image.layer >= counts.length) {
+        continue;
+      }
+      counts[image.layer] += 1;
+    }
+    return counts;
+  }
+
   /** 画板内全部未删除、且所在图层可见的条目轴对齐最小包围框（旋转条目按外接矩形计算）。 */
   private contentBounds(): Bounds | null {
     return imagesBounds(this.images.filter((image) => (
@@ -2908,12 +3139,61 @@ export class PinBoardRenderer {
     }
   }
 
+  /**
+   * 点选命中：笔迹按墨迹判，位图与文字按四角框判。
+   *
+   * 位图不读回纹理就不知道 alpha，文字框本来就贴合字形；只有笔迹能把几何精确展开成
+   * 折线。于是椭圆、对角线笔迹、矩形内部的大片空白不再「点中就选中」——先用条目
+   * 外框（外扩容差）预筛，再逐段算距离。仍从最上层往下找第一个命中项。
+   */
   private hitImage(point: Point): PinBoardItem | null {
+    const tolerance = this.hitTolerance();
     for (let index = this.visibleImages.length - 1; index >= 0; index -= 1) {
       const image = this.visibleImages[index];
-      if (pointInQuad(point, image.points)) return image;
+      if (image.kind !== "stroke") {
+        if (pointInQuad(point, image.points)) return image;
+        continue;
+      }
+      const bounds = strokeHitBounds(image, tolerance);
+      if (point[0] < bounds.minX || point[0] > bounds.maxX
+        || point[1] < bounds.minY || point[1] > bounds.maxY) continue;
+      const geometry = this.strokeGeometries.get(image.itemId);
+      // 几何还没读回来（刚打开画板）时退回包围框：宁可选中，也不要「点了没反应」。
+      if (!geometry) {
+        if (pointInQuad(point, image.points)) return image;
+        continue;
+      }
+      if (strokeHitByCircle(this.strokeOutlines(image, geometry), point, tolerance)) return image;
     }
     return null;
+  }
+
+  /**
+   * 框选命中：与点选同口径，笔迹按墨迹判。
+   *
+   * 两次便宜判断挡在分段求交之前：外框（外扩容差）与框选矩形不相交 → 直接否；框选
+   * 矩形完全罩住外框 → 直接是。后者把「一大片区域整体框住」这个最常见的操作从
+   * 「每条笔迹逐段求交」降成一次比较。
+   */
+  private itemIntersectsMarquee(image: PinBoardItem, bounds: Bounds): boolean {
+    if (image.kind !== "stroke") return quadIntersectsBounds(image.points, bounds);
+    const tolerance = this.hitTolerance();
+    const padded = strokeHitBounds(image, tolerance);
+    if (padded.maxX < bounds.minX || padded.minX > bounds.maxX
+      || padded.maxY < bounds.minY || padded.minY > bounds.maxY) return false;
+    if (bounds.minX <= padded.minX && bounds.maxX >= padded.maxX
+      && bounds.minY <= padded.minY && bounds.maxY >= padded.maxY) return true;
+    const geometry = this.strokeGeometries.get(image.itemId);
+    if (!geometry) return quadIntersectsBounds(image.points, bounds);
+    return strokeIntersectsBounds(this.strokeOutlines(image, geometry), bounds, tolerance);
+  }
+
+  /**
+   * 点选与框选的最小命中容差（世界单位）：细线只按半个线宽判会点不中，见
+   * `STROKE_HIT_TOLERANCE_CSS_PIXELS`。缩放后容差按 CSS 像素换算，屏幕上恒定。
+   */
+  private hitTolerance(): number {
+    return STROKE_HIT_TOLERANCE_CSS_PIXELS * this.worldUnitsPerCssPixel();
   }
 
   private snapshot(itemIds: number[]): ImageSnapshot[] {

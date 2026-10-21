@@ -1,9 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
-  exportTextMaxDimension,
   measurePinBoardText,
   rasterizePinBoardText,
-  rasterizePinBoardTextPng,
   requestedTextTextureDimension,
   textRgbaPayload,
   textTextureDimensions,
@@ -74,7 +72,6 @@ describe("pin-board text layout", () => {
     const item = textItem();
     expect(textTextureDimensions(item, 500)).toEqual([500, 250]);
     expect(requestedTextTextureDimension(item, 1000, 8192)).toBe(1250);
-    expect(exportTextMaxDimension(item)).toBe(200);
   });
 
   it("emits the shared RGBA header and draws each line", () => {
@@ -104,23 +101,4 @@ describe("pin-board text layout", () => {
     expect(fillText.mock.calls.map((call) => call[2])).toEqual([28, 78]);
   });
 
-  it("encodes the export raster as PNG bytes", async () => {
-    const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
-    const toBlob = vi.fn((callback: BlobCallback, type?: string) => {
-      expect(type).toBe("image/png");
-      callback({ arrayBuffer: async () => png.buffer } as unknown as Blob);
-    });
-    vi.spyOn(HTMLCanvasElement.prototype, "toBlob").mockImplementation(toBlob);
-
-    expect(await rasterizePinBoardTextPng(textItem(), 200)).toEqual(png);
-    expect(toBlob).toHaveBeenCalledTimes(1);
-    expect(fillText).toHaveBeenCalledTimes(2);
-  });
-
-  it("rejects when the canvas cannot encode a blob", async () => {
-    vi.spyOn(HTMLCanvasElement.prototype, "toBlob")
-      .mockImplementation((callback: BlobCallback) => callback(null));
-
-    await expect(rasterizePinBoardTextPng(textItem(), 200)).rejects.toThrow("无法生成文字图片");
-  });
 });

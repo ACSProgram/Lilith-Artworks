@@ -31,7 +31,8 @@ import {
 
 /** 可绘制工具；`select` 不在其中，它沿用原有的选中/框选/变换交互。 */
 export type StrokeToolName = "pen" | "line" | "arrow" | "rect" | "ellipse";
-export type PinBoardTool = "select" | StrokeToolName;
+/** 全部工具：`eraser` 不产生几何，但和绘制工具一样独占指针（不选中、不框选）。 */
+export type PinBoardTool = "select" | StrokeToolName | "eraser";
 
 /** 标注的默认颜色取偏红的高对比色：在多数参考图上都能看清，又不至于像纯红那样刺眼。 */
 export const DEFAULT_STROKE_COLOR = "#e5484d";
@@ -59,13 +60,28 @@ const MIN_SAMPLE_DISTANCE = 1e-6;
 const TOOL_BY_KEY: Readonly<Record<string, PinBoardTool>> = {
   v: "select",
   p: "pen",
+  e: "eraser",
   l: "line",
   a: "arrow",
   r: "rect",
   o: "ellipse",
 };
 
+/**
+ * 是否会产生几何（笔 / 直线 / 箭头 / 矩形 / 椭圆）。
+ *
+ * 只有这一类才走「草稿 → 编码 → 落库」；擦拭同样占用指针，却一条几何也不写，
+ * 因此必须与它分开——把橡皮当成笔会让绘制分支去编码一个不存在的草稿。
+ */
 export function isStrokeTool(tool: PinBoardTool): tool is StrokeToolName {
+  return tool !== "select" && tool !== "eraser";
+}
+
+/**
+ * 是否由工具独占指针（绘制或擦除）。这两类工具下 `pointerdown` 不进选中/框选分支，
+ * 也不该带着上一轮的选中框。
+ */
+export function isDrawingTool(tool: PinBoardTool): boolean {
   return tool !== "select";
 }
 
@@ -74,7 +90,7 @@ export function strokeToolId(tool: StrokeToolName): PinBoardStrokeTool {
   return STROKE_TOOL[tool];
 }
 
-/** 单键工具快捷键（`V` 选择、`P` 笔、`L` 直线、`A` 箭头、`R` 矩形、`O` 椭圆）。 */
+/** 单键工具快捷键（`V` 选择、`P` 笔、`E` 橡皮、`L` 直线、`A` 箭头、`R` 矩形、`O` 椭圆）。 */
 export function toolForShortcut(key: string): PinBoardTool | null {
   return TOOL_BY_KEY[key.toLowerCase()] ?? null;
 }

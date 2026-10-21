@@ -9,7 +9,12 @@ import {
   resolveBoardRevision,
 } from "./pendingSettle";
 import type { PinBoardItem, PinBoardView } from "./types";
-import { STROKE_TOOL, decodeStrokeHeader, type PinBoardStrokeGeometry } from "./strokeGeometry";
+import {
+  STROKE_TOOL,
+  decodeStrokeHeader,
+  type PinBoardStrokeGeometry,
+  type PinBoardStrokeTool,
+} from "./strokeGeometry";
 import { encodeStrokeGeometry } from "./strokeRender";
 import { beginStrokeDraft, extendStrokeDraft } from "./strokeDrawing";
 import { normalizeLayerVisibility, type PinBoardLayerVisibility } from "./layers";
@@ -59,6 +64,14 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     strokeIndexCount: 0,
     // 图层可见性：类字段初始化不会在替身对象上执行，这里补一份「全部显示」。
     visibleLayers: normalizeLayerVisibility(null),
+    // 橡皮擦的环形光标与擦除状态：同样是类字段初始化，替身要手工补齐。
+    eraserRing: { hidden: true, style: {}, remove: vi.fn() },
+    eraserPointer: null,
+    strokeOutlineCache: new Map(),
+    eraseHitIds: new Set(),
+    eraseFrom: null,
+    eraseCandidates: [],
+    strokeWidthValue: 10,
     // 基准预算（低档）：与历史常量一致，预算相关的断言依赖这些值。
     textureBudgetBytes: PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES,
     previewTextureBudgetBytes: PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
@@ -1095,6 +1108,16 @@ describe("pin-board additive marquee selection", () => {
     expect([...marqueeSelection(images, topLeftBounds, [])]).toEqual([1]);
   });
 
+  it("lets the caller replace the quad test with an ink test", () => {
+    const images = [boardImage(1, topLeft), boardImage(2, bottomRight), boardImage(3, topLeft, true)];
+    const hitTest = vi.fn<(image: PinBoardItem) => boolean>(() => false);
+
+    // 谓词只在通过删除/可用性检查之后调用：已删除的条目根本不参与判定。
+    expect([...marqueeSelection(images, topLeftBounds, [], hitTest)]).toEqual([]);
+    expect(hitTest).toHaveBeenCalledTimes(2);
+    expect(hitTest.mock.calls.map(([image]) => image.itemId)).toEqual([1, 2]);
+  });
+
   it("leaves the base set untouched", () => {
     const base = new Set<number>([2]);
 
@@ -1404,9 +1427,15 @@ describe("pin-board drawing interaction", () => {
     renderer.setTool("pen");
     expect(toggle).toHaveBeenCalledWith("tool-pen", true);
 
-    // 其余工具保持十字：类名撤掉即可，不需要逐工具写光标。
+    // 橡皮有自己的类名（用来藏掉十字光标），笔尖类名要同时撤掉。
+    renderer.setTool("eraser");
+    expect(toggle).toHaveBeenCalledWith("tool-pen", false);
+    expect(toggle).toHaveBeenCalledWith("tool-eraser", true);
+
+    // 其余工具保持十字：两个类名都撤掉即可，不需要逐工具写光标。
     renderer.setTool("rect");
-    expect(toggle).toHaveBeenLastCalledWith("tool-pen", false);
+    expect(toggle).toHaveBeenLastCalledWith("tool-eraser", false);
+    expect(toggle).toHaveBeenCalledWith("tool-pen", false);
   });
 
   it("cancels an in-flight drawing instead of committing it", () => {
@@ -1473,5 +1502,366 @@ describe("pin-board drawing interaction", () => {
 
     // 1 个世界单位 = 1 CSS 像素，低于 3 像素的最小拖拽距离。
     expect(onStrokeCommit).not.toHaveBeenCalled();
+  });
+});
+
+/** 擦除、复制载荷与图层计数共用同一套「已装载的小画板」替身，因此归在一个 describe 里。 */
+describe("pin-board eraser, clipboard payload and layer counts", () => {
+  const ERASER_STROKE_WIDTH = 10;
+
+  function quad(left: number): PinBoardItem["points"] {
+    return [[left, 0], [left + 100, 0], [left + 100, 100], [left, 100]];
+  }
+
+  function strokeItem(itemId: number, left = 0, layer = 3): PinBoardItem {
+    return {
+      boardId: 1,
+      itemId,
+      kind: "stroke",
+      width: 100,
+      height: 100,
+      order: itemId,
+      layer,
+      deleted: false,
+      points: quad(left),
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      tool: STROKE_TOOL.line,
+      color: "#FF8000",
+      strokeWidth: ERASER_STROKE_WIDTH,
+    } as unknown as PinBoardItem;
+  }
+
+  function bitmapItem(itemId: number, left = 0): PinBoardItem {
+    return {
+      boardId: 1,
+      itemId,
+      kind: "bitmap",
+      width: 100,
+      height: 100,
+      order: itemId,
+      layer: 1,
+      deleted: false,
+      points: quad(left),
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+    } as unknown as PinBoardItem;
+  }
+
+  function textItem(itemId: number): PinBoardItem {
+    return {
+      ...bitmapItem(itemId),
+      kind: "text",
+      text: "备注",
+      fontFamily: "sans-serif",
+      fontSize: 14,
+      color: "#ffffff",
+      align: "left",
+      bold: false,
+      italic: false,
+    } as unknown as PinBoardItem;
+  }
+
+  function lineGeometry(itemId: number): PinBoardStrokeGeometry {
+    const bytes = encodeStrokeGeometry(STROKE_TOOL.line, [], 0);
+    return {
+      ...decodeStrokeHeader(bytes),
+      itemId,
+      color: "#FF8000",
+      strokeWidth: ERASER_STROKE_WIDTH,
+      width: 100,
+      height: 100,
+      geometry: bytes,
+    };
+  }
+
+  function eraserRenderer(images: PinBoardItem[], options: Record<string, unknown> = {}) {
+    return rendererWith({
+      loaded: true,
+      destroyed: false,
+      locked: false,
+      tool: "eraser",
+      images,
+      imageById: new Map(images.map((image) => [image.itemId, image])),
+      selectedIds: new Set<number>(),
+      dragMode: null,
+      dragPointerId: 1,
+      dragBefore: [],
+      marqueeBaseIds: new Set<number>(),
+      history: [],
+      historyIndex: 0,
+      dirty: false,
+      saving: false,
+      strokeWidthValue: ERASER_STROKE_WIDTH,
+      defaultWorldUnitsPerCssPixel: 1,
+      worldUnitsPerCssPixel: () => 1,
+      strokeGeometries: new Map(
+        images
+          .filter((image) => image.kind === "stroke")
+          .map((image) => [image.itemId, lineGeometry(image.itemId)]),
+      ),
+      canvas: {
+        classList: { add: vi.fn(), remove: vi.fn() },
+        hasPointerCapture: () => false,
+        releasePointerCapture: vi.fn(),
+        getBoundingClientRect: () => ({ width: 100, height: 100, left: 0, top: 0 }),
+      },
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      refreshSelectionVisuals: vi.fn(),
+      syncGeometryBuffers: vi.fn(),
+      refreshViewport: vi.fn(),
+      emitState: vi.fn(),
+      stateKey: () => "current",
+      savedStateKey: "saved",
+      scheduleAutosave: vi.fn(),
+      cancelAutosave: vi.fn(),
+      ...options,
+    });
+  }
+
+  type EraserTestRenderer = {
+    beginErasing: (world: [number, number]) => boolean;
+    eraseAt: (world: [number, number]) => number[];
+    finishInteraction: () => void;
+    interactionState: { layerCounts: number[] };
+    copySelection: () => unknown[];
+    dragMode: unknown;
+    eraseHitIds: Set<number>;
+    dirty: boolean;
+    locked: boolean;
+    history: {
+      before: { itemId: number; deleted: boolean }[];
+      after: { itemId: number; deleted: boolean }[];
+    }[];
+  };
+
+  it("erases every stroke under one drag and commits a single history entry", () => {
+    const first = strokeItem(11);
+    const second = strokeItem(12, 200);
+    const renderer = eraserRenderer([first, second]) as unknown as EraserTestRenderer;
+
+    expect(renderer.beginErasing([50, 50])).toBe(true);
+    expect(first.deleted).toBe(true);
+    expect(second.deleted).toBe(false);
+    expect(renderer.dragMode).toBe("erase");
+
+    // 继续拖动：只处理新命中的条目，两条最终落在同一条撤销记录里。
+    expect(renderer.eraseAt([250, 50])).toEqual([12]);
+    renderer.finishInteraction();
+
+    expect(renderer.history).toHaveLength(1);
+    expect(renderer.history[0].before.map((snapshot) => snapshot.deleted)).toEqual([false, false]);
+    expect(renderer.history[0].after.map((snapshot) => snapshot.deleted)).toEqual([true, true]);
+    expect(renderer.dirty).toBe(true);
+    expect(renderer.eraseHitIds.size).toBe(0);
+  });
+
+  it("erases along the swept path between two pointer samples", () => {
+    const stroke = strokeItem(11);
+    const renderer = eraserRenderer([stroke]) as unknown as EraserTestRenderer;
+
+    // 两个采样点都离笔迹很远（笔迹是从 (5,5) 到 (95,95) 的对角线），但连线正好穿过它。
+    // 只判当前点会漏掉这种「快速擦过细线」的情形，这也是橡皮时灵时不灵的根源。
+    expect(renderer.beginErasing([-40, 50])).toBe(true);
+    expect(stroke.deleted).toBe(false);
+
+    expect(renderer.eraseAt([100, 50])).toEqual([11]);
+    renderer.finishInteraction();
+
+    expect(renderer.history).toHaveLength(1);
+    expect(renderer.history[0].after.map((snapshot) => snapshot.deleted)).toEqual([true]);
+  });
+
+  it("does not erase when the swept path misses the ink", () => {
+    const stroke = strokeItem(11);
+    const renderer = eraserRenderer([stroke]) as unknown as EraserTestRenderer;
+
+    expect(renderer.beginErasing([-40, -40])).toBe(true);
+    // 与上一点同在笔迹左上方，整段都不碰墨迹。
+    expect(renderer.eraseAt([0, -10])).toEqual([]);
+    renderer.finishInteraction();
+
+    expect(stroke.deleted).toBe(false);
+    expect(renderer.history).toHaveLength(0);
+  });
+
+  it("keeps the board untouched when the click hits no ink", () => {
+    const stroke = strokeItem(11);
+    const renderer = eraserRenderer([stroke]) as unknown as EraserTestRenderer;
+
+    // 没有命中也要进入拖拽：按下后继续拖可能才碰到笔迹。
+    expect(renderer.beginErasing([500, 500])).toBe(true);
+    expect(stroke.deleted).toBe(false);
+
+    renderer.finishInteraction();
+
+    expect(renderer.history).toHaveLength(0);
+    expect(renderer.dirty).toBe(false);
+    expect(renderer.dragMode).toBeNull();
+  });
+
+  it("never erases bitmaps and skips strokes on hidden layers", () => {
+    const stroke = strokeItem(11);
+    const bitmap = bitmapItem(12);
+    const renderer = eraserRenderer([stroke, bitmap], {
+      visibleLayers: normalizeLayerVisibility([true, true, true, false]),
+    }) as unknown as EraserTestRenderer;
+
+    // 标注层被隐藏：看不见的笔迹不该被擦掉，位图本来就不参与擦除。
+    expect(renderer.beginErasing([50, 50])).toBe(false);
+    expect(stroke.deleted).toBe(false);
+    expect(bitmap.deleted).toBe(false);
+  });
+
+  it("records only the source of each clipboard item", () => {
+    const renderer = eraserRenderer(
+      [bitmapItem(1), textItem(2), strokeItem(3)],
+      { tool: "select", selectedIds: new Set([1, 2, 3]) },
+    ) as unknown as EraserTestRenderer;
+
+    // 三类条目都只带「来源」：尺寸、变换与载荷由原生端读源条目现算。
+    expect(renderer.copySelection()).toEqual([
+      { kind: "bitmap", sourceBoardId: 1, sourceItemId: 1 },
+      { kind: "text", sourceBoardId: 1, sourceItemId: 2 },
+      { kind: "stroke", sourceBoardId: 1, sourceItemId: 3 },
+    ]);
+
+    renderer.locked = true;
+    expect(renderer.copySelection()).toEqual([]);
+  });
+
+  it("counts items per layer without dropping hidden ones", () => {
+    const renderer = eraserRenderer(
+      [
+        { ...bitmapItem(1, 0), layer: 0 },
+        { ...bitmapItem(2, 0), layer: 1 },
+        { ...bitmapItem(3, 0), layer: 1, deleted: true },
+        { ...textItem(4), layer: 1 },
+        strokeItem(5),
+      ],
+      {
+        tool: "select",
+        visibleLayers: normalizeLayerVisibility([true, true, true, false]),
+      },
+    ) as unknown as EraserTestRenderer;
+
+    // 隐藏的标注层照样计入；已删除的条目不计入。
+    expect(renderer.interactionState.layerCounts).toEqual([1, 2, 0, 1]);
+  });
+});
+
+describe("pin-board ink hit testing", () => {
+  const QUAD: PinBoardItem["points"] = [[0, 0], [100, 0], [100, 100], [0, 100]];
+
+  function strokeItem(itemId: number, overrides: Partial<PinBoardItem> = {}): PinBoardItem {
+    return {
+      boardId: 1,
+      itemId,
+      kind: "stroke",
+      width: 100,
+      height: 100,
+      order: itemId,
+      layer: 3,
+      deleted: false,
+      points: QUAD,
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      tool: STROKE_TOOL.rect,
+      color: "#FF8000",
+      strokeWidth: 4,
+      ...overrides,
+    } as unknown as PinBoardItem;
+  }
+
+  function geometryFor(
+    itemId: number,
+    tool: PinBoardStrokeTool,
+    strokeWidth: number,
+    width = 100,
+    height = 100,
+  ): PinBoardStrokeGeometry {
+    const bytes = encodeStrokeGeometry(tool, [], 0);
+    return {
+      ...decodeStrokeHeader(bytes),
+      itemId,
+      color: "#FF8000",
+      strokeWidth,
+      width,
+      height,
+      geometry: bytes,
+    };
+  }
+
+  /** 世界单位 / CSS 像素 = 1（viewport 与 cssHeight 都是 100），容差即 3 个世界单位。 */
+  function inkRenderer(images: PinBoardItem[], geometries: PinBoardStrokeGeometry[]) {
+    return rendererWith({
+      loaded: true,
+      destroyed: false,
+      images,
+      imageById: new Map(images.map((image) => [image.itemId, image])),
+      visibleImages: images,
+      strokeGeometries: new Map(geometries.map((geometry) => [geometry.itemId, geometry])),
+      viewport: { centerX: 50, centerY: 50, height: 100 },
+      cssHeight: 100,
+    }) as unknown as {
+      hitImage: (point: [number, number]) => PinBoardItem | null;
+      itemIntersectsMarquee: (
+        image: PinBoardItem,
+        bounds: { minX: number; minY: number; maxX: number; maxY: number },
+      ) => boolean;
+    };
+  }
+
+  it("hits a shape on its ink instead of its hollow frame", () => {
+    const rect = strokeItem(1);
+    const renderer = inkRenderer([rect], [geometryFor(1, STROKE_TOOL.rect, 4)]);
+
+    // 框内是空的：点中心不该选中。
+    expect(renderer.hitImage([50, 50])).toBeNull();
+    // 描边本身（带宽 4）当然命中。
+    expect(renderer.hitImage([2, 50])).toBe(rect);
+    // 外侧 3 个单位容差之内仍算命中，再远就不算了。
+    expect(renderer.hitImage([-2, 50])).toBe(rect);
+    expect(renderer.hitImage([-6, 50])).toBeNull();
+  });
+
+  it("keeps bitmaps on their bounding quad", () => {
+    const bitmap = { ...strokeItem(2), kind: "bitmap", layer: 1 } as PinBoardItem;
+    const renderer = inkRenderer([bitmap], []);
+
+    // 位图不读回纹理就无法知道 alpha，中心空白也按框判。
+    expect(renderer.hitImage([50, 50])).toBe(bitmap);
+    expect(renderer.hitImage([150, 50])).toBeNull();
+  });
+
+  it("still hits a hairline stroke through the minimum tolerance", () => {
+    const line = strokeItem(3, {
+      height: 20,
+      strokeWidth: 1,
+      points: [[0, 0], [100, 0], [100, 20], [0, 20]],
+    });
+    const renderer = inkRenderer([line], [geometryFor(3, STROKE_TOOL.line, 1, 100, 20)]);
+
+    // 线宽 1 → 半径 0.5，容差补到 3.5：偏 3 个单位仍点得中，偏 5 个就不行了。
+    expect(renderer.hitImage([50, 13])).toBe(line);
+    expect(renderer.hitImage([50, 15])).toBeNull();
+  });
+
+  it("judges marquee membership by ink as well", () => {
+    const rect = strokeItem(4);
+    const renderer = inkRenderer([rect], [geometryFor(4, STROKE_TOOL.rect, 4)]);
+
+    // 只框住内部：不选中；框到描边：选中；罩住整条：选中。
+    expect(renderer.itemIntersectsMarquee(rect, { minX: 20, minY: 20, maxX: 80, maxY: 80 })).toBe(false);
+    expect(renderer.itemIntersectsMarquee(rect, { minX: 0, minY: 20, maxX: 2, maxY: 80 })).toBe(true);
+    expect(renderer.itemIntersectsMarquee(rect, { minX: -10, minY: -10, maxX: 110, maxY: 110 })).toBe(true);
+  });
+
+  it("falls back to the quad while stroke geometry is still loading", () => {
+    const rect = strokeItem(5);
+    const renderer = inkRenderer([rect], []);
+
+    expect(renderer.hitImage([50, 50])).toBe(rect);
+    expect(renderer.itemIntersectsMarquee(rect, { minX: 20, minY: 20, maxX: 80, maxY: 80 })).toBe(true);
   });
 });

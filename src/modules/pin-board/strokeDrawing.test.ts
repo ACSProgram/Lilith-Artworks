@@ -10,6 +10,8 @@ import {
   clampStrokeWidth,
   constrainShapeEnd,
   extendStrokeDraft,
+  isDrawingTool,
+  isStrokeTool,
   resolveStrokeDraft,
   strokeDraftPoints,
   strokeWidthFromSlider,
@@ -60,11 +62,25 @@ describe("pin-board drawing tools", () => {
   it("maps single-key shortcuts and ignores unknown keys", () => {
     expect(toolForShortcut("v")).toBe("select");
     expect(toolForShortcut("P")).toBe("pen");
+    expect(toolForShortcut("e")).toBe("eraser");
+    expect(toolForShortcut("E")).toBe("eraser");
     expect(toolForShortcut("l")).toBe("line");
     expect(toolForShortcut("A")).toBe("arrow");
     expect(toolForShortcut("r")).toBe("rect");
     expect(toolForShortcut("o")).toBe("ellipse");
     expect(toolForShortcut("x")).toBeNull();
+  });
+
+  it("separates tools that produce geometry from tools that only own the pointer", () => {
+    // 橡皮不写几何：把它当笔会让绘制分支去编码一个不存在的草稿。
+    for (const tool of ["pen", "line", "arrow", "rect", "ellipse"] as const) {
+      expect(isStrokeTool(tool)).toBe(true);
+      expect(isDrawingTool(tool)).toBe(true);
+    }
+    expect(isStrokeTool("eraser")).toBe(false);
+    expect(isDrawingTool("eraser")).toBe(true);
+    expect(isStrokeTool("select")).toBe(false);
+    expect(isDrawingTool("select")).toBe(false);
   });
 
   it("clamps stroke widths to the input range", () => {

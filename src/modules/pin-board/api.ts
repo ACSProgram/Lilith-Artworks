@@ -5,7 +5,7 @@ import type { PinBoardStrokeTool } from "./strokeGeometry";
 import type {
   PinBoardArrangeItem,
   PinBoardArrangeResult,
-  PinBoardClipboardImage,
+  PinBoardClipboardItem,
   PinBoardEditableItem,
   PinBoardMutationResult,
   PinBoardSummary,
@@ -49,15 +49,18 @@ export const pinBoardApi = {
   ) => invokeCommand<SavePinBoardResult>("save_pin_board", { boardId, items, expectedRevision }),
   finalizePinBoard: (boardId: number, expectedRevision: string) =>
     invokeCommand<SavePinBoardResult>("finalize_pin_board", { boardId, expectedRevision }),
-  pastePinBoardImages: (
+  /**
+   * 画板内粘贴：位图、文字与笔迹共一条命令、一次事务、一次 revision 推进。
+   * 落位按「整组保持相对位置」处理，因此不需要阵列间距参数。
+   */
+  pastePinBoardItems: (
     boardId: number,
-    images: PinBoardClipboardImage[],
+    items: PinBoardClipboardItem[],
     centerX: number,
     centerY: number,
-    gapRatio: number,
     expectedRevision: string,
-  ) => invokeCommand<PinBoardMutationResult>("paste_pin_board_images", {
-    boardId, images, centerX, centerY, gapRatio, expectedRevision,
+  ) => invokeCommand<PinBoardMutationResult>("paste_pin_board_items", {
+    boardId, items, centerX, centerY, expectedRevision,
   }),
   importPinBoardImages: (
     boardId: number,
@@ -138,15 +141,6 @@ export const pinBoardApi = {
     outputDirectory: string,
   ) => invokeCommand<number>("export_pin_board_images", {
     boardId, itemIds, outputDirectory,
-  }),
-  /** 写文字条目的导出图：前端编码 PNG，原生端校验后原子写盘。 */
-  writePinBoardItemPng: (
-    boardId: number,
-    itemId: number,
-    outputDirectory: string,
-    bytes: number[],
-  ) => invokeCommand<string>("write_pin_board_item_png", {
-    boardId, itemId, outputDirectory, bytes,
   }),
   readPinBoardClipboardPaths: () => invokeCommand<string[]>("read_pin_board_clipboard_paths"),
   /**

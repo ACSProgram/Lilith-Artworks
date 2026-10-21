@@ -45,14 +45,16 @@ export interface PinBoardSummary {
   updatedMs: number;
 }
 
-export interface PinBoardClipboardImage {
+/**
+ * 画板内复制的载荷：**只记来源**。
+ *
+ * 显示尺寸、变换与载荷内容都由原生端读源条目现算——前端带尺寸时，那份值可能来自
+ * 尚未落库的快照，与仓库里的真实记录不一致。
+ */
+export interface PinBoardClipboardItem {
+  kind: PinBoardItem["kind"];
   sourceBoardId: number;
   sourceItemId: number;
-  width: number;
-  height: number;
-  displayWidth: number;
-  displayHeight: number;
-  uv: PinBoardItem["uv"];
 }
 
 export interface PinBoardTransferProgress {

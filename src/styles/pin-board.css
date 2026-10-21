@@ -365,6 +365,23 @@
 .pin-board-canvas.selecting,
 /* 画笔保持笔尖光标：`:not(.tool-pen)` 让这条规则不再盖掉上面的 `.tool-pen`。 */
 .pin-board-canvas.drawing:not(.tool-pen) { cursor: crosshair; }
+/* 橡皮不显示系统光标：擦头由下面这个 DOM 空心圆表示，圆内外都留空才看得清。
+   锁定时工具已退回 `select`，这里的 `:not(.locked)` 只是防止状态泄漏时把指针藏掉。 */
+.pin-board-canvas.tool-eraser:not(.locked),
+.pin-board-canvas.erasing:not(.locked) { cursor: none; }
+/* 橡皮的环形光标：直径随「大小」与缩放变化，因此只有定位与描边写在这里。 */
+.pin-board-eraser-ring {
+  display: block;
+  position: absolute;
+  z-index: 1;
+  border-radius: 50%;
+  box-shadow:
+    0 0 0 1px rgb(0 0 0 / 35%),
+    inset 0 0 0 1px rgb(255 255 255 / 55%);
+  pointer-events: none;
+  transform: translate(-50%, -50%);
+}
+.pin-board-eraser-ring[hidden] { display: none; }
 
 /* 绘制预览层：只画当前这一笔，压在画布与占位层之上、选中框与框选矩形之下。 */
 .pin-board-draw-overlay {
@@ -529,6 +546,15 @@
 .pin-board-layer-row.hidden .pin-board-layer-swatch { opacity: .35; }
 .pin-board-layer-row .pin-board-layer-swatch { flex: none; }
 .pin-board-layer-name { flex: 1; }
+/* 每层条目数：弱化色、行内右对齐；固定行高与字号，不因数字位数变化撑高行。 */
+.pin-board-layer-count {
+  flex: none;
+  color: var(--pb-text-faint);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  text-align: right;
+}
 
 .pin-board-text-backdrop { z-index: 2300; }
 .pin-board-text-dialog { width: min(560px, 100%); }

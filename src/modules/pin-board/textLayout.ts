@@ -8,8 +8,6 @@ import type { PinBoardTextItem } from "./types";
 export const PIN_BOARD_TEXT_FONT_FAMILY =
   '"Microsoft YaHei UI", "Segoe UI", sans-serif';
 export const PIN_BOARD_TEXT_LINE_HEIGHT_RATIO = 1.3;
-/** 导出倍率：文字按逻辑尺寸的固定倍数栅格化，避免屏幕字体小图被放大。 */
-export const PIN_BOARD_TEXT_EXPORT_SCALE = 2;
 export const PIN_BOARD_TEXT_MAX_DIMENSION = 8192;
 
 export interface PinBoardTextMetrics {
@@ -173,7 +171,7 @@ function measureTextInk(
   return { ascent, descent: Number.isFinite(descent) && descent > 0 ? descent : 0 };
 }
 
-/** 按请求长边把文字画到离屏 canvas；显示纹理与导出共用这一段绘制逻辑。 */
+/** 按请求长边把文字画到离屏 canvas；显示纹理这一条路径的绘制逻辑。 */
 function drawPinBoardText(item: PinBoardTextItem, maxDimension: number): DrawnText {
   const metrics = measurePinBoardText(item.text, item.fontSize);
   const [width, height] = textTextureDimensions(item, maxDimension);
@@ -216,27 +214,6 @@ export function rasterizePinBoardText(
 }
 
 /**
- * 导出用的文字载荷：浏览器把它编码成 PNG 再交给原生端写盘。
- *
- * 原生端要以 RGBA 收同样的图需要跨 IPC 传数千万个数字（最长边 8192 时约
- * 64 MiB 像素），文案 PNG 则是几十到几百 KB。原生端只校验格式与尺寸后原子
- * 写盘，不再重新编码。
- */
-export async function rasterizePinBoardTextPng(
-  item: PinBoardTextItem,
-  maxDimension: number,
-): Promise<Uint8Array> {
-  const { canvas } = drawPinBoardText(item, maxDimension);
-  const blob = await new Promise<Blob>((resolve, reject) => {
-    canvas.toBlob((result) => {
-      if (result) resolve(result);
-      else reject(new Error("无法生成文字图片"));
-    }, "image/png");
-  });
-  return new Uint8Array(await blob.arrayBuffer());
-}
-
-/**
  * 与 Rust 纹理读取一致的 RGBA 负载：`"RGBA"` + 小端宽高 + 像素。
  * 渲染器复用既有 `isRgbaPayload` 分支上传。
  */
@@ -255,17 +232,4 @@ export function textRgbaPayload(
   view.setUint32(8, height, true);
   payload.set(rgba, 12);
   return payload;
-}
-
-/** 导出分辨率：逻辑长边 × 固定倍率，并受像素上限与 RGBA 预算约束。 */
-export function exportTextMaxDimension(item: PinBoardTextItem): number {
-  const long = Math.max(item.width, item.height);
-  return Math.max(
-    1,
-    Math.min(
-      PIN_BOARD_TEXT_MAX_DIMENSION,
-      budgetedTextDimension(item),
-      Math.round(long * PIN_BOARD_TEXT_EXPORT_SCALE),
-    ),
-  );
 }

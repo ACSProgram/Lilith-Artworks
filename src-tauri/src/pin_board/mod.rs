@@ -28,7 +28,7 @@ use crate::{
 };
 use arrange::{ArrangeItem, ArrangeOptions, HeightPolicy, ItemOrder};
 use repository::{
-    EditablePinBoardItem, PinBoardClipboardImage, PinBoardSummary, PinBoardView, SavePinBoardResult,
+    EditablePinBoardItem, PinBoardClipboardItem, PinBoardSummary, PinBoardView, SavePinBoardResult,
 };
 
 #[derive(Debug, Serialize)]
@@ -210,26 +210,28 @@ pub(crate) async fn finalize_pin_board(
         .map_err(String::from)
 }
 
+/// 画板内粘贴：位图、文字与笔迹走同一条命令、一次事务，混合选择必须原子。
+///
+/// 取代旧的 `paste_pin_board_images`：两条粘贴路径迟早会在校验、落位与错误文案上
+/// 分叉。落位按「整组保持相对位置」处理，因此不需要阵列间距参数。
 #[tauri::command]
-pub(crate) async fn paste_pin_board_images(
+pub(crate) async fn paste_pin_board_items(
     coordinator: State<'_, OperationCoordinator>,
     board_id: i64,
-    images: Vec<PinBoardClipboardImage>,
+    items: Vec<PinBoardClipboardItem>,
     center_x: f64,
     center_y: f64,
-    gap_ratio: f64,
     expected_revision: String,
 ) -> Result<PinBoardMutationResult, String> {
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::PinBoard, move |context| {
-            let (view, item_ids) = usecases::pin_board::paste_images(
+            let (view, item_ids) = usecases::pin_board::paste_items(
                 context,
                 board_id,
-                &images,
+                &items,
                 center_x,
                 center_y,
-                gap_ratio,
                 &expected_revision,
             )?;
             Ok(PinBoardMutationResult { view, item_ids })
@@ -425,37 +427,6 @@ pub(crate) async fn export_pin_board_images(
                 |current, total| {
                     context.report_progress("正在导出图片", current as u64, total as u64)
                 },
-            )
-        })
-        .await
-        .map_err(String::from)
-}
-
-/// 写出文字条目的导出图：前端按屏幕同一套字体度量栅格化并编码 PNG，原生端
-/// 只校验格式与尺寸后原子写盘。
-#[tauri::command]
-pub(crate) async fn write_pin_board_item_png(
-    coordinator: State<'_, OperationCoordinator>,
-    window: tauri::WebviewWindow,
-    board_id: i64,
-    item_id: i64,
-    output_directory: String,
-    bytes: Vec<u8>,
-) -> Result<String, String> {
-    path_scope::ensure_authorized(
-        &window.fs_scope(),
-        Path::new(output_directory.trim()),
-        "导出位置",
-    )?;
-    let coordinator = coordinator.inner().clone();
-    coordinator
-        .spawn(OperationDomain::PinBoard, move |context| {
-            usecases::pin_board::write_item_png(
-                context,
-                board_id,
-                item_id,
-                &output_directory,
-                &bytes,
             )
         })
         .await
