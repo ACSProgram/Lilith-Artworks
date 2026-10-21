@@ -41,19 +41,6 @@ entries for the reader; they are not a template every entry has to fill.
   (reported, not gated); G2 is renamed to say it only checks that stage timings
   were reported; and two front-end tests are renamed to match what they assert
   and given the assertions they lacked.
-- `vite` moves to 6.4.4 (only `package-lock.json` changes; `package.json`'s
-  `^6.0.0` already allows it) to clear three high-severity advisories GitHub
-  published on 2026-10-20, all in the bundled `launch-editor` code: `%` is not
-  escaped by `escapeCmdArgs()` on Windows, some editors' CLI flags can be
-  misread into arbitrary command execution, and an `fs.existsSync()` existence
-  check can be bypassed. None of them is on the ignore list, and the first
-  Windows CI run after publication (2026-10-21T02:36Z, `0.3.0-alpha.5`) failed
-  at the full-dependency audit step — the new advisories caused it, not a
-  regression in the preceding commits. `vite` is a devDependency and the
-  affected code only runs on the dev server's "open in editor" path, so it never
-  ships in the installer and the production audit stayed green throughout; 6.4.4
-  is the last 6.x patch and drops `launch-editor` entirely, and both `vitest`
-  and `@vitejs/plugin-react` accept vite 6.x, so nothing else moved.
 - The remaining test-audit items land in a second batch. H3's pin-board DDS
   memory ceiling drops from 512 MiB to 64 MiB (12.5 MiB measured on a debug
   build) and now fails on Windows when the peak reading is absent instead of
@@ -88,10 +75,10 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
-- RustSec advisories RUSTSEC-2026-0381/0382/0383: the lock file moves
-  `rustls-webpki` to 0.103.16 and `webpki-roots` / `webpki-root-certs` to
-  1.0.10, all within existing semver ranges, so `dependency-audit` stops
-  failing without adding rows to the CI ignore lists.
+- Dependency updates clear newly published advisories: `vite` 6.4.4 (dev-only;
+  GHSA-698v-4r3x-3vcv / GHSA-r825-w8mm-5pxw / GHSA-587h-7wmj-h5pm) and
+  `rustls-webpki` 0.103.16 with `webpki-roots` / `webpki-root-certs` 1.0.10
+  (RUSTSEC-2026-0381/0382/0383). The third-party license list is regenerated.
 
 ## 0.3.0-alpha.5 - 2026-10-21
 

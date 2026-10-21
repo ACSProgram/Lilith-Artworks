@@ -84,7 +84,8 @@ DDS 损坏与损坏后内容变化再提交 R7）、`stress_format` ChunkFile �
   不依赖序号。2026-10-19 的缩略图边界就是因为只改产品、没改序号而让 B1/B4/B5 杀错了位置。
 - **按成本分层**：**九组便宜的分组（`stress_cancel` / `stress_crash` / `stress_cleanup` /
   `stress_damage` / `stress_format` / `stress_pin_board` / `stress_authenticity` /
-  `stress_concurrency` / `stress_input`，合计约 30 秒运行）进 Windows CI**，日常改动因此获得自动回归保护；
+  `stress_concurrency` / `stress_input`，合计约 1.5–2 分钟运行；2026-10-21 本地实测
+  97 秒）进 Windows CI**，日常改动因此获得自动回归保护；
   **`stress_large`（数十分钟到两小时，视档位）、`stress_scale`（约 1 分钟）与 `stress_bench`
   仍只在发布前手动运行**
   ——前两组依赖大量磁盘与时间，`stress_bench` 是性能基准，
@@ -251,6 +252,54 @@ LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authent
 - **一次性探针不留仓库**：一次性的验证程序/脚本（例如历史上仓库根出现过的 `target/probe/`
   探针）放 `target/` 下或直接编译到系统临时目录，用完即删；仓库根与 `src-tauri/` 下不应出现
   任何非源码文件。
+
+## 本地 CI 预检（只在发布前运行）
+
+`npm run ci:local`（`tools/ci/local-ci.mjs`）在推送候选版本或打标签前，复现 Windows CI 中
+**日常检查不会覆盖**的门槛。它和昂贵压力测试同级：日常开发、收尾与整理阶段都不运行，
+也不替代本文前面的轻量检查。
+
+覆盖范围：
+
+- 两个 workflow 的审计 ignore 列表逐字一致，并作为本地 RustSec 审计的 ignore 列表；
+- 平台分支只出现在 `platform/` 内（与 `windows-ci.yml` 的 grep 同规则，Node 实现）；
+- `npm ci`、生产与完整两条 `npm audit`（官方 registry）、RustSec `cargo audit`
+  （缺失时自动 `cargo install --locked cargo-audit`）；
+- `npm run verify:release-metadata`；
+- `npm run legal` 后与运行前文件比对，确认许可证清单与当前依赖一致；
+- 一次 `cargo test --features headless --no-run` 预编译 `gate_guard` 与九组便宜压力测试，
+  再串行运行它们。
+
+不重复日常检查：`npm test`、`cargo test --lib`、`cargo fmt --check`、`npm run build` 与
+`npx tsc --noEmit` 仍按「分层验证」在改动时运行。`stress_large` / `stress_scale` /
+`stress_bench` 也不在本地 CI 内，仍按上一节单独发起。
+
+失败策略：独立门槛互不阻断，最后一次性汇总；只有 `npm ci`、Rust 编译这类前置失败才会
+跳过依赖它的步骤。这样一次能看到所有要修的门槛，而不是按单个红点反复推送。
+
+并行边界与产物：
+
+- `npm ci`、Rust 编译、两条 npm 审计、RustSec 审计与元数据检查同时启动；
+- cargo 命令共用同一个 target 目录，**必须串行**；不要在脚本外并行跑多个 cargo；
+- 九组压力测试**串行**：`stress_support` 的 `report.jsonl` / `ledger.jsonl` 只有进程内锁，
+  跨进程并行写入会交错并破坏报告证据；
+- 日志与汇总写在 `<target>/ci/`（默认 `src-tauri/target/ci`，跟随 `CARGO_TARGET_DIR`），
+  已被 `/src-tauri/target/` 与 `*.log` 忽略，不进入版本控制，`cargo clean` 会一并清掉；
+- 许可证检查以**运行前的工作区文件**为基准，不要求先提交；失败时清单已被重新生成，
+  审查 diff 后随本次改动提交；
+- 首次运行要安装 `cargo-audit`（约 3–5 分钟）；热缓存一轮约 2 分钟（2026-10-21 实测
+  124 秒），其中九组压力测试约 1.5–2 分钟（实测 97 秒）。全新 target 或依赖刚更新时，
+  Rust 编译会明显更长。
+
+本地 CI 不替代 CI：SBOM、NSIS 打包、签名与安装包检查仍由 `release.yml` 负责。
+
+### 为什么需要它（2026-10-21 的三连失败）
+
+- 审计门槛由外部公告库驱动，代码没变也可能在新公告发布后变红；
+- `dependency-audit` 的步骤串行，一次推送只暴露第一层问题，修好 npm 后才看到 RustSec；
+- 依赖版本一变，`npm run legal` 必须重跑；这是本地可确定性复现的步骤，漏掉会让 `validate`
+  在许可证一致性处失败；
+- 因此修复时先跑完整集合，再决定改什么，不要按 CI 报出的单个红点逐轮推送。
 
 ## 持续集成
 

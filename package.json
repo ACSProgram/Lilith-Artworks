@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:pin-board": "vitest run src/modules/pin-board",
     "verify:release-metadata": "node tools/release/verify-metadata.mjs",
+    "ci:local": "node tools/ci/local-ci.mjs",
     "preview": "vite preview",
     "tauri": "tauri"
   },

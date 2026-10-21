@@ -8,6 +8,13 @@
 
 ## 当前批次状态
 
+2026-10-21 本地 CI 预检（本批次）：新增 `npm run ci:local`（`tools/ci/local-ci.mjs`），
+只覆盖日常检查之外的 CI 门槛——workflow 审计列表一致性、平台分支检查、两条 npm 审计、
+RustSec 审计、发布元数据、许可证一致性、headless 测试目标预编译与九组便宜压力测试；
+独立门槛并行启动、失败后继续跑完再汇总，日志只写 `src-tauri/target/ci/`。同批重新生成
+许可证清单，修复 webpki 升级后 `validate` 在「许可证一致性」处失败的问题。无 GUI 验收项；
+口径见 `docs/guides/validation.md` 的「本地 CI 预检」。
+
 2026-10-21 测试体检落地批（第一批已提交 `6f7e492`，第二批为本次提交；C9/C10 待发布前实跑）：
 `docs/planning/test-audit-2026-10-21.md` 的处理项分两批完成。第一批删除一次性的
 `stress_baseline` 组与过时调试档基线；修严格性能门（每笔耗时「只记录不比对」、吞吐量改「越大
