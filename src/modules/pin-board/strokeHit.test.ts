@@ -1,11 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   STROKE_TOOL,
-  decodeStrokeHeader,
-  type PinBoardStrokeGeometry,
   type PinBoardStrokeTool,
 } from "./strokeGeometry";
-import { arrowHeadPoints, encodeStrokeGeometry } from "./strokeRender";
+import { arrowHeadPoints } from "./strokeRender";
+import { strokeGeometryFixture, strokeItemFixture } from "./pinBoardFixtures";
 import {
   buildStrokeWorldOutlines,
   strokeHitBounds,
@@ -16,43 +15,11 @@ import {
 } from "./strokeHit";
 import type { PinBoardStrokeItem } from "./types";
 
-/** 100 × 20 的笔迹条目：四角就是世界坐标，便于把「局部」与「世界」对齐着断言。 */
-function strokeItem(overrides: Partial<PinBoardStrokeItem> = {}): PinBoardStrokeItem {
-  return {
-    kind: "stroke",
-    boardId: 1,
-    itemId: 5,
-    width: 100,
-    height: 20,
-    order: 0,
-    layer: 3,
-    deleted: false,
-    points: [[0, 0], [100, 0], [100, 20], [0, 20]],
-    uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
-    available: true,
-    tool: STROKE_TOOL.pen,
-    color: "#e5484d",
-    strokeWidth: 10,
-    ...overrides,
-  };
-}
-
-/** 造一条几何：头部字段直接从编码结果里解回来，不在这里重抄一遍头部口径。 */
-function geometryFor(
+const strokeItem = strokeItemFixture;
+const geometryFor = (
   tool: PinBoardStrokeTool,
   samples: readonly { u: number; v: number; pressure?: number }[] = [],
-): PinBoardStrokeGeometry {
-  const geometry = encodeStrokeGeometry(tool, samples);
-  return {
-    itemId: 5,
-    color: "#e5484d",
-    strokeWidth: 10,
-    width: 100,
-    height: 20,
-    ...decodeStrokeHeader(geometry),
-    geometry,
-  };
-}
+) => strokeGeometryFixture({ tool, samples });
 
 /** 水平方向的一条自由笔：局部 (10,10) → 世界 (10,10)，直到 (90,10)。 */
 function horizontalPen() {
@@ -134,6 +101,33 @@ describe("pin-board eraser hit testing", () => {
     );
     expect(strokeHitByCircle(ellipse, [98, 50], 1)).toBe(true);
     expect(strokeHitByCircle(ellipse, [50, 50], 0)).toBe(false);
+  });
+
+  it("adds the caller's tolerance outside the ink radius", () => {
+    // 100 × 100、线宽 4 的方块：描边占 0–4 与 96–100 两条带。
+    const square = buildStrokeWorldOutlines(
+      strokeItem({
+        width: 100,
+        height: 100,
+        strokeWidth: 4,
+        points: [[0, 0], [100, 0], [100, 100], [0, 100]],
+      }),
+      geometryFor(STROKE_TOOL.rect),
+    );
+    expect(strokeHitByCircle(square, [2, 50], 0)).toBe(true);
+    // 外侧 3 个单位容差之内仍算命中，再远就不算了。
+    expect(strokeHitByCircle(square, [-2, 50], 3)).toBe(true);
+    expect(strokeHitByCircle(square, [-6, 50], 3)).toBe(false);
+  });
+
+  it("finds a hairline through the minimum hit tolerance", () => {
+    const line = buildStrokeWorldOutlines(
+      strokeItem({ strokeWidth: 1, height: 20 }),
+      geometryFor(STROKE_TOOL.line),
+    );
+    // 线宽 1 → 半径 0.5，容差补到 3.5：偏 3 个单位仍点得中，偏 5 个就不行了。
+    expect(strokeHitByCircle(line, [50, 13], 3)).toBe(true);
+    expect(strokeHitByCircle(line, [50, 15], 3)).toBe(false);
   });
 
   it("includes the arrow head so the wings can be erased", () => {

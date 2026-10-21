@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { decodeStrokeHeader, STROKE_TOOL, type PinBoardStrokeGeometry } from "./strokeGeometry";
+import {
+  decodeStrokeHeader,
+  encodeStrokeGeometry,
+  STROKE_TOOL,
+  type PinBoardStrokeGeometry,
+} from "./strokeGeometry";
 import {
   STROKE_OUTLINE_VERTICES,
   STROKE_PRIMITIVE_KIND,
@@ -7,7 +12,6 @@ import {
   buildStrokeBatch,
   buildStrokeOutlines,
   decodeStrokeSamples,
-  encodeStrokeGeometry,
   mapLocalPoint,
   shapeAnchors,
   strokePointRadius,

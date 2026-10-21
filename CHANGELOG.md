@@ -101,6 +101,19 @@ entries for the reader; they are not a template every entry has to fill.
 - The pin-board board summary's `imageCount` is renamed `itemCount` (native field
   `item_count`): it counts every kind — bitmaps, text and strokes — not bitmaps
   alone.
+- The pin-board front end is split by responsibility too. `PinBoardModule` now
+  composes a sidebar (board list, trash, reorder and its list menu), a toolbar,
+  a canvas stage (GPU canvas, overlays, drawbar, layer panel), dialogs (text and
+  whole-board export on one local shell) and the canvas context menu. The
+  renderer keeps its editing state machine, while device/pipeline/texture
+  plumbing moved to `rendererGpu.ts`, the DOM stroke preview to
+  `strokePreview.ts`, and the offscreen export target, readback and stroke
+  buffers to `rendererExport.ts`. The geometry BLOB encoder moved next to the
+  decoder in `strokeGeometry.ts`, so `strokeDrawing.ts` no longer depends on
+  `strokeRender.ts`. Import/export/text/stroke queue boilerplate moved into
+  `usePinBoardTransfers.ts`, and the tool key map is now a single table in
+  `strokeDrawing.ts` that also feeds the drawbar labels. No observable behaviour
+  changes.
 - The pin-board stroke style label is now "大小" instead of "线宽": the value is
   both the pen width and the eraser diameter. Internal identifiers keep the
   `strokeWidth` name.

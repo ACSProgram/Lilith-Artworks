@@ -2,18 +2,18 @@
 
 ## 上下文入口
 
-- 页面、工具栏、快捷键绑定：`src/modules/pin-board/PinBoardModule.tsx`
-- 画板列表与选择、保存/导入/导出状态、生命周期参与者：`usePinBoardController.ts`
+- 页面编排与快捷键绑定：`src/modules/pin-board/PinBoardModule.tsx`；主工具栏 `PinBoardToolbar.tsx`，画板列表/回收站/拖放排序 `PinBoardSidebar.tsx`，画布舞台 `PinBoardCanvasStage.tsx`，文字与整画布导出对话框 `PinBoardDialogs.tsx`，画布右键菜单 `PinBoardContextMenu.tsx`，传输进度条 `PinBoardTransferProgress.tsx`
+- 画板列表与选择、保存与生命周期参与者：`usePinBoardController.ts`；导入（选择器/剪贴板/拖入）、导出、整画布导出、添加文字与笔迹落库队列：`usePinBoardTransfers.ts`
 - 后台结算队列与其展示状态：`pendingSettle.ts`、`usePendingSettle.ts`
 - 侧栏拖放排序的纯函数（插到目标行前/后、无变化时返回 null）：`boardOrder.ts`
-- WebGPU/Canvas 渲染与编辑状态：`renderer.ts`
+- WebGPU/Canvas 渲染与编辑状态：`renderer.ts`；设备/管线/纹理上传与 DDS·RGBA 负载校验 `rendererGpu.ts`；绘制预览层 `strokePreview.ts`；整画布导出的目标纹理、行带回读与导出笔迹缓冲 `rendererExport.ts`
 - 纹理请求尺寸与两级缓存预算：`texturePolicy.ts`
 - 纯几何：`geometry.ts`
 - 选择判定（加选修饰键、框选命中）：`selection.ts`；笔迹的墨迹命中见 `strokeHit.ts`
 - 进程内视图恢复：`session.ts`
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - 文字布局与栅格化（显示纹理用）：`textLayout.ts`
-- 添加文字对话框与内置取色器：`PinBoardModule.tsx`、`PinBoardColorPicker.tsx`
+- 添加文字对话框与内置取色器：`PinBoardDialogs.tsx`、`PinBoardColorPicker.tsx`
 - Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程，`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
 - 条目与导入上限（`MAX_BOARD_ITEMS`、`MAX_IMPORT_FILES`、`MAX_CLIPBOARD_IMAGE_BYTES`）：`src-tauri/src/pin_board/contracts.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
@@ -21,8 +21,9 @@
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
 - 整画布导出的原生侧（会话表、行带校验、PNG 流式写盘、临时文件与原子改名）：`src-tauri/src/pin_board/canvas_export.rs`
-- 笔迹渲染的几何与缓冲构建（局部坐标、SDF 图元、LOD 抽稀、顶点布局）：`strokeRender.ts`，着色器与管线在 `renderer.ts`
-- 绘制交互的纯状态（工具枚举与快捷键、Shift 约束、草稿到包围盒/几何的编码）：`strokeDrawing.ts`
+- 笔迹渲染的几何与缓冲构建（局部坐标、SDF 图元、LOD 抽稀、顶点布局）：`strokeRender.ts`，着色器与管线在 `rendererGpu.ts`
+- 绘制交互的纯状态（工具枚举与快捷键、Shift 约束、草稿到包围盒/几何的编码）：`strokeDrawing.ts`；几何 BLOB 的编码与解析同住 `strokeGeometry.ts`
+- 标注工具的键位、界面名与显示顺序：`strokeDrawing.ts` 的 `PIN_BOARD_TOOL_META`，快捷键分发与标注工具条共用这一份
 - 整画布导出的口径（默认倍率、建议上限与硬上限、行带/分块布局的纯函数）：`exportPolicy.ts`
 - 图片传输的取消信号（原子布尔、传输开始复位、循环在条目边界检查）：`src-tauri/src/pin_board/transfer.rs`
 - 笔迹的墨迹命中（条目几何展开成世界折线、按「墨迹半径 + 容差」判距/判交、缓存签名）：`strokeHit.ts`——橡皮擦、点选与框选共用
@@ -42,7 +43,7 @@
 
 整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字与笔迹条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字与笔迹条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
-前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为 controller 与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存/导入/导出状态、错误状态，并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者；`PinBoardModule.tsx` 只负责视图、弹窗与局部交互，`PinBoardRenderer` 只处理 GPU、画板装载与绘制。导入/导出的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。添加文字是一次瞬时命令、没有原生进度事件，只在等待期间用同一条本地传输条显示「正在添加文字」。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
+前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为控制器与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存状态、错误状态并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者，传输类样板（busy/进度/取消、导入导出、文字与笔迹队列）在 `usePinBoardTransfers.ts`；`PinBoardModule.tsx` 只做页面编排与快捷键，视图拆到 `PinBoardToolbar.tsx`、`PinBoardSidebar.tsx`、`PinBoardCanvasStage.tsx`、`PinBoardDialogs.tsx`、`PinBoardContextMenu.tsx`，`PinBoardRenderer` 只处理 GPU、画板装载与绘制（GPU 与导出的底层分别在 `rendererGpu.ts`、`rendererExport.ts`，绘制预览在 `strokePreview.ts`）。导入/导出的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。添加文字是一次瞬时命令、没有原生进度事件，只在等待期间用同一条本地传输条显示「正在添加文字」。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
 
 模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。
 

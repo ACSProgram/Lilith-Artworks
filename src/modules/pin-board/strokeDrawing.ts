@@ -21,9 +21,9 @@ import {
   MAX_STROKE_EXTENT,
   MAX_STROKE_POINTS,
   STROKE_TOOL,
+  encodeStrokeGeometry,
   type PinBoardStrokeTool,
 } from "./strokeGeometry";
-import { encodeStrokeGeometry } from "./strokeRender";
 import {
   normalisePenSamples,
   type PressureSample,
@@ -57,15 +57,27 @@ export const MIN_STROKE_DRAG_CSS_PIXELS = 3;
 /** 同一个点重复到达时的合并阈值（世界单位）：指针事件常带完全相同的坐标。 */
 const MIN_SAMPLE_DISTANCE = 1e-6;
 
-const TOOL_BY_KEY: Readonly<Record<string, PinBoardTool>> = {
-  v: "select",
-  p: "pen",
-  e: "eraser",
-  l: "line",
-  a: "arrow",
-  r: "rect",
-  o: "ellipse",
-};
+/**
+ * 工具的键位、界面名与顺序：快捷键分发与标注工具条共用这一份，提示里的字母因此
+ * 不可能与真正生效的键位漂移。
+ */
+export const PIN_BOARD_TOOL_META: ReadonlyArray<{
+  tool: PinBoardTool;
+  label: string;
+  shortcut: string;
+}> = [
+  { tool: "select", label: "选择", shortcut: "V" },
+  { tool: "pen", label: "画笔", shortcut: "P" },
+  { tool: "eraser", label: "橡皮", shortcut: "E" },
+  { tool: "line", label: "直线", shortcut: "L" },
+  { tool: "arrow", label: "箭头", shortcut: "A" },
+  { tool: "rect", label: "矩形", shortcut: "R" },
+  { tool: "ellipse", label: "椭圆", shortcut: "O" },
+];
+
+const TOOL_BY_KEY: Readonly<Record<string, PinBoardTool>> = Object.fromEntries(
+  PIN_BOARD_TOOL_META.map((entry) => [entry.shortcut.toLowerCase(), entry.tool]),
+);
 
 /**
  * 是否会产生几何（笔 / 直线 / 箭头 / 矩形 / 椭圆）。
@@ -90,7 +102,7 @@ export function strokeToolId(tool: StrokeToolName): PinBoardStrokeTool {
   return STROKE_TOOL[tool];
 }
 
-/** 单键工具快捷键（`V` 选择、`P` 笔、`E` 橡皮、`L` 直线、`A` 箭头、`R` 矩形、`O` 椭圆）。 */
+/** 单键工具快捷键：键位只在 `PIN_BOARD_TOOL_META` 里写一份，这里按小写归一后查表。 */
 export function toolForShortcut(key: string): PinBoardTool | null {
   return TOOL_BY_KEY[key.toLowerCase()] ?? null;
 }

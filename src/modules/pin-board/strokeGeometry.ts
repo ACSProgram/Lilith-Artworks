@@ -1,5 +1,5 @@
 /**
- * 笔迹几何的前端契约：工具编号、BLOB 布局与批量二进制的解析。
+ * 笔迹几何的前端契约：工具编号、BLOB 布局、写入侧的编码与读取侧的解析（含批量二进制）。
  *
  * 原生端的同一份契约在 `src-tauri/src/pin_board/stroke.rs`，两边的校验口径必须
  * 一致：任一侧改动都要同步另一侧与各自测试。几何只走数据库，不建纹理、不落文件。
@@ -145,4 +145,53 @@ export function parseStrokeBatch(payload: Uint8Array): Map<number, PinBoardStrok
 
 function rgbToHex(value: number): string {
   return `#${(value & 0x00ffffff).toString(16).toUpperCase().padStart(6, "0")}`;
+}
+
+/**
+ * 编码几何 BLOB（写入侧）。自由笔逐点量化 `u16 / u16 / u8`；形状只写头部，两端点由
+ * 包围盒与方向位推出。超出点数上限直接拒绝——抽稀与重采样由 `strokeSampling.ts`
+ * 在编码前完成。
+ */
+export function encodeStrokeGeometry(
+  tool: PinBoardStrokeTool,
+  samples: readonly { u: number; v: number; pressure?: number }[] = [],
+  direction = 0,
+): Uint8Array {
+  const isShape = tool !== STROKE_TOOL.pen;
+  const directionBits = Math.max(0, Math.min(3, Math.trunc(direction))) & 0b11;
+  if (isShape) {
+    if (samples.length > 0) throw new Error("形状笔迹不应包含点数据");
+    return new Uint8Array([
+      STROKE_GEOMETRY_VERSION,
+      tool,
+      directionBits,
+      0,
+      0, 0, 0, 0,
+    ]);
+  }
+  if (samples.length === 0) throw new Error("笔迹至少需要一个点");
+  if (samples.length > MAX_STROKE_POINTS) throw new Error("笔迹点数超过上限");
+  const hasPressure = samples.some((sample) => (sample.pressure ?? 0) > 0);
+  const bytes = new Uint8Array(STROKE_HEADER_BYTES + samples.length * STROKE_POINT_BYTES);
+  bytes[0] = STROKE_GEOMETRY_VERSION;
+  bytes[1] = tool;
+  bytes[2] = directionBits | (hasPressure ? 0b0000_0100 : 0);
+  bytes[3] = 0;
+  const view = new DataView(bytes.buffer);
+  view.setUint32(4, samples.length, true);
+  samples.forEach((sample, index) => {
+    const offset = STROKE_HEADER_BYTES + index * STROKE_POINT_BYTES;
+    view.setUint16(offset, quantiseUnit(sample.u), true);
+    view.setUint16(offset + 2, quantiseUnit(sample.v), true);
+    bytes[offset + 4] = Math.round(clamp(sample.pressure ?? 0, 0, 1) * 0xff);
+  });
+  return bytes;
+}
+
+function quantiseUnit(value: number): number {
+  return Math.round(clamp(value, 0, 1) * 0xffff);
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
 }

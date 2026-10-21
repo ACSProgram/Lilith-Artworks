@@ -8,36 +8,17 @@
 
 ## 当前批次状态
 
-2026-10-21 素材板结构收尾（批次二，本次提交）：按
-`pin-board-structural-cleanup-plan-2026-10-21.md` 把 `repository.rs` 拆成
-`src-tauri/src/pin_board/repository/` 六个子模块（`paths` / `boards` / `view` /
-`save` / `create` / `bitmap_io`），公开调用面仍是 `repository::*`。五处建条目流程收敛为
-`begin_item_mutation` + `record_initial_state` + `finish_item_mutation`，文字与笔迹载荷
-INSERT、单条落位、以及「规范文件名 + 仓库边界」检查各只剩一份实现（规范名判定收敛为
-`paths::is_item_dds_file`，相对路径拼装收敛为 `paths::relative_item_dds`）；修订冲突文案、
-redo 作废、`FULL_UV` 与默认图层抽成共享常量/helper。`imported_points` 移到 `arrange.rs`，条目与
-导入上限移到 `contracts.rs`（该文件补齐模块文档）；持久化测试按归属分到各子模块，迁移测试移入
-`library/schema.rs`，无头导入的条目数输出与 `stress_bench` 消费者同步改为 `itemCount`。
-行为只有一处防御性收紧：永久删除画板现在要求该画板已在回收站（此前按 id 直接硬删除，活画板也会
-连记录和 DDS 一起消失且无从撤销），界面观感无变化。自动验证已通过（`cargo fmt --check`、
-`cargo check --all-targets`、`cargo check --features headless --all-targets`、
-`cargo test --lib` 414 用例、`git diff --check`）。批次三仍按计划文件执行。
+2026-10-21 素材板结构收尾（三批全部落实，计划与实施记录已归档）：按
+`archive/pin-board-structural-cleanup-plan-2026-10-21.md` 完成结构整理——批次一补上纹理结果
+缓存键的仓库身份并按条目 kind 收紧图层契约，批次二把 Rust 持久化拆成
+`repository/{paths,boards,view,save,create,bitmap_io}.rs` 并收敛建条目公共流程，批次三把前端
+拆成侧栏/工具栏/画布舞台/对话框/右键菜单与 `usePinBoardTransfers`，渲染器只留编辑状态机
+（GPU、绘制预览与整画布导出的底层各自独立）。自动验证已通过（`cargo fmt --check`、
+`cargo test --lib` 414 用例、`npx tsc --noEmit`、`npm run test:pin-board` 24 文件 / 255 用例、
+`npm test` 49 文件 / 439 用例、`git diff --check`）；拆分后的界面观感与对话框外壳待人工验收。
+细节见 `archive/handoff-log-2026-10-21.md` 第 13 节，验收项在 `todo.md`。
 
-2026-10-21 素材板结构收尾（批次一，本次提交）：按
-`pin-board-structural-cleanup-plan-2026-10-21.md` 落实批次一。两处正确性修复：纹理结果缓存键加入
-仓库根路径（切仓库后画板/条目 id 从头复用不再串图；键同时从四元组改为具名字段结构、根路径按
-`PathBuf` 原样比较），`validate_editable` 按条目 kind 收紧图层契约（位图与文字的 layer 3 被拒，
-笔迹仍由 `effective_layer` 强制标注层）。卫生清理：删除 `session.ts` 的 `dropArtworkSessions`
-及其测试（并在模块注释里说明会话不做淘汰的理由）、`strokeGeometry.ts` 的 `STROKE_LAYER` 与
-`MAX_STROKE_WIDTH`（与 `strokeDrawing.ts` 的 500 同名不同义）、renderer 的两层纹理别名，清理
-`stroke.rs` 的「阶段 2」注释与不再需要的 `allow(dead_code)`；`imageCount` 在 `PinBoardSummary`、
-`PinBoardInteractionState` 与原生 `item_count` 一并改名为 `itemCount`；同步过期注释与模块/架构
-文档（补充缓存键构成、位图/文字占标注层被拒的契约与测试覆盖），并清掉本文件与 `todo.md` 中
-已归档素材板批次的表层段落。自动验证已通过（`cargo fmt --check`、`cargo test --lib pin_board`
-88 用例、`npm run test:pin-board` 24 文件 / 256 用例、`npx tsc --noEmit`、`git diff --check`）。
-批次三仍按计划文件执行。
-
-2026-10-21 素材板图层开关与锁定解耦（本次提交）：图层面板此前跟着按钮组共用的
+2026-10-21 素材板图层开关与锁定解耦（已提交 `2f4c323`）：图层面板此前跟着按钮组共用的
 `editingBlocked`（锁定或导出）走，锁定状态下四个开关一并置灰——那是整画布导出引入统一禁用
 条件时把 `locked` 顺带并进来的结果，计划与模块文档都只要求「导出期间禁用图层面板」。现改为
 独立的 `pinBoardLayersPanelDisabled`，只检查渲染器是否可用与是否正在导出：图层显隐是纯视图
@@ -60,15 +41,15 @@ Provider 同文件时，开发模式保存 Provider 会热更新出新的 contex
 自动验证已通过（`tsc --noEmit`、`vitest run src/app`），**兜底界面的观感、真实崩溃恢复与
 热更新不再卸载界面仍待人工确认**（验收项在 `todo.md`）。
 
-2026-10-21 本地 CI 预检（本批次）：新增 `npm run ci:local`（`tools/ci/local-ci.mjs`），
+2026-10-21 本地 CI 预检（已提交 `d58dee7`）：新增 `npm run ci:local`（`tools/ci/local-ci.mjs`），
 只覆盖日常检查之外的 CI 门槛——workflow 审计列表一致性、平台分支检查、两条 npm 审计、
 RustSec 审计、发布元数据、许可证一致性、headless 测试目标预编译与九组便宜压力测试；
 独立门槛并行启动、失败后继续跑完再汇总，日志只写 `src-tauri/target/ci/`。同批重新生成
 许可证清单，修复 webpki 升级后 `validate` 在「许可证一致性」处失败的问题。无 GUI 验收项；
 口径见 `docs/guides/validation.md` 的「本地 CI 预检」。
 
-2026-10-21 测试体检落地批（第一批已提交 `6f7e492`，第二批为本次提交；C9/C10 待发布前实跑）：
-`docs/planning/test-audit-2026-10-21.md` 的处理项分两批完成。第一批删除一次性的
+2026-10-21 测试体检落地批（第一批已提交 `6f7e492`，第二批已提交 `b11781b`；C9/C10 待发布前
+实跑）：`docs/planning/test-audit-2026-10-21.md` 的处理项分两批完成。第一批删除一次性的
 `stress_baseline` 组与过时调试档基线；修严格性能门（每笔耗时「只记录不比对」、吞吐量改「越大
 越好」）、C7 第 6 检查点（改由 `COMMIT_CHECKPOINTS` 驱动）、J5 文案对齐；收紧 D1/K2/J2/G2 与
 前端 3.8/3.9 弱断言；新增 R7（损坏快照+内容变化再提交）、C9/C10（大文件并行强杀、4 MiB 边界）、
@@ -81,9 +62,10 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 逐项状态见体检报告顶部的「处理状态」注记；行为变化见 `CHANGELOG.md` 的 `## Unreleased`。
 剩余项（3.7 实际收紧、C9/C10 与 4.8 实跑、4.6 暂缓）在 `todo.md`。
 
-2026-10-21 版本切分 `0.3.0-alpha.5`（未打标签）：`CHANGELOG.md` 的 `## Unreleased` 落为带
-日期的 `## 0.3.0-alpha.5 - 2026-10-21` 小节并按「CHANGELOG 写法」再压缩一遍，顶部重留空的
-`## Unreleased`；五处版本字段、许可清单（`npm run legal`）与 `tools/release/verify-metadata.mjs`
+2026-10-21 版本切分 `0.3.0-alpha.5`（已提交 `3974bcc`，未打标签）：`CHANGELOG.md` 的
+`## Unreleased` 落为带日期的 `## 0.3.0-alpha.5 - 2026-10-21` 小节并按「CHANGELOG 写法」再压缩
+一遍，顶部重留空的 `## Unreleased`；五处版本字段、许可清单（`npm run legal`）与
+`tools/release/verify-metadata.mjs`
 的版本→schema 映射同步为 `0.3.0-alpha.5 → repository schema v6`（登记表在 schema 升 v6 时
 已预登记，本次起 `verify-metadata` 恢复一致）；README 与 `docs/planning/` 的版本引用一并
 更新。该版本收拢 alpha4 之后的全部改动——素材板笔迹与图层、备份检查元数据接线、快速命中
@@ -129,6 +111,9 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 
 ## 下一步
 
+- 素材板结构收尾的界面确认：拆分后的侧栏、工具栏、画布舞台、对话框与右键菜单外观与交互不变；
+  文字与整画布导出共用本地对话框外壳后的观感一致；绘制预览、选中描边与整画布导出的输出与
+  拆分前一致。验收项见 `todo.md`。
 - 错误边界的界面验收：根兜底顶条与窗口按钮、区块兜底的作用范围（含素材板窗格内的位置）、
   热更新不再整棵卸载，以及 `[boundary]` 日志能否按标签筛到。验收项见 `todo.md`。
 - 测试体检第二批的收尾：随发布前压力测试轮运行 C9/C10（含 4.8 新增的临时文件清理闭环），并用

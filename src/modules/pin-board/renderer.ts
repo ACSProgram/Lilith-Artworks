@@ -1,3 +1,11 @@
+/**
+ * 素材板渲染器：画板装载、屏幕绘制、选中/变换/绘制/擦除的编辑状态机与保存结算。
+ *
+ * 这里只管「这一帧画什么」和「用户正在改什么」：设备、管线与纹理上传在 `rendererGpu.ts`，
+ * 绘制预览的 DOM 叠加层在 `strokePreview.ts`，整画布导出的离屏目标、回读与导出笔迹缓冲在
+ * `rendererExport.ts`，笔迹的几何构建与缓冲打包在 `strokeRender.ts`。
+ */
+
 import { errorMessage } from "../../shared/errors";
 import { diagnosticsLog, diagnosticsSlowStep } from "../../shared/diagnostics";
 import { pinBoardApi } from "./api";
@@ -27,7 +35,6 @@ import {
   isDrawingTool,
   isStrokeTool,
   resolveStrokeDraft,
-  strokeDraftSamples,
   toolForShortcut,
   type PinBoardTool,
   type StrokeCommitRequest,
@@ -45,10 +52,8 @@ import {
 } from "./strokeHit";
 import {
   STROKE_OUTLINE_VERTICES,
-  STROKE_VERTEX_BYTES,
   buildStrokeBatch,
   buildStrokeOutlines,
-  strokePointRadius,
   type StrokeBatch,
 } from "./strokeRender";
 import {
@@ -96,28 +101,44 @@ import {
   type CanvasExportTile,
 } from "./exportPolicy";
 import {
-  estimatedTextureLoadBytes,
-  estimatedTextureResidentBytes,
   PIN_BOARD_CANVAS_DIMENSION_LIMIT,
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   PIN_BOARD_NATIVE_TEXTURE_LIMIT,
-  PIN_BOARD_RGBA_PREVIEW_BUDGET_BYTES,
   PIN_BOARD_TEXTURE_LOAD_BUDGET_BYTES,
   PIN_BOARD_TEXTURE_STAGING_MARGIN_BYTES,
-  PIN_BOARD_TEXTURE_UPLOAD_BUDGET_BYTES,
-  bc7TextureDimensions,
-  bc7TextureUvScale,
   requestedTextureDimension,
   textureBudgetsForLevel,
-  textureUploadLayout,
   type PinBoardTextureBudgets,
 } from "./texturePolicy";
+import { requestedTextTextureDimension } from "./textLayout";
 import {
-  requestedTextTextureDimension,
-  textRgbaPayload,
-  textTextureResidentBytes,
-  textTextureRgbaBytes,
-} from "./textLayout";
+  adjustLiveRenderers,
+  clearColor,
+  destroyTexture,
+  estimatedLoadBytes,
+  estimatedResidentBytes,
+  loadTexture,
+  makeGpu,
+  outlineData,
+  releaseCanvasGpu,
+  vertexData,
+  type GpuState,
+  type LoadedTexture,
+} from "./rendererGpu";
+import {
+  buildExportStrokeBuffers,
+  createExportTexture,
+  destroyExportStrokeBuffers,
+  exportTextureDimension,
+  exportTileBounds,
+  readExportTile,
+  type ExportStrokeBuffers,
+} from "./rendererExport";
+import {
+  clearStrokePreview as clearStrokePreviewLayer,
+  coalescedStrokeSamples,
+  drawStrokePreview as paintStrokePreview,
+} from "./strokePreview";
 
 /** 结算遇到 `repository_busy` 时的重试间隔。 */
 const FINALIZE_BUSY_RETRY_DELAY_MS = 300;
@@ -133,43 +154,6 @@ function isRepositoryBusy(error: unknown): boolean {
   const message = errorMessage(error);
   return message.includes("仓库正在写入") || message.includes("另一个进程写入");
 }
-
-type GpuState = {
-  canvas: HTMLCanvasElement;
-  device: any;
-  context: any;
-  pipeline: any;
-  outlinePipeline: any;
-  /** 笔迹 SDF 管线：整板笔迹合并成一条三角形列表一次画完。 */
-  strokePipeline: any;
-  /**
-   * 整画布导出的离屏管线：与屏幕那三条只有目标格式不同（`rgba8unorm` 而不是画布
-   * 格式），着色器与绑定布局完全共用。回读后能直接按 RGBA 编 PNG，省一次通道交换。
-   */
-  exportPipeline: any;
-  exportStrokePipeline: any;
-  /** 导出专用 uniform（逐块写入），与屏幕的 `viewportBuffer` 分开。 */
-  exportViewportBuffer: any;
-  exportViewportBindGroup: any;
-  sampler: any;
-  viewportBuffer: any;
-  viewportBindGroup: any;
-  /** 诊断用：本设备的创建序号，便于在日志里与销毁记录配对。 */
-  sequence: number;
-  /** 设备释放后，异步纹理读取返回时不得再次触碰 WebGPU 对象。 */
-  released: boolean;
-};
-
-type LoadedTexture = {
-  texture: any;
-  bindGroup: any;
-  vertexBuffer: any;
-  outlineBuffer: any;
-  byteSize: number;
-  maxDimension: number;
-  uvScale: [number, number];
-  lastUsed: number;
-};
 
 type TextureLoadCandidate = {
   image: PinBoardItem;
@@ -222,6 +206,24 @@ export interface PinBoardInteractionState {
   exporting: boolean;
 }
 
+/** 未装载画板或没有渲染器时的交互状态：锁定、无选中、工具为选择。 */
+export const DEFAULT_PIN_BOARD_INTERACTION: PinBoardInteractionState = {
+  itemCount: 0,
+  selectedCount: 0,
+  arrangeableCount: 0,
+  exportableCount: 0,
+  layerCounts: [0, 0, 0, 0],
+  canUndo: false,
+  canRedo: false,
+  dirty: false,
+  saving: false,
+  locked: true,
+  zoomPercent: 100,
+  tool: "select",
+  visibleLayers: normalizeLayerVisibility(null),
+  exporting: false,
+};
+
 export interface PinBoardContextMenuRequest {
   clientX: number;
   clientY: number;
@@ -257,7 +259,6 @@ const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 /** 橡皮环形光标的视觉最小直径（CSS 像素）：再小就看不见了。 */
 const ERASER_RING_MIN_CSS_PIXELS = 4;
-const QUAD_TRIANGLE_ORDER = [0, 1, 3, 3, 1, 2] as const;
 /**
  * 笔迹缓冲的超扫边距（视口宽高的比例）：四周各扩这么多，平移在这个范围内既不改
  * 可见集合、也不改缓冲签名，因此拖动画布不重建；逐段裁剪用同一个框，边距内平移
@@ -278,645 +279,12 @@ const DRAG_CURSOR_CLASS: Record<DragMode, string> = {
   erase: "erasing",
 };
 
-const SHADER = `
-struct Viewport { bounds: vec4f };
-@group(0) @binding(0) var<uniform> viewport: Viewport;
-@group(1) @binding(0) var boardSampler: sampler;
-@group(1) @binding(1) var boardTexture: texture_2d<f32>;
-struct VertexInput { @location(0) position: vec2f, @location(1) uv: vec2f };
-struct VertexOutput { @builtin(position) position: vec4f, @location(0) uv: vec2f };
-fn projected(position: vec2f) -> vec4f {
-  let minPoint = viewport.bounds.xy;
-  let extent = max(viewport.bounds.zw, vec2f(1.0));
-  let normalized = (position - minPoint) / extent;
-  return vec4f(normalized.x * 2.0 - 1.0, normalized.y * 2.0 - 1.0, 0.0, 1.0);
-}
-@vertex fn vs(input: VertexInput) -> VertexOutput {
-  var output: VertexOutput;
-  output.position = projected(input.position);
-  output.uv = input.uv;
-  return output;
-}
-@fragment fn fs(input: VertexOutput) -> @location(0) vec4f {
-  return textureSample(boardTexture, boardSampler, input.uv);
-}
-@vertex fn outlineVs(@location(0) position: vec2f) -> @builtin(position) vec4f {
-  return projected(position);
-}
-@fragment fn outlineFs() -> @location(0) vec4f {
-  return vec4f(1.0, 0.76, 0.12, 1.0);
-}
-`;
-
-/**
- * 笔迹着色器：整板笔迹合并成一条三角形列表一次画完。
- *
- * 每个顶点带「世界位置 + 局部坐标 + 图元参数」，片元在局部空间算距离场后按
- * `viewport.scale.x`（设备像素 / 世界单位）做 1 px 羽化。局部坐标到世界坐标的
- * 双线性映射在 CPU 侧完成（`strokeRender.ts`），因此移动、旋转、缩放不需要任何
- * 着色器分支。
- */
-const STROKE_SHADER = `
-struct Viewport {
-  bounds: vec4f,
-  // x = 设备像素 / 世界单位；yzw 保留。
-  scale: vec4f
-};
-@group(0) @binding(0) var<uniform> viewport: Viewport;
-
-struct StrokeVertex {
-  @location(0) position: vec2f,
-  @location(1) local: vec2f,
-  @location(2) anchorA: vec2f,
-  @location(3) anchorB: vec2f,
-  @location(4) anchorC: vec2f,
-  @location(5) radius: vec2f,
-  @location(6) color: vec4f,
-  @location(7) params: vec2f
-};
-
-struct StrokeVaryings {
-  @builtin(position) position: vec4f,
-  @location(0) local: vec2f,
-  @location(1) anchorA: vec2f,
-  @location(2) anchorB: vec2f,
-  @location(3) anchorC: vec2f,
-  @location(4) radius: vec2f,
-  @location(5) color: vec4f,
-  @location(6) params: vec2f
-};
-
-fn projected(position: vec2f) -> vec4f {
-  let minPoint = viewport.bounds.xy;
-  let extent = max(viewport.bounds.zw, vec2f(1.0));
-  let normalized = (position - minPoint) / extent;
-  return vec4f(normalized.x * 2.0 - 1.0, normalized.y * 2.0 - 1.0, 0.0, 1.0);
-}
-
-@vertex fn strokeVs(input: StrokeVertex) -> StrokeVaryings {
-  var output: StrokeVaryings;
-  output.position = projected(input.position);
-  output.local = input.local;
-  output.anchorA = input.anchorA;
-  output.anchorB = input.anchorB;
-  output.anchorC = input.anchorC;
-  output.radius = input.radius;
-  output.color = input.color;
-  output.params = input.params;
-  return output;
-}
-
-fn sdBox(p: vec2f, halfSize: vec2f) -> f32 {
-  let d = abs(p) - halfSize;
-  return length(max(d, vec2f(0.0))) + min(max(d.x, d.y), 0.0);
-}
-
-fn sdTriangle(p: vec2f, p0: vec2f, p1: vec2f, p2: vec2f) -> f32 {
-  let e0 = p1 - p0;
-  let e1 = p2 - p1;
-  let e2 = p0 - p2;
-  let v0 = p - p0;
-  let v1 = p - p1;
-  let v2 = p - p2;
-  let pq0 = v0 - e0 * clamp(dot(v0, e0) / max(dot(e0, e0), 1e-8), 0.0, 1.0);
-  let pq1 = v1 - e1 * clamp(dot(v1, e1) / max(dot(e1, e1), 1e-8), 0.0, 1.0);
-  let pq2 = v2 - e2 * clamp(dot(v2, e2) / max(dot(e2, e2), 1e-8), 0.0, 1.0);
-  let side = sign(e0.x * e2.y - e0.y * e2.x);
-  let d0 = vec2f(dot(pq0, pq0), side * (v0.x * e0.y - v0.y * e0.x));
-  let d1 = vec2f(dot(pq1, pq1), side * (v1.x * e1.y - v1.y * e1.x));
-  let d2 = vec2f(dot(pq2, pq2), side * (v2.x * e2.y - v2.y * e2.x));
-  let d = min(min(d0, d1), d2);
-  return -sqrt(d.x) * sign(d.y);
-}
-
-@fragment fn strokeFs(input: StrokeVaryings) -> @location(0) vec4f {
-  let kind = input.params.x;
-  var dist: f32 = 0.0;
-  if (kind < 0.5) {
-    // 锥形胶囊：自由笔与直线，宽度在两端之间线性插值。
-    let pa = input.local - input.anchorA;
-    let ba = input.anchorB - input.anchorA;
-    let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-8), 0.0, 1.0);
-    dist = length(pa - ba * h) - mix(input.radius.x, input.radius.y, h);
-  } else if (kind < 1.5) {
-    let center = (input.anchorA + input.anchorB) * 0.5;
-    let halfSize = abs(input.anchorB - input.anchorA) * 0.5;
-    dist = abs(sdBox(input.local - center, halfSize)) - input.radius.x;
-  } else if (kind < 2.5) {
-    // 椭圆：用「隐函数值 / 梯度长度」近似距离。早先用 min(radii) 缩放隐函数，长短轴
-    // 差距越大越低估距离，笔画的左右两端会明显变粗并被四边形切平；这个近似在常见的
-    // 长短轴比例下误差只有几个百分点，扁椭圆不会在两端变粗（极端细长的仍有偏差）。
-    let radii = max(input.anchorB, vec2f(1e-4));
-    let p = input.local - input.anchorA;
-    let k0 = length(p / radii);
-    let k1 = length(p / (radii * radii));
-    let approx = k0 * (k0 - 1.0) / max(k1, 1e-8);
-    dist = abs(approx) - input.radius.x;
-  } else {
-    dist = sdTriangle(input.local, input.anchorA, input.anchorB, input.anchorC);
-  }
-  let feather = max(0.5 / max(viewport.scale.x, 1e-6), 1e-6);
-  let coverage = clamp(1.0 - smoothstep(-feather, feather, dist), 0.0, 1.0);
-  return vec4f(input.color.rgb, input.color.a * coverage);
-}
-`;
-
-/** 视口 uniform 的字节数：`bounds` + `scale` 两个 vec4f。 */
-const VIEWPORT_UNIFORM_BYTES = 32;
-
-/** 离屏导出目标的格式：回读后直接就是 PNG 需要的 RGBA 字节序。 */
-const EXPORT_TARGET_FORMAT = "rgba8unorm";
-/** GPU 纹理用途位：RENDER_ATTACHMENT / COPY_SRC / COPY_DST / MAP_READ。 */
-const TEXTURE_USAGE_RENDER_ATTACHMENT = 0x10;
-const TEXTURE_USAGE_COPY_SRC = 0x01;
-const BUFFER_USAGE_MAP_READ = 0x01;
-const BUFFER_USAGE_COPY_DST = 0x08;
-/** `GPUMapMode.READ`。 */
-const MAP_MODE_READ = 0x01;
-/** 回读时 `bytesPerRow` 必须是 256 的倍数。 */
-const READBACK_ROW_ALIGNMENT = 256;
-
-/**
- * 按目标格式建渲染管线。屏幕（画布首选格式）与整画布导出（`rgba8unorm`）共用这一份：
- * 着色器与绑定布局完全相同，只有 `format` 不同，因此离屏导出不需要第二套着色器。
- */
-function createBoardPipelines(
-  device: any,
-  module: any,
-  strokeModule: any,
-  viewportLayout: any,
-  textureLayout: any,
-  format: string,
-  includeOutline: boolean,
-) {
-  const blend = {
-    color: { srcFactor: "src-alpha", dstFactor: "one-minus-src-alpha", operation: "add" },
-    alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" },
-  };
-  const pipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [viewportLayout, textureLayout] }),
-    vertex: {
-      module,
-      entryPoint: "vs",
-      buffers: [{
-        arrayStride: 16,
-        attributes: [
-          { shaderLocation: 0, offset: 0, format: "float32x2" },
-          { shaderLocation: 1, offset: 8, format: "float32x2" },
-        ],
-      }],
-    },
-    fragment: {
-      module,
-      entryPoint: "fs",
-      targets: [{ format, blend }],
-    },
-    primitive: { topology: "triangle-list" },
-  });
-  const outlinePipeline = includeOutline
-    ? device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [viewportLayout] }),
-      vertex: {
-        module,
-        entryPoint: "outlineVs",
-        buffers: [{
-          arrayStride: 8,
-          attributes: [{ shaderLocation: 0, offset: 0, format: "float32x2" }],
-        }],
-      },
-      fragment: { module, entryPoint: "outlineFs", targets: [{ format }] },
-      primitive: { topology: "line-strip" },
-    })
-    : null;
-  const strokePipeline = device.createRenderPipeline({
-    layout: device.createPipelineLayout({ bindGroupLayouts: [viewportLayout] }),
-    vertex: {
-      module: strokeModule,
-      entryPoint: "strokeVs",
-      buffers: [{
-        arrayStride: STROKE_VERTEX_BYTES,
-        attributes: [
-          { shaderLocation: 0, offset: 0, format: "float32x2" },
-          { shaderLocation: 1, offset: 8, format: "float32x2" },
-          { shaderLocation: 2, offset: 16, format: "float32x2" },
-          { shaderLocation: 3, offset: 24, format: "float32x2" },
-          { shaderLocation: 4, offset: 32, format: "float32x2" },
-          { shaderLocation: 5, offset: 40, format: "float32x2" },
-          { shaderLocation: 6, offset: 48, format: "float32x4" },
-          { shaderLocation: 7, offset: 64, format: "float32x2" },
-        ],
-      }],
-    },
-    fragment: {
-      module: strokeModule,
-      entryPoint: "strokeFs",
-      targets: [{ format, blend }],
-    },
-    primitive: { topology: "triangle-list" },
-  });
-  return { pipeline, outlinePipeline, strokePipeline };
-}
-
 function cloneQuad(quad: Quad): Quad {
   return quad.map((point) => [...point] as Point) as Quad;
 }
 
 function cloneImage(image: PinBoardItem): PinBoardItem {
   return { ...image, points: cloneQuad(image.points), uv: cloneQuad(image.uv) };
-}
-
-/** 一次指针事件换算出的笔迹采样：世界坐标 + 压感 + 指针类型。 */
-interface PointerStrokeSample {
-  point: Point;
-  pressure: number;
-  pointerType: string;
-}
-
-/**
- * 一次指针事件里的全部采样点。
- *
- * Chromium 会把 `pointermove` 合并到约 60 Hz，被合并掉的中间点只在
- * `getCoalescedEvents()` 里；不可用（旧内核、测试环境）或返回空数组时退回事件本身。
- * 一次事件内的所有点共用同一个画布矩形，不必逐点测量布局。
- */
-function coalescedStrokeSamples(
-  event: PointerEvent,
-  rect: DOMRect,
-  viewport: Viewport,
-): PointerStrokeSample[] {
-  const coalesced = typeof event.getCoalescedEvents === "function"
-    ? event.getCoalescedEvents()
-    : [];
-  const events = coalesced.length > 0 ? coalesced : [event];
-  return events.map((entry) => ({
-    point: screenToWorld(entry.clientX, entry.clientY, rect, viewport),
-    pressure: entry.pressure,
-    pointerType: entry.pointerType ?? "",
-  }));
-}
-
-function estimatedLoadBytes(image: PinBoardItem, maxDimension: number): number {
-  if (image.kind === "text") {
-    // 文字没有 DDS：负载是前端栅格化出的 RGBA 加头，另外留一份给 canvas 到
-    // 上传缓冲的临时拷贝。
-    return 12 + textTextureRgbaBytes(image, maxDimension) * 2;
-  }
-  return estimatedTextureLoadBytes(image, maxDimension);
-}
-
-function estimatedResidentBytes(image: PinBoardItem, maxDimension: number): number {
-  if (image.kind === "text") return textTextureResidentBytes(image, maxDimension);
-  // 笔迹是 SDF 几何，不占纹理预算。
-  if (image.kind === "stroke") return 0;
-  return estimatedTextureResidentBytes(image, maxDimension);
-}
-
-function isRgbaPayload(bytes: Uint8Array): boolean {
-  return bytes.byteLength >= 12
-    && bytes[0] === 0x52
-    && bytes[1] === 0x47
-    && bytes[2] === 0x42
-    && bytes[3] === 0x41;
-}
-
-function ddsHeader(bytes: Uint8Array) {
-  if (bytes.byteLength < 148
-    || bytes[0] !== 0x44
-    || bytes[1] !== 0x44
-    || bytes[2] !== 0x53
-    || bytes[3] !== 0x20) {
-    throw new Error("不是有效的 DDS 文件");
-  }
-  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-  return {
-    width: view.getUint32(16, true),
-    height: view.getUint32(12, true),
-    data: bytes.subarray(148),
-  };
-}
-
-function checkedPayloadBytes(width: number, height: number, bytesPerPixel: number): number {
-  const total = width * height * bytesPerPixel;
-  if (!Number.isSafeInteger(total) || total < 1) throw new Error("纹理负载尺寸过大");
-  return total;
-}
-
-function vertexData(
-  image: Pick<PinBoardItem, "points" | "uv">,
-  uvScale: readonly [number, number] = [1, 1],
-): Float32Array {
-  return new Float32Array(QUAD_TRIANGLE_ORDER.flatMap((index) => [
-    image.points[index][0],
-    image.points[index][1],
-    image.uv[index][0] * uvScale[0],
-    image.uv[index][1] * uvScale[1],
-  ]));
-}
-
-function outlineData(image: Pick<PinBoardItem, "points">): Float32Array {
-  return new Float32Array([0, 1, 2, 3, 0].flatMap((index) => image.points[index]));
-}
-
-function createGeometryBuffers(
-  device: any,
-  image: PinBoardItem,
-  uvScale: readonly [number, number] = [1, 1],
-) {
-  const vertices = vertexData(image, uvScale);
-  let vertexBuffer: any = null;
-  let outlineBuffer: any = null;
-  try {
-    vertexBuffer = device.createBuffer({
-      size: vertices.byteLength,
-      usage: 0x20 | 0x08,
-      mappedAtCreation: true,
-    });
-    new Float32Array(vertexBuffer.getMappedRange()).set(vertices);
-    vertexBuffer.unmap();
-
-    const outline = outlineData(image);
-    outlineBuffer = device.createBuffer({
-      size: outline.byteLength,
-      usage: 0x20 | 0x08,
-      mappedAtCreation: true,
-    });
-    new Float32Array(outlineBuffer.getMappedRange()).set(outline);
-    outlineBuffer.unmap();
-    return { vertexBuffer, outlineBuffer };
-  } catch (error) {
-    outlineBuffer?.destroy();
-    vertexBuffer?.destroy();
-    throw error;
-  }
-}
-
-/**
- * 诊断计数：`gpuDevicesCreated` 单调递增，`liveRenderers` 反映未销毁的渲染器。
- * 与 `destroy()` 的记录配对后可判断切换作品/画板时是否在累积 GPU 设备。
- */
-let gpuDevicesCreated = 0;
-let liveRenderers = 0;
-
-/**
- * 每块 canvas 当前的 GPU 设备序号。同一块 canvas 会被反复 configure 到不同设备，
- * 销毁旧渲染器时只允许当前 owner 解绑上下文，避免旧设备影响新渲染器的 surface。
- */
-const canvasGpuOwners = new WeakMap<HTMLCanvasElement, number>();
-
-async function makeGpu(canvas: HTMLCanvasElement): Promise<GpuState> {
-  const browserGpu = (navigator as any).gpu;
-  if (!browserGpu) throw new Error("当前 WebView 不支持 WebGPU");
-  const adapter = await browserGpu.requestAdapter();
-  if (!adapter) throw new Error("无法初始化 WebGPU 适配器");
-  if (!adapter.features.has("texture-compression-bc")) {
-    throw new Error("当前显卡不支持 BC7 纹理");
-  }
-
-  const device = await adapter.requestDevice({ requiredFeatures: ["texture-compression-bc"] });
-  // 设备序号在设备登记之前确定，使下面两个异步回调带上与实际登记一致的序号。
-  const deviceSequence = gpuDevicesCreated + 1;
-  // 设备丢失是显存压力或驱动重置的信号；主动 destroy 产生的 "destroyed" 不算异常。
-  if (device.lost) {
-    void device.lost.then((info: { reason?: string; message?: string }) => {
-      const reason = info?.reason ?? "unknown";
-      if (reason === "destroyed") return;
-      diagnosticsLog(
-        "warn",
-        `[gpu] pin-board gpu device lost: seq=${deviceSequence}, reason=${reason}, message=${info?.message ?? ""}`,
-      );
-    });
-  }
-  // 未被错误作用域捕获的 GPU 错误默认被静默吞掉（异步校验失败、队列被回收等）。
-  if ("onuncapturederror" in device) {
-    device.onuncapturederror = (event: { error?: { message?: string } }) => {
-      diagnosticsLog(
-        "warn",
-        `[gpu] pin-board gpu uncaptured error: seq=${deviceSequence}, message=${event?.error?.message ?? "unknown"}`,
-      );
-    };
-  }
-  const context = (canvas as any).getContext("webgpu");
-  const format = browserGpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "opaque" });
-  const module = device.createShaderModule({ code: SHADER });
-  const viewportLayout = device.createBindGroupLayout({
-    entries: [{
-      binding: 0,
-      // 片元阶段也要可见：笔迹着色器按 `viewport.scale.x` 换算羽化宽度。
-      visibility: 0x1 | 0x2,
-      buffer: { type: "uniform" },
-    }],
-  });
-  const textureLayout = device.createBindGroupLayout({
-    entries: [
-      { binding: 0, visibility: 0x2, sampler: { type: "filtering" } },
-      { binding: 1, visibility: 0x2, texture: { sampleType: "float" } },
-    ],
-  });
-  const strokeModule = device.createShaderModule({ code: STROKE_SHADER });
-  const { pipeline, outlinePipeline, strokePipeline } = createBoardPipelines(
-    device,
-    module,
-    strokeModule,
-    viewportLayout,
-    textureLayout,
-    format,
-    true,
-  );
-  // 离屏导出复用同一份着色器与绑定布局，只把目标格式换成 rgba8unorm；导出不画选中
-  // 描边，因此不需要那条管线。
-  const { pipeline: exportPipeline, strokePipeline: exportStrokePipeline } = createBoardPipelines(
-    device,
-    module,
-    strokeModule,
-    viewportLayout,
-    textureLayout,
-    EXPORT_TARGET_FORMAT,
-    false,
-  );
-  const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-  const viewportBuffer = device.createBuffer({
-    size: VIEWPORT_UNIFORM_BYTES,
-    usage: 0x40 | 0x08,
-  });
-  const viewportBindGroup = device.createBindGroup({
-    layout: viewportLayout,
-    entries: [{ binding: 0, resource: { buffer: viewportBuffer } }],
-  });
-  const exportViewportBuffer = device.createBuffer({
-    size: VIEWPORT_UNIFORM_BYTES,
-    usage: 0x40 | 0x08,
-  });
-  const exportViewportBindGroup = device.createBindGroup({
-    layout: viewportLayout,
-    entries: [{ binding: 0, resource: { buffer: exportViewportBuffer } }],
-  });
-  gpuDevicesCreated = deviceSequence;
-  canvasGpuOwners.set(canvas, gpuDevicesCreated);
-  diagnosticsLog(
-    "info",
-    `pin-board gpu device created: seq=${gpuDevicesCreated}, liveRenderers=${liveRenderers}`,
-  );
-  return {
-    canvas,
-    device,
-    context,
-    pipeline,
-    outlinePipeline,
-    strokePipeline,
-    exportPipeline,
-    exportStrokePipeline,
-    exportViewportBuffer,
-    exportViewportBindGroup,
-    sampler,
-    viewportBuffer,
-    viewportBindGroup,
-    sequence: gpuDevicesCreated,
-    released: false,
-  };
-}
-
-async function loadTexture(
-  gpu: GpuState,
-  image: PinBoardItem,
-  maxDimension: number,
-): Promise<LoadedTexture> {
-  // 位图读仓库内的 DDS；文字由前端按同一请求长边栅格化，随后共用 RGBA 上传路径。
-  const response = image.kind === "text"
-    ? textRgbaPayload(image, maxDimension)
-    : await pinBoardApi.readPinBoardTexture(image.boardId, image.itemId, maxDimension);
-  // 画板切换会先销毁旧设备，但旧 IPC 读取可能稍后才返回。不要让这个返回值继续
-  // 触碰已经释放的 WebGPU 对象——此前会直接进入 createTexture/writeTexture，在
-  // WebView2 的 GPU 路径上形成悬空设备调用。
-  if (gpu.released) {
-    diagnosticsLog(
-      "warn",
-      `texture.read completed after gpu release: gpuSeq=${gpu.sequence}, itemId=${image.itemId}, dim=${maxDimension}`,
-    );
-    throw new Error("纹理读取所属的 GPU 设备已释放");
-  }
-  const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
-  let width: number;
-  let height: number;
-  let data: Uint8Array;
-  let format: string;
-  let sourceBytesPerRow: number;
-  let rowsPerImage: number;
-  let textureWidth: number;
-  let textureHeight: number;
-  let uvScale: [number, number];
-
-  if (isRgbaPayload(bytes)) {
-    if (bytes.byteLength < 12) throw new Error("RGBA 纹理负载不完整");
-    const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
-    width = view.getUint32(4, true);
-    height = view.getUint32(8, true);
-    data = bytes.subarray(12);
-    format = "rgba8unorm";
-    textureWidth = width;
-    textureHeight = height;
-    uvScale = [1, 1];
-    const expectedBytes = checkedPayloadBytes(width, height, 4);
-    if (expectedBytes > PIN_BOARD_RGBA_PREVIEW_BUDGET_BYTES || data.byteLength < expectedBytes) {
-      throw new Error("RGBA 纹理预览超过内存上限");
-    }
-    sourceBytesPerRow = width * 4;
-    rowsPerImage = height;
-  } else {
-    const header = ddsHeader(bytes);
-    width = header.width;
-    height = header.height;
-    data = header.data;
-    format = "bc7-rgba-unorm";
-    sourceBytesPerRow = Math.ceil(width / 4) * 16;
-    rowsPerImage = Math.ceil(height / 4);
-    [textureWidth, textureHeight] = bc7TextureDimensions(width, height);
-    uvScale = bc7TextureUvScale(width, height);
-  }
-
-  if (width < 1 || height < 1) {
-    throw new Error("纹理负载尺寸无效");
-  }
-  if (width > PIN_BOARD_NATIVE_TEXTURE_LIMIT || height > PIN_BOARD_NATIVE_TEXTURE_LIMIT) {
-    throw new Error("纹理负载超过素材板尺寸上限");
-  }
-  const upload = textureUploadLayout(data, sourceBytesPerRow, rowsPerImage);
-  if (upload.data.byteLength > PIN_BOARD_TEXTURE_UPLOAD_BUDGET_BYTES) {
-    throw new Error("纹理上传负载超过内存上限");
-  }
-
-  let texture: any = null;
-  let geometry: { vertexBuffer: any; outlineBuffer: any } | null = null;
-  let validationScope = false;
-  try {
-    if (typeof gpu.device.pushErrorScope === "function"
-      && typeof gpu.device.popErrorScope === "function") {
-      gpu.device.pushErrorScope("validation");
-      validationScope = true;
-    }
-    texture = gpu.device.createTexture({
-      size: { width: textureWidth, height: textureHeight, depthOrArrayLayers: 1 },
-      format,
-      usage: 0x04 | 0x02,
-    });
-    gpu.device.queue.writeTexture(
-      { texture },
-      upload.data,
-      { bytesPerRow: upload.bytesPerRow, rowsPerImage: upload.rowsPerImage },
-      { width: textureWidth, height: textureHeight, depthOrArrayLayers: 1 },
-    );
-    const bindGroup = gpu.device.createBindGroup({
-      layout: gpu.pipeline.getBindGroupLayout(1),
-      entries: [
-        { binding: 0, resource: gpu.sampler },
-        { binding: 1, resource: texture.createView() },
-      ],
-    });
-    geometry = createGeometryBuffers(gpu.device, image, uvScale);
-    if (validationScope) {
-      const validationError = await gpu.device.popErrorScope();
-      validationScope = false;
-      if (validationError) throw new Error(validationError.message || "WebGPU 纹理校验失败");
-    }
-    return {
-      texture,
-      bindGroup,
-      ...geometry,
-      byteSize: upload.data.byteLength,
-      maxDimension: Math.max(width, height),
-      uvScale,
-      lastUsed: performance.now(),
-    };
-  } catch (error) {
-    if (validationScope) {
-      try {
-        await gpu.device.popErrorScope();
-      } catch {
-        // Preserve the original texture error when an error scope cannot close.
-      }
-    }
-    geometry?.outlineBuffer.destroy();
-    geometry?.vertexBuffer.destroy();
-    texture?.destroy();
-    throw error;
-  }
-}
-
-function destroyTexture(loaded: LoadedTexture) {
-  loaded.texture.destroy();
-  loaded.vertexBuffer.destroy();
-  loaded.outlineBuffer.destroy();
-}
-
-function clearColor(canvas: HTMLCanvasElement) {
-  const values = getComputedStyle(canvas).backgroundColor.match(/[\d.]+/g)?.map(Number);
-  if (!values || values.length < 3) return { r: 0.08, g: 0.1, b: 0.09, a: 1 };
-  return {
-    r: values[0] / 255,
-    g: values[1] / 255,
-    b: values[2] / 255,
-    a: values.length > 3 ? values[3] : 1,
-  };
 }
 
 export class PinBoardRenderer {
@@ -1055,10 +423,8 @@ export class PinBoardRenderer {
    * 中途改模型会让输出与用户看到的对不上。
    */
   private exporting = false;
-  /** 导出期间按导出区域单独构建的笔迹缓冲，结束即释放（不碰屏幕那份）。 */
-  private exportStrokeVertexBuffer: any = null;
-  private exportStrokeIndexBuffer: any = null;
-  private exportStrokeIndexCount = 0;
+  /** 导出期间按导出区域单独构建的笔迹缓冲，结束即释放（不碰屏幕那份）；无笔迹时为 null。 */
+  private exportStrokeBuffers: ExportStrokeBuffers | null = null;
   /** 导出要画的条目：未删除、可用、所在图层可见，按 layer 再按 order（与屏幕同序）。 */
   private exportDrawItems: PinBoardItem[] = [];
   /**
@@ -1242,7 +608,7 @@ export class PinBoardRenderer {
       onStrokeCommit,
       cacheBudgets,
     );
-    liveRenderers += 1;
+    adjustLiveRenderers(1);
     return renderer;
   }
 
@@ -1350,7 +716,7 @@ export class PinBoardRenderer {
     this.clearStrokePreview();
     this.releaseStrokeResources();
     this.exportDrawItems = [];
-    this.destroyExportStrokeBuffers();
+    this.releaseExportStrokeBuffers();
     this.visibleImages = [];
     this.history.length = 0;
     this.historyIndex = 0;
@@ -1690,7 +1056,7 @@ export class PinBoardRenderer {
     this.releaseStrokeResources();
     this.exporting = false;
     this.exportDrawItems = [];
-    this.destroyExportStrokeBuffers();
+    this.releaseExportStrokeBuffers();
     for (const loaded of this.textures.values()) destroyTexture(loaded);
     this.textures.clear();
     for (const loaded of this.previewTextures.values()) destroyTexture(loaded);
@@ -1701,28 +1067,15 @@ export class PinBoardRenderer {
     // 先标记设备已释放，再解绑 canvas 上下文并销毁设备。在飞行的纹理读取返回后，
     // loadTexture 会在任何 GPU 调用之前拒绝旧结果。
     this.gpu.released = true;
-    if (canvasGpuOwners.get(this.gpu.canvas) === this.gpu.sequence) {
-      try {
-        this.gpu.context.unconfigure();
-      } catch {
-        // 上下文已失效时忽略。
-      }
-      canvasGpuOwners.delete(this.gpu.canvas);
-    } else {
-      diagnosticsLog(
-        "info",
-        `gpu unconfigure skipped for stale owner: gpuSeq=${this.gpu.sequence}, currentOwner=${canvasGpuOwners.get(this.gpu.canvas) ?? "none"}`,
-      );
-    }
+    releaseCanvasGpu(this.gpu);
     try {
       this.gpu.device.destroy();
     } catch {
       // 设备已丢失时忽略。
     }
-    liveRenderers = Math.max(0, liveRenderers - 1);
     diagnosticsLog(
       "info",
-      `pin-board renderer destroyed: gpuSeq=${this.gpu.sequence}, liveRenderers=${liveRenderers}, finalized=${this.finalized}, stagePending=${stagePending}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
+      `pin-board renderer destroyed: gpuSeq=${this.gpu.sequence}, liveRenderers=${adjustLiveRenderers(-1)}, finalized=${this.finalized}, stagePending=${stagePending}, inFlightTextureLoads=${this.inFlightTextureLoads}`,
     );
   }
 
@@ -1983,8 +1336,8 @@ export class PinBoardRenderer {
       );
       sessionOpen = true;
       this.exportDrawItems = this.renderableItems();
-      this.buildExportStrokeBuffers(plan);
-      const texture = this.createExportTexture(plan);
+      this.prepareExportStrokeBuffers(plan);
+      const texture = createExportTexture(this.gpu.device, plan);
       try {
         for (let index = 0; index < tiles.length; index += 1) {
           const tile = tiles[index];
@@ -2008,7 +1361,7 @@ export class PinBoardRenderer {
       this.exporting = false;
       this.exportDrawItems = [];
       this.exportProtectedIds = null;
-      this.destroyExportStrokeBuffers();
+      this.releaseExportStrokeBuffers();
       this.updateEraserRing();
       if (this.loaded && !this.destroyed) {
         this.refreshViewport(0);
@@ -2037,31 +1390,6 @@ export class PinBoardRenderer {
       .sort((left, right) => left.layer - right.layer || right.order - left.order);
   }
 
-  /** 导出用的渲染目标：整次导出复用一张，逐块设视口，块外由清屏值填成透明。 */
-  private createExportTexture(plan: CanvasExportPlan): any {
-    return this.gpu.device.createTexture({
-      size: {
-        width: plan.tileWidth,
-        height: Math.min(plan.bandHeight, plan.height),
-        depthOrArrayLayers: 1,
-      },
-      format: EXPORT_TARGET_FORMAT,
-      usage: TEXTURE_USAGE_RENDER_ATTACHMENT | TEXTURE_USAGE_COPY_SRC,
-    });
-  }
-
-  /** 一块输出像素对应的世界矩形（y 轴向上，所以从 maxY 往下推）。 */
-  private exportTileBounds(plan: CanvasExportPlan, tile: CanvasExportTile): Bounds {
-    const minX = plan.bounds.minX + tile.x / plan.scale;
-    const maxY = plan.bounds.maxY - tile.y / plan.scale;
-    return {
-      minX,
-      maxX: minX + tile.width / plan.scale,
-      maxY,
-      minY: maxY - tile.height / plan.scale,
-    };
-  }
-
   /**
    * 按导出倍率为「这一块涉及的位图」准备纹理。
    *
@@ -2073,14 +1401,18 @@ export class PinBoardRenderer {
     plan: CanvasExportPlan,
     tile: CanvasExportTile,
   ): Promise<void> {
-    const region = this.exportTileBounds(plan, tile);
+    const region = exportTileBounds(plan, tile);
     const tileImages = this.exportDrawItems.filter((image) => (
       image.kind !== "stroke" && intersects(imageBounds(image), region)
     ));
     this.exportProtectedIds = new Set(tileImages.map((image) => image.itemId));
     try {
       for (const image of tileImages) {
-        const desired = this.exportTextureDimension(image, plan.scale);
+        const desired = exportTextureDimension(
+          image,
+          plan.scale,
+          this.gpu.device.limits.maxTextureDimension2D as number,
+        );
         const current = this.textures.get(image.itemId);
         if (current && current.maxDimension >= desired * 0.9) continue;
         if (estimatedResidentBytes(image, desired) > this.textureBudgetBytes / 4) continue;
@@ -2089,17 +1421,6 @@ export class PinBoardRenderer {
     } finally {
       this.exportProtectedIds = null;
     }
-  }
-
-  /** 导出倍率下的纹理请求长边。位图受源图与设备上限约束，文字按同一套预算换算。 */
-  private exportTextureDimension(image: PinBoardItem, scale: number): number {
-    const [worldWidth, worldHeight] = imageSize(image);
-    const displayDimension = Math.max(worldWidth, worldHeight) * scale;
-    const deviceLimit = this.gpu.device.limits.maxTextureDimension2D as number;
-    if (image.kind === "text") {
-      return requestedTextTextureDimension(image, displayDimension, deviceLimit);
-    }
-    return requestedTextureDimension(image, displayDimension, deviceLimit);
   }
 
   /**
@@ -2130,39 +1451,16 @@ export class PinBoardRenderer {
    * 按导出区域单独构建笔迹缓冲：收集框是整个导出区域，逐段裁剪在 `buildStrokeBatch`
    * 里完成；屏幕那份（`strokeVertexBuffer` / `strokeIndexCount`）一个字段都不动。
    */
-  private buildExportStrokeBuffers(plan: CanvasExportPlan): void {
-    const entries = this.exportDrawItems.flatMap((image) => {
-      if (image.kind !== "stroke") return [];
-      const geometry = this.strokeGeometries.get(image.itemId);
-      return geometry ? [{ item: image, geometry }] : [];
-    });
-    if (entries.length === 0) return;
-    const batch = buildStrokeBatch(entries, {
-      pixelsPerWorldUnit: plan.scale,
-      cullBounds: plan.bounds,
-    });
-    if (batch.indices.length === 0) return;
-    const device = this.gpu.device;
+  private prepareExportStrokeBuffers(plan: CanvasExportPlan): void {
+    this.releaseExportStrokeBuffers();
     try {
-      const vertexBuffer = device.createBuffer({
-        size: batch.vertices.byteLength,
-        usage: 0x20 | 0x08,
-        mappedAtCreation: true,
-      });
-      this.exportStrokeVertexBuffer = vertexBuffer;
-      new Float32Array(vertexBuffer.getMappedRange()).set(batch.vertices);
-      vertexBuffer.unmap();
-      const indexBuffer = device.createBuffer({
-        size: batch.indices.byteLength,
-        usage: 0x10 | 0x08,
-        mappedAtCreation: true,
-      });
-      this.exportStrokeIndexBuffer = indexBuffer;
-      new Uint32Array(indexBuffer.getMappedRange()).set(batch.indices);
-      indexBuffer.unmap();
-      this.exportStrokeIndexCount = batch.indices.length;
+      this.exportStrokeBuffers = buildExportStrokeBuffers(
+        this.gpu.device,
+        this.exportDrawItems,
+        this.strokeGeometries,
+        plan,
+      );
     } catch (error) {
-      this.destroyExportStrokeBuffers();
       diagnosticsLog(
         "warn",
         `pin-board export stroke buffer failed: boardId=${this.boardId}, error=${errorMessage(error)}`,
@@ -2170,12 +1468,9 @@ export class PinBoardRenderer {
     }
   }
 
-  private destroyExportStrokeBuffers(): void {
-    this.exportStrokeVertexBuffer?.destroy();
-    this.exportStrokeIndexBuffer?.destroy();
-    this.exportStrokeVertexBuffer = null;
-    this.exportStrokeIndexBuffer = null;
-    this.exportStrokeIndexCount = 0;
+  private releaseExportStrokeBuffers(): void {
+    destroyExportStrokeBuffers(this.exportStrokeBuffers);
+    this.exportStrokeBuffers = null;
   }
 
   /**
@@ -2184,82 +1479,21 @@ export class PinBoardRenderer {
    * 导出通道不画选中描边、纹理占位框、框选矩形与绘制预览——它们属于屏幕上的编辑
    * 提示，不是画板内容。清屏值是全透明，因此输出就是一张可直接叠到别处的 PNG。
    */
-  private async readExportTile(
+  private readExportTile(
     plan: CanvasExportPlan,
     texture: any,
     tile: CanvasExportTile,
   ): Promise<Uint8Array> {
-    const gpu = this.gpu;
-    const device = gpu.device;
-    const bounds = this.exportTileBounds(plan, tile);
-    const rowBytes = tile.width * 4;
-    // `bytesPerRow` 必须是 256 的倍数：8192 宽的块正好对齐，只有最后一块需要去 padding。
-    const bytesPerRow = Math.ceil(rowBytes / READBACK_ROW_ALIGNMENT) * READBACK_ROW_ALIGNMENT;
-    const readback = device.createBuffer({
-      size: bytesPerRow * tile.height,
-      usage: BUFFER_USAGE_MAP_READ | BUFFER_USAGE_COPY_DST,
+    return readExportTile({
+      gpu: this.gpu,
+      texture,
+      plan,
+      tile,
+      drawItems: this.exportDrawItems,
+      textures: this.textures,
+      previewTextures: this.previewTextures,
+      strokeBuffers: this.exportStrokeBuffers,
     });
-    try {
-      device.queue.writeBuffer(gpu.exportViewportBuffer, 0, new Float32Array([
-        bounds.minX,
-        bounds.minY,
-        bounds.maxX - bounds.minX,
-        bounds.maxY - bounds.minY,
-        // 笔迹的抗锯齿羽化按「设备像素 / 世界单位」换算，导出倍率就是它。
-        plan.scale,
-        0,
-        0,
-        0,
-      ]));
-      const encoder = device.createCommandEncoder();
-      const pass = encoder.beginRenderPass({
-        colorAttachments: [{
-          view: texture.createView(),
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: "clear",
-          storeOp: "store",
-        }],
-      });
-      pass.setViewport(0, 0, tile.width, tile.height, 0, 1);
-      pass.setPipeline(gpu.exportPipeline);
-      pass.setBindGroup(0, gpu.exportViewportBindGroup);
-      for (const image of this.exportDrawItems) {
-        if (image.kind === "stroke") continue;
-        const loaded = this.textures.get(image.itemId) ?? this.previewTextures.get(image.itemId);
-        if (!loaded) continue;
-        pass.setBindGroup(1, loaded.bindGroup);
-        pass.setVertexBuffer(0, loaded.vertexBuffer);
-        pass.draw(6);
-      }
-      // 与屏幕同序：笔迹固定在最上层，整板合并成一次 indexed draw。
-      if (this.exportStrokeIndexCount > 0
-        && this.exportStrokeVertexBuffer
-        && this.exportStrokeIndexBuffer) {
-        pass.setPipeline(gpu.exportStrokePipeline);
-        pass.setBindGroup(0, gpu.exportViewportBindGroup);
-        pass.setVertexBuffer(0, this.exportStrokeVertexBuffer);
-        pass.setIndexBuffer(this.exportStrokeIndexBuffer, "uint32");
-        pass.drawIndexed(this.exportStrokeIndexCount);
-      }
-      pass.end();
-      encoder.copyTextureToBuffer(
-        { texture },
-        { buffer: readback, bytesPerRow, rowsPerImage: tile.height },
-        { width: tile.width, height: tile.height, depthOrArrayLayers: 1 },
-      );
-      device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(MAP_MODE_READ);
-      const mapped = new Uint8Array(readback.getMappedRange());
-      if (bytesPerRow === rowBytes) return mapped.slice(0, rowBytes * tile.height);
-      const packed = new Uint8Array(rowBytes * tile.height);
-      for (let row = 0; row < tile.height; row += 1) {
-        const source = row * bytesPerRow;
-        packed.set(mapped.subarray(source, source + rowBytes), row * rowBytes);
-      }
-      return packed;
-    } finally {
-      readback.destroy();
-    }
   }
 
   /**
@@ -3174,11 +2408,7 @@ export class PinBoardRenderer {
   }
 
   private clearStrokePreview() {
-    const overlay = this.drawOverlay;
-    const context = overlay?.getContext("2d");
-    if (!overlay || !context) return;
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, overlay.width, overlay.height);
+    clearStrokePreviewLayer(this.drawOverlay);
   }
 
   /**
@@ -3186,149 +2416,15 @@ export class PinBoardRenderer {
    * 之后，线宽与形状尺寸天然与落库后的渲染一致，不必两处各写一份换算。
    */
   private drawStrokePreview() {
-    const overlay = this.drawOverlay;
-    if (!overlay) return;
-    const context = overlay.getContext("2d");
-    if (!context) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const cssWidth = Math.max(rect.width, 1);
-    const cssHeight = Math.max(rect.height, 1);
-    const ratio = Math.max(1, window.devicePixelRatio || 1);
-    const pixelWidth = Math.max(1, Math.round(cssWidth * ratio));
-    const pixelHeight = Math.max(1, Math.round(cssHeight * ratio));
-    if (overlay.width !== pixelWidth || overlay.height !== pixelHeight) {
-      overlay.width = pixelWidth;
-      overlay.height = pixelHeight;
-    }
-    context.setTransform(1, 0, 0, 1, 0, 0);
-    context.clearRect(0, 0, overlay.width, overlay.height);
-    const draft = this.draft;
-    if (!draft || !this.loaded) return;
-    const bounds = viewportBounds(this.viewport, cssWidth, cssHeight);
-    const scale = pixelWidth / Math.max(bounds.maxX - bounds.minX, 1e-9);
-    context.setTransform(scale, 0, 0, -scale, -bounds.minX * scale, bounds.maxY * scale);
-    context.strokeStyle = this.strokeColor;
-    context.fillStyle = this.strokeColor;
-    context.lineWidth = this.strokeWidthValue;
-    context.lineJoin = "round";
-    context.lineCap = "round";
-    const samples = strokeDraftSamples(draft);
-    // 自由笔每个指针事件都重画一遍：直接读采样数组，不再复制成一份点数组。
-    if (draft.tool === "pen") {
-      if (samples.length < 2) return;
-      // 数位笔的预览按压感画成变宽墨迹：与落库判定同一条件（指针是笔**且**确实
-      // 收到过非零压感），否则会出现「预览细、落库粗」的跳变。鼠标仍画等宽折线。
-      if (draft.pen && samples.some((sample) => sample.pressure > 0)) {
-        this.strokePreviewInk(context, samples);
-        return;
-      }
-      context.beginPath();
-      context.moveTo(samples[0].point[0], samples[0].point[1]);
-      for (let index = 1; index < samples.length; index += 1) {
-        context.lineTo(samples[index].point[0], samples[index].point[1]);
-      }
-      context.stroke();
-      return;
-    }
-    const [start, end] = [samples[0].point, samples[1].point];
-    switch (draft.tool) {
-      case "line":
-        this.strokePreviewSegment(context, start, end);
-        return;
-      case "arrow": {
-        const deltaX = end[0] - start[0];
-        const deltaY = end[1] - start[1];
-        const length = Math.hypot(deltaX, deltaY);
-        if (length < 1e-6) return;
-        const unitX = deltaX / length;
-        const unitY = deltaY / length;
-        const headLength = Math.min(length, Math.max(this.strokeWidthValue * 4, 1e-4));
-        const halfBase = headLength * 0.5;
-        const base: Point = [end[0] - unitX * headLength, end[1] - unitY * headLength];
-        // 杆止于三角形底边，与渲染层一致：圆头藏在箭头里，不会从箭尖后面冒出来。
-        this.strokePreviewSegment(context, start, base);
-        context.beginPath();
-        context.moveTo(end[0], end[1]);
-        context.lineTo(base[0] - unitY * halfBase, base[1] + unitX * halfBase);
-        context.lineTo(base[0] + unitY * halfBase, base[1] - unitX * halfBase);
-        context.closePath();
-        context.fill();
-        return;
-      }
-      case "rect": {
-        const left = Math.min(start[0], end[0]);
-        const top = Math.max(start[1], end[1]);
-        context.strokeRect(left, top, Math.abs(end[0] - start[0]), -Math.abs(end[1] - start[1]));
-        return;
-      }
-      default: {
-        const centerX = (start[0] + end[0]) / 2;
-        const centerY = (start[1] + end[1]) / 2;
-        const radiusX = Math.abs(end[0] - start[0]) / 2;
-        const radiusY = Math.abs(end[1] - start[1]) / 2;
-        if (!(radiusX > 0) || !(radiusY > 0)) return;
-        context.beginPath();
-        context.ellipse(centerX, centerY, radiusX, radiusY, 0, 0, Math.PI * 2);
-        context.stroke();
-      }
-    }
-  }
-
-  private strokePreviewSegment(
-    context: CanvasRenderingContext2D,
-    start: Point,
-    end: Point,
-  ) {
-    context.beginPath();
-    context.moveTo(start[0], start[1]);
-    context.lineTo(end[0], end[1]);
-    context.stroke();
-  }
-
-  /**
-   * 按压感把一段草稿画成变宽的墨迹：沿中心线按每点的半径向两侧偏移出一条闭合
-   * 轮廓再一次填充，而不是逐段 `stroke()`——后者在几百个点上就是几百次绘制调用，
-   * 每次 `pointermove` 重画一遍会拖慢预览。
-   */
-  private strokePreviewInk(
-    context: CanvasRenderingContext2D,
-    samples: readonly { point: Point; pressure: number }[],
-  ) {
-    if (samples.length < 2) return;
-    // 与着色器共用同一个半径公式，预览与落库不会各写一份而慢慢漂移。
-    const radii = samples.map((sample) => (
-      strokePointRadius(this.strokeWidthValue, sample.pressure, true)
-    ));
-    const left: Point[] = [];
-    const right: Point[] = [];
-    for (let index = 0; index < samples.length; index += 1) {
-      const previous = samples[Math.max(0, index - 1)].point;
-      const next = samples[Math.min(samples.length - 1, index + 1)].point;
-      let deltaX = next[0] - previous[0];
-      let deltaY = next[1] - previous[1];
-      const length = Math.hypot(deltaX, deltaY);
-      if (!(length > 0)) {
-        deltaX = 1;
-        deltaY = 0;
-      } else {
-        deltaX /= length;
-        deltaY /= length;
-      }
-      const center = samples[index].point;
-      const radius = radii[index];
-      left.push([center[0] - deltaY * radius, center[1] + deltaX * radius]);
-      right.push([center[0] + deltaY * radius, center[1] - deltaX * radius]);
-    }
-    context.beginPath();
-    context.moveTo(left[0][0], left[0][1]);
-    for (let index = 1; index < left.length; index += 1) {
-      context.lineTo(left[index][0], left[index][1]);
-    }
-    for (let index = right.length - 1; index >= 0; index -= 1) {
-      context.lineTo(right[index][0], right[index][1]);
-    }
-    context.closePath();
-    context.fill();
+    if (!this.drawOverlay) return;
+    paintStrokePreview({
+      overlay: this.drawOverlay,
+      canvas: this.canvas,
+      viewport: this.viewport,
+      draft: this.loaded ? this.draft : null,
+      color: this.strokeColor,
+      width: this.strokeWidthValue,
+    });
   }
 
   private readonly wheel = (event: WheelEvent) => {

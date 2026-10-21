@@ -197,3 +197,29 @@ README、发行政策与 `docs/planning/` 的版本引用一并更新。该版�
 自动验证：`npm run test:pin-board` 24 文件 / 254 用例、`npx vitest run` 47 文件 / 431 用例、
 `npx tsc --noEmit`、`npm run build`、`cargo check --tests`、`cargo fmt --check` 通过；
 `cargo test pin_board --lib` 86 用例沿用本批次实施时的记录。
+
+## 13. 素材板结构收尾（计划三批，2026-10-21 全部落实并归档）
+
+`pin-board-structural-cleanup-plan-2026-10-21.md` 的三批结构整理全部完成。批次一处理契约缺口
+与卫生：纹理结果缓存键加入仓库根路径（切仓库后画板/条目 id 从头复用不再串图），
+`validate_editable` 按条目 kind 收紧图层契约（位图与文字写 layer 3 被拒，笔迹仍由
+`effective_layer` 强制标注层），删除 `session.ts::dropArtworkSessions`、`strokeGeometry.ts` 里
+同名不同义的 `STROKE_LAYER`/`MAX_STROKE_WIDTH` 与 renderer 的两层纹理别名，`imageCount` 统一改名
+`itemCount`，并同步过期注释与模块/架构文档。批次二把 `repository.rs` 拆成
+`repository/{mod,paths,boards,view,save,create,bitmap_io}.rs`，五处建条目流程收敛为
+`begin_item_mutation` + `record_initial_state` + `finish_item_mutation`，规范文件名与仓库边界检查
+各只剩一份，`imported_points` 移到 `arrange.rs`、上限移到 `contracts.rs`；唯一的行为收紧是永久
+删除画板要求该画板已在回收站。批次三拆前端：`PinBoardModule` 只做页面编排与快捷键，视图拆到
+`PinBoardToolbar`/`PinBoardSidebar`/`PinBoardCanvasStage`/`PinBoardDialogs`/`PinBoardContextMenu`
+（文字与整画布导出共用本地对话框外壳），`renderer.ts` 保留编辑状态机，设备/管线/纹理上传移到
+`rendererGpu.ts`、DOM 绘制预览移到 `strokePreview.ts`、整画布导出的目标纹理/回读/笔迹缓冲移到
+`rendererExport.ts`；几何 BLOB 编码与解析同住 `strokeGeometry.ts`（`strokeDrawing.ts` 不再反向
+依赖 `strokeRender.ts`）；`usePinBoardTransfers` 收口导入/导出/整画布导出/文字/笔迹队列的
+busy/进度/取消与 `replaceAfterImageMutation` 链；工具键位表收敛为 `strokeDrawing.ts` 一份，
+工具条标签由它派生。测试侧把 renderer 里与 `strokeHit.test.ts` 重复的墨迹命中用例合并过去，
+renderer 只留分派用例，并把笔迹条目/几何夹具抽到共享 helper。
+
+验证：`cargo fmt --check`、`cargo test --lib`（414 用例）、`npx tsc --noEmit`、
+`npm run test:pin-board`（24 文件 / 255 用例）、`npm test`（49 文件 / 439 用例）、
+`git diff --check` 全部通过。GUI 观感（拆分后的组件结构、对话框外壳、渲染器导出路径）留待人工
+验收，见 `../todo.md`。

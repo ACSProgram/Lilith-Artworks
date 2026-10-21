@@ -8,14 +8,13 @@ import {
   resetPendingSettleForTests,
   resolveBoardRevision,
 } from "./pendingSettle";
-import type { PinBoardItem, PinBoardView } from "./types";
+import type { PinBoardItem, PinBoardStrokeItem, PinBoardView } from "./types";
 import {
   STROKE_TOOL,
   decodeStrokeHeader,
   type PinBoardStrokeGeometry,
-  type PinBoardStrokeTool,
 } from "./strokeGeometry";
-import { encodeStrokeGeometry } from "./strokeRender";
+import { strokeGeometryFixture, strokeItemFixture } from "./pinBoardFixtures";
 import { beginStrokeDraft, extendStrokeDraft } from "./strokeDrawing";
 import { normalizeLayerVisibility, type PinBoardLayerVisibility } from "./layers";
 import {
@@ -450,16 +449,14 @@ describe("pin-board stroke rendering", () => {
   }
 
   function strokeGeometry(): PinBoardStrokeGeometry {
-    const bytes = encodeStrokeGeometry(STROKE_TOOL.line, [], 0);
-    return {
-      ...decodeStrokeHeader(bytes),
+    return strokeGeometryFixture({
       itemId: 5,
-      color: "#FF8000",
+      tool: STROKE_TOOL.line,
       strokeWidth: 2,
       width: 100,
       height: 100,
-      geometry: bytes,
-    };
+      color: "#FF8000",
+    });
   }
 
   it("never queues a texture load for a stroke item", () => {
@@ -1566,16 +1563,14 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
   }
 
   function lineGeometry(itemId: number): PinBoardStrokeGeometry {
-    const bytes = encodeStrokeGeometry(STROKE_TOOL.line, [], 0);
-    return {
-      ...decodeStrokeHeader(bytes),
+    return strokeGeometryFixture({
       itemId,
-      color: "#FF8000",
+      tool: STROKE_TOOL.line,
       strokeWidth: ERASER_STROKE_WIDTH,
       width: 100,
       height: 100,
-      geometry: bytes,
-    };
+      color: "#FF8000",
+    });
   }
 
   function eraserRenderer(images: PinBoardItem[], options: Record<string, unknown> = {}) {
@@ -1753,46 +1748,25 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
   });
 });
 
-describe("pin-board ink hit testing", () => {
+describe("pin-board ink hit dispatch", () => {
   const QUAD: PinBoardItem["points"] = [[0, 0], [100, 0], [100, 100], [0, 100]];
 
-  function strokeItem(itemId: number, overrides: Partial<PinBoardItem> = {}): PinBoardItem {
-    return {
-      boardId: 1,
+  // 与 `strokeHit.test.ts` 共用同一份条目：这里只验证渲染器的分派，几何判定留在那里。
+  function strokeItem(
+    itemId: number,
+    overrides: Partial<PinBoardStrokeItem> = {},
+  ): PinBoardItem {
+    return strokeItemFixture({
       itemId,
-      kind: "stroke",
       width: 100,
       height: 100,
       order: itemId,
-      layer: 3,
-      deleted: false,
       points: QUAD,
-      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
-      available: true,
       tool: STROKE_TOOL.rect,
       color: "#FF8000",
       strokeWidth: 4,
       ...overrides,
-    } as unknown as PinBoardItem;
-  }
-
-  function geometryFor(
-    itemId: number,
-    tool: PinBoardStrokeTool,
-    strokeWidth: number,
-    width = 100,
-    height = 100,
-  ): PinBoardStrokeGeometry {
-    const bytes = encodeStrokeGeometry(tool, [], 0);
-    return {
-      ...decodeStrokeHeader(bytes),
-      itemId,
-      color: "#FF8000",
-      strokeWidth,
-      width,
-      height,
-      geometry: bytes,
-    };
+    }) as unknown as PinBoardItem;
   }
 
   /** 世界单位 / CSS 像素 = 1（viewport 与 cssHeight 都是 100），容差即 3 个世界单位。 */
@@ -1815,19 +1789,6 @@ describe("pin-board ink hit testing", () => {
     };
   }
 
-  it("hits a shape on its ink instead of its hollow frame", () => {
-    const rect = strokeItem(1);
-    const renderer = inkRenderer([rect], [geometryFor(1, STROKE_TOOL.rect, 4)]);
-
-    // 框内是空的：点中心不该选中。
-    expect(renderer.hitImage([50, 50])).toBeNull();
-    // 描边本身（带宽 4）当然命中。
-    expect(renderer.hitImage([2, 50])).toBe(rect);
-    // 外侧 3 个单位容差之内仍算命中，再远就不算了。
-    expect(renderer.hitImage([-2, 50])).toBe(rect);
-    expect(renderer.hitImage([-6, 50])).toBeNull();
-  });
-
   it("keeps bitmaps on their bounding quad", () => {
     const bitmap = { ...strokeItem(2), kind: "bitmap", layer: 1 } as PinBoardItem;
     const renderer = inkRenderer([bitmap], []);
@@ -1835,29 +1796,6 @@ describe("pin-board ink hit testing", () => {
     // 位图不读回纹理就无法知道 alpha，中心空白也按框判。
     expect(renderer.hitImage([50, 50])).toBe(bitmap);
     expect(renderer.hitImage([150, 50])).toBeNull();
-  });
-
-  it("still hits a hairline stroke through the minimum tolerance", () => {
-    const line = strokeItem(3, {
-      height: 20,
-      strokeWidth: 1,
-      points: [[0, 0], [100, 0], [100, 20], [0, 20]],
-    });
-    const renderer = inkRenderer([line], [geometryFor(3, STROKE_TOOL.line, 1, 100, 20)]);
-
-    // 线宽 1 → 半径 0.5，容差补到 3.5：偏 3 个单位仍点得中，偏 5 个就不行了。
-    expect(renderer.hitImage([50, 13])).toBe(line);
-    expect(renderer.hitImage([50, 15])).toBeNull();
-  });
-
-  it("judges marquee membership by ink as well", () => {
-    const rect = strokeItem(4);
-    const renderer = inkRenderer([rect], [geometryFor(4, STROKE_TOOL.rect, 4)]);
-
-    // 只框住内部：不选中；框到描边：选中；罩住整条：选中。
-    expect(renderer.itemIntersectsMarquee(rect, { minX: 20, minY: 20, maxX: 80, maxY: 80 })).toBe(false);
-    expect(renderer.itemIntersectsMarquee(rect, { minX: 0, minY: 20, maxX: 2, maxY: 80 })).toBe(true);
-    expect(renderer.itemIntersectsMarquee(rect, { minX: -10, minY: -10, maxX: 110, maxY: 110 })).toBe(true);
   });
 
   it("falls back to the quad while stroke geometry is still loading", () => {

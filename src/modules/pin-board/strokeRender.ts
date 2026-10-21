@@ -23,17 +23,15 @@
  * - 局部坐标经条目四角的双线性映射落到世界空间，因此移动、旋转、缩放**不需要**
  *   任何额外变换代码；`uv` 被翻转时（左右/上下镜像）同一份映射会跟着镜像；
  * - 包围盒是**墨迹外框**：矩形与椭圆的路径内缩半个线宽，直线与箭头的两端点也内缩
- *   半个线宽。写入侧必须按线宽把包围盒向外膨胀（见计划的「风险 4」），读侧据此还原。
+ *   半个线宽。写入侧必须按线宽把包围盒向外膨胀后再存（水平/垂直形状的原始高度为 0，
+ *   不膨胀会归一化除零），读侧据此还原。
  */
 
 import {
-  MAX_STROKE_POINTS,
-  STROKE_GEOMETRY_VERSION,
   STROKE_HEADER_BYTES,
   STROKE_POINT_BYTES,
   STROKE_TOOL,
   type PinBoardStrokeGeometry,
-  type PinBoardStrokeTool,
 } from "./strokeGeometry";
 import type { Bounds, Point, Quad } from "./geometry";
 import { quadIntersectsBounds } from "./geometry";
@@ -128,47 +126,6 @@ export function decodeStrokeSamples(geometry: PinBoardStrokeGeometry): StrokeSam
     });
   }
   return samples;
-}
-
-/**
- * 编码几何 BLOB（写入侧）。自由笔逐点量化 `u16 / u16 / u8`；形状只写头部，两端点由
- * 包围盒与方向位推出。超出点数上限直接拒绝——抽稀与重采样由 `strokeSampling.ts`
- * 在编码前完成。
- */
-export function encodeStrokeGeometry(
-  tool: PinBoardStrokeTool,
-  samples: readonly { u: number; v: number; pressure?: number }[] = [],
-  direction = 0,
-): Uint8Array {
-  const isShape = tool !== STROKE_TOOL.pen;
-  const directionBits = Math.max(0, Math.min(3, Math.trunc(direction))) & 0b11;
-  if (isShape) {
-    if (samples.length > 0) throw new Error("形状笔迹不应包含点数据");
-    return new Uint8Array([
-      STROKE_GEOMETRY_VERSION,
-      tool,
-      directionBits,
-      0,
-      0, 0, 0, 0,
-    ]);
-  }
-  if (samples.length === 0) throw new Error("笔迹至少需要一个点");
-  if (samples.length > MAX_STROKE_POINTS) throw new Error("笔迹点数超过上限");
-  const hasPressure = samples.some((sample) => (sample.pressure ?? 0) > 0);
-  const bytes = new Uint8Array(STROKE_HEADER_BYTES + samples.length * STROKE_POINT_BYTES);
-  bytes[0] = STROKE_GEOMETRY_VERSION;
-  bytes[1] = tool;
-  bytes[2] = directionBits | (hasPressure ? 0b0000_0100 : 0);
-  bytes[3] = 0;
-  const view = new DataView(bytes.buffer);
-  view.setUint32(4, samples.length, true);
-  samples.forEach((sample, index) => {
-    const offset = STROKE_HEADER_BYTES + index * STROKE_POINT_BYTES;
-    view.setUint16(offset, quantiseUnit(sample.u), true);
-    view.setUint16(offset + 2, quantiseUnit(sample.v), true);
-    bytes[offset + 4] = Math.round(clamp(sample.pressure ?? 0, 0, 1) * 0xff);
-  });
-  return bytes;
 }
 
 /**
@@ -676,10 +633,6 @@ function hexToRgba(color: string): [number, number, number, number] {
     (value & 0xff) / 0xff,
     1,
   ];
-}
-
-function quantiseUnit(value: number): number {
-  return Math.round(clamp(value, 0, 1) * 0xffff);
 }
 
 function clamp(value: number, min: number, max: number): number {
