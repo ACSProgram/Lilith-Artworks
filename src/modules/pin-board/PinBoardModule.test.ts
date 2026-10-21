@@ -3,6 +3,7 @@ import {
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
   PIN_BOARD_TOOLBAR_SHORTCUT,
+  pinBoardLayersPanelDisabled,
   pinBoardLockIndicatorVisible,
   pinBoardUnavailableNotice,
 } from "./PinBoardModule";
@@ -74,5 +75,23 @@ describe("pin-board unavailable notice", () => {
       locked: true,
       unavailable: false,
     })).toBe(false);
+  });
+});
+
+describe("pin-board layer panel availability", () => {
+  it("stays usable while the board is locked", () => {
+    // 显隐是纯视图状态：锁定只挡改模型的操作，藏掉一层看底图恰恰是锁定时的常用动作。
+    // 条件里没有 locked 这一项，这条用例就是防止它被并回「编辑禁用」那组。
+    expect(pinBoardLayersPanelDisabled({ hasRenderer: true, exporting: false })).toBe(false);
+  });
+
+  it("greys out during the whole-board export", () => {
+    // 导出渲染的是点下那一刻的画面：中途改显隐会让输出与用户看到的对不上。
+    expect(pinBoardLayersPanelDisabled({ hasRenderer: true, exporting: true })).toBe(true);
+  });
+
+  it("greys out without a renderer", () => {
+    expect(pinBoardLayersPanelDisabled({ hasRenderer: false, exporting: false })).toBe(true);
+    expect(pinBoardLayersPanelDisabled({ hasRenderer: false, exporting: true })).toBe(true);
   });
 });

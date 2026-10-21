@@ -172,6 +172,20 @@ export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
   return hasView && locked && !unavailable;
 }
 
+/**
+ * 图层面板的禁用条件。
+ *
+ * 只有整画布导出期间才置灰：导出渲染的是「点下那一刻的画面」，中途改显隐会让输出与用户
+ * 看到的对不上。画板锁定不算——显隐是纯视图状态（不写库、不标 dirty、不进撤销栈），锁定
+ * 时改它不会动模型，而「锁住画面只看内容」正是最需要藏掉标注层的场合。
+ */
+export function pinBoardLayersPanelDisabled({ hasRenderer, exporting }: {
+  hasRenderer: boolean;
+  exporting: boolean;
+}): boolean {
+  return !hasRenderer || exporting;
+}
+
 /** 侧栏画板拖放排序使用的自定义 dataTransfer 类型。 */
 const PIN_BOARD_DRAG_TYPE = "application/x-lilith-pin-board-board";
 
@@ -1641,7 +1655,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
               visibility={interaction.visibleLayers}
               counts={interaction.layerCounts}
               onToggle={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
-              disabled={!renderer || editingBlocked}
+              disabled={pinBoardLayersPanelDisabled({
+                hasRenderer: renderer !== null,
+                exporting: interaction.exporting,
+              })}
             />
           )}
           {unavailable ? (

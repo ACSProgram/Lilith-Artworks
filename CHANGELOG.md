@@ -175,6 +175,11 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
+- The pin-board layer panel no longer greys out on a locked board. Its switches
+  only need the renderer and are blocked during whole-board export, which renders
+  the frame captured when it starts; lock was folded into the shared "editing
+  blocked" condition when export landed, even though layer visibility is view
+  state that writes nothing.
 - Dependency updates clear newly published advisories: `vite` 6.4.4 (dev-only;
   GHSA-698v-4r3x-3vcv / GHSA-r825-w8mm-5pxw / GHSA-587h-7wmj-h5pm) and
   `rustls-webpki` 0.103.16 with `webpki-roots` / `webpki-root-certs` 1.0.10
