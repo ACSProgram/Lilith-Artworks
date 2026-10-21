@@ -33,7 +33,7 @@ use stress_support::*;
 const SCENARIO_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// H3 的规模：个人素材板真实上限「数百张」，用 300 张覆盖。单次导入上限为 256
-/// （`dds::MAX_IMPORT_FILES`），因此按 100 张一批分三次导入。
+/// （`pin_board::contracts::MAX_IMPORT_FILES`），因此按 100 张一批分三次导入。
 const SCALE_TOTAL: usize = 300;
 const SCALE_BATCH: usize = 100;
 

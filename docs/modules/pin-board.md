@@ -14,9 +14,10 @@
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - 文字布局与栅格化（显示纹理用）：`textLayout.ts`
 - 添加文字对话框与内置取色器：`PinBoardModule.tsx`、`PinBoardColorPicker.tsx`
-- Rust 数据持久化：`src-tauri/src/pin_board/repository.rs`
+- Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程，`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
+- 条目与导入上限（`MAX_BOARD_ITEMS`、`MAX_IMPORT_FILES`、`MAX_CLIPBOARD_IMAGE_BYTES`）：`src-tauri/src/pin_board/contracts.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
-- 阵列排序（统一高度、阅读序、断行、落位）：`src-tauri/src/pin_board/arrange.rs`
+- 阵列排序（统一高度、阅读序、断行、落位）与导入/粘贴的落位数学：`src-tauri/src/pin_board/arrange.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
 - 整画布导出的原生侧（会话表、行带校验、PNG 流式写盘、临时文件与原子改名）：`src-tauri/src/pin_board/canvas_export.rs`
@@ -29,6 +30,7 @@
 - 开发期自检入口（合成笔迹的采样/编码/缓冲耗时）：`strokePerfProbe.ts`
 - 图层可见性的纯函数（四层可见性类型与归一化、可见判断、隐藏层里待取消选中的条目）：`layers.ts`，浮层界面在 `PinBoardLayersPanel.tsx`
 - 素材板表定义（仓库 schema v5 起为多态条目，v6 起含笔迹）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
+- 仓库 schema 迁移测试（v1/v4/v5→v6 的数据与 step 历史、外键失败回滚、拒绝更新版本仓库）：同一文件的 `migration_tests`；它们不依赖持久化模块的私有项，因此跟着 schema 走而不是留在 `repository/`
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -473,5 +475,5 @@ SQLite:
   「采样管道」「草稿 + 编码」「整板缓冲构建」的耗时，结果打 `console.table` 并返回同一份对象。
   它不写仓库、不碰 GPU，只能回答 CPU 侧成本；帧率要在真实适配器上手工看（见
   `docs/guides/validation.md` 的压力测试分层）。
-- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰与跨仓库键隔离、画板 CRUD/回收站/排序、v1/v4/v5→v6 迁移（数据/step 历史/外键/失败回滚/拒绝更新版本仓库）、文字与笔迹条目（BLOB 边界、标注层强制、位图/文字占标注层被拒、批量二进制打包、坏几何报错）、画板内粘贴（三类条目混合、保持相对位置、一次事务一次 revision、源画板在回收站/源条目已删除/kind 不一致/数量超限）、整画布导出的流式 PNG（尺寸与像素、多块拼一条行带、乱序/越界/字节数不符拒绝、缺行拒绝、取消删除临时文件、仓库边界拒绝、重名不覆盖、文件名清洗、强杀残留清理）、图片传输的取消（导入取消整笔回滚且不留 DDS、导出取消不写文件、取消信号复位）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；
+- `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰与跨仓库键隔离、画板 CRUD/回收站/排序（含永久删除只接受回收站画板）、文字与笔迹条目（BLOB 边界、标注层强制、位图/文字占标注层被拒、批量二进制打包、坏几何报错）、画板内粘贴（三类条目混合、保持相对位置、一次事务一次 revision、源画板在回收站/源条目已删除/kind 不一致/数量超限）、整画布导出的流式 PNG（尺寸与像素、多块拼一条行带、乱序/越界/字节数不符拒绝、缺行拒绝、取消删除临时文件、仓库边界拒绝、重名不覆盖、文件名清洗、强杀残留清理）、图片传输的取消（导入取消整笔回滚且不留 DDS、导出取消不写文件、取消信号复位）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；schema 迁移测试在 `library::schema::migration_tests` 下（`cargo test --lib` 全量会一并跑到）；
 - 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。

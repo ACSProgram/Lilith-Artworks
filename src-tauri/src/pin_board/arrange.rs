@@ -426,6 +426,66 @@ fn block_bounds(placed: &[(usize, Quad)]) -> Bounds {
     bounds
 }
 
+/// 粘贴/导入图片以指针位置为中心做阵列排序。
+///
+/// 排版数学由本模块提供，这里只负责把「一批自然尺寸」转成排列输入并保持返回顺序
+/// 与 `sizes` 一致。导入的新图还没有位置，所以用 [`ItemOrder::Input`] 保留调用方给
+/// 的顺序；间距与整理路径同一口径——按统一高度的比例传入，不随画布缩放变化。
+pub(crate) fn imported_points(
+    sizes: &[(f64, f64)],
+    center_x: f64,
+    center_y: f64,
+    gap_ratio: f64,
+) -> Vec<Quad> {
+    if sizes.is_empty() {
+        return Vec::new();
+    }
+    // 尺寸由上游（`repository` 的导入/粘贴校验）保证为正有限值；这里只兜住退化输入，
+    // 让每个条目都拿到一个位于中心的零面积四边形，避免调用方按索引 zip 时错位。
+    let degenerate = || {
+        vec![
+            [
+                [center_x, center_y],
+                [center_x, center_y],
+                [center_x, center_y],
+                [center_x, center_y],
+            ];
+            sizes.len()
+        ]
+    };
+    let usable = |value: f64| value.is_finite() && value > f64::EPSILON;
+    if !sizes
+        .iter()
+        .all(|(width, height)| usable(*width) && usable(*height))
+    {
+        return degenerate();
+    }
+
+    let items = sizes
+        .iter()
+        .enumerate()
+        .map(|(index, (width, height))| ArrangeItem {
+            item_id: index as i64,
+            width: *width,
+            height: *height,
+            center_x,
+            center_y,
+        })
+        .collect::<Vec<_>>();
+    let arranged = arrange(
+        &items,
+        ArrangeOptions {
+            order: ItemOrder::Input,
+            height: HeightPolicy::Max,
+            gap_ratio: gap_ratio.max(0.0),
+        },
+    );
+    if arranged.len() != sizes.len() {
+        return degenerate();
+    }
+    arranged.into_iter().map(|(_, points)| points).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

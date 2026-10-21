@@ -1,7 +1,7 @@
 //! 素材板 DDS/BC7 图像处理与纹理读取缓存。
 //!
 //! 图像格式逻辑自 Lilith Client 素材板模块原样迁移：导入归一化、DDS 头校验、
-//! BC7 解码预览与纹理结果缓存。存储路径与数据库访问由 `repository.rs`
+//! BC7 解码预览与纹理结果缓存。存储路径与数据库访问由 `repository/`
 //! 与 `mod.rs` 负责。
 
 use std::{
@@ -17,8 +17,6 @@ use std::{
 
 use tempfile::NamedTempFile;
 
-use super::arrange::{arrange, ArrangeItem, ArrangeOptions, HeightPolicy, ItemOrder};
-
 pub(crate) const MAX_DDS_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_TEXTURE_DIMENSION: u32 = 8192;
 pub(crate) const MIN_TEXTURE_DIMENSION: u32 = 64;
@@ -27,15 +25,11 @@ pub(crate) const MAX_SOURCE_PIXELS: u64 = 96_000_000;
 pub(crate) const MAX_DDS_SOURCE_PIXELS: u64 = 268_435_456;
 pub(crate) const DXGI_FORMAT_BC7_UNORM: u32 = 98;
 pub(crate) const DDS_DX10_HEADER_BYTES: usize = 148;
-/// 单块画板的条目上限（全部 kind：位图、文字与笔迹合计）。
-pub(crate) const MAX_BOARD_ITEMS: usize = 20_000;
-pub(crate) const MAX_IMPORT_FILES: usize = 256;
-pub(crate) const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 pub(crate) const MAX_IMAGE_PIXELS: u64 = 64_000_000;
 pub(crate) const MAX_RGBA_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const RGBA_BYTES_PER_PIXEL: u64 = 4;
 /// 纹理读取结果 LRU 缓存预算。大图（上亿像素）每次请求都要重新解码全部
-/// BC7 块，成本与目标尺寸几乎无关；缓存按 (画板, 图片, 请求长边) 保存
+/// BC7 块，成本与目标尺寸几乎无关；缓存按 (仓库根, 画板, 条目, 请求长边) 保存
 /// 解码结果，滑动回来或重复请求同一尺寸时直接复用，避免反复等待。
 /// 预算由配置的缓存等级决定，默认中等（128 MiB）。
 pub(crate) const TEXTURE_CACHE_DEFAULT_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
@@ -565,67 +559,6 @@ pub(crate) fn persist_dds_file(destination: &Path, bytes: &[u8], kind: &str) -> 
         .persist(destination)
         .map_err(|error| format!("无法保存{kind}：{}", error.error))?;
     Ok(())
-}
-
-/// 粘贴/导入图片以指针位置为中心做阵列排序。
-///
-/// 排版数学统一由 [`crate::pin_board::arrange`] 提供，这里只负责把「一批自然尺寸」
-/// 转成排列输入并保持返回顺序与 `sizes` 一致。导入的新图还没有位置，所以用
-/// [`ItemOrder::Input`] 保留调用方给的顺序；间距与整理路径同一口径——按统一高度
-/// 的比例传入，不随画布缩放变化。
-pub(crate) fn imported_points(
-    sizes: &[(f64, f64)],
-    center_x: f64,
-    center_y: f64,
-    gap_ratio: f64,
-) -> Vec<[[f64; 2]; 4]> {
-    if sizes.is_empty() {
-        return Vec::new();
-    }
-    // 尺寸由上游（`repository` 的导入/粘贴校验）保证为正有限值；这里只兜住退化输入，
-    // 让每个条目都拿到一个位于中心的零面积四边形，避免调用方按索引 zip 时错位。
-    let degenerate = || {
-        vec![
-            [
-                [center_x, center_y],
-                [center_x, center_y],
-                [center_x, center_y],
-                [center_x, center_y],
-            ];
-            sizes.len()
-        ]
-    };
-    let usable = |value: f64| value.is_finite() && value > f64::EPSILON;
-    if !sizes
-        .iter()
-        .all(|(width, height)| usable(*width) && usable(*height))
-    {
-        return degenerate();
-    }
-
-    let items = sizes
-        .iter()
-        .enumerate()
-        .map(|(index, (width, height))| ArrangeItem {
-            item_id: index as i64,
-            width: *width,
-            height: *height,
-            center_x,
-            center_y,
-        })
-        .collect::<Vec<_>>();
-    let arranged = arrange(
-        &items,
-        ArrangeOptions {
-            order: ItemOrder::Input,
-            height: HeightPolicy::Max,
-            gap_ratio: gap_ratio.max(0.0),
-        },
-    );
-    if arranged.len() != sizes.len() {
-        return degenerate();
-    }
-    arranged.into_iter().map(|(_, points)| points).collect()
 }
 
 #[cfg(test)]

@@ -8,6 +8,21 @@
 
 ## 当前批次状态
 
+2026-10-21 素材板结构收尾（批次二，本次提交）：按
+`pin-board-structural-cleanup-plan-2026-10-21.md` 把 `repository.rs` 拆成
+`src-tauri/src/pin_board/repository/` 六个子模块（`paths` / `boards` / `view` /
+`save` / `create` / `bitmap_io`），公开调用面仍是 `repository::*`。五处建条目流程收敛为
+`begin_item_mutation` + `record_initial_state` + `finish_item_mutation`，文字与笔迹载荷
+INSERT、单条落位、以及「规范文件名 + 仓库边界」检查各只剩一份实现（规范名判定收敛为
+`paths::is_item_dds_file`，相对路径拼装收敛为 `paths::relative_item_dds`）；修订冲突文案、
+redo 作废、`FULL_UV` 与默认图层抽成共享常量/helper。`imported_points` 移到 `arrange.rs`，条目与
+导入上限移到 `contracts.rs`（该文件补齐模块文档）；持久化测试按归属分到各子模块，迁移测试移入
+`library/schema.rs`，无头导入的条目数输出与 `stress_bench` 消费者同步改为 `itemCount`。
+行为只有一处防御性收紧：永久删除画板现在要求该画板已在回收站（此前按 id 直接硬删除，活画板也会
+连记录和 DDS 一起消失且无从撤销），界面观感无变化。自动验证已通过（`cargo fmt --check`、
+`cargo check --all-targets`、`cargo check --features headless --all-targets`、
+`cargo test --lib` 414 用例、`git diff --check`）。批次三仍按计划文件执行。
+
 2026-10-21 素材板结构收尾（批次一，本次提交）：按
 `pin-board-structural-cleanup-plan-2026-10-21.md` 落实批次一。两处正确性修复：纹理结果缓存键加入
 仓库根路径（切仓库后画板/条目 id 从头复用不再串图；键同时从四元组改为具名字段结构、根路径按
@@ -20,7 +35,7 @@
 文档（补充缓存键构成、位图/文字占标注层被拒的契约与测试覆盖），并清掉本文件与 `todo.md` 中
 已归档素材板批次的表层段落。自动验证已通过（`cargo fmt --check`、`cargo test --lib pin_board`
 88 用例、`npm run test:pin-board` 24 文件 / 256 用例、`npx tsc --noEmit`、`git diff --check`）。
-批次二、三仍按计划文件执行。
+批次三仍按计划文件执行。
 
 2026-10-21 素材板图层开关与锁定解耦（本次提交）：图层面板此前跟着按钮组共用的
 `editingBlocked`（锁定或导出）走，锁定状态下四个开关一并置灰——那是整画布导出引入统一禁用

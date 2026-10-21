@@ -1040,13 +1040,13 @@ fn import_board_images(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_owned();
-    let image_count = view
+    let item_count = view
         .get("items")
         .and_then(Value::as_array)
         .map_or(0, Vec::len);
     Ok(json!({
         "imageIds": image_ids,
-        "imageCount": image_count,
+        "itemCount": item_count,
         "revision": revision,
     }))
 }
@@ -1264,7 +1264,7 @@ fn parse_stroke_spec(spec: &[u8]) -> Result<Vec<StrokeSpecRecord>, CommandError>
         return Err(invalid("--spec 不完整"));
     }
     let count = u32::from_le_bytes(spec[0..4].try_into().unwrap_or_default()) as usize;
-    if count == 0 || count > crate::pin_board::dds::MAX_BOARD_ITEMS {
+    if count == 0 || count > crate::pin_board::contracts::MAX_BOARD_ITEMS {
         return Err(invalid("--spec 的条目数超出范围"));
     }
     let mut offset = 4;

@@ -85,6 +85,19 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- Pin-board persistence is split by responsibility under
+  `src-tauri/src/pin_board/repository/`: board metadata, view loading, save and
+  finalize, item creation, bitmap file I/O, and path helpers now live in
+  separate modules behind the same `repository::*` API. The five near-copies of
+  the item-creation flow share one begin/record/finish path, the canonical
+  `<item-id>.dds` name check and the repository-boundary check live in one
+  helper each, and the repeated revision-conflict text, redo invalidation, full
+  UV and default layer are centralised. Item and import limits moved to
+  `contracts.rs`, the import placement maths to `arrange.rs`, and the headless
+  importer now reports `itemCount` instead of `imageCount` (its only reader is
+  the pre-release stress benchmark). Apart from that headless key, nothing is
+  observable from the outside: the split is a move plus de-duplication behind an
+  unchanged API.
 - The pin-board board summary's `imageCount` is renamed `itemCount` (native field
   `item_count`): it counts every kind — bitmaps, text and strokes — not bitmaps
   alone.
@@ -159,6 +172,10 @@ entries for the reader; they are not a template every entry has to fill.
   the frame captured when it starts; lock was folded into the shared "editing
   blocked" condition when export landed, even though layer visibility is view
   state that writes nothing.
+- Permanent deletion of a pin board now requires the board to be in the trash.
+  The record was removed by id without re-checking `deleted_at`, so a stale or
+  mistaken id could hard-delete an active board together with its DDS files,
+  with nothing left to undo it.
 - Dependency updates clear newly published advisories: `vite` 6.4.4 (dev-only;
   GHSA-698v-4r3x-3vcv / GHSA-r825-w8mm-5pxw / GHSA-587h-7wmj-h5pm) and
   `rustls-webpki` 0.103.16 with `webpki-roots` / `webpki-root-certs` 1.0.10

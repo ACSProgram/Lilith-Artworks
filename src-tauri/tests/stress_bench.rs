@@ -985,7 +985,7 @@ fn p3_board_dds_import_and_scrub_baseline() {
     revision = imported.data_str("revision");
     assert!(!revision.is_empty(), "{}", imported.describe());
     assert_eq!(
-        imported.data_u64("imageCount"),
+        imported.data_u64("itemCount"),
         BOARD_IMAGES as u64,
         "导入数量与预期不符：\n{}",
         imported.describe()

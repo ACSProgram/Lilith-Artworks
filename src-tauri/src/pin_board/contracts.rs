@@ -1,3 +1,13 @@
+//! 素材板的规模上限与仓库中立契约。
+//!
+//! 上限（[`MAX_BOARD_ITEMS`] / [`MAX_IMPORT_FILES`] / [`MAX_CLIPBOARD_IMAGE_BYTES`]）
+//! 放在这里而不是 `dds.rs` 或持久化模块：它们是「素材板能装多少」的业务口径，与图像
+//! 格式、SQLite 写法都无关；`repository/create.rs`、`repository/save.rs` 与无头入口
+//! 共用同一份值。
+//!
+//! [`PinBoardReferenceInventory`] 是画板 DDS 的引用清单实现，供 `cleanup` /
+//! 完整性扫描按中立契约核对「记录 ↔ 文件」，使那些模块不必认识画板路径布局。
+
 use std::{fs, path::Path};
 
 use rusqlite::{params, Connection};
@@ -9,7 +19,16 @@ use crate::{
     storage,
 };
 
-use super::repository::{board_relative_path, is_dds_name, parse_board_dds_path, BOARD_DIRECTORY};
+use super::repository::{
+    is_dds_name, is_item_dds_file, parse_board_dds_path, relative_item_dds, BOARD_DIRECTORY,
+};
+
+/// 单块画板的条目上限（全部 kind：位图、文字与笔迹合计）。
+pub(crate) const MAX_BOARD_ITEMS: usize = 20_000;
+/// 一次导入与一次画板内粘贴共用的条目数上限。
+pub(crate) const MAX_IMPORT_FILES: usize = 256;
+/// 剪贴板位图（含拖入导入的字节）大小上限。
+pub(crate) const MAX_CLIPBOARD_IMAGE_BYTES: usize = 256 * 1024 * 1024;
 
 /// 画板 DDS 的引用清单。位图载荷的文件路径在 DB 里是 `<item-id>.dds`，仓库中的
 /// 完整位置由 `artworks/<artwork-id>/boards/<board-id>/` 与文件名拼出。文字与笔迹
@@ -44,11 +63,11 @@ impl ReferenceInventory for PinBoardReferenceInventory {
         for row in rows {
             let (artwork_id, board_id, item_id, file_path) =
                 row.map_err(storage::database_error)?;
-            if file_path != format!("{item_id}.dds") {
+            if !is_item_dds_file(item_id, &file_path) {
                 continue;
             }
             targets.push(ManagedFile {
-                path: format!("{}/{file_path}", board_relative_path(&artwork_id, board_id)),
+                path: relative_item_dds(&artwork_id, board_id, item_id),
                 owner: ManagedFileOwner::PinBoardDds,
                 deletable: true,
             });

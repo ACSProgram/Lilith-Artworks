@@ -1,14 +1,15 @@
 //! 素材板（pin-board）领域模块：按 Artwork 的自由画布图片工作台。
 //!
 //! - 前端唯一入口为 `src/modules/pin-board/api.ts`，命令名与 DTO 以本模块为准；
-//! - 持久化见 `repository.rs`（schema v6 多态条目表），笔迹几何契约见 `stroke.rs`，
-//!   图像格式见 `dds.rs`，阵列排序见 `arrange.rs`（整理与导入落位共用同一份实现）；
+//! - 持久化见 `repository/`（schema v6 多态条目表），笔迹几何契约见 `stroke.rs`，
+//!   图像格式见 `dds.rs`，阵列排序见 `arrange.rs`（整理与导入落位共用同一份实现），
+//!   规模上限与 DDS 引用清单见 `contracts.rs`；
 //! - 普通浏览走共享读租约，保存/导入/粘贴/删除等变更走仓库 lease + 仓库操作锁
 //!   （`OperationCoordinator::run_repository_write`），保持不取共享运行锁的既有语义。
 
 pub(crate) mod arrange;
 pub(crate) mod canvas_export;
-mod contracts;
+pub(crate) mod contracts;
 pub(crate) mod dds;
 pub(crate) mod repository;
 pub(crate) mod scrub;
@@ -31,6 +32,7 @@ use crate::{
     platform::clipboard,
 };
 use arrange::{ArrangeItem, ArrangeOptions, HeightPolicy, ItemOrder};
+use contracts::MAX_IMPORT_FILES;
 use repository::{
     EditablePinBoardItem, PinBoardClipboardItem, PinBoardSummary, PinBoardView, SavePinBoardResult,
 };
@@ -513,8 +515,8 @@ pub(crate) fn read_pin_board_clipboard_paths(
     // 平台剪贴板读取返回全部文件路径；「最多导入多少个」是素材板的业务上限，
     // 在这里按 `MAX_IMPORT_FILES` 截断（与迁移前在读取侧截断的结果一致）。
     let mut paths = clipboard::file_paths()?;
-    if paths.len() > dds::MAX_IMPORT_FILES {
-        paths.truncate(dds::MAX_IMPORT_FILES);
+    if paths.len() > MAX_IMPORT_FILES {
+        paths.truncate(MAX_IMPORT_FILES);
     }
     for path in &paths {
         let file = Path::new(path);

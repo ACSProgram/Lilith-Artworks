@@ -1,0 +1,606 @@
+//! 画板保存与结算。
+//!
+//! 保存把前端的纯变换写成一个新步骤并作废 redo；结算截断未来步骤、清除仍为删除
+//! 状态的条目，并把位图 DDS 的删除经 `pending_file_cleanup` 入队。
+
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
+
+use rusqlite::{params, Connection};
+
+use super::super::contracts::MAX_BOARD_ITEMS;
+use super::boards::bump_revision;
+use super::paths::{is_item_dds_file, relative_item_dds};
+use super::view::{
+    current_states, effective_layer, ensure_revision, open_board_context, same_state,
+    validate_editable,
+};
+use super::{EditablePinBoardItem, ImageTransform, SavePinBoardResult, ITEM_KIND_BITMAP};
+use crate::{cleanup, storage};
+
+pub(crate) fn save_board(
+    connection: &mut Connection,
+    root: &Path,
+    board_id: i64,
+    items: &[EditablePinBoardItem],
+    expected_revision: &str,
+) -> Result<SavePinBoardResult, String> {
+    if items.len() > MAX_BOARD_ITEMS {
+        return Err("保存的画板条目数量超过限制".into());
+    }
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let context = open_board_context(&transaction, root, board_id)?;
+    ensure_revision(&context, expected_revision)?;
+    let now_step = context.now_step;
+
+    let mut requested = HashMap::with_capacity(items.len());
+    for item in items {
+        if requested.insert(item.item_id, item).is_some() {
+            return Err("保存请求包含重复条目".into());
+        }
+    }
+
+    let stored = current_states(&transaction, board_id, now_step)?;
+    let mut kinds = HashMap::with_capacity(stored.len());
+    let mut changed = HashSet::new();
+    let mut order_changed = false;
+    let mut found = 0usize;
+    for (item_id, state) in &stored {
+        kinds.insert(*item_id, state.kind);
+        let Some(editable) = requested.get(item_id) else {
+            continue;
+        };
+        found += 1;
+        validate_editable(editable, state.kind)?;
+        if !same_state(state, editable) {
+            changed.insert(*item_id);
+        }
+        order_changed |= state.sort_order != editable.order;
+    }
+    if found != requested.len() {
+        return Err("保存请求包含不属于当前画板的条目".into());
+    }
+    if changed.is_empty() && !order_changed {
+        return Ok(SavePinBoardResult {
+            saved: false,
+            revision: context.revision,
+            now_step,
+        });
+    }
+
+    let next_step = if changed.is_empty() {
+        now_step
+    } else {
+        now_step.checked_add(1).ok_or("画板历史步骤已达到上限")?
+    };
+
+    // 新步骤会覆盖未来：与 Client 行为一致，写入新步骤后 redo 记录作废。
+    for item_id in &changed {
+        transaction
+            .execute(
+                "DELETE FROM pin_board_history WHERE board_id = ?1 AND item_id = ?2 AND step > ?3",
+                params![board_id, item_id, now_step as i64],
+            )
+            .map_err(storage::database_error)?;
+        let editable = requested.get(item_id).expect("checked above");
+        let layer = effective_layer(
+            kinds.get(item_id).copied().unwrap_or(ITEM_KIND_BITMAP),
+            editable.layer,
+        );
+        transaction
+            .execute(
+                "INSERT INTO pin_board_history
+                   (board_id, item_id, step, deleted, layer, sort_order, transform_json)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![
+                    board_id,
+                    item_id,
+                    next_step as i64,
+                    editable.deleted as i64,
+                    layer as i64,
+                    editable.order as i64,
+                    serde_json::to_string(&ImageTransform {
+                        points: editable.points,
+                        uv: editable.uv,
+                    })
+                    .map_err(|error| format!("无法序列化条目变换：{error}"))?,
+                ],
+            )
+            .map_err(storage::database_error)?;
+    }
+    if order_changed {
+        for (item_id, editable) in requested.iter() {
+            transaction
+                .execute(
+                    "UPDATE pin_board_history SET sort_order = ?1
+                     WHERE board_id = ?2 AND item_id = ?3 AND step = ?4",
+                    params![editable.order as i64, board_id, item_id, now_step as i64],
+                )
+                .map_err(storage::database_error)?;
+        }
+    }
+    if !changed.is_empty() {
+        transaction
+            .execute(
+                "UPDATE pin_boards SET now_step = ?1, max_step = ?1 WHERE id = ?2",
+                params![next_step as i64, board_id],
+            )
+            .map_err(storage::database_error)?;
+    }
+    let (_, revision) = bump_revision(&transaction, board_id)?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(SavePinBoardResult {
+        saved: true,
+        revision,
+        now_step: next_step,
+    })
+}
+
+/// 结算画板：截断未来步骤，清除当前为删除状态的条目记录。
+///
+/// 被删除图片的 DDS 不再在提交前删除：事务内入队 `pending_file_cleanup`，
+/// 提交成功后由调用方执行 `cleanup::run` 重放删除。若提交失败，入队随事务
+/// 一起回滚，记录与 DDS 保持一致；删除失败则条目留在队列可重试，不阻断结算
+/// （重放每次调用只做单遍尝试，不会循环重试阻塞进度）。
+pub(crate) fn finalize_board(
+    connection: &mut Connection,
+    root: &Path,
+    board_id: i64,
+    expected_revision: &str,
+) -> Result<(SavePinBoardResult, Vec<String>), String> {
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let outcome = finalize_board_in_transaction(&transaction, root, board_id, expected_revision)?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(outcome)
+}
+
+fn finalize_board_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    root: &Path,
+    board_id: i64,
+    expected_revision: &str,
+) -> Result<(SavePinBoardResult, Vec<String>), String> {
+    let context = open_board_context(transaction, root, board_id)?;
+    ensure_revision(&context, expected_revision)?;
+    let now_step = context.now_step;
+    let mut changed = context.max_step != now_step;
+    let states = current_states(transaction, board_id, now_step)?;
+    let mut deleted = Vec::new();
+    for (item_id, state) in &states {
+        if state.deleted {
+            deleted.push((*item_id, state.kind, state.file_path.clone()));
+            changed = true;
+            continue;
+        }
+        let removed = transaction
+            .execute(
+                "DELETE FROM pin_board_history WHERE board_id = ?1 AND item_id = ?2 AND step > ?3",
+                params![board_id, item_id, now_step as i64],
+            )
+            .map_err(storage::database_error)?;
+        changed |= removed > 0;
+    }
+    transaction
+        .execute(
+            "UPDATE pin_boards SET max_step = ?1 WHERE id = ?2",
+            params![now_step as i64, board_id],
+        )
+        .map_err(storage::database_error)?;
+
+    if !changed {
+        return Ok((
+            SavePinBoardResult {
+                saved: false,
+                revision: context.revision,
+                now_step,
+            },
+            Vec::new(),
+        ));
+    }
+    let mut cleanup_ids = Vec::new();
+    for (item_id, kind, file_path) in &deleted {
+        transaction
+            .execute(
+                "DELETE FROM pin_board_items WHERE id = ?1 AND board_id = ?2",
+                params![item_id, board_id],
+            )
+            .map_err(storage::database_error)?;
+        if *kind != ITEM_KIND_BITMAP {
+            continue;
+        }
+        // 位图载荷未落库 SHA-256，按清理体系规划用不带期望摘要的入队；
+        // 非规范文件名的坏记录不参与引用，留给完整性扫描报告。
+        let Some(file_path) = file_path else {
+            continue;
+        };
+        if !is_item_dds_file(*item_id, file_path) {
+            continue;
+        }
+        cleanup_ids.push(cleanup::enqueue_repository_file(
+            transaction,
+            &relative_item_dds(&context.artwork_id, board_id, *item_id),
+            "pin_board_finalize",
+        )?);
+    }
+    let (_, revision) = bump_revision(transaction, board_id)?;
+    Ok((
+        SavePinBoardResult {
+            saved: true,
+            revision,
+            now_step,
+        },
+        cleanup_ids,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pin_board::repository::boards::create_board;
+    use crate::pin_board::repository::create::{create_stroke, create_text};
+    use crate::pin_board::repository::fixtures::{
+        board_revision, create_test_artwork, insert_deleted_state_image, insert_live_bitmap,
+        scalar, scalar_for_board, shape_geometry, test_repository,
+    };
+    use crate::pin_board::repository::view::load_view;
+    use crate::pin_board::stroke;
+
+    #[test]
+    fn stroke_items_stay_on_the_annotation_layer_when_saved() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "图层板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (_, stroke_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_RECT,
+            "#FF0000",
+            4.0,
+            80.0,
+            60.0,
+            &shape_geometry(stroke::TOOL_RECT, 2),
+            100.0,
+            100.0,
+            &revision,
+        )
+        .unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "同板文字",
+            20.0,
+            "#00FF00",
+            "left",
+            80.0,
+            30.0,
+            500.0,
+            500.0,
+            &revision,
+        )
+        .unwrap();
+
+        // 前端把两者都声明成底层；笔迹必须被强制拉回标注层，文字照旧。
+        let items = view
+            .items
+            .iter()
+            .map(|item| EditablePinBoardItem {
+                item_id: item.item_id,
+                order: item.order,
+                layer: 0,
+                deleted: false,
+                points: item.points,
+                uv: item.uv,
+            })
+            .collect::<Vec<_>>();
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap();
+        assert!(saved.saved);
+
+        let layer_of = |connection: &Connection, item_id: i64| -> i64 {
+            connection
+                .query_row(
+                    "SELECT layer FROM pin_board_history
+                     WHERE item_id = ?1 ORDER BY step DESC LIMIT 1",
+                    [item_id],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(layer_of(&connection, stroke_ids[0]), 3);
+        assert_eq!(layer_of(&connection, text_ids[0]), 0);
+        let stored = load_view(&connection, &root, board.board_id).unwrap();
+        assert_eq!(
+            stored
+                .items
+                .iter()
+                .find(|item| item.item_id == stroke_ids[0])
+                .unwrap()
+                .layer,
+            3
+        );
+
+        // 只把图层写错、几何没变时不算改动：笔迹被强制拉回 3，与库里一致，
+        // 因此不产生新步骤（前端传来 0/1/2 都不会让笔迹漂移出标注层）。
+        let latest = load_view(&connection, &root, board.board_id).unwrap();
+        let stroke_item = latest
+            .items
+            .iter()
+            .find(|item| item.item_id == stroke_ids[0])
+            .unwrap();
+        let only_stroke = vec![EditablePinBoardItem {
+            item_id: stroke_item.item_id,
+            order: stroke_item.order,
+            layer: 2,
+            deleted: false,
+            points: stroke_item.points,
+            uv: stroke_item.uv,
+        }];
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &only_stroke,
+            &revision,
+        )
+        .unwrap();
+        assert!(!saved.saved, "笔迹的图层请求应被忽略，不算改动");
+        assert_eq!(layer_of(&connection, stroke_ids[0]), 3);
+
+        // 超出标注层的图层值仍然拒绝：3 是笔迹的固定位置，不是可调范围。
+        let mut invalid = only_stroke;
+        invalid[0].layer = 4;
+        let revision = board_revision(&connection, board.board_id);
+        let error =
+            save_board(&mut connection, &root, board.board_id, &invalid, &revision).unwrap_err();
+        assert!(error.contains("图层无效"), "{error}");
+    }
+
+    #[test]
+    fn bitmap_and_text_items_cannot_claim_the_annotation_layer() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "图层板").unwrap();
+        let bitmap_id = insert_live_bitmap(
+            &connection,
+            board.board_id,
+            &root,
+            &artwork_id,
+            0.0,
+            100.0,
+            40.0,
+            20.0,
+        );
+        let revision = board_revision(&connection, board.board_id);
+        let (_, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "文字",
+            20.0,
+            "#00FF00",
+            "left",
+            80.0,
+            30.0,
+            300.0,
+            200.0,
+            &revision,
+        )
+        .unwrap();
+        let view = load_view(&connection, &root, board.board_id).unwrap();
+
+        // 3 是笔迹的固化位，位图与文字只用 0–2：写成 3 必须被拒，而不是静默落库
+        // 后与「标注层只装笔迹」的渲染约定自相矛盾。
+        for item_id in [bitmap_id, text_ids[0]] {
+            let item = view
+                .items
+                .iter()
+                .find(|item| item.item_id == item_id)
+                .unwrap();
+            let items = vec![EditablePinBoardItem {
+                item_id: item.item_id,
+                order: item.order,
+                layer: stroke::STROKE_LAYER,
+                deleted: false,
+                points: item.points,
+                uv: item.uv,
+            }];
+            let revision = board_revision(&connection, board.board_id);
+            let error =
+                save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap_err();
+            assert!(error.contains("图层无效"), "{error}");
+        }
+    }
+
+    #[test]
+    fn finalize_removes_stroke_rows_without_touching_dds_cleanup() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "结算板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, item_ids) = create_stroke(
+            &mut connection,
+            &root,
+            board.board_id,
+            stroke::TOOL_ARROW,
+            "#123456",
+            3.0,
+            50.0,
+            50.0,
+            &shape_geometry(stroke::TOOL_ARROW, 1),
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let stroke_item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == item_ids[0])
+            .unwrap();
+
+        // 标记删除 → 结算：笔迹记录随条目级联删除，且没有 DDS 清理入队。
+        let revision = board_revision(&connection, board.board_id);
+        let items = vec![EditablePinBoardItem {
+            item_id: stroke_item.item_id,
+            order: stroke_item.order,
+            layer: stroke_item.layer,
+            deleted: true,
+            points: stroke_item.points,
+            uv: stroke_item.uv,
+        }];
+        let saved = save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap();
+        assert!(saved.saved);
+        let revision = board_revision(&connection, board.board_id);
+        let (_, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+        assert!(cleanup_ids.is_empty(), "笔迹没有实体文件，不应入队清理");
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_items"),
+            0
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pin_board_strokes"),
+            0
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            0
+        );
+    }
+
+    #[test]
+    fn finalize_enqueues_deleted_dds_and_replay_removes_the_file() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "结算板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        let (result, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+        assert!(result.saved);
+        assert_eq!(cleanup_ids.len(), 1);
+
+        // 提交成功后、重放前：DDS 仍在磁盘上，队列恰好登记一条。
+        assert!(dds_path.is_file());
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            1
+        );
+
+        let report = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.pending_count, 0);
+        assert!(!dds_path.exists());
+
+        // 结算后条目记录与历史已删除。
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_items WHERE board_id = ?1",
+                board.board_id
+            ),
+            0
+        );
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_history WHERE board_id = ?1",
+                board.board_id
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn finalize_rollback_keeps_the_image_record_and_the_dds_file() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "回滚板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        // 模拟提交失败：结算事务中途回滚，入队与记录删除一起消失。
+        {
+            let transaction = connection.transaction().unwrap();
+            let (_, cleanup_ids) =
+                finalize_board_in_transaction(&transaction, &root, board.board_id, &revision)
+                    .unwrap();
+            assert_eq!(cleanup_ids.len(), 1);
+        }
+
+        // 记录回滚而文件保留，队列无残留条目。
+        assert!(dds_path.is_file());
+        assert_eq!(
+            scalar_for_board(
+                &connection,
+                "SELECT COUNT(*) FROM pin_board_items WHERE board_id = ?1",
+                board.board_id
+            ),
+            1
+        );
+        assert_eq!(
+            scalar(&connection, "SELECT COUNT(*) FROM pending_file_cleanup"),
+            0
+        );
+    }
+
+    #[test]
+    fn finalize_cleanup_entry_survives_a_failed_replay_and_can_be_retried() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "重试板").unwrap();
+        let dds_path = insert_deleted_state_image(&connection, board.board_id, &root, &artwork_id);
+        let revision = board_revision(&connection, board.board_id);
+
+        let (_, cleanup_ids) =
+            finalize_board(&mut connection, &root, board.board_id, &revision).unwrap();
+
+        // 用「文件被数据库引用」构造一次可重试的失败：重放拒绝删除，条目留在队列。
+        // 期望的相对路径由真实文件反推——夹具按 `<item-id>.dds` 命名，文件名即 id。
+        let item_id = dds_path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .and_then(|stem| stem.parse::<i64>().ok())
+            .unwrap();
+        let relative = relative_item_dds(&artwork_id, board.board_id, item_id);
+        connection
+            .execute_batch(&format!(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO final_artifacts
+                   (id, branch_id, history_id, source_path, source_sha256, media_type,
+                    byte_size, created_ms)
+                 VALUES ('artifact', 'branch', 'history', '{relative}',
+                         '0000000000000000000000000000000000000000000000000000000000000000',
+                         'image/jpeg', 8, 0);"
+            ))
+            .unwrap();
+        let failed = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert_eq!(failed.failures.len(), 1);
+        assert!(dds_path.is_file());
+        assert_eq!(failed.pending_count, 1);
+
+        // 解除引用后单次重放即删除：不循环重试、不阻塞后续流程。
+        connection
+            .execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 DELETE FROM final_artifacts WHERE id = 'artifact';",
+            )
+            .unwrap();
+        let retried = crate::cleanup::run(&root, &cleanup_ids).unwrap();
+        assert!(retried.failures.is_empty());
+        assert!(!dds_path.exists());
+        assert_eq!(retried.pending_count, 0);
+    }
+}
