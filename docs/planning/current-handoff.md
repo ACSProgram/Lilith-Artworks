@@ -8,26 +8,6 @@
 
 ## 当前批次状态
 
-2026-10-21 素材板结构收尾（三批全部落实，计划与实施记录已归档）：按
-`archive/pin-board-structural-cleanup-plan-2026-10-21.md` 完成结构整理——批次一补上纹理结果
-缓存键的仓库身份并按条目 kind 收紧图层契约，批次二把 Rust 持久化拆成
-`repository/{paths,boards,view,save,create,bitmap_io}.rs` 并收敛建条目公共流程，批次三把前端
-拆成侧栏/工具栏/画布舞台/对话框/右键菜单与 `usePinBoardTransfers`，渲染器只留编辑状态机
-（GPU、绘制预览与整画布导出的底层各自独立）。自动验证已通过（`cargo fmt --check`、
-`cargo test --lib` 414 用例、`npx tsc --noEmit`、`npm run test:pin-board` 24 文件 / 255 用例、
-`npm test` 49 文件 / 439 用例、`git diff --check`）；拆分后的界面观感与对话框外壳待人工验收。
-细节见 `archive/handoff-log-2026-10-21.md` 第 13 节，验收项在 `todo.md`。
-
-2026-10-21 素材板图层开关与锁定解耦（已提交 `2f4c323`）：图层面板此前跟着按钮组共用的
-`editingBlocked`（锁定或导出）走，锁定状态下四个开关一并置灰——那是整画布导出引入统一禁用
-条件时把 `locked` 顺带并进来的结果，计划与模块文档都只要求「导出期间禁用图层面板」。现改为
-独立的 `pinBoardLayersPanelDisabled`，只检查渲染器是否可用与是否正在导出：图层显隐是纯视图
-状态（不写库、不标 dirty、不进撤销栈），锁定挡的是改模型的操作，锁着藏掉标注层看底图正是
-锁定状态下的常用动作。行为变化见 `CHANGELOG.md` 的 `## Unreleased`，模块口径见
-`docs/modules/pin-board.md` 的「图层可见性」。自动验证已通过（`tsc --noEmit`、
-`npm run test:pin-board` 24 文件 / 257 用例），**锁定态下开关的手感与导出期禁用仍待人工确认**
-（验收项在 `todo.md`）。
-
 2026-10-21 错误边界与上下文拆分（已提交 `0c2f5d0`）：渲染期异常不再卸载整棵 React 树——根边界包在
 `NoticeCenter` / `AppRuntimeProvider` **之外**（三个 context hook 在 provider 缺失时都抛错，边界
 放在里面就兜不住），兜底自带可拖拽顶条与窗口按钮；作品工作区、三个标签页共用的视图层与素材板
@@ -37,7 +17,8 @@
 Provider 同文件时，开发模式保存 Provider 会热更新出新的 context 对象，仍持有旧 `useContext` 的
 消费者读到 `null` 抛错并带走整棵树（2026-10-21 素材板渲染器被卸载即由此触发）。窗口按钮抽成
 共用的 `WindowControls.tsx`，标题栏与根兜底不再各写一份标记。行为变化见 `CHANGELOG.md` 的
-`## Unreleased`，架构口径见 `docs/architecture/overview.md` 的「错误边界」与「上下文模块」。
+`## 0.3.0-alpha.6 - 2026-10-21`，架构口径见 `docs/architecture/overview.md` 的「错误边界」与
+「上下文模块」。
 自动验证已通过（`tsc --noEmit`、`vitest run src/app`），**兜底界面的观感、真实崩溃恢复与
 热更新不再卸载界面仍待人工确认**（验收项在 `todo.md`）。
 
@@ -59,18 +40,29 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 「扫描 → 确认清理 → 再扫描为空」闭环，并把 C3/快照上界改口径为「灾难性上界」。维护者已决定
 关闭 3.9（工具栏显隐归人工验收）、暂不做 4.6。C9/C10（含 4.8 新断言）仅验证过测试可编译
 （`cargo check --tests`），未实际运行——这符合大文件组的既有口径，不是压力测试结果。
-逐项状态见体检报告顶部的「处理状态」注记；行为变化见 `CHANGELOG.md` 的 `## Unreleased`。
+逐项状态见体检报告顶部的「处理状态」注记；行为变化见 `CHANGELOG.md` 的
+`## 0.3.0-alpha.6 - 2026-10-21`。
 剩余项（3.7 实际收紧、C9/C10 与 4.8 实跑、4.6 暂缓）在 `todo.md`。
 
-2026-10-21 版本切分 `0.3.0-alpha.5`（已提交 `3974bcc`，未打标签）：`CHANGELOG.md` 的
-`## Unreleased` 落为带日期的 `## 0.3.0-alpha.5 - 2026-10-21` 小节并按「CHANGELOG 写法」再压缩
-一遍，顶部重留空的 `## Unreleased`；五处版本字段、许可清单（`npm run legal`）与
-`tools/release/verify-metadata.mjs`
-的版本→schema 映射同步为 `0.3.0-alpha.5 → repository schema v6`（登记表在 schema 升 v6 时
-已预登记，本次起 `verify-metadata` 恢复一致）；README 与 `docs/planning/` 的版本引用一并
-更新。该版本收拢 alpha4 之后的全部改动——素材板笔迹与图层、备份检查元数据接线、快速命中
-计数与自适应强制全量、手动重查分支按链校验。**切版本不等于发布**：不触发任何门槛，是否打
-`v0.3.0-alpha.5` 标签由维护者单独决定。
+2026-10-21 版本切分 `0.3.0-alpha.6`（未打标签）：`CHANGELOG.md` 的 `## Unreleased` 落为
+带日期的 `## 0.3.0-alpha.6 - 2026-10-21` 小节，并按「CHANGELOG 写法」压缩一遍（合并在画板内
+复制与粘贴落点两条、删去整画布导出与错误边界的实现细节、把两处结构拆分收成一两句、测试条目改为
+行为描述），顶部重留空的 `## Unreleased`；五处版本字段、许可清单（`npm run legal`）与
+`tools/release/verify-metadata.mjs` 的版本→schema 映射同步为 `0.3.0-alpha.6 → repository
+schema v6`；README 与 `docs/planning/` 的版本引用一并更新。该版本收拢 alpha5 之后的全部改动——
+素材板橡皮擦与墨迹命中、图层计数、三类粘贴、整画布导出与可取消传输、结构收尾的契约修复
+（纹理缓存键、图层 kind、回收站删除前置）、持久化与前端结构拆分、分层错误边界与 context
+拆分、分支备份控件改版、本地 CI 预检、2026-10-21 测试体检两批与两次依赖升级。本地 CI 预检
+（`npm run ci:local`）已通过：workflow 审计、平台分支、两条 npm 审计、RustSec、发布元数据、
+许可证一致性、headless 目标预编译与九组便宜压力测试全 PASS（C9/C10 仍待发布前轮次）。
+**切版本不等于发布**：不触发任何门槛，是否打 `v0.3.0-alpha.6` 标签由维护者单独决定。
+
+上一批（版本切分 `0.3.0-alpha.5`，已提交 `3974bcc`，未打标签）：`CHANGELOG.md` 的 `## Unreleased`
+落为带日期的 `## 0.3.0-alpha.5 - 2026-10-21` 小节并按「CHANGELOG 写法」再压缩一遍，顶部重留
+空的 `## Unreleased`；五处版本字段、许可清单（`npm run legal`）与
+`tools/release/verify-metadata.mjs` 的版本→schema 映射同步为 `0.3.0-alpha.5 → repository
+schema v6`；README 与 `docs/planning/` 的版本引用一并更新。该版本收拢 alpha4 之后的全部改动——
+素材板笔迹与图层、备份检查元数据接线、快速命中计数与自适应强制全量、手动重查分支按链校验。
 
 上一批（自动备份调度与快速检查修复，阶段 1–5，已提交）：快速检查的指纹门槛、调度侧
 静默与代价感知、让位改事件驱动、后台完成事件收敛、提交路径删除 head snapshot 整份复检、
@@ -79,24 +71,12 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 `## 0.3.0-alpha.4 - 2026-10-20`。自动验证已通过，**GUI 手工验收、一天日志观察与 release 下
 同一 1.378 GB 分支的提交/恢复复测仍待人工**（验收项在 `todo.md`）。
 
-上一批（平台代码集中，已提交）：平台专属逻辑收口到 `src-tauri/src/platform/`，新增可移植性规范
-`docs/guides/platform.md`，Windows CI 增加「平台分支只准出现在 `platform/` 内」的 grep 把关。
-计划与实施记录见 `archive/platform-code-consolidation-plan-2026-10-20.md`；行为零变化（纯机械
-搬移 + 一轮不改变行为的整理），自动验证已通过，维护者已做初步手工确认但**未覆盖全部界面入口**，
-剩余 GUI 验收项在 `todo.md`。
-
 上一批（缩略图格式扩展第一批，已提交）：节点缩略图新增三种来源——`.sai2`（libsai 移植，
 `intg` 画布优先、`thum` 兜底）、`.procreate`（ZIP 内的 `QuickLook/Thumbnail.png`）与无魔数的
 `.tga`，`supports_preview` 同步登记；其余候选格式由维护者决定暂缓。计划、格式依据与实施记录
 见 `archive/thumbnail-format-expansion-plan-2026-10-20.md`；行为变化见 `CHANGELOG.md` 的
 `## 0.3.0-alpha.4 - 2026-10-20`。自动验证已通过（含 `intg` 在 3 个真实样本上与 SAI 导出 PNG
 的逐像素比对），**GUI 手工验收与 `.procreate` 真实样本验证仍待人工**（验收项在 `todo.md`）。
-
-上一批（校验可见性与「无法检查」状态，已提交）：历史节点的问题从「分支状态行一行小字」
-改为节点级可见（红=文件丢失、黄=文件损坏、灰=无法检查），失败归因修为「真正坏掉的节点标
-丢失/损坏，被挡住的更早节点写无法检查」，全库扫描改为按链走。alpha3 阶段 9 的 GUI 手工验收
-已由维护者实测通过（见 `archive/handoff-log-2026-10-20.md` 第 12 节）；**本批次改版后的界面
-观感与真实损坏场景仍待人工确认**（验收项在 `todo.md`）。
 
 上一批（切换作品不再等待仓库写入，已提交）：`loadBoard` 改为同步交接，旧画板的未保存改动以快照
 形式交给模块级后台结算队列（`pin-board/pendingSettle.ts`）串行写回，后台任务持写锁再久也不影响
@@ -111,9 +91,6 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 
 ## 下一步
 
-- 素材板结构收尾的界面确认：拆分后的侧栏、工具栏、画布舞台、对话框与右键菜单外观与交互不变；
-  文字与整画布导出共用本地对话框外壳后的观感一致；绘制预览、选中描边与整画布导出的输出与
-  拆分前一致。验收项见 `todo.md`。
 - 错误边界的界面验收：根兜底顶条与窗口按钮、区块兜底的作用范围（含素材板窗格内的位置）、
   热更新不再整棵卸载，以及 `[boundary]` 日志能否按标签筛到。验收项见 `todo.md`。
 - 测试体检第二批的收尾：随发布前压力测试轮运行 C9/C10（含 4.8 新增的临时文件清理闭环），并用
@@ -121,37 +98,30 @@ RustSec 审计、发布元数据、许可证一致性、headless 测试目标预
 - 自动备份调度修复的阶段 2–5 待人工验证：GUI 手工验收（静默窗、调度器代价感知、让位不空转、
   后台完成事件只合并分支）、一天日志观察，以及 release 下同一 1.378 GB 分支的提交/恢复复测
   （与计划 §6.1 的分段耗时逐项对照）。验收项见 `todo.md`。
-- 平台批次剩余的 GUI 手工验收（「在文件夹中显示」、设置页三个目录入口、素材板粘贴导入），
-  验收项见 `todo.md`。
 - 缩略图格式扩展的 GUI 手工验收：选中 `.sai2` / `.procreate` / `.tga` 分支的节点，逐档确认
   图片、「无可用预览」占位与「格式不支持」三种表现；`.procreate` 的真实文件仍只有合成 ZIP
   单测。验收项见 `todo.md`。
-- 校验可见性改版的界面确认：故障节点在总览、当前分支与时间轴三处按色呈现，状态行与默认展开的
-  「详情信息」读起来不费解；再用真实仓库删掉某个 head 的 snapshot，确认归因只落在坏节点上。
-  验收项见 `todo.md`。
 - 切换作品的后台结算确认：长任务运行期间切换作品仍即时完成；未保存改动切换不弹错、由后台写回；
   仓库只读时出现常驻提示并可重试；退出时后台队列被清空。验收项见 `todo.md`。
-- 拖放暂存清理的退出确认：退出后 `%TEMP%` 不留本次运行的暂存目录，强杀残留下次启动被清掉，
-  拖放导入流程不受影响。验收项见 `todo.md`。
-- 阶段 9 剩余的优先级确认（待查集合按 `created_ms` 最旧优先、失败节点退出队列、有到期备份时的
-  aging 插队），验收项见 `todo.md`。
-- 垃圾文件扫描与检查点取消的界面验收、alpha2 遗留验收（同仓库写入排队）见 `todo.md`。
-- 版本已切至 `0.3.0-alpha.5`（未打标签，见「当前批次状态」）；0.3 发布前仍由维护者显式安排
-  压力测试（含 `manual` 8 GiB 档，见 `docs/guides/release-policy.md`），并把实测写入
+- 拖放暂存清理的退出确认：退出后 `%TEMP%` 不留本次运行的暂存目录，强杀残留下次启动被清掉。
+  验收项见 `todo.md`。
+- 检查点取消的界面验收、alpha2 遗留验收（同仓库写入排队）见 `todo.md`。
+- 版本已切至 `0.3.0-alpha.6`（未打标签，见「当前批次状态」）；0.3 发布前仍由维护者显式
+  安排压力测试（含 `manual` 8 GiB 档，见 `docs/guides/release-policy.md`），并把实测写入
   `docs/user/stress-test-report.md`；是否打标签按同一文件单独决定。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 已切 `0.3.0-alpha.5`（未打标签的过渡版本，收拢 alpha4 之后的素材板笔迹与调度
-  接线批次），五处版本字段、`CHANGELOG.md` 与逐版本 schema 映射同步；日常改动写入
-  `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按 `docs/guides/release-policy.md`
-  单独决定。
-- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地）；ChunkFile 仓库
-  可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 alpha1 与 alpha2 保持 v4；**0.3 共有
-  两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的 v5 → v6），高于当前版本的仓库由旧程序直接
-  拒绝。
+- 版本：`dev` 已切 `0.3.0-alpha.6`（未打标签的过渡版本，收拢 alpha5 之后的素材板复制/
+  橡皮擦/导出、结构拆分、错误边界与备份控件改版批次），五处版本字段、`CHANGELOG.md` 与逐版本
+  schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
+  `docs/guides/release-policy.md` 单独决定。
+- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地；alpha6
+  沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 alpha1 与
+  alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的 v5 → v6），高于
+  当前版本的仓库由旧程序直接拒绝。
 - 0.3 基线（阶段 0 一次性采集）：临时仓库副本 `D:\temp\Artworks`（3 作品 / 59 历史节点 /
   ≈9.83 GiB），采集后已按采集前状态还原。`stress_baseline` 组已随 2026-10-21 的测试体检退役
   删除（历史数值见 `0.3-baseline-2026-10-18.md`），长期回归对照用 `stress_bench`。

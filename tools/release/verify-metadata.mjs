@@ -63,6 +63,7 @@ const schemaByVersion = new Map([
   ["0.3.0-alpha.3", "5"],
   ["0.3.0-alpha.4", "5"],
   ["0.3.0-alpha.5", "6"],
+  ["0.3.0-alpha.6", "6"],
 ]);
 const expectedSchema = schemaByVersion.get(expected);
 if (!expectedSchema) {

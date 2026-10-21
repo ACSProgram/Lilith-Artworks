@@ -15,105 +15,75 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+## 0.3.0-alpha.6 - 2026-10-21
+
 ### Added
 
-- Pin-board eraser (`E`). It only erases strokes, uses a ring cursor whose
-  diameter follows the shared "size" value and the viewport zoom, and hits in
-  world space by distance from the ink polyline (freehand pressure radii, the
-  four shape borders, and the arrow head triangle). Erasing tests the path swept
-  between two pointer samples rather than just the sample point: pointer moves
-  are coalesced to 60–120 Hz, so a fast rub could otherwise jump over thin ink
-  and erase nothing while a single click worked. One drag produces exactly one
+- Pin-board eraser (`E`). It only erases strokes, uses a ring cursor sized by the
+  shared "大小" value and the viewport zoom, and hits by distance to the ink
+  polyline (freehand pressure radii, the four shape borders, the arrow head
+  triangle). It tests the path swept between two pointer samples rather than
+  the sample point, so a fast rub no longer jumps over thin ink. One drag is one
   undo entry; a click that touches no ink changes nothing.
-- The layer panel now shows the item count of each layer. Counts include items
-  on hidden layers (the number means "how much is on this layer", not "how much
-  is visible"); the annotation row stays count-free, and the number is
-  `aria-hidden` so the row's accessible name does not become "顶层 12".
-- In-board copy/paste covers bitmaps, text and strokes. `paste_pin_board_items`
-  writes the whole selection in one transaction with one revision bump, so a
-  mixed selection is atomic; the clipboard payload only records
-  `{ kind, sourceBoardId, sourceItemId }` and the native side reads the source
-  item's current state instead of trusting possibly-stale front-end sizes.
+- The layer panel shows each layer's item count, including items on hidden
+  layers; the annotation row stays count-free, and the count is `aria-hidden`
+  so a row's accessible name stays its layer name.
+- In-board copy/paste covers bitmaps, text and strokes in one transaction with
+  one revision bump, so a mixed selection is atomic. The pasted group keeps its
+  relative layout - the bounding box is centred on the drop point instead of
+  re-flowing bitmaps through the import arrangement, which used to break
+  alignment on multi-select. The clipboard payload only records
+  `{ kind, sourceBoardId, sourceItemId }`; the native side reads the source
+  item's current state.
 - Whole-board PNG export. Every visible item — bitmaps, text and strokes — can
-  now be written into one transparent PNG, cropped to the content bounds with a
+  be written into one transparent PNG, cropped to the content bounds with a
   10 px margin by default (0–64 px adjustable). The factor is a free number
   (0.01–8) whose default is "1x or whatever fits the suggested longest edge",
-  and the pixel width and the factor are two views of the same value: editing
-  either one updates the other. The suggested edge comes from the texture cache
-  level (10000 / 20000 / 30000 px) and is advisory only — going over it shows a
-  warning and keeps the export, while a hard cap (65535 px per edge, 1e9 pixels)
-  still converges absurd input. The file name defaults to the board name and is
-  editable. There is no duration estimate: it was never accurate enough to be
-  worth the space. Rendering uses a separate offscreen `rgba8unorm` pass (same
-  shaders, copies of the pipelines with only the target format changed), so the
-  screen path is untouched; bitmaps are re-requested at display size × export
-  factor while the items of the current tile are protected from eviction. The
-  image is streamed to the native side as row bands: the front end reads each
-  tile back, a `png` writer assembles rows, and the file is published atomically.
-  Export takes no repository write lease or operation lock and locks the board
-  while it runs. The blank-area context menu has the same entry as the toolbar.
+  and the pixel width and the factor are two views of one value; the suggested
+  edge (10000 / 20000 / 30000 px depending on texture cache level) only warns,
+  while a hard cap of 65535 px per edge and 1e9 pixels converges absurd input.
+  The file name defaults to the board name and is editable, export runs off the
+  screen pass with the PNG published atomically, and it takes no repository
+  write lease or operation lock. It locks the board while running and appears
+  both in the toolbar and the blank-area context menu.
 - One shared transfer bar for import, export and whole-board export: label,
-  progress, percentage and a cancel button on a single row. Import and export of
-  bitmaps can now be cancelled too (`cancel_pin_board_transfer`; the native
-  loops check between items). A cancelled import rolls back entirely — no half
-  batch of items and no orphaned DDS files — while a cancelled bitmap export
-  keeps the PNGs already written.
+  progress, percentage and a cancel button on a single row. Bitmap import and
+  export can be cancelled too (`cancel_pin_board_transfer`); a cancelled import
+  rolls back entirely, while a cancelled bitmap export keeps the PNGs already
+  written.
 - Layered React error boundaries, because a single throw while rendering used
-  to unmount the whole tree: the window went blank and, since it has no
-  decorations and `F5` / `Ctrl+R` is cancelled on purpose, could not even be
-  dragged or closed. The root boundary wraps every provider — all three context
-  hooks throw when their provider is missing, so a boundary placed inside them
-  would miss exactly those errors — and its fallback draws its own drag strip
-  and window buttons. A workspace boundary keeps the library and title bar
-  usable when one artwork crashes; inside it the three tabs share one view
-  boundary, so a broken history page no longer takes the tab bar with it, and
-  the pin-board pane keeps its own boundary because it is the one module that
-  stays mounted across views and holds the GPU device and the edit session.
-  Every fallback logs `[boundary]` with the message, the throwing component and
-  the stack, then offers retry first: retry only remounts the failed subtree,
-  whereas a full reload would discard the in-memory pending pin-board settle
-  queue, so reload sits behind it with "open log directory". Boundaries clear
+  to unmount the whole tree and leave a blank, undecorated window that could
+  not even be dragged or closed. The fallbacks cover the window, the workspace
+  (library and title bar stay usable), the three tabs and the pin-board pane,
+  each with retry first - a full reload would discard the in-memory pending
+  pin-board settle queue - and "open log directory" behind it. Boundaries clear
   themselves when their `resetKeys` change, so switching artwork or tab
-  recovers without a click.
-- Tests: a damaged head snapshot under changed content (R7); a large-file commit
-  killed in the middle of the snapshot pipeline (C9); the 4 MiB pipeline
-  boundary at 4 MiB - 1, 4 MiB and 4 MiB + 1 bytes, with snapshot and delta
-  restored byte for byte (C10); application-layer coverage that a manual commit
-  clears the quick-hit counter on success and leaves it alone on failure or
-  cancellation; and front-end coverage for the background-save indicator hook
-  and for culling a long stroke segment by segment across the viewport.
+  recovers without a click. Every fallback logs `[boundary]` with the message,
+  the throwing component and the stack.
+- Tests: a damaged head snapshot under changed content; a large-file commit
+  killed in the middle of the snapshot pipeline; the 4 MiB pipeline boundary at
+  4 MiB - 1, 4 MiB and 4 MiB + 1 bytes, restored byte for byte; a manual commit
+  clearing the quick-hit counter on success only; and front-end coverage for
+  the background-save indicator hook and for culling a long stroke segment by
+  segment across the viewport.
 
 ### Changed
 
 - Pin-board persistence is split by responsibility under
-  `src-tauri/src/pin_board/repository/`: board metadata, view loading, save and
-  finalize, item creation, bitmap file I/O, and path helpers now live in
-  separate modules behind the same `repository::*` API. The five near-copies of
-  the item-creation flow share one begin/record/finish path, the canonical
-  `<item-id>.dds` name check and the repository-boundary check live in one
-  helper each, and the repeated revision-conflict text, redo invalidation, full
-  UV and default layer are centralised. Item and import limits moved to
-  `contracts.rs`, the import placement maths to `arrange.rs`, and the headless
-  importer now reports `itemCount` instead of `imageCount` (its only reader is
-  the pre-release stress benchmark). Apart from that headless key, nothing is
-  observable from the outside: the split is a move plus de-duplication behind an
-  unchanged API.
+  `src-tauri/src/pin_board/repository/` behind the same `repository::*` API:
+  the five near-copies of the item-creation flow now share one path, and item
+  and import limits live in `contracts.rs`. The split is a move plus
+  de-duplication with no observable change, apart from the headless importer
+  reporting `itemCount` instead of `imageCount`.
 - The pin-board board summary's `imageCount` is renamed `itemCount` (native field
   `item_count`): it counts every kind — bitmaps, text and strokes — not bitmaps
   alone.
-- The pin-board front end is split by responsibility too. `PinBoardModule` now
-  composes a sidebar (board list, trash, reorder and its list menu), a toolbar,
-  a canvas stage (GPU canvas, overlays, drawbar, layer panel), dialogs (text and
-  whole-board export on one local shell) and the canvas context menu. The
-  renderer keeps its editing state machine, while device/pipeline/texture
-  plumbing moved to `rendererGpu.ts`, the DOM stroke preview to
-  `strokePreview.ts`, and the offscreen export target, readback and stroke
-  buffers to `rendererExport.ts`. The geometry BLOB encoder moved next to the
-  decoder in `strokeGeometry.ts`, so `strokeDrawing.ts` no longer depends on
-  `strokeRender.ts`. Import/export/text/stroke queue boilerplate moved into
-  `usePinBoardTransfers.ts`, and the tool key map is now a single table in
-  `strokeDrawing.ts` that also feeds the drawbar labels. No observable behaviour
-  changes.
+- The pin-board front end is split the same way: `PinBoardModule` composes a
+  sidebar, toolbar, canvas stage, dialogs (text and whole-board export on one
+  local shell) and the canvas context menu, while device/pipeline/texture
+  plumbing, the DOM stroke preview and the export target live in their own
+  renderer modules, and the transfer queues live in `usePinBoardTransfers`.
+  Behaviour is unchanged.
 - The pin-board stroke style label is now "大小" instead of "线宽": the value is
   both the pen width and the eraser diameter. Internal identifiers keep the
   `strokeWidth` name.
@@ -121,48 +91,39 @@ entries for the reader; they are not a template every entry has to fill.
   selection measures the cursor's distance to the ink polyline, marquee
   selection intersects that polyline with the box, and both add a minimum
   tolerance of 3 CSS px so hairlines stay clickable. Framing the hollow inside
-  of a rectangle or ellipse no longer selects it, which also means clicking an
-  empty centre no longer does. Bitmaps and text keep their bounding quad —
-  bitmaps would need a texture read-back, and a text quad already hugs the
-  glyphs. The marquee still short-circuits on the ink box, so framing a large
-  area does not degrade into per-segment work.
-- Paste placement keeps the group's relative layout: the selection's bounding
-  box is centred on the drop point instead of re-flowing bitmaps through the
-  import arrangement, which used to break alignment on multi-select and shift
-  mixed selections.
+  of a rectangle or ellipse no longer selects it. Bitmaps and text keep their
+  bounding quad.
 - Single-item export is bitmap-only. The text export path (front-end PNG
   rasterisation plus `write_pin_board_item_png` and `repository::write_text_png`)
   is gone, `exportableCount` counts bitmaps only, and the export and
   system-clipboard actions are disabled together when the selection has no
   bitmap.
-- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in two
-  batches. The one-off `stress_baseline` group and the 0.2.0-era debug profile are
-  deleted, with long-term regression left to `stress_bench` and the synthetic
-  scenarios. The strict performance gate now states a direction per key (latency
-  `<=`, throughput `>=`, so a faster restore is not a regression) and derived
-  per-item timings are record-only; C7 cancels its sixth checkpoint from
-  `COMMIT_CHECKPOINTS`, and J5 matches the current cross-process lock wording.
-- Assertions now measure what their names claim: D1's memory ceiling drops to
-  64 MiB (17 MiB measured) and H3's to 64 MiB (12.5 MiB measured), K2 asserts the
-  exact titles and trims, J2 adds a 30-second ceiling plus reported timings, G2 is
-  renamed to what it checks, and the 180-second rapid-commit guard is removed
-  because it could not detect a regression. The gate guard scans every top-level
-  `tests/*.rs` and keys to whether a target spawns a process; the native arrange
-  command gains boundary coverage; C9 gains the scratch-file cleanup loop; and
-  C3's memory and snapshot allowances are labelled catastrophic bounds rather
-  than proof of streaming.
+- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in
+  two batches. The one-off `stress_baseline` group and the 0.2.0-era debug
+  profile are deleted, with long-term regression left to `stress_bench`; the
+  strict performance gate now states a direction per key (latency `<=`,
+  throughput `>=`, so a faster restore is not a regression) and derived
+  per-item timings are record-only.
+- Assertions now measure what their names claim: memory ceilings drop to the
+  measured sizes plus headroom, titles and trims are asserted exactly, timings
+  get a ceiling, the 180-second rapid-commit guard is removed because it could
+  not detect a regression, and C3's memory and snapshot allowances are labelled
+  catastrophic bounds rather than proof of streaming. The gate guard scans every
+  top-level `tests/*.rs`; the native arrange command gains boundary coverage;
+  and C9 gains the scratch-file cleanup loop.
+- `npm run ci:local` (`tools/ci/local-ci.mjs`) is the release-only local
+  preflight: workflow audit-list consistency, the platform-branch check, both
+  npm audits, RustSec, release metadata, license consistency, prebuilt headless
+  test targets and the nine cheap stress groups run in parallel and report once
+  at the end. It is not part of daily checks.
 - Each React context now lives in its own module (`appRuntimeContext.ts`,
-  `noticeContext.ts`, `runtimeProgressContext.ts`) instead of sharing a file
-  with its provider. Saving a provider file during development re-executes that
-  module, which produced a fresh context object while consumers still held the
-  old `useContext`; they read `null`, threw, and took the whole tree down with
-  them (the pin-board renderer teardown on 2026-10-21). Hot updates no longer
-  change the context identity.
+  `noticeContext.ts`, `runtimeProgressContext.ts`), so saving a provider file
+  during development no longer swaps the context identity under consumers that
+  still hold the old `useContext`.
 - The minimize / maximize / close buttons are one `WindowControls` component
-  shared by the title bar and the root fallback, instead of two hand-copied
-  blocks of markup that could drift apart. Both now fetch the window object on
-  click rather than at import, so rendering the title bar no longer depends on
-  the Tauri window API being present.
+  shared by the title bar and the root fallback instead of two hand-copied
+  blocks of markup. Both fetch the window object on click rather than at import,
+  so rendering the title bar no longer needs the Tauri window API.
 - The branch band condenses automatic backup: the two toggles stack under a
   timer icon, the interval sits next to the switch it belongs to, the quick
   check hint reads "跳过未改动文件", and the status sentence is replaced by a
