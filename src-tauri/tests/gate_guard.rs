@@ -75,8 +75,7 @@ fn every_stress_target_is_gated_behind_the_headless_feature() {
 /// `%TEMP%` 会与系统和其他进程争用（实测出现过工作区中途被回收），而且这些残留无法随
 /// `cargo clean` 一起清掉，会散落到仓库之外。
 ///
-/// 允许的例外是测试夹具自己的确定性样本（`tests/fixtures/`）与基线脚本的一次性外部副本
-/// （`LILITH_BASELINE_REPO`），两者都在模块顶部的注释里说明。
+/// 允许的例外是测试夹具自己的确定性样本（`tests/fixtures/`），在模块顶部的注释里说明。
 #[test]
 fn stress_targets_do_not_create_their_own_temp_space() {
     const FORBIDDEN: [&str; 4] = [

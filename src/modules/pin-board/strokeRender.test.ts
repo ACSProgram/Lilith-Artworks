@@ -381,6 +381,54 @@ describe("pin-board stroke primitives", () => {
     expect(culled.indices).toHaveLength(0);
     expect(culled.strokeCount).toBe(0);
   });
+
+  it("culls a long freehand stroke segment by segment across the viewport", () => {
+    // 一条横贯 1000 世界单位长的自由笔（1000 段），视口只看得到 x ∈ [400, 600]。
+    const samples = Array.from({ length: 1001 }, (_, index) => ({
+      u: index / 1000,
+      v: 0.5,
+      pressure: 0,
+    }));
+    const item = strokeItem({
+      width: 1000,
+      height: 10,
+      points: [[0, 0], [1000, 0], [1000, 10], [0, 10]],
+    });
+    const items = [entry(item, geometryFor(STROKE_TOOL.pen, samples))];
+    // pixelsPerWorldUnit = 10 让抽稀阈值（1/10 世界单位）远小于点距（1 世界单位），
+    // 1001 个采样点全部保留——这里测的是裁剪，不是 LOD。
+    const options = { pixelsPerWorldUnit: 10 };
+    const cullBounds = { minX: 400, minY: -100, maxX: 600, maxY: 100 };
+
+    const whole = buildStrokeBatch(items, options);
+    const culled = buildStrokeBatch(items, { ...options, cullBounds });
+
+    expect(whole.primitiveCount).toBe(1000);
+    // 视口只覆盖 20% 的长度：大部分段被裁掉，但不是整笔消失。
+    expect(culled.primitiveCount).toBeGreaterThan(0);
+    expect(culled.primitiveCount).toBeLessThan(whole.primitiveCount / 2);
+    expect(culled.strokeCount).toBe(1);
+    expect(culled.indices).toHaveLength(culled.primitiveCount * 6);
+
+    // 每个写出的四边形都必须与视口相交，且至少各有一段跨越左右边界——
+    // 「逐段裁剪」意味着框内被完整覆盖，而不是只画了框内整段的某个子集。
+    let minX = Number.POSITIVE_INFINITY;
+    let maxX = Number.NEGATIVE_INFINITY;
+    for (let primitive = 0; primitive < culled.primitiveCount; primitive += 1) {
+      const xs: number[] = [];
+      for (let corner = 0; corner < 4; corner += 1) {
+        xs.push(vertex(culled, primitive * 4 + corner)[0]);
+      }
+      const left = Math.min(...xs);
+      const right = Math.max(...xs);
+      expect(right).toBeGreaterThanOrEqual(cullBounds.minX);
+      expect(left).toBeLessThanOrEqual(cullBounds.maxX);
+      minX = Math.min(minX, left);
+      maxX = Math.max(maxX, right);
+    }
+    expect(minX).toBeLessThanOrEqual(cullBounds.minX + 5);
+    expect(maxX).toBeGreaterThanOrEqual(cullBounds.maxX - 5);
+  });
 });
 
 describe("pin-board stroke selection outline", () => {

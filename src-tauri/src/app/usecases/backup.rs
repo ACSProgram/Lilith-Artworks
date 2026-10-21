@@ -328,6 +328,207 @@ pub(crate) fn notice_target(
     })
 }
 
+#[cfg(test)]
+mod tests {
+    //! 手动提交与快速命中计数的契约：成功提交（无论是否产生新节点）都完整读过
+    //! 工作文件，连续快速命中计数必须归零；失败与取消没有完整读，计数必须原样
+    //! 保留——否则一次失败的提交会白白推迟下一次全量内容确认。
+    //!
+    //! `reset_quick_hit_count` 本身在 `history::repository`，它的持久化行为由
+    //! `backup::scheduler` 的单测覆盖（`reset_quick_hit_count_clears_the_persisted_value`）；
+    //! 这里补的是**应用层入口**：走 `usecases::backup::commit` 的完整锁序与错误处理路径。
+
+    use super::*;
+    use crate::app::command_runtime::{
+        CommandErrorKind, NoopEventSink, OperationCoordinator, OperationDomain,
+    };
+    use crate::backup::chunk_file::ChunkWriteOptions;
+    use crate::backup::worker;
+    use crate::backup::BackupState;
+    use crate::cancel::CancelToken;
+    use std::{fs, io::Write, path::Path, sync::Arc};
+
+    /// 仓库 + 分支 + 仓库外的工作文件。与 `backup::scheduler` 的测试夹具同构。
+    fn fixture() -> (
+        tempfile::TempDir,
+        std::path::PathBuf,
+        std::path::PathBuf,
+        String,
+    ) {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let source = directory.path().join("artwork.bin");
+        fs::File::create(&source)
+            .unwrap()
+            .write_all(b"content v1")
+            .unwrap();
+        crate::library::initialize(&root).unwrap();
+        let artwork =
+            crate::library::create_artwork(&root, None, "Artwork", "Main", &source, true).unwrap();
+        (directory, root, source, artwork.branch_id)
+    }
+
+    /// 指向给定仓库的协调器。`repository_path` 必须与仓库一致：
+    /// `execute` 用它推导 `repository_key` 并取跨进程锁。
+    fn coordinator_for(root: &Path, directory: &Path, name: &str) -> OperationCoordinator {
+        let mut settings = crate::app::settings::AppSettings::default();
+        settings.repository_path = root.to_string_lossy().into_owned();
+        let state = crate::app::AppState::new(
+            settings,
+            directory.join(format!("{name}.json")),
+            directory.join(format!("{name}-logs")),
+            None,
+        );
+        OperationCoordinator::new(state, BackupState::default(), Arc::new(NoopEventSink))
+    }
+
+    fn set_quick_hits(root: &Path, branch_id: &str, hits: u32) {
+        crate::storage::open(root)
+            .unwrap()
+            .execute(
+                "UPDATE branches SET quick_hit_count = ?2 WHERE id = ?1",
+                rusqlite::params![branch_id, hits],
+            )
+            .unwrap();
+    }
+
+    fn quick_hits(root: &Path, branch_id: &str) -> u32 {
+        history::load_scheduled(root, branch_id)
+            .unwrap()
+            .unwrap()
+            .quick_hit_count
+    }
+
+    #[test]
+    fn manual_commit_resets_quick_hit_count_on_success() {
+        let (directory, root, source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "success");
+        // 先建立 head；这次提交同样应把计数归零（初始就是 0，主要是确认路径可用）。
+        let first = coordinator
+            .execute(OperationDomain::Backup, |context| {
+                commit(context, &branch_id, "first", "manual", true)
+            })
+            .unwrap();
+        assert!(first.created);
+
+        set_quick_hits(&root, &branch_id, 6);
+        // 内容变化 → 新节点：完整读过工作文件，计数归零。
+        fs::File::create(&source)
+            .unwrap()
+            .write_all(b"content v2")
+            .unwrap();
+        let second = coordinator
+            .execute(OperationDomain::Backup, |context| {
+                commit(context, &branch_id, "second", "manual", true)
+            })
+            .unwrap();
+        assert!(second.created);
+        assert_eq!(
+            quick_hits(&root, &branch_id),
+            0,
+            "成功的手动提交必须清零连续快速命中计数"
+        );
+
+        // 内容不变（head 比对提前返回）也算完整读过：计数同样归零。
+        set_quick_hits(&root, &branch_id, 3);
+        let third = coordinator
+            .execute(OperationDomain::Backup, |context| {
+                commit(context, &branch_id, "unchanged", "manual", true)
+            })
+            .unwrap();
+        assert!(third.unchanged);
+        assert_eq!(quick_hits(&root, &branch_id), 0);
+    }
+
+    #[test]
+    fn manual_commit_keeps_quick_hit_count_on_failure() {
+        let (directory, root, source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "failure");
+        coordinator
+            .execute(OperationDomain::Backup, |context| {
+                commit(context, &branch_id, "first", "manual", true)
+            })
+            .unwrap();
+        set_quick_hits(&root, &branch_id, 6);
+
+        // 工作文件消失 → 提交失败：没有完整读，计数必须原样保留。
+        fs::remove_file(&source).unwrap();
+        let result = coordinator.execute(OperationDomain::Backup, |context| {
+            commit(context, &branch_id, "missing source", "manual", true)
+        });
+        assert!(result.is_err(), "源文件缺失时提交必须失败");
+        assert_eq!(
+            quick_hits(&root, &branch_id),
+            6,
+            "失败的提交不得清零连续快速命中计数"
+        );
+    }
+
+    #[test]
+    fn manual_commit_keeps_quick_hit_count_on_cancellation() {
+        let (directory, root, _source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "cancelled");
+        coordinator
+            .execute(OperationDomain::Backup, |context| {
+                commit(context, &branch_id, "first", "manual", true)
+            })
+            .unwrap();
+        set_quick_hits(&root, &branch_id, 6);
+
+        let token = CancelToken::standalone();
+        token.cancel();
+        let result = coordinator.execute_with(OperationDomain::Backup, token, |context| {
+            commit(context, &branch_id, "cancelled", "manual", true)
+        });
+        let error = result.expect_err("已取消的提交必须失败");
+        assert_eq!(error.kind, CommandErrorKind::Cancelled);
+        assert_eq!(
+            quick_hits(&root, &branch_id),
+            6,
+            "被取消的提交不得清零连续快速命中计数"
+        );
+    }
+
+    /// 直接调用 `worker::run_backup`（不经 use-case）**不得**触碰该计数：
+    /// 归零只属于「经应用入口完整读过工作文件」的路径，调度器自己的全量确认另有清零点
+    /// （`backup::scheduler` 走 `record_check_result`，由 `history::record_check_result`
+    /// 在全量模式下清零）。
+    #[test]
+    fn worker_run_backup_alone_does_not_touch_quick_hit_count() {
+        let (_directory, root, source, branch_id) = fixture();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "first",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        set_quick_hits(&root, &branch_id, 6);
+
+        fs::File::create(&source)
+            .unwrap()
+            .write_all(b"content v2")
+            .unwrap();
+        worker::run_backup(
+            &root,
+            &branch_id,
+            "second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+
+        assert_eq!(
+            quick_hits(&root, &branch_id),
+            6,
+            "绕过应用入口的提交不得清零计数"
+        );
+    }
+}
+
 #[cfg(feature = "headless")]
 pub(crate) fn list_scheduled(
     context: &CommandContext,

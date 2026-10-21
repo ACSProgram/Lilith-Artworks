@@ -152,6 +152,7 @@ fn d1_deep_chain_resolves_and_compacts() {
 
     let mut nodes = Vec::with_capacity(COMMITS);
     let mut max_peak = 0_u64;
+    let mut peak_reports = 0_usize;
     let started = Instant::now();
     for index in 0..COMMITS {
         if index > 0 {
@@ -169,7 +170,10 @@ fn d1_deep_chain_resolves_and_compacts() {
             "{}",
             outcome.describe()
         );
-        max_peak = max_peak.max(outcome.result["peakWorkingSetBytes"].as_u64().unwrap_or(0));
+        if let Some(peak) = outcome.result["peakWorkingSetBytes"].as_u64() {
+            peak_reports += 1;
+            max_peak = max_peak.max(peak);
+        }
         nodes.push(outcome.data_str("historyId"));
     }
     let commit_elapsed = started.elapsed();
@@ -235,10 +239,17 @@ fn d1_deep_chain_resolves_and_compacts() {
     );
     assert_cleanup_empty(&scale.workspace, &scale.repository);
 
-    // 流式实现：300 层链不把峰值内存推到「链深 × 文件大小」量级。
+    // 灾难性上界：300 × 128 KiB ≈ 37.5 MiB 被测总量，64 MiB 的上限拦得住「把整条链
+    // 的内容都留在内存」这类失控，同时给无头进程自身基线留了余量（2026-10-21 在 debug
+    // 构建上实测 maxPeakBytes ≈ 17 MiB，约四倍余量）。它不证明「峰值内存与链深无关」——
+    // 那是 C3 在大文件档用管道预算断言的事。
     assert!(
-        max_peak < 256 * MIB,
-        "提交峰值内存应远小于链深×文件大小：{max_peak} 字节"
+        peak_reports > 0,
+        "提交结果应上报峰值内存，否则内存断言无从谈起"
+    );
+    assert!(
+        max_peak < 64 * MIB,
+        "提交峰值内存超过灾难性上界（64 MiB = 37.5 MiB 被测总量 + 进程基线余量）：{max_peak} 字节"
     );
 
     record(

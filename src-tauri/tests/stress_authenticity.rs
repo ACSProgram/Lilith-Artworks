@@ -550,10 +550,14 @@ fn g6_publish_warns_for_small_watermark_regions() {
     );
 }
 
-/// G1 / G2：16K 源图的发布内存与耗时。
+/// G1 / G2：16K 源图的发布内存与阶段耗时上报。
 ///
 /// 只在 `extreme` 及以上档位运行：生成 16384x16384 需要约 1 GiB 内存，发布链路解码
 /// 同样如此；低于该档位时**明确跳过并报告**，而不是静默降级。
+///
+/// 注意：G2 部分只断言 render / encode / signing 的耗时**被记录**（产品自报了阶段耗时，
+/// 观测数据），**不构成性能门槛**——绝对快慢由维护者在 release 档人工对照
+/// `stress_bench` 与发布报告。内存上限与回读正确性才是这里的硬断言。
 #[test]
 fn g1_g2_large_publish_memory_and_timing() {
     let tier = tier();

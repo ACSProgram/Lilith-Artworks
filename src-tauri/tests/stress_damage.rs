@@ -15,6 +15,10 @@
 //! 但没有任何用例验证过「主库被改坏」时使用者看到的是**可行动的错误**而不是崩溃、静默
 //! 通过或残留半成品。R3 覆盖头部被外部工具误写成非数据库内容，R4 覆盖文件被清空。
 //!
+//! R7 补上 R1 没覆盖的另一条路径：head snapshot 已损坏、**内容又发生了变化**的提交。
+//! 内容变化时提交路径仍要打开旧快照生成反向增量（整份复检已移除），这条链路此前没有
+//! 端到端覆盖——必须干净失败、不推进历史、不留半成品、不把损坏扩散到新节点。
+//!
 //! R5/R6 把「改坏」从**固定位置**扩展成**随机化、逐个文件、多个种子**：R5 对每一个
 //! 受管理文件（snapshot / delta）施加确定性随机改写，断言每一次都被检测到；R6 对画板
 //! DDS 做结构性损坏与随机改写，并把「结构性检查 vs 内容语义」这条边界如实钉下来。
@@ -137,6 +141,97 @@ fn r1_damaged_head_snapshot_is_detected_and_left_alone() {
         restore.describe()
     );
     assert!(!restored.exists(), "被拒绝的恢复不得产生输出");
+}
+
+/// R7：head snapshot 已损坏、**工作文件内容又发生了变化**的提交必须干净失败。
+///
+/// R1 只覆盖「内容未变化」：那种提交直接返回「内容未变化」，根本不读旧快照。内容变化时
+/// 提交仍要打开 head snapshot 生成反向增量——移除提交路径的整份复检后，这条路径没有
+/// 端到端测试。断言：错误可读（退出码 1、无 panic）、历史不推进、没有新增 snapshot/delta、
+/// 损坏文件不被改写或回收、仓库可重开、恢复旧节点仍被拒绝——即损坏既没有扩散到新节点，
+/// 也没有被静默吞掉。
+#[test]
+fn r7_commit_with_changed_content_over_a_damaged_head_fails_cleanly() {
+    let fixture = ArtworkFixture::new();
+    let head = fixture.commit(96 * 1024, 1, "baseline");
+
+    let before = assert_no_stray(&fixture.repository);
+    assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
+    let damaged_relative = before.snapshots[0].clone();
+    let damaged_path = fixture.repository.join(&damaged_relative);
+
+    // 与 R1 相同的损坏手法：翻转 snapshot 最后一个字节。
+    let mut damaged_bytes = fs::read(&damaged_path).expect("无法读取 snapshot");
+    *damaged_bytes.last_mut().expect("snapshot 不应为空") ^= 0xff;
+    fs::write(&damaged_path, &damaged_bytes).expect("无法改写 snapshot");
+
+    // 内容发生变化：这次提交必须打开旧快照生成反向增量，因而必须失败。
+    write_work_file(&fixture.work, 96 * 1024, 2);
+    let commit = fixture
+        .commit_command()
+        .arg("note", "changed content over damage")
+        .finish();
+    assert!(
+        !commit.ok() && !commit.timed_out,
+        "head snapshot 损坏时，内容变化的提交必须失败：\n{}",
+        commit.describe()
+    );
+    assert_eq!(
+        commit.exit_code,
+        1,
+        "提交失败必须是普通错误（退出码 1）：\n{}",
+        commit.describe()
+    );
+    assert!(
+        !commit.stderr.contains("panicked"),
+        "提交不得以 panic 收场：\n{}",
+        commit.describe()
+    );
+    assert!(
+        !commit.error().is_empty(),
+        "失败必须给出可行动的错误信息：\n{}",
+        commit.describe()
+    );
+
+    // 历史不推进（由 snapshot/delta 计数断言）；数据库级校验不受文件内容影响：
+    // 仓库仍可重开（内容级损坏本身仍由 scrub 负责，见 R1，不在这里重复断言）。
+    assert_reopens(&fixture.workspace, &fixture.repository);
+    let after = assert_no_stray(&fixture.repository);
+    assert_eq!(after.snapshots.len(), 1, "{:?}", after.snapshots);
+    assert_eq!(after.deltas.len(), 0, "{:?}", after.deltas);
+    assert_eq!(
+        after.snapshots[0], damaged_relative,
+        "损坏的 snapshot 不应被失败提交替换或回收：{:?}",
+        after.snapshots
+    );
+    assert_eq!(
+        fs::read(&damaged_path).expect("无法读取 snapshot"),
+        damaged_bytes,
+        "损坏的 snapshot 字节不应被失败提交改动"
+    );
+
+    // 损坏没有扩散：旧节点恢复仍被拒绝（损坏仍在），且没有留下半成品输出。
+    let output = fixture.workspace.out("r7-damaged.bin");
+    let restore = fixture
+        .command("restore")
+        .arg("history", &head)
+        .arg("output", output.to_string_lossy())
+        .finish();
+    assert!(
+        !restore.ok() && !restore.timed_out,
+        "损坏节点的恢复必须仍被拒绝：\n{}",
+        restore.describe()
+    );
+    assert!(!output.exists(), "被拒绝的恢复不得产生输出");
+    fixture.assert_repository_clean();
+
+    record(
+        "R7 changed content over damaged head",
+        "R",
+        "small",
+        &commit,
+        json!({ "snapshot": damaged_relative }),
+    );
 }
 
 /// R2：delta 被改坏 → 内容级校验报错（失败原因指向 delta），但数据库级校验与 head 的

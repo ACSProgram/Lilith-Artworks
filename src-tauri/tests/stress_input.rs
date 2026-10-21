@@ -173,13 +173,29 @@ fn k2_title_length_counts_characters_not_bytes() {
     create_artwork(&fixture, &format!("   {}   ", "😀".repeat(160)), &source).expect_ok();
 
     let found = titles(&fixture);
-    assert!(
-        found.iter().any(|title| title == &emoji),
-        "640 字节 / 160 字符的标题必须被接受并逐字符往返：{found:?}"
+    // 去掉夹具的默认作品后，恰好三个节点：带空格的版本 trim 后与首个 emoji 作品同名，
+    // 但仍是独立作品。若带空格的原始值被原样存库，会出现第四个不同标题（前导空格版）；
+    // 若 trim 后长度校验改成了按字节，emoji / CJK 会直接被拒——两种回归都会在这里失败。
+    assert_eq!(
+        found.iter().filter(|title| *title != "Artwork").count(),
+        3,
+        "除默认作品外应恰好三个节点（emoji、CJK、trim 后同名的 emoji）：{found:?}"
+    );
+    assert_eq!(
+        found.iter().filter(|title| *title == &emoji).count(),
+        2,
+        "640 字节 / 160 字符的标题必须被接受，trim 后与首个作品同名：{found:?}"
+    );
+    assert_eq!(
+        found.iter().filter(|title| *title == &cjk).count(),
+        1,
+        "480 字节 / 160 字符的标题必须被接受并逐字符往返：{found:?}"
     );
     assert!(
-        found.iter().any(|title| title == &cjk),
-        "480 字节 / 160 字符的标题必须被接受并逐字符往返：{found:?}"
+        !found
+            .iter()
+            .any(|title| title.starts_with(' ') || title.ends_with(' ')),
+        "带首尾空格的原始值不得存库：{found:?}"
     );
 
     for over in ["😀".repeat(161), "漢".repeat(161)] {

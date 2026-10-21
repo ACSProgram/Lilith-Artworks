@@ -673,6 +673,62 @@ impl Running {
             stderr,
         }
     }
+
+    /// 在外部条件首次为真时 `Child::kill()` 强杀进程。
+    ///
+    /// 与 [`Running::kill_at`] 相对：并行快照管道**内部没有交互检查点**（管道线程只读
+    /// 静默取消层），「大文件提交在管道进行到一半时被强杀」无法用闸门定位，只能观察
+    /// 进程的磁盘副作用后再杀——谓词由调用方提供（例如轮询 `artworks/<id>/temp/` 下
+    /// 快照临时文件的大小），轮询间隔与 [`POLL_INTERVAL`] 一致。
+    ///
+    /// 不要求闸门：不带 `--cancel-on-stdin` 时检查点只往 marker 写一行就继续，进程一路
+    /// 冲过提交边界，因此这里没有「停在某处」的能力，只能靠磁盘副作用定位。谓词为真前
+    /// 进程自行退出时如实报告（`killed=false`），断言交给 `expect_killed`——那通常意味着
+    /// 提交快于观察窗口，是测试环境问题而非产品缺陷。
+    pub fn kill_when<F: FnMut() -> bool>(mut self, mut when: F) -> CrashOutcome {
+        let started = Instant::now();
+        let mut fired = false;
+        let mut timed_out = false;
+        let exit_code;
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    exit_code = status.code();
+                    break;
+                }
+                Ok(None) => {}
+                Err(error) => panic!("等待无头进程失败：{error}"),
+            }
+            if when() {
+                fired = true;
+                let _ = self.child.kill();
+                exit_code = self.child.wait().ok().and_then(|status| status.code());
+                break;
+            }
+            if Instant::now() >= self.deadline {
+                timed_out = true;
+                let _ = self.child.kill();
+                exit_code = self.child.wait().ok().and_then(|status| status.code());
+                break;
+            }
+            std::thread::sleep(POLL_INTERVAL);
+        }
+        // 进程已死亡：只收集最后几行，不再作答。
+        let _ = self.consume_new_checkpoints();
+        let stderr = truncate(
+            fs::read_to_string(&self.stderr_path).unwrap_or_default(),
+            STDERR_LIMIT,
+        );
+        CrashOutcome {
+            killed: fired,
+            target: None,
+            timed_out,
+            exit_code,
+            checkpoints: self.checkpoints,
+            elapsed: started.elapsed(),
+            stderr,
+        }
+    }
 }
 
 fn parse_checkpoint(line: &str) -> Option<Checkpoint> {

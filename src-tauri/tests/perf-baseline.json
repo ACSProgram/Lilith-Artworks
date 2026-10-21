@@ -1,32 +1,11 @@
 {
-  "note": "由 stress_bench 在 LILITH_STRESS_PERF_UPDATE=1 下生成；供 LILITH_STRESS_PERF_STRICT=1 比对。键 `场景::标签` 是墙钟、`场景::标签#cpu` 是子进程 CPU 时间（用户 + 内核，多线程阶段会大于墙钟）。绝对耗时依赖机器与构建档，跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR；CPU 时间只在基线 ≥ 50 ms 时参与比对（Windows 的 CPU 记账粒度 15.625 ms）。`machine` 记录采集基线的机器，由维护者维护，更新基线不会改写它。",
+  "note": "由 stress_bench 在 LILITH_STRESS_PERF_UPDATE=1 下生成；供 LILITH_STRESS_PERF_STRICT=1 比对。键 `场景::标签` 是墙钟、`场景::标签#cpu` 是子进程 CPU 时间（用户 + 内核，多线程阶段会大于墙钟）。绝对耗时依赖机器与构建档，跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR；CPU 时间只在基线 ≥ 50 ms 时参与比对（Windows 的 CPU 记账粒度 15.625 ms）。吞吐量键（MiBPerSecond）越大越好，按 `value >= base / factor` 比较；每笔耗时键（PerStrokeMs）分辨率不足，只记录不比对，严格门看整批总量。`machine` 记录采集基线的机器与日期，由维护者维护，更新基线不会改写它。调试档基线（0.2.0 时代数据）已于 2026-10-21 删除；如需调试档基线，用 LILITH_STRESS_PERF_UPDATE=1 重新采集。",
   "machine": {
     "cpu": "13th Gen Intel(R) Core(TM) i5-13490F（10 核 / 16 线程，6 P-core + 4 E-core）",
     "memory": "32 GB",
     "os": "Microsoft Windows 11 专业版 10.0.26300",
     "harness": "debug 测试脚手架驱动 target/release/lilith-artworks.exe（LILITH_STRESS_PROFILE=release）",
     "collectedAt": "2026-10-19"
-  },
-  "debug": {
-    "P1 node chain::commitMs": 58.5,
-    "P1 node chain::chainStepMs": 1.6,
-    "P1 node chain::restoreOldestMs": 74.3,
-    "P1 node chain::restoreHeadMs": 38.6,
-    "P2 authenticity::publishMs": 746.7,
-    "P2 authenticity::renderMs": 450.0,
-    "P2 authenticity::encodeMs": 120.0,
-    "P2 authenticity::signingMs": 12.0,
-    "P2 authenticity::decodeMs": 324.3,
-    "P3 board dds::importPerImageMs": 23.3,
-    "P3 board dds::importTotalMs": 372.7,
-    "P3 board dds::scrubMs": 413.7,
-    "P3 board dds::scrubPerImageMs": 25.9,
-    "P4 library tree and search::listTreeMs": 36.9,
-    "P4 library tree and search::searchAllMs": 33.1,
-    "P4 library tree and search::searchNarrowMs": 32.2,
-    "P5 repository backup::backupMs": 335.1,
-    "P6 cleanup scan::scanUnreferencedMs": 32.8,
-    "P6 cleanup scan::cleanupQueueMs": 32.0
   },
   "release": {
     "P1 node chain::commitMs": 51.7,

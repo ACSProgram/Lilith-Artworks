@@ -184,9 +184,11 @@ fn j1_read_commands_answer_while_a_write_holds_the_repository_lock() {
     }
 }
 
-/// J2：读 + 读 并发——多个只读命令同时运行，互不阻塞且都成功。
+/// J2：读 + 读 并发——多个只读命令同时运行，都成功且没有命令挂死。
 ///
-/// 只读命令走共享路径（不取哨兵锁），因此并发读之间不应有任何串行化。
+/// 只读命令走共享路径（不取哨兵锁）。标题里的「互不阻塞」按两层验证：宽松墙钟上界
+/// 拦住挂死/死锁（串行化在毫秒级完成时无法与真并行区分，不在断言范围内），每次调用的
+/// 耗时记入报告供人工对照——不要引用这里的数字谈性能（见 validation.md 的墙钟口径）。
 #[test]
 fn j2_concurrent_readers_do_not_block_each_other() {
     let fixture = ArtworkFixture::new();
@@ -217,11 +219,28 @@ fn j2_concurrent_readers_do_not_block_each_other() {
             "并发读 #{index} 必须成功返回：\n{}",
             outcome.describe()
         );
+        // 宽松上界：并发读之间没有任何锁可以等待，正常应在亚秒级返回；
+        // 30 s 只拦「被某个共享资源挡死」的灾难情形（口径与 J1 一致）。
+        assert!(
+            outcome.elapsed < Duration::from_secs(30),
+            "并发读 #{index} 耗时 {:?}，像是被串行化或挂死：\n{}",
+            outcome.elapsed,
+            outcome.describe()
+        );
     }
     // 并发读之后状态不变。
     assert_eq!(tree_value(&fixture), before_tree);
     assert_eq!(fixture.healthy(), 2);
     fixture.assert_repository_clean();
+    record(
+        "J2 concurrent readers",
+        "J",
+        "small",
+        &outcomes[0],
+        json!({
+            "elapsedMs": outcomes.iter().map(|outcome| outcome.elapsed.as_millis() as u64).collect::<Vec<_>>(),
+        }),
+    );
 }
 
 /// 一次「写进程持锁期间，只读命令必须照常回答」的采样：跑三个只读命令并断言它们
@@ -400,24 +419,24 @@ fn j4_reads_answer_while_a_compaction_holds_the_lock() {
     fixture.assert_repository_clean();
 }
 
-/// J5：真正并发的「结构写 + 全库读」（不设闸门）。
+/// J5：真正并发的「结构写 + 全库写」（不设闸门）。
 ///
 /// J1/J3/J4 都是把写进程停在检查点上、再让读命令跑——确定性高，但读者与写者的危险窗口是
 /// **构造**出来的。这一条不构造窗口：让 `compact` 与 `scrub` 真正同时启动、各自跑完，
 /// 重复多轮。断言三条不变量：
 /// ① 两者都不得挂起；
-/// ② `compact` **要么成功、要么拿到那个明确的「多进程写入」拒绝**——`scrub` 的哨兵
-///    **探测**本身也用 `BEGIN IMMEDIATE`，零等待下可与同时启动的写者抢到锁，因此精简可能
-///    拿到拒绝；这是产品已知的不对称，断言对齐「第二个写者拿到明确拒绝」这条实际承诺，
-///    而不是要求一个产品从未承诺过的结果。`scrub` 成功、以「仓库正在被写入，请稍后重试」
-///    **明确拒绝**，或以退出码 1 干净失败（无 panic）；
+/// ② 每个命令**要么成功、要么拿到那条明确的「多进程写入」拒绝**——两者都是前台写命令，
+///    同时启动时只有一个能取到跨进程 owner lock，另一个零等待失败。断言对齐的是「第二个
+///    写者拿到明确拒绝」这条实际承诺，而不是「精简必须成功」——后者产品从未承诺；
 /// ③ 两者都结束后仓库必须完整：被拒绝的精简随后重试一次并成功（此时已无并发写者，因此
 ///    是确定性的——不 sleep、不轮询），`verify` + `scrub` 通过，且仍存在的每个节点都能
 ///    逐位恢复。
 ///
-/// 两类拒绝都计入报告：写者持锁时全库校验给出的是**有意义的**拒绝；精简被拒绝则说明
-/// `scrub` 的探测先抢到了锁。若一轮里精简不是那条明确的拒绝（而是别的错误），才是需要
-/// 继续关注的信号。
+/// 两类拒绝都计入报告：`scrub` 自 2026-10-19 起按前台写命令执行，写者持锁时拿到的是写锁
+/// 冲突文案「仓库正在被另一个进程写入」，不是早先内容级只读探测的「仓库正在被写入，请稍后
+/// 重试」（见 J6 的注释）；精简被拒绝则说明 `scrub` 先抢到了锁。精简的失败理由已被断言必须
+/// 是那条明确拒绝，因此只有**校验**拿到别的错误（`otherFailures`）才需要继续关注——报告里
+/// 它不为 0 就是信号，测试不在这里判失败。
 #[test]
 fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
     let mut compact_refusals = 0_usize;
@@ -471,7 +490,10 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
             compact_refusals += 1;
         }
         if !scrub.ok() {
-            if scrub.error().contains("仓库正在被写入，请稍后重试") {
+            // 与 J6 对齐：写锁冲突文案。匹配前缀「仓库正在被另一个进程写入」——它与
+            // 进程内排队超时（「仓库正在写入…」）和内容级只读探测（「仓库正在被写入，
+            // 请稍后重试」）都只差几个字，别拿错。
+            if scrub.error().contains("仓库正在被另一个进程写入") {
                 scrub_refusals += 1;
             } else {
                 other_failures += 1;
@@ -533,15 +555,16 @@ fn j5_compaction_and_full_scrub_run_concurrently_without_corruption() {
                 "compactRefusals": compact_refusals,
                 "compactError": if compaction.ok() { Value::Null } else { Value::String(compaction.error()) },
                 "scrubOk": scrub.ok(),
-                "scrubRefused": !scrub.ok() && scrub.error().contains("仓库正在被写入"),
+                "scrubRefused": !scrub.ok() && scrub.error().contains("仓库正在被另一个进程写入"),
                 "scrubRefusals": scrub_refusals,
                 "scrubError": if scrub.ok() { Value::Null } else { Value::String(scrub.error()) },
+                "otherFailures": other_failures,
             }),
         );
     }
 
     // 如实记录：真并发下精简被明确拒绝、全库校验被明确拒绝，以及以其他错误失败的轮次。
-    // 前两类是既定行为（精简的拒绝来自 `scrub` 的探测抢到锁，见报告「边界」），最后一类
+    // 前两类是既定行为（精简的拒绝来自 `scrub` 先抢到 owner lock，见报告「边界」），最后一类
     // 才是需要继续关注的信号。若 6 轮里一次精简拒绝都没出现，说明抢锁窗口本轮未被触发，
     // 重试分支未覆盖——如实注明，不用 sleep 或人为构造窗口。
     eprintln!(

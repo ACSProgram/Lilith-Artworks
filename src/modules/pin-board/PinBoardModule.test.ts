@@ -28,7 +28,9 @@ describe("pin-board default shortcuts", () => {
     expect(PIN_BOARD_FULLSCREEN_SHORTCUT).toBe("F11");
   });
 
-  it("toggles the floating annotation toolbar on an unmodified T", () => {
+  it("binds the toolbar toggle to an unmodified T", () => {
+    // 只验证快捷键绑定本身（常量与按键匹配）；工具栏显示/隐藏的界面行为需要组件
+    // 渲染夹具，见 docs/planning/todo.md 的待办。
     expect(PIN_BOARD_TOOLBAR_SHORTCUT).toBe("T");
     expect(toolForShortcut(PIN_BOARD_TOOLBAR_SHORTCUT)).toBeNull();
     expect(shortcutMatches(

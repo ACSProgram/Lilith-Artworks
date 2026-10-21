@@ -258,7 +258,7 @@ scan_repository_storage_disk
 ## 可靠性不变量与覆盖
 
 以下命题是历史/备份模块对使用者的承诺，每条都由自动化压力测试（`src-tauri/tests/`；九组便宜的
-分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench`/`stress_baseline` 仍在发布
+分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench` 仍在发布
 前手动运行，见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）以**独立进程
 调用真实可执行文件**的方式验证；断言只用子命令返回的 JSON 与磁盘事实，不读内部状态。
 
@@ -275,10 +275,13 @@ scan_repository_storage_disk
 | 整仓灾备副本可独立打开并通过完整性与链路校验，树结构与源仓库一致 | `stress_scale` E1 |
 | 越界输入（备注/标题/搜索超长、非法提交类型、不存在的历史节点、已存在的输出路径、非法移动目标）被明确拒绝而非崩溃 | `stress_scale` F1 |
 | 损坏的 snapshot/delta 被内容级校验（`scrub`）发现；数据库级校验（`verify`）不读取文件内容因此仍通过；head snapshot 损坏后，内容未变化的提交直接返回「内容未变化」且不改写该文件；恢复损坏节点被拒绝且不留半成品 | `stress_damage` R1–R2（另有 `backup/worker.rs`、`backup/restore.rs` 单测） |
+| head snapshot 已损坏、工作文件内容又发生变化时，提交仍要打开旧快照生成反向增量，因此必须干净失败：错误可读（退出码 1、无 panic）、历史不推进、无新增 snapshot/delta、损坏文件不被改写或回收、仓库可重开、恢复旧节点仍被拒绝 | `stress_damage` R7 |
 | GUI、无头与维护入口的每次写操作先在同一进程的写入闸门里按优先级排队、再取跨进程 owner lock：同进程的第二个写者排队等待而不是与前者竞态，跨进程则仍拿到明确拒绝；锁由内核在句柄关闭时释放，因此强杀不残留，随后仍能取得锁。锁库与 owner 元数据不参与数据库发现、灾备复制或未引用文件判定 | `stress_concurrency` I1、I2；`repository_lock` 与 `library::repository` 单测 |
 | 写进程持 owner lock 期间只读命令仍作答并看到一致状态（含「快照已发布、事务未提交」的窗口）；并发读互不阻塞 | `stress_concurrency` J1、J2（跨进程）；`app/settings.rs` 单测（进程内长写持锁时的读租约） |
 | 主库文件本身（`lilith-artworks.sqlite3`）被误写或清空时，两层校验都干净失败并给出可行动的错误，且失败的打开不会把空文件重建为空仓库 | `stress_damage` R3–R4 |
 | 大文件提交在任意取消检查点被取消、或中途被强杀，都不留残留、历史不推进、可重试；强杀后 head 恢复逐字节一致 | `stress_large` C7 |
+| 大文件提交在**并行快照管道写到一半**时被强杀：不产生半成品 snapshot/delta，仓库可重开并通过校验，历史不推进；残留的临时文件不阻塞后续提交，head 恢复逐字节一致 | `stress_large` C9 |
+| 并行快照管道的 4 MiB 切换边界（4 MiB−1 / 4 MiB / 4 MiB+1）两侧，快照与增量路径的提交、恢复都逐位一致 | `stress_large` C10 |
 | 逐个受管理文件（snapshot/delta）做多种子单点改写，每一次都被内容级校验发现（退出码 1、无 panic），数据库级校验不受影响；复原后最早版本仍逐位可恢复 | `stress_damage` R5 |
 | 整仓灾备与精简这两类**长**写任务持锁期间，只读命令仍作答、未超时，且看到改接 / 复制之前的一致状态（树逐字段一致、历史未推进） | `stress_concurrency` J3、J4 |
 | 不构造窗口的真并发「精简 + 全库校验」不挂起、不损坏仓库（结束后完整且每个仍存在的节点逐位可恢复）；写者持 owner lock 时全库校验立即以「仓库正在被另一个进程写入；不支持同一仓库的多进程写入」明确拒绝，轻量只读命令不受影响 | `stress_concurrency` J5、J6 |
@@ -286,6 +289,10 @@ scan_repository_storage_disk
 | `.clip` 容器感知分块在真实链路上逐字节一致：tile 结构快照与 delta（磁盘事实确认 chunker/adapter 为 CLIP）、无 tile 形态（Exta 单结构单元）、截断容器回退 CDC 后照常提交与恢复 | `stress_format` M1–M3 |
 | v1/v2 混存仓库：`--chunk-format v1` 写出的节点与默认 v2 节点并存，跨格式链全部可恢复；检查点把含 v1 delta 的链物化为 v2 快照；格式随提交步进在磁盘上可核对 | `stress_format` M4 |
 | 磁盘写满时快照写入干净失败：返回「空间不足」、不推进历史、不留半成品、可重试；写到一半的字节不会被误认为完整快照 | `backup/worker.rs`、`backup/chunk_file/tests.rs` 单测 |
+
+2026-10-21 新增的 `stress_large` C9/C10 在本批只验证过编译：它们属昂贵分组，按
+`docs/guides/validation.md` 的口径在发布前手动运行，实跑之前这两条不变量只有断言、没有实测
+记录（R7 属便宜分组，已随 `stress_damage` 在本地跑过）。
 
 0.3 阶段 4 在 `stress_bench` 增加 P1B：4 MiB 文件 × 6 节点的多段链上反复恢复最早与最新节点，报告 p50/p95 与吞吐；它只作为段索引与读取游标的决策证据，随发布前的整套压力测试手动运行，不进入日常检查、CI 门槛或性能基线更新。快速检查的同尺寸同 mtime 改写由 `backup/worker.rs` 单测覆盖（回拨修改时间但在首尾采样区改动内容，必须触发全量）。0.3 阶段 5 在同一基准里增加 P7（10 个作品、每作品 12 条分支的调度候选扫描）与 P8（120 个无记录画板 DDS 的扫描与确认清理）；P5 整仓灾备同时记录文件数、吞吐与 `verification: sample`，作为摘要管线与抽样复核的基线。
 

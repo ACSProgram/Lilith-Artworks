@@ -170,6 +170,21 @@ fn read_baseline() -> Value {
         .unwrap_or_else(|| Value::Object(Map::new()))
 }
 
+/// 墙钟测量的严格门比较方向：指标不是同一个方向，门槛也不能是同一个方向。
+///
+/// - [`WallGate::Latency`]：耗时类，越低越好，`ms <= base * factor`（默认）；
+/// - [`WallGate::Throughput`]：吞吐量类，越大越好，`value >= base / factor`——
+///   否则恢复速度提升反而会被判成回归；
+/// - [`WallGate::RecordOnly`]：只记录不比对。用于分辨率不足的派生指标
+///   （如每笔耗时：0.045 ms 在 0.1 ms 写入分辨率下取整成 0，任何非零实测都「超阈值」），
+///   严格门改看同场景的整批总量。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WallGate {
+    Latency,
+    Throughput,
+    RecordOnly,
+}
+
 /// 一条性能测量：墙钟与 CPU 时间**都记**，两者分工不同。
 ///
 /// - **墙钟**是用户感知的成本（含等磁盘、含被调度剥夺），跨机器、跨负载都不可比；
@@ -183,6 +198,7 @@ struct Measure {
     label: &'static str,
     wall_ms: f64,
     cpu_ms: Option<f64>,
+    gate: WallGate,
 }
 
 /// 一次测量的样本：墙钟 +（可选的）CPU 时间。派生值（每张图、每步、每节点）用
@@ -228,6 +244,7 @@ impl Sample {
             label,
             wall_ms: self.wall_ms,
             cpu_ms: self.cpu_ms,
+            gate: WallGate::Latency,
         }
     }
 
@@ -236,7 +253,22 @@ impl Sample {
             label,
             wall_ms: self.wall_ms,
             cpu_ms: None,
+            gate: WallGate::Latency,
         }
+    }
+}
+
+impl Measure {
+    /// 该指标只记录：照常进基线与报告，但不参与严格比对。
+    fn record_only(mut self) -> Self {
+        self.gate = WallGate::RecordOnly;
+        self
+    }
+
+    /// 该指标是吞吐量（越大越好）：严格门按 `value >= base / factor` 比较。
+    fn throughput(mut self) -> Self {
+        self.gate = WallGate::Throughput;
+        self
     }
 }
 
@@ -263,10 +295,18 @@ fn emit(scenario: &str, measurements: &[Measure], extra: Value) {
             measure.wall_ms,
             extra.clone(),
         );
-        println!(
-            "[perf] {scenario} :: {} = {:.1} ms wall ({profile})",
-            measure.label, measure.wall_ms
-        );
+        // 吞吐量的「墙钟」说法没有意义（它本身就是墙钟算出来的派生值），单位直接标 MiB/s。
+        if measure.gate == WallGate::Throughput {
+            println!(
+                "[perf] {scenario} :: {} = {:.1} MiB/s ({profile})",
+                measure.label, measure.wall_ms
+            );
+        } else {
+            println!(
+                "[perf] {scenario} :: {} = {:.1} ms wall ({profile})",
+                measure.label, measure.wall_ms
+            );
+        }
         let Some(cpu_ms) = measure.cpu_ms else {
             continue;
         };
@@ -298,16 +338,28 @@ fn emit(scenario: &str, measurements: &[Measure], extra: Value) {
     let baseline = read_baseline();
     let table = baseline.get(profile).and_then(Value::as_object);
     for measure in measurements {
-        compare(
-            table
-                .and_then(|table| table.get(&baseline_key(scenario, measure.label)))
-                .and_then(Value::as_f64),
-            factor,
-            scenario,
-            measure.label,
-            measure.wall_ms,
-            "墙钟",
-        );
+        if measure.gate == WallGate::RecordOnly {
+            eprintln!(
+                "[perf] {} 只记录，不参与严格比对（分辨率不足或派生指标）",
+                baseline_key(scenario, measure.label)
+            );
+        } else {
+            let (unit, gate) = match measure.gate {
+                WallGate::Throughput => ("吞吐量", WallGate::Throughput),
+                _ => ("墙钟", WallGate::Latency),
+            };
+            compare(
+                table
+                    .and_then(|table| table.get(&baseline_key(scenario, measure.label)))
+                    .and_then(Value::as_f64),
+                factor,
+                scenario,
+                measure.label,
+                measure.wall_ms,
+                unit,
+                gate,
+            );
+        }
         if let Some(cpu_ms) = measure.cpu_ms {
             let key = cpu_key(scenario, measure.label);
             let base = table
@@ -321,6 +373,7 @@ fn emit(scenario: &str, measurements: &[Measure], extra: Value) {
                     measure.label,
                     cpu_ms,
                     "CPU 时间",
+                    WallGate::Latency,
                 ),
                 Some(_) => eprintln!(
                     "[perf] {key} 基线低于 {CPU_GATE_MIN_MS} ms，量化误差过大，只记录不比对"
@@ -343,7 +396,15 @@ fn cpu_key(scenario: &str, label: &str) -> String {
     format!("{scenario}::{label}#cpu")
 }
 
-fn compare(base: Option<f64>, factor: f64, scenario: &str, label: &str, ms: f64, unit: &str) {
+fn compare(
+    base: Option<f64>,
+    factor: f64,
+    scenario: &str,
+    label: &str,
+    value: f64,
+    unit: &str,
+    gate: WallGate,
+) {
     let Some(base) = base else {
         eprintln!(
             "[perf] {} 无基线，跳过比对（用 LILITH_STRESS_PERF_UPDATE=1 生成）",
@@ -351,12 +412,22 @@ fn compare(base: Option<f64>, factor: f64, scenario: &str, label: &str, ms: f64,
         );
         return;
     };
-    assert!(
-        ms <= base * factor,
-        "性能回归：{scenario} :: {label} 的{unit}实测 {ms:.1} ms，基线 {base:.1} ms，\
-         阈值 {:.1} ms（{factor}×）。若确为环境差异，请核对后更新基线。",
-        base * factor
-    );
+    match gate {
+        WallGate::Throughput => assert!(
+            value >= base / factor,
+            "吞吐量回归：{scenario} :: {label} 的{unit}实测 {value:.1} MiB/s，基线 {base:.1}，\
+             下限 {:.1}（基线 / {factor}）。吞吐量越大越好；若确为环境差异，\
+             请核对后更新基线。",
+            base / factor
+        ),
+        // `RecordOnly` 在 `emit` 里已被拦下，走不到这里；列出它只是让新增变体时编译报错。
+        WallGate::Latency | WallGate::RecordOnly => assert!(
+            value <= base * factor,
+            "性能回归：{scenario} :: {label} 的{unit}实测 {value:.1} ms，基线 {base:.1} ms，\
+             阈值 {:.1} ms（{factor}×）。若确为环境差异，请核对后更新基线。",
+            base * factor
+        ),
+    }
 }
 
 /// 把本次测量写进基线的对应构建档。
@@ -379,7 +450,10 @@ fn update_baseline(scenario: &str, profile: &str, measurements: &[Measure]) {
                  供 LILITH_STRESS_PERF_STRICT=1 比对。键 `场景::标签` 是墙钟、\
                  `场景::标签#cpu` 是子进程 CPU 时间（用户 + 内核，多线程阶段会大于墙钟）。\
                  绝对耗时依赖机器与构建档，跨机器比对时请放宽 LILITH_STRESS_PERF_FACTOR；\
-                 CPU 时间只在基线 ≥ 50 ms 时参与比对（Windows 的 CPU 记账粒度 15.625 ms）。"
+                 CPU 时间只在基线 ≥ 50 ms 时参与比对（Windows 的 CPU 记账粒度 15.625 ms）。\
+                 吞吐量键（MiBPerSecond）越大越好，按 `value >= base / factor` 比较；\
+                 每笔耗时键（PerStrokeMs）分辨率不足，只记录不比对，严格门看整批总量。\
+                 `machine` 记录采集基线的机器与日期，由维护者维护，更新基线不会改写它。"
             ),
         );
     }
@@ -646,9 +720,11 @@ fn p1b_segment_reads_baseline() {
             }
             .wall_measure("restoreHeadP95Ms"),
             Sample::wall(mib / (oldest_p50 / 1000.0).max(1e-9))
-                .wall_measure("restoreOldestMiBPerSecond"),
+                .wall_measure("restoreOldestMiBPerSecond")
+                .throughput(),
             Sample::wall(mib / (head_p50 / 1000.0).max(1e-9))
-                .wall_measure("restoreHeadMiBPerSecond"),
+                .wall_measure("restoreHeadMiBPerSecond")
+                .throughput(),
         ],
         json!({
             "nodes": SEGMENT_NODES,
@@ -1595,7 +1671,13 @@ fn p9_stroke_write_and_read_baseline() {
             ),
         };
         measurements.push(write_sample.measure(write_total_label));
-        measurements.push(write_sample.scale(strokes as f64).measure(write_per_label));
+        // 每笔耗时分辨率不足（0.045 ms 取整为 0），只记录；严格门看上面的整批总量断言。
+        measurements.push(
+            write_sample
+                .scale(strokes as f64)
+                .measure(write_per_label)
+                .record_only(),
+        );
         measurements.push(read_sample.measure(read_label));
         extra.insert(
             format!("payloadBytes{strokes}"),

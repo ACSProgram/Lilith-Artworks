@@ -171,21 +171,24 @@ describe("pin-board renderer keep-alive", () => {
       .toBe(16 * 1024 * 1024);
   });
 
-  it("keeps preview textures resident under the shared eviction budget", () => {
+  it("evicts only hi-res textures when the hi-res budget is exceeded, previews stay resident", () => {
     const renderer = rendererWith({
       textures: new Map([
+        // 受保护的高清纹理贴着预算上限，另有一张可淘汰的高清纹理做淘汰对象。
         [1, makeLoaded(PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES - 4 * 1024 * 1024, 1)],
+        [3, makeLoaded(8 * 1024 * 1024, 3)],
       ]),
       previewTextures: new Map([
         [2, makeLoaded(4 * 1024 * 1024, 2)],
       ]),
     });
 
-    // 高清预算超限时只淘汰 textures，常驻缩略图不受影响。
+    // 高清预算超限时只淘汰高清 textures，常驻缩略图不受影响。
     (renderer as unknown as {
       evictTextures: (protectedImageId?: number, additionalBytes?: number) => void;
     }).evictTextures(1, 16 * 1024 * 1024);
 
+    expect((renderer as unknown as { textures: Map<number, unknown> }).textures.has(3)).toBe(false);
     expect((renderer as unknown as { textures: Map<number, unknown> }).textures.has(1)).toBe(true);
     expect((renderer as unknown as { previewTextures: Map<number, unknown> }).previewTextures.has(2))
       .toBe(true);
@@ -484,7 +487,7 @@ describe("pin-board stroke rendering", () => {
     expect(layer.childElementCount).toBe(0);
   });
 
-  it("builds the stroke buffer once and only rebuilds when zoom changes", () => {
+  it("rebuilds the stroke buffer when zoom changes or the visible set leaves the over-scan margin", () => {
     const created: number[] = [];
     const device = {
       createBuffer: (descriptor: { size: number }) => {

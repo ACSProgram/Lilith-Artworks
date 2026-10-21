@@ -39,7 +39,7 @@ fn gated_command(fixture: &ArtworkFixture, command: &str, policy: &Policy) -> Ou
 ///
 /// 一次内容有变化的提交必须恰好发出 `COMMIT_CHECKPOINTS` 枚交互检查点，最后一枚的阶段名
 /// 是 `事务已写入，尚未提交`。`run_backup` 里新增或删除一处取消边界会整体移动序号，
-/// B1/B4/B5、A1、J1 与 `stress_baseline` 的定位随之错位；这枚测试先失败，把「改常量」
+/// B1/B4/B5、A1 与 J1 的定位随之错位；这枚测试先失败，把「改常量」
 /// 这件事顶到眼前，而不是让几个强杀用例杀在错误位置再靠磁盘事实猜原因。
 #[test]
 fn a0_commit_checkpoint_sequence_matches_the_documented_boundaries() {

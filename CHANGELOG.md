@@ -15,6 +15,61 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in a
+  single batch. The one-off `stress_baseline` group is deleted — its
+  real-repository numbers are archived in `0.3-baseline-2026-10-18.md` and
+  long-term regression stays with `stress_bench` and the synthetic scenarios —
+  together with the 0.2.0-era debug profile in `perf-baseline.json`. The strict
+  performance gate gains an explicit direction: latency keys still require
+  `measured <= baseline * factor`, throughput keys (restore MiB/s) now require
+  `measured >= baseline / factor`, so a faster restore is no longer reported as
+  a regression, and a record-only gate covers derived per-item timings whose
+  resolution is too coarse for any threshold.
+- C7 also cancels the sixth commit checkpoint (the in-transaction "rows written,
+  not yet committed" marker), and its loop is driven by `COMMIT_CHECKPOINTS`, so
+  a new boundary fails the test instead of silently going uncovered. J5 matches
+  the current cross-process lock wording (`仓库正在被另一个进程写入`) instead of
+  the retired content-probe message, so refusals are counted in the right bucket
+  again.
+- A batch of assertions now measures what its name claims. D1's deep-chain
+  memory ceiling drops from 256 MiB to 64 MiB against 37.5 MiB of tested
+  payload (17 MiB peak measured on a debug build); K2 asserts exactly three
+  titles beyond the fixture's default (two emoji, one CJK) and that no leading
+  or trailing space survives; J2 adds a 30-second ceiling plus per-call timings
+  (reported, not gated); G2 is renamed to say it only checks that stage timings
+  were reported; and two front-end tests are renamed to match what they assert
+  and given the assertions they lacked.
+- `vite` moves to 6.4.4 (only `package-lock.json` changes; `package.json`'s
+  `^6.0.0` already allows it) to clear three high-severity advisories GitHub
+  published on 2026-10-20, all in the bundled `launch-editor` code: `%` is not
+  escaped by `escapeCmdArgs()` on Windows, some editors' CLI flags can be
+  misread into arbitrary command execution, and an `fs.existsSync()` existence
+  check can be bypassed. None of them is on the ignore list, and the first
+  Windows CI run after publication (2026-10-21T02:36Z, `0.3.0-alpha.5`) failed
+  at the full-dependency audit step — the new advisories caused it, not a
+  regression in the preceding commits. `vite` is a devDependency and the
+  affected code only runs on the dev server's "open in editor" path, so it never
+  ships in the installer and the production audit stayed green throughout; 6.4.4
+  is the last 6.x patch and drops `launch-editor` entirely, and both `vitest`
+  and `@vitejs/plugin-react` accept vite 6.x, so nothing else moved.
+
+### Added
+
+- Tests: committing changed content over a damaged head snapshot (stress_damage
+  R7: a readable error, history not advanced, repository reopenable, the damaged
+  node still refused on restore); a large-file commit killed in the middle of
+  the parallel snapshot pipeline (stress_large C9, which watches the snapshot
+  scratch file grow before killing, then asserts no partial snapshot or delta, a
+  repository that still reopens and verifies, and a following commit that the
+  orphaned scratch file does not block); the 4 MiB pipeline boundary at
+  4 MiB - 1, 4 MiB and 4 MiB + 1 bytes (C10, snapshot and delta paths restored
+  byte for byte); application-layer tests that a manual commit clears the
+  quick-hit counter on success and leaves it alone on failure or cancellation;
+  and front-end tests for the pin-board background-save indicator hook and for
+  culling a long stroke segment by segment across the viewport.
+
 ## 0.3.0-alpha.5 - 2026-10-21
 
 ### Added

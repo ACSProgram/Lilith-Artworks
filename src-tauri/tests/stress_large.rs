@@ -36,8 +36,10 @@
 //! 而链深行为与文件大小无关，20 层链已在小档位覆盖。
 //!
 //! 场景：C1 端到端（小改动链）、C2 精简、C3 峰值内存、C4 链体积与账本、C5 恢复产物即删、
-//! C6 大改动端到端、C7 大文件中断、C8 密集不可压缩快照体积。C1–C5 走小改动档，C6 走大改动
-//! 档，C7 用当前档位的工作文件，C8 固定 8 MiB（与档位无关：它断言格式语义，不是存储放大）。
+//! C6 大改动端到端、C7 大文件中断、C8 密集不可压缩快照体积、C9 并行快照管道中间强杀、
+//! C10 并行管道 4 MiB 边界。C1–C5 走小改动档，C6 走大改动档，C7/C9 用当前档位的
+//! 工作文件，C8 固定 8 MiB、C10 固定 4 MiB 上下（与档位无关：断言格式/管道语义，
+//! 不是存储放大）。
 //!
 //! 档位由 `LILITH_STRESS_TIERS` 选择（`default` 64 MiB / `large` 256 MiB / `heavy`
 //! 1 GiB / `extreme` 4 GiB / `manual` 8 GiB）。峰值内存、存储放大与耗时只有指向发布档
@@ -987,7 +989,9 @@ fn c7_large_file_commit_survives_cancellation_and_kill() {
     assert_eq!(scenario.healthy().nodes, 1);
 
     // 逐检查点取消：每个取消点都断言无残留、待清理队列为空、历史不推进、仓库可重开。
-    for target in 1..=5_usize {
+    // 上界直接引用 COMMIT_CHECKPOINTS（含最后一枚「事务已写入，尚未提交」事务内标记点），
+    // 边界新增时这里自动跟上，不再漏测。
+    for target in 1..=COMMIT_CHECKPOINTS {
         scenario.next_change(target);
         let policy = Policy::at_index(target);
         let outcome = scenario
@@ -1128,4 +1132,211 @@ fn c8_dense_snapshot_tracks_the_logical_size() {
             "deltaBytes": 0,
         }),
     );
+}
+
+/// 作品 `temp/` 下是否存在 ≥ `min_bytes` 的 `.tmp*` 暂存文件。
+///
+/// 场景只有一个作品，直接扫 `artworks/*/temp/`；目录不存在（还没有任何提交）按空处理。
+fn artwork_temp_has_scratch(repository: &std::path::Path, min_bytes: u64) -> bool {
+    let Ok(artworks) = fs::read_dir(repository.join("artworks")) else {
+        return false;
+    };
+    artworks.flatten().any(|artwork| {
+        let Ok(files) = fs::read_dir(artwork.path().join("temp")) else {
+            return false;
+        };
+        files.flatten().any(|file| {
+            file.file_name().to_string_lossy().starts_with(".tmp")
+                && fs::metadata(file.path())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0)
+                    >= min_bytes
+        })
+    })
+}
+
+/// C9 大文件 × 并行快照管道中间强杀。
+///
+/// C7 的强杀落在第 1 个检查点——闸门让进程停在「载入分支后」，快照还没开始写；而
+/// 并行管道**内部**没有任何交互检查点（管道线程只读静默取消层，进度也不进闸门），
+/// 因此「档位大小的提交在快照管道写到一半时被 TerminateProcess」这条最真实的
+/// 中断路径，C7 实际没有覆盖。本用例补上它：不用闸门，让提交进程自由运行，轮询
+/// 作品 `temp/` 下快照临时文件的体积，一超过触发线就强杀。
+///
+/// 触发线固定 1 MiB，只是档位工作文件的一小部分（`default` 档 64 MiB 时约 1/64，快照本身
+/// 压缩后约 35 MiB）：从「临时文件达到触发线」到「快照写完」之间还剩绝大部分写入量（debug
+/// 档也以秒计），不存在「提交先完成导致强杀落空」的竞态；提交真的先完成了，
+/// [`CrashOutcome::expect_killed`] 会如实失败，不会被当作通过。
+///
+/// 断言全部基于磁盘事实：
+///
+/// 1. 快照临时文件残留——这是「杀在管道里」的证据；产品契约承认这类崩溃残留：作品
+///    `temp/` 下的 `.tmp*` 由未引用扫描报为候选（`history/contracts.rs` 的扫描目录），
+///    经用户确认后清理，且 30 分钟宽限期会跳过刚写入的文件（`cleanup.rs` 的
+///    `SCAN_GRACE_MS`），因此**不断言它被立即清掉**；
+/// 2. `snapshots/` 与 `deltas/` 无任何半成品：发布是对临时文件的原子改名，不会出现
+///    半个快照或半个增量；
+/// 3. 仓库可重开、`verify` + `scrub` 通过、历史不推进；
+/// 4. 孤儿临时文件**不阻塞**后续提交，head 恢复与工作文件逐位一致。
+#[test]
+fn c9_large_file_parallel_pipeline_mid_kill() {
+    const KILL_TRIGGER_BYTES: u64 = MIB;
+
+    let Some(mut scenario) = Scenario::new("C9 large file pipeline kill", ChangeProfile::Small)
+    else {
+        return;
+    };
+    let tier = tier();
+
+    scenario.commit("baseline");
+    assert_eq!(scenario.healthy().nodes, 1);
+    let before = storage_state(&scenario.repository);
+    assert_eq!(before.snapshots.len(), 1, "{:?}", before.snapshots);
+    assert_eq!(before.deltas.len(), 0, "{:?}", before.deltas);
+    // 成功提交的临时文件已随发布（改名）消失：观察谓词从干净的 temp/ 出发，
+    // 否则触发线可能被残留文件提前满足、强杀落在管道之外。
+    assert!(
+        !artwork_temp_has_scratch(&scenario.repository, 0),
+        "基线提交后作品 temp/ 必须为空"
+    );
+
+    scenario.next_change(1);
+    let killed = scenario
+        .command("commit")
+        .arg("branch", &scenario.branch_id)
+        .arg("commit-kind", "manual")
+        .arg("note", "pipeline kill probe")
+        .start()
+        .kill_when(|| artwork_temp_has_scratch(&scenario.repository, KILL_TRIGGER_BYTES));
+    killed.expect_killed();
+
+    // ① 杀在管道里的证据：快照临时文件残留且已越过触发线。
+    assert!(
+        artwork_temp_has_scratch(&scenario.repository, KILL_TRIGGER_BYTES),
+        "强杀后作品 temp/ 必须残留快照临时文件（否则强杀并未落在快照阶段）：\n{}",
+        killed.describe()
+    );
+    // ② 没有任何半成品进入正式存储。
+    let after = storage_state(&scenario.repository);
+    assert_eq!(
+        after.snapshots, before.snapshots,
+        "强杀不得产生半成品快照：{:?}",
+        after.snapshots
+    );
+    assert_eq!(
+        after.deltas, before.deltas,
+        "强杀不得产生半成品增量：{:?}",
+        after.deltas
+    );
+    // ③ 仓库可重开、逐块校验通过、历史不推进。
+    assert_eq!(
+        scenario.healthy().nodes,
+        1,
+        "被强杀的管道提交不得推进历史：\n{}",
+        killed.describe()
+    );
+    record_crash(
+        "C9 large file pipeline kill",
+        "C",
+        tier.name(),
+        &killed,
+        json!({ "logicalBytes": scenario.logical, "regionBytes": scenario.region_bytes() }),
+    );
+
+    // ④ 孤儿临时文件不阻塞后续提交；head 恢复与工作文件逐位一致。
+    scenario.next_change(2);
+    scenario.commit("after pipeline kill");
+    assert_eq!(scenario.healthy().nodes, 2);
+    let (head, output) = scenario.restore(&scenario.nodes[1], "c9-head.bin");
+    assert_eq!(file_bytes(&output), scenario.logical);
+    assert_files_identical(&scenario.work, &output);
+    record(
+        "C9 large file recover after pipeline kill",
+        "C",
+        tier.name(),
+        &head,
+        json!({ "logicalBytes": scenario.logical, "restoreMs": head.elapsed.as_millis() as u64 }),
+    );
+    fs::remove_file(&output).expect("无法清理恢复输出");
+    assert!(directory_names(&scenario.workspace.out_directory()).is_empty());
+}
+
+/// C10 并行快照管道的 4 MiB 边界。
+///
+/// `PIPELINE_MIN_BYTES = 4 MiB`（`snapshot.rs`）：低于它走串行路径，达到它才并行；
+/// 增量路径有第二处同阈值开关。边界两侧必须同样正确：三个尺寸各做两次提交（快照路径 +
+/// 增量路径）并逐位恢复，断言「边界 ±1 字节不崩、内容不丢」。把 `<` 写成 `<=` 不会改变
+/// 输出（两条路径逐字节一致，见 `chunk_file::tests` 的单测），因此本用例拦的是边界尺寸
+/// 在真实链路上踩到分块或缓冲假设，而不是阈值方向——哪一侧走哪条路径无法从无头命令观察，
+/// 端到端只需保证边界尺寸本身往返无损。
+#[test]
+fn c10_pipeline_boundary_sizes_round_trip() {
+    const PIPELINE_MIN_BYTES: u64 = 4 * MIB;
+    const BASELINE_SEED: u64 = 0xC10_0001;
+    const CHANGED_SEED: u64 = 0xC10_0002;
+
+    // 单核机器上两条路径退化为同一条：边界语义仍在，但「并行侧」名存实亡——明确跳过。
+    let workers = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    if workers < 2 {
+        record_skip(
+            "C10 pipeline boundary",
+            "C",
+            "fixed-4MiB",
+            &format!("可用并行度 {workers} < 2，并行管道不会启用，边界两侧同路径"),
+        );
+        return;
+    }
+
+    for (name, logical) in [
+        ("c10-serial", PIPELINE_MIN_BYTES - 1),
+        ("c10-boundary", PIPELINE_MIN_BYTES),
+        ("c10-parallel", PIPELINE_MIN_BYTES + 1),
+    ] {
+        let fixture = ArtworkFixture::with_work_file(
+            &format!("{name}.bin"),
+            &pattern_bytes(logical as usize, BASELINE_SEED),
+        );
+        let first = fixture
+            .commit_command()
+            .arg("note", format!("{name} baseline"))
+            .finish();
+        first.expect_ok();
+        let baseline_id = first.data_str("historyId");
+        assert!(!baseline_id.is_empty(), "{}", first.describe());
+
+        // 改一轮内容：增量路径（同一逻辑大小的管道开关在增量上另有一处）。
+        write_work_file(&fixture.work, logical as usize, CHANGED_SEED);
+        let second = fixture
+            .commit_command()
+            .arg("note", format!("{name} changed"))
+            .finish();
+        second.expect_ok();
+        let head_id = second.data_str("historyId");
+        assert!(!head_id.is_empty(), "{}", second.describe());
+        assert_eq!(fixture.healthy(), 2, "{name}：两次提交后历史应有 2 个节点");
+
+        // 边界两侧的每个节点都逐位恢复。
+        let baseline_bytes = fixture.restore_to(&baseline_id, &format!("{name}-baseline.bin"));
+        assert_eq!(
+            baseline_bytes,
+            pattern_bytes(logical as usize, BASELINE_SEED),
+            "{name}：基线节点恢复必须逐位一致"
+        );
+        let head_bytes = fixture.restore_to(&head_id, &format!("{name}-head.bin"));
+        assert_eq!(
+            head_bytes,
+            pattern_bytes(logical as usize, CHANGED_SEED),
+            "{name}：head 节点恢复必须逐位一致"
+        );
+
+        record(
+            "C10 pipeline boundary",
+            "C",
+            "fixed-4MiB",
+            &second,
+            json!({ "logicalBytes": logical, "workers": workers }),
+        );
+    }
 }
