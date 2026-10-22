@@ -8,9 +8,9 @@ import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } f
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { formatBytes } from "../../shared/format";
-import { authenticityApi } from "./api";
 import type {
-  AuthenticityBranch, CertificationRecord, NormalizedRegion, PreviewImage, PreviewTileSource, PublicationPreview,
+  AuthenticityBranch, CertificationRecord, NormalizedRegion, OutputPreviewTileSource,
+  PreviewImage, PublicationPreview,
 } from "./types";
 import {
   clampPreviewZoom, navigatorRect, navigatorScrollTarget, previewZoomFromButton,
@@ -63,7 +63,7 @@ function PublishView({
     viewingPreview, exporting, deletingRecord, deleteRecord, deleteConfirmOpen, setDeleteConfirmOpen, cleanupFailures,
     selectedBranch, enterPublication, retryArtifactPreview, chooseCertificate, generateOutputPreview,
     cancelAuthenticityOperation, publish, cancelPublication,
-    retryCleanup, openRecord, exportRecord, previewLoupe,
+    retryCleanup, openRecord, exportRecord, previewLoupe, previewOutputTile,
   } = usePublicationController({
     artworkTitle,
     branches,
@@ -159,7 +159,7 @@ function PublishView({
           </div> : <button className="primary-button publish-command" type="button" disabled={busy} onClick={() => void generateOutputPreview()}><Eye aria-hidden="true" size={17} />生成质量预览</button>}
         </section>
         <RecordList records={publication.records} onNavigate={openRecord} selectedId={selectedRecordId} />
-        {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={publishing} cancelling={cancelling} onBack={() => setOutputPreviewOpen(false)} onCancel={() => void cancelAuthenticityOperation()} onPublish={() => void publish()} />}
+        {outputPreviewOpen && outputPreview && <PublicationPreviewDialog preview={outputPreview} busy={publishing} cancelling={cancelling} onRequestTile={previewOutputTile} onBack={() => setOutputPreviewOpen(false)} onCancel={() => void cancelAuthenticityOperation()} onPublish={() => void publish()} />}
       </div> : config && artifactPreviewError ? <>
         <section className="publication-gate">
           <div className="gate-icon"><FileImage size={24} /></div>
@@ -428,10 +428,16 @@ function ReadOnlyField({ label, value, multiline = false }: { label: string; val
   return <div className={`readonly-field${multiline ? " multiline" : ""}`}><span>{label}</span><strong>{value}</strong></div>;
 }
 
-export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, onCancel, onPublish }: {
+/** 局部图去抖：平移途中不逐像素请求，停稳后再取当前格。 */
+const TILE_FETCH_DEBOUNCE_MS = 180;
+/** 对话框的局部图缓存块数上限。 */
+const TILE_CACHE_LIMIT = 12;
+
+export function PublicationPreviewDialog({ preview, busy, cancelling, onRequestTile, onBack, onCancel, onPublish }: {
   preview: PublicationPreview;
   busy: boolean;
   cancelling: boolean;
+  onRequestTile: (source: OutputPreviewTileSource, request: TileRequest) => Promise<PreviewImage>;
   onBack: () => void;
   onCancel: () => void;
   onPublish: () => void;
@@ -443,7 +449,7 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
   const [showOriginal, setShowOriginal] = useState(false);
   const [viewport, setViewport] = useState<PreviewViewport | null>(null);
   const [canvasSize, setCanvasSize] = useState<{ width: number; height: number } | null>(null);
-  const [tile, setTile] = useState<{ key: string; request: TileRequest; image: PreviewImage; source: PreviewTileSource } | null>(null);
+  const [tile, setTile] = useState<{ key: string; request: TileRequest; image: PreviewImage; source: OutputPreviewTileSource } | null>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const imageRef = useRef<HTMLImageElement>(null);
   const dragRef = useRef<{ pointerId: number; x: number; y: number; scrollLeft: number; scrollTop: number } | null>(null);
@@ -454,7 +460,7 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
   const tileRequestRef = useRef(0);
   const [imageSwitching, setImageSwitching] = useState(false);
   const image = showOriginal ? preview.originalImage : preview.image;
-  const tileSource: PreviewTileSource = showOriginal ? "original" : "compressed";
+  const tileSource: OutputPreviewTileSource = showOriginal ? "original" : "compressed";
   const fitZoom = canvasSize && canvasSize.width > 0 && canvasSize.height > 0
     && preview.sourceWidth > 0 && preview.sourceHeight > 0
     ? Math.min(4, Math.min(canvasSize.width / preview.sourceWidth, canvasSize.height / preview.sourceHeight))
@@ -589,7 +595,7 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
     viewport,
   });
   const desiredTileKey = desiredTile ? `${tileSource}|${tileCacheKey(desiredTile)}` : "";
-  const desiredTileRef = useRef<{ request: TileRequest; source: PreviewTileSource } | null>(null);
+  const desiredTileRef = useRef<{ request: TileRequest; source: OutputPreviewTileSource } | null>(null);
   desiredTileRef.current = desiredTile ? { request: desiredTile, source: tileSource } : null;
   useEffect(() => {
     // 只有与当前对位一致（key 相同）的局部图才会被渲染，因此签名进行中可以直接保留
@@ -606,25 +612,21 @@ export function PublicationPreviewDialog({ preview, busy, cancelling, onBack, on
       return;
     }
     const timer = window.setTimeout(() => {
-      authenticityApi.previewTile({
-        source: target.source,
-        cacheToken: target.source === "compressed" ? preview.cacheToken : null,
-        branchId: target.source === "original" ? preview.branchId : null,
-        ...target.request,
-      }).then((next) => {
+      onRequestTile(target.source, target.request).then((next) => {
         if (requestId !== tileRequestRef.current) return;
         const cache = tileCacheRef.current;
         cache.set(desiredTileKey, next);
-        while (cache.size > 12) {
+        // 满了按插入顺序淘汰最早的块；命中不重排，与框选放大镜的缓存一致。
+        while (cache.size > TILE_CACHE_LIMIT) {
           const oldest = cache.keys().next();
           if (oldest.done) break;
           cache.delete(oldest.value);
         }
         setTile({ key: desiredTileKey, request: target.request, image: next, source: target.source });
       }).catch(() => undefined);
-    }, 180);
+    }, TILE_FETCH_DEBOUNCE_MS);
     return () => window.clearTimeout(timer);
-  }, [desiredTileKey, busy, preview.cacheToken, preview.branchId]);
+  }, [desiredTileKey, busy, onRequestTile]);
   useEffect(() => () => { tileRequestRef.current += 1; }, []);
   const onPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (event.button !== 0 || !canvasRef.current) return;

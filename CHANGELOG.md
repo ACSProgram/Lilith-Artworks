@@ -39,6 +39,13 @@ entries for the reader; they are not a template every entry has to fill.
   cleanup template, and the history page and settings dialog are split into
   preview/selection hooks and per-view/per-page components with unchanged
   controlled state and interaction contracts.
+- The publication preview dialog no longer calls the authenticity API directly:
+  its high-resolution tile requests now go through the publication controller,
+  which binds the current preview cache token or branch. The unused
+  `.scope-reset` style is gone and the size-estimate response reuses the shared
+  `FileSizeEstimate` type. Tile sources, the debounce and the cache limit are
+  now named in one place, and the loupe's eviction list is no longer called an
+  LRU, since it evicts in insertion order.
 
 ### Fixed
 

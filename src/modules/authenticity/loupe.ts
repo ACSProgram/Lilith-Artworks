@@ -263,7 +263,8 @@ export function useLoupeFrame({
 
   const images = useRef(new Map<string, CanvasImageSource>());
   const tiles = useRef(new Map<string, PreviewImage>());
-  const lru = useRef<string[]>([]);
+  // 瓦片键的插入顺序：满了按最早插入的淘汰，命中不重排（不是 LRU）。
+  const insertionOrder = useRef<string[]>([]);
   const requested = useRef(new Set<string>());
   const sourceRef = useRef(sourceKey);
   const requestRef = useRef(request);
@@ -301,7 +302,7 @@ export function useLoupeFrame({
         // 源已切换时丢弃结果，避免旧作品的瓦片回填进新缓存。
         if (requestedSource !== sourceRef.current) return;
         tiles.current.set(tileKey, tile);
-        const order = lru.current;
+        const order = insertionOrder.current;
         order.push(tileKey);
         while (order.length > LOUPE_REGION_CACHE) {
           const oldest = order.shift();
@@ -325,7 +326,7 @@ export function useLoupeFrame({
     if (previousSource.current === sourceKey) return;
     previousSource.current = sourceKey;
     tiles.current.clear();
-    lru.current.length = 0;
+    insertionOrder.current.length = 0;
     for (const existing of Array.from(images.current.keys())) {
       if (existing !== `${sourceKey}|base`) images.current.delete(existing);
     }

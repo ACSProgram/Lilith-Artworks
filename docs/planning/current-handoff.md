@@ -8,36 +8,33 @@
 
 ## 当前批次状态
 
-2026-10-22 0.3 收尾与认证整改第三批（已实现、自动验证通过并提交）：
+2026-10-22 0.3 收尾与认证整改第四批（已实现、自动验证通过并提交）：
 
-- `src-tauri/src/app/settings.rs` 拆为 `app/settings/` 目录：`model` 管设置文件与校验、
-  `service` 管 revision/CAS、`state` 管运行态与仓库租约、`window` 管窗口几何、`commands`
-  管命令与仓库准备；`crate::app::settings::*` 的既有入口路径保持不变。
-- 设置页四个长任务（完整性扫描、整仓备份、磁盘扫描、垃圾文件扫描）共用
-  `runSettingsOperation` 模板，busy 拒绝文案只保留一份；新增 4 条 hook 用例覆盖 busy、
-  成功、命令失败与运行状态读取失败。
-- `HistoryModule.tsx` 的节点预览与精简选择抽为 `useNodePreview.ts` / `useCompactSelection.ts`，
-  总览与当前分支视图拆为 `HistoryOverview.tsx` / `HistoryBranchView.tsx`；受控契约、悬停浮层、
-  缩略图刷新与确认流程不变。拆分后重复的视图联合类型与节点宽度上下界收敛到 `historyModel.ts`
-  一处，`localStorage` 夹紧与滑条范围不会再各自漂移。
-- `SettingsDialog.tsx` 只保留外壳、导航、页脚与跨页确认弹窗，六页拆到 `src/app/settings/`，
-  页面只接收草稿、快照、仓库状态与维护接口。
-- 注释统一为中文（`app/settings/state.rs` 与 `useNodePreview.ts` 中随拆分搬来的英文注释）。
-- 文档：`0.3-baseline-2026-10-18.md` 移入归档；本文件累积的已提交批次摘要移入
-  `archive/handoff-log-2026-10-22.md`；模块文档与入口说明同步新文件位置。
+- 发布质量预览的高清局部图请求移回 `usePublicationController.previewOutputTile`：`compressed`
+  绑定本次预览的缓存 token，`original` 绑定当前分支，各自缺所需上下文时明确拒绝；
+  `PublicationPreviewDialog` 只保留请求代次、缓存与去抖，`AuthenticityModule.tsx` 不再直接
+  导入 `authenticityApi`。
+- 局部图来源收敛为 `types.ts` 的 `OutputPreviewTileSource`；对话框去抖与缓存上限改为具名常量；
+  `loupe.ts` 的 `lru` 变量改名 `insertionOrder`，与「按插入顺序淘汰、命中不重排」的实际行为一致。
+- 删除无引用的 `.scope-reset` 样式；估算命令返回值统一使用已有的 `FileSizeEstimate`。
+- `docs/modules/authenticity.md` 修正质量预览缓存位置、放大镜淘汰策略与记录搜索字段，并补上
+  局部图请求经 controller 绑定上下文这一边界；
+  tile 命令注释改为「走仓库共享读租约，发布/签名中前端不发起新请求」。
+- 测试：dialog 局部图用例改为断言只提交来源与矩形，controller 新增压缩/原图参数绑定与
+  缺上下文拒绝的用例。
 
 计划与逐批验证记录见 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 13 节。
-第一至第三批已提交。第四至第六批未开始。
+第一至第四批已提交；第五、六批未开始。
 
-界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）只做了自动验证与现有组件测试，
-标注为**待人工验收**，验收项在 `todo.md`。
+第三批界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）只做了自动验证与现有
+组件测试，标注为**待人工验收**，验收项在 `todo.md`。
 
 ## 下一步
 
 - 第三批界面验收：历史总览/当前分支视图切换、精简模式选择与二段确认、节点悬停与缩略图刷新、
   设置六页的保存/取消/滚动与空间页确认弹窗；验收项见 `todo.md`。
 - 第一、二批遗留的人工确认（备份页持久化记录、仓库切换清空）见 `todo.md`。
-- 进入第四批（认证边界修正与事实清理）。
+- 第五批（认证后端结构重组与识别路径）待开始。
 - 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
   `docs/guides/release-policy.md`。
 

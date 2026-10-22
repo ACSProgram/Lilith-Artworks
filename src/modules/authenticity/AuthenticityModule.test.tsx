@@ -192,7 +192,7 @@ describe("PublicationPreviewDialog", () => {
   });
 
   it("preserves the numeric zoom while switching between the export and original images", async () => {
-    render(<PublicationPreviewDialog preview={preview} busy={false} cancelling={false} onBack={vi.fn()} onCancel={vi.fn()} onPublish={vi.fn()} />);
+    render(<PublicationPreviewDialog preview={preview} busy={false} cancelling={false} onRequestTile={async () => preview.image} onBack={vi.fn()} onCancel={vi.fn()} onPublish={vi.fn()} />);
 
     fireEvent.click(screen.getByTitle("放大"));
     expect(screen.getByTitle("按原始像素显示（100% 为 1:1）").textContent).toBe("110%");
@@ -209,8 +209,9 @@ describe("PublicationPreviewDialog", () => {
   it("positions the high-resolution tile with inline geometry", async () => {
     const width = vi.spyOn(Element.prototype, "clientWidth", "get").mockReturnValue(1200);
     const height = vi.spyOn(Element.prototype, "clientHeight", "get").mockReturnValue(900);
+    const onRequestTile = vi.fn(async () => preview.image);
     try {
-      render(<PublicationPreviewDialog preview={preview} busy={false} cancelling={false} onBack={vi.fn()} onCancel={vi.fn()} onPublish={vi.fn()} />);
+      render(<PublicationPreviewDialog preview={preview} busy={false} cancelling={false} onRequestTile={onRequestTile} onBack={vi.fn()} onCancel={vi.fn()} onPublish={vi.fn()} />);
 
       const tile = await waitFor(() => {
         const node = document.querySelector<HTMLImageElement>(".publication-preview-tile");
@@ -225,9 +226,12 @@ describe("PublicationPreviewDialog", () => {
       expect(tile.style.top).not.toBe("");
       expect(tile.style.width).not.toBe("");
       expect(tile.style.height).not.toBe("");
-      expect(api.previewTile).toHaveBeenCalledWith(expect.objectContaining({
-        source: "compressed",
-        cacheToken: "cache-token",
+      expect(onRequestTile).toHaveBeenCalledWith("compressed", expect.objectContaining({
+        x: expect.any(Number),
+        y: expect.any(Number),
+        width: expect.any(Number),
+        height: expect.any(Number),
+        maxEdge: expect.any(Number),
       }));
     } finally {
       width.mockRestore();
@@ -237,7 +241,7 @@ describe("PublicationPreviewDialog", () => {
 
   it("exposes cancellation while signing is active", () => {
     const onCancel = vi.fn();
-    render(<PublicationPreviewDialog preview={preview} busy cancelling={false} onBack={vi.fn()} onCancel={onCancel} onPublish={vi.fn()} />);
+    render(<PublicationPreviewDialog preview={preview} busy cancelling={false} onRequestTile={async () => preview.image} onBack={vi.fn()} onCancel={onCancel} onPublish={vi.fn()} />);
 
     fireEvent.click(screen.getByRole("button", { name: "取消签名" }));
     expect(onCancel).toHaveBeenCalledOnce();

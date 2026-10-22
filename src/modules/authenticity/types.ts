@@ -102,6 +102,9 @@ export interface PublicationPreviewRequest {
 
 export type PreviewTileSource = "compressed" | "original" | "external";
 
+/** 质量预览对话框可用的局部图来源：本次预览的缓存 JPEG 与分支最终成品。 */
+export type OutputPreviewTileSource = Exclude<PreviewTileSource, "external">;
+
 export interface PreviewTileRequest {
   source: PreviewTileSource;
   cacheToken: string | null;

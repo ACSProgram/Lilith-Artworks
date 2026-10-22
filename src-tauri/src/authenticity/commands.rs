@@ -220,8 +220,9 @@ pub(crate) fn cancel_authenticity_operation(
 /// 压缩源的令牌即缓存文件名，因此先做严格格式校验；原始源按分支解析受控成品路径；
 /// 外部源与 `decode_authenticity` 使用同一条 `ensure_dialog_authorized` 授权检查，
 /// 再由流水线做仓库边界与矩形范围校验。解码复用统一资源预算。
-/// 不参与认证活动任务锁——预览对话框只在空闲时请求局部图，与发布流程并发时
-/// 由前端丢弃过期响应。
+///
+/// 命令走仓库共享读租约，不参与认证活动任务锁；前端在发布/签名进行中不发起新的
+/// 局部图请求，并保留已加载的局部图。
 #[tauri::command]
 pub(crate) async fn preview_authenticity_tile(
     request: super::model::PreviewTileRequest,

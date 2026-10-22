@@ -374,6 +374,61 @@ describe("usePublicationController", () => {
       maxEdge: 72,
     });
   });
+
+  it("binds output-preview tiles to the current cache token and branch", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.previewPublication.mockResolvedValue(outputPreview("1".repeat(40)));
+    api.previewTile.mockResolvedValue(previewImage);
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+
+    act(() => result.current.setPrivateKey("private-key"));
+    await act(async () => { await result.current.generateOutputPreview(); });
+    expect(result.current.outputPreview?.cacheToken).toBe("cache-token");
+
+    const tile = { x: 1, y: 2, width: 3, height: 4, maxEdge: 72 };
+    await act(async () => { await result.current.previewOutputTile("compressed", tile); });
+    expect(api.previewTile).toHaveBeenCalledWith({
+      source: "compressed",
+      cacheToken: "cache-token",
+      branchId: null,
+      ...tile,
+    });
+
+    await act(async () => { await result.current.previewOutputTile("original", tile); });
+    expect(api.previewTile).toHaveBeenCalledWith({
+      source: "original",
+      cacheToken: null,
+      branchId: "first",
+      ...tile,
+    });
+  });
+
+  it("rejects compressed output-preview tiles before a preview exists", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.publication?.branchId).toBe("first"));
+
+    await expect(result.current.previewOutputTile("compressed", {
+      x: 0, y: 0, width: 1, height: 1, maxEdge: 72,
+    })).rejects.toThrow("导出预览尚未生成");
+  });
+
+  it("serves original output-preview tiles from the branch alone", async () => {
+    api.getPublication.mockResolvedValue(publishedBranch("first"));
+    api.previewTile.mockResolvedValue(previewImage);
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.publication?.branchId).toBe("first"));
+
+    const tile = { x: 1, y: 2, width: 3, height: 4, maxEdge: 72 };
+    await act(async () => { await result.current.previewOutputTile("original", tile); });
+    expect(api.previewTile).toHaveBeenCalledWith({
+      source: "original",
+      cacheToken: null,
+      branchId: "first",
+      ...tile,
+    });
+  });
 });
 
 describe("useIdentificationController", () => {

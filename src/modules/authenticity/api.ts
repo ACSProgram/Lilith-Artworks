@@ -5,6 +5,7 @@ import type {
   CertificationRecord,
   DecodeResult,
   DroppedImageImport,
+  FileSizeEstimate,
   NormalizedRegion,
   PreviewImage,
   PreviewTileRequest,
@@ -44,7 +45,7 @@ export const authenticityApi = {
   exportRecord: (recordId: string, outputPath: string) =>
     invokeCommand<void>("export_certification_record", { request: { recordId, outputPath } }),
   estimate: (branchId: string, jpegQuality: number, backgroundColor: string) =>
-    invokeCommand<{ jpegBytes: number; sourceBytes: number }>("estimate_authenticity_output_size", { request: { branchId, jpegQuality, backgroundColor } }),
+    invokeCommand<FileSizeEstimate>("estimate_authenticity_output_size", { request: { branchId, jpegQuality, backgroundColor } }),
   decode: (inputPath: string, region: NormalizedRegion | null) =>
     invokeCommand<DecodeResult>("decode_authenticity", {
       request: { inputPath, region },

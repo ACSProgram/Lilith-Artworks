@@ -11,6 +11,7 @@ import type {
   CertificationRecord,
   DecodeResult,
   NormalizedRegion,
+  OutputPreviewTileSource,
   PreviewImage,
   PublicationPreview,
   PublishResult,
@@ -557,6 +558,28 @@ export function usePublicationController({
     return authenticityApi.previewTile({ source: "original", cacheToken: null, branchId, ...tile });
   }, []);
 
+  // 质量预览对话框的高清局部：压缩源绑定本次预览的缓存 token，原图绑定当前分支；
+  // 各自缺少所需上下文时明确拒绝，不把半套参数交给后端。依赖只取 token，预览对象
+  // 其他字段变化不会让对话框重建回调、重置去抖。
+  const outputPreviewCacheToken = outputPreview?.cacheToken ?? null;
+  const previewOutputTile = useCallback((
+    source: OutputPreviewTileSource,
+    tile: TileRequest,
+  ) => {
+    if (source === "compressed") {
+      if (!outputPreviewCacheToken) return Promise.reject(new Error("导出预览尚未生成"));
+      return authenticityApi.previewTile({
+        source,
+        cacheToken: outputPreviewCacheToken,
+        branchId: null,
+        ...tile,
+      });
+    }
+    const branchId = selectedBranchIdRef.current;
+    if (!branchId) return Promise.reject(new Error("当前分支尚未加载完成"));
+    return authenticityApi.previewTile({ source, cacheToken: null, branchId, ...tile });
+  }, [outputPreviewCacheToken]);
+
   const openRecord = useCallback((record: CertificationRecord) => {
     setViewingRecord(record);
     onNavigateRecord(record);
@@ -636,6 +659,7 @@ export function usePublicationController({
     cancelPublication,
     retryCleanup,
     previewLoupe,
+    previewOutputTile,
     openRecord,
     exportRecord,
     deletingRecord,
