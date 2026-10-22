@@ -6,7 +6,7 @@ use std::{
 
 use rusqlite::Connection;
 
-/// 受管理文件的所有者类别。用于清理引用复查与完整性校验的错误定位。
+/// 受管理文件的所有者类别。用于清理引用复查时标注「谁还在引用这条路径」。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum ManagedFileOwner {
     HistorySnapshot,
@@ -35,26 +35,11 @@ impl ManagedFileOwner {
 /// 一条仍被数据库引用的受管理文件。
 ///
 /// `path` 与数据库列完全一致：仓库内文件使用 `/` 分隔的相对路径，认证导出使用
-/// 用户选择的绝对路径。`deletable` 表示该路径失去引用后能否进入普通清理队列；
-/// 外部导出仍只能经用户逐条确认删除。该标志目前只随清单传递，阶段 7 的 kind
-/// 分派校验会据此决定入队路径。
+/// 用户选择的绝对路径。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ManagedFile {
     pub(crate) path: String,
     pub(crate) owner: ManagedFileOwner,
-    pub(crate) deletable: bool,
-}
-
-/// [`ReferenceInventory::validate_target`] 按所有者复查的结果。
-#[allow(dead_code)] // 冻结接口，阶段 7 的 kind 分派校验接入后消费。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ValidationOutcome {
-    /// 该所有者仍引用此目标。
-    Valid,
-    /// 该所有者不再引用此目标。
-    Unreferenced,
-    /// 目标声明的所有者不匹配，交由下一个 inventory 继续判断。
-    OwnerMismatch(ManagedFileOwner),
 }
 
 /// 扫描时由领域提供的候选文件（绝对路径与报告原因）。
@@ -78,20 +63,10 @@ pub(crate) struct RedundantFile {
 
 /// 一个领域对受管理文件清单与文件布局的公开视图。
 ///
-/// 阶段 5 按计划冻结 `collect_targets` / `validate_target` 的签名：前者已用于
-/// anti-join 与孤儿判定，后者要等阶段 7 的 kind 分派校验接入后才会有调用方
-/// （届时 scrub 按所有者复查，而不是把领域查询写回 cleanup）。`scan_candidates`
-/// 是同一契约上的只读扩展，供未引用文件扫描复用领域自己的命名与目录布局；
-/// 阶段 7 为画板增加 kind 维度时继续以新方法扩展，不改动已有签名。
+/// `collect_targets` 用于 anti-join 与孤儿判定；`scan_candidates` 供未引用文件
+/// 扫描复用领域自己的命名与目录布局。新增文件类别时以新方法扩展，不改动已有签名。
 pub(crate) trait ReferenceInventory: Send + Sync {
     fn collect_targets(&self, connection: &Connection) -> Result<Vec<ManagedFile>, String>;
-
-    #[allow(dead_code)] // 冻结接口，阶段 7 的 kind 分派校验接入后消费。
-    fn validate_target(
-        &self,
-        connection: &Connection,
-        target: &ManagedFile,
-    ) -> Result<ValidationOutcome, String>;
 
     fn scan_candidates(
         &self,
@@ -152,21 +127,6 @@ impl ReferenceInventories {
             .into_iter()
             .map(|target| (target.path, target.owner))
             .collect())
-    }
-
-    #[allow(dead_code)] // 冻结接口，阶段 7 的 kind 分派校验接入后消费。
-    pub(crate) fn validate_target(
-        &self,
-        connection: &Connection,
-        target: &ManagedFile,
-    ) -> Result<ValidationOutcome, String> {
-        for inventory in &self.inventories {
-            match inventory.validate_target(connection, target)? {
-                ValidationOutcome::OwnerMismatch(_) => continue,
-                outcome => return Ok(outcome),
-            }
-        }
-        Ok(ValidationOutcome::Unreferenced)
     }
 
     pub(crate) fn scan_candidates(

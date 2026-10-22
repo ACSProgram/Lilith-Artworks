@@ -1,9 +1,8 @@
-//! 画板目录布局与位图 DDS 路径解析。
+//! 画板目录布局与位图 DDS 路径。
 //!
-//! [`board_relative_path`] 与 [`parse_board_dds_path`] 是同一布局的正反两面：写入侧
-//! 拼仓库相对路径，`cleanup` / `scrub` / 完整性扫描反向解析。位图实体名固定为
-//! `<item-id>.dds`，读写前统一经 [`canonical_item_dds`] 校验文件名与仓库边界，
-//! 只判名字时用 [`is_item_dds_file`]，拼相对路径时用 [`relative_item_dds`]。
+//! [`board_relative_path`] 拼仓库相对路径。位图实体名固定为 `<item-id>.dds`，
+//! 读写前统一经 [`canonical_item_dds`] 校验文件名与仓库边界，只判名字时用
+//! [`is_item_dds_file`]，拼相对路径时用 [`relative_item_dds`]。
 
 use std::path::{Path, PathBuf};
 
@@ -28,21 +27,6 @@ pub(crate) fn relative_item_dds(artwork_id: &str, board_id: i64, item_id: i64) -
 /// 文件读写，留给完整性扫描报告，因此判定只此一处。
 pub(crate) fn is_item_dds_file(item_id: i64, file_path: &str) -> bool {
     file_path == format!("{item_id}.dds")
-}
-
-/// 反向解析画板 DDS 的仓库相对路径
-/// `artworks/<artwork-id>/<BOARD_DIRECTORY>/<board-id>/<item-id>.dds`，返回
-/// `(artwork_id, board_id, item_id)`；不匹配时返回 `None`。文字条目没有实体文件，
-/// 因此只有位图条目会出现在这条路径布局里。它与 `board_relative_path` 是同一布局的
-/// 正反两面，供 `cleanup` 的画板 DDS 反向引用检查使用，避免调用方另行硬编码路径形状。
-pub(crate) fn parse_board_dds_path(path: &str) -> Option<(&str, i64, i64)> {
-    let parts = path.split('/').collect::<Vec<_>>();
-    if parts.len() != 5 || parts[0] != "artworks" || parts[2] != BOARD_DIRECTORY {
-        return None;
-    }
-    let board_id = parts[3].parse::<i64>().ok()?;
-    let item_id = parts[4].strip_suffix(".dds")?.parse::<i64>().ok()?;
-    Some((parts[1], board_id, item_id))
 }
 
 /// 画板 DDS 文件名：`<item-id>.dds`（item id 为 SQLite 自增正整数）。扫描与

@@ -7,7 +7,7 @@
 //! 两套口径**不静默合并**：非 snapshot 节点的 `chunk_file_size` 是重建读取量，
 //! 不进入存储总量；认证输出按 `output_bytes` 与路径去重后只算一次；磁盘扫描只
 //! 统计仓库目录本身，认证外部首次导出路径不计入。DDS 分类只看条目是否存在实体
-//! 文件（`file_path` 非空），阶段 7 重建画板表后只需重新定位这里的 SQL。
+//! 文件（`file_path` 非空），位置按 `pin_board_bitmaps.file_path` 定位。
 
 use std::{
     collections::{HashMap, HashSet},

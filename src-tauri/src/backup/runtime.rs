@@ -280,7 +280,7 @@ impl BackupState {
     ///
     /// 与 `run_exclusive` 的差别只有这两步，都不阻塞、不排队：登记让调度器在取得
     /// 运行锁后复查并让位，取消请求让正在运行的后台任务尽快退出。
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn run_foreground<T>(
         &self,
         branch_id: Option<&str>,
@@ -290,8 +290,9 @@ impl BackupState {
             .map_err(|error| error.to_string())
     }
 
-    /// [`Self::run_foreground`] 的 typed 版本，供 `OperationCoordinator` 保留
-    /// `CommandError` 的 code/kind 而不在中途退化成字符串。
+    /// 前台长命令的 typed 版本，供 `OperationCoordinator` 保留 `CommandError` 的
+    /// code/kind 而不在中途退化成字符串。非 typed 的 `run_foreground` 只供测试使用
+    /// （`#[cfg(test)]`）。
     pub(crate) fn run_foreground_typed<T, E>(
         &self,
         branch_id: Option<&str>,
@@ -321,7 +322,7 @@ impl BackupState {
         )
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub(crate) fn run_exclusive<T>(
         &self,
         branch_id: Option<&str>,

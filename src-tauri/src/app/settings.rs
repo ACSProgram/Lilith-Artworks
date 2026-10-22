@@ -145,14 +145,12 @@ impl Default for WindowSettings {
 #[serde(default, rename_all = "camelCase")]
 struct ContentSettings {
     density: String,
-    default_panel: String,
 }
 
 impl Default for ContentSettings {
     fn default() -> Self {
         Self {
             density: "comfortable".into(),
-            default_panel: "overview".into(),
         }
     }
 }
@@ -427,7 +425,6 @@ impl AppState {
     /// refresh, history read or settings snapshot still answers while a long
     /// backup, restore or compaction is running. SQLite's WAL keeps each read
     /// consistent while a write transaction commits.
-    #[allow(dead_code)]
     pub(crate) fn with_repository_read<T>(
         &self,
         operation: impl FnOnce(&Path) -> Result<T, String>,
@@ -440,7 +437,6 @@ impl AppState {
     /// 用途：把「读操作自身耗时过长」归因到具体命令。素材板卡死期间曾观察到
     /// `repository read took 3000+ ms`，但无从判断是纹理读取、树刷新还是别处；
     /// 调用点传入 `read_pin_board_texture board=.. image=..` 这类标签即可定位。
-    #[allow(dead_code)]
     pub(crate) fn with_repository_read_labeled<T>(
         &self,
         label: &str,
@@ -480,7 +476,7 @@ impl AppState {
         result
     }
 
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn with_repository_switch<T>(
         &self,
         operation: impl FnOnce() -> Result<T, String>,
@@ -488,8 +484,9 @@ impl AppState {
         self.with_repository_switch_typed(operation)
     }
 
-    /// [`Self::with_repository_switch`] 的 typed 版本。设置保存需要在同一临界区里
-    /// 替换仓库路径并写设置；协调器先取得运行分类锁，再进入这里取写租约。
+    /// 设置保存专用的 typed 版本：在同一临界区里替换仓库路径并写设置；协调器先取得
+    /// 运行分类锁，再进入这里取写租约。非 typed 的 `with_repository_switch` 只供测试
+    /// 使用（`#[cfg(test)]`）。
     pub(crate) fn with_repository_switch_typed<T, E: From<String>>(
         &self,
         operation: impl FnOnce() -> Result<T, E>,
@@ -666,13 +663,6 @@ fn sanitize_settings(settings: &mut AppSettings) -> bool {
     }
     if !matches!(settings.content.density.as_str(), "comfortable" | "compact") {
         settings.content.density = fallback.content.density;
-        repaired = true;
-    }
-    if !matches!(
-        settings.content.default_panel.as_str(),
-        "overview" | "history" | "authenticity"
-    ) {
-        settings.content.default_panel = fallback.content.default_panel;
         repaired = true;
     }
     if !matches!(
@@ -1093,12 +1083,6 @@ pub(crate) fn validate_settings(settings: &AppSettings) -> Result<(), String> {
         return Err("内容密度设置无效".into());
     }
     if !matches!(
-        settings.content.default_panel.as_str(),
-        "overview" | "history" | "authenticity"
-    ) {
-        return Err("默认内容面板无效".into());
-    }
-    if !matches!(
         settings.pin_board.texture_cache_level.as_str(),
         "low" | "medium" | "high"
     ) {
@@ -1183,6 +1167,21 @@ mod tests {
         assert_eq!(actual.window.width, 1320);
         assert_eq!(actual.pin_board.lock_shortcut, "CommandOrControl+R");
         assert_eq!(actual.pin_board.fullscreen_shortcut, "F11");
+    }
+
+    #[test]
+    fn legacy_content_fields_are_ignored_on_load() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        fs::write(
+            &path,
+            "{\"version\":2,\"content\":{\"density\":\"compact\",\"defaultPanel\":\"history\"}}",
+        )
+        .unwrap();
+
+        let (settings, warning) = load_settings(&path);
+        assert!(warning.is_none());
+        assert_eq!(settings.content.density, "compact");
     }
 
     #[test]

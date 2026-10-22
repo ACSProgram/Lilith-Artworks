@@ -109,8 +109,8 @@ impl RepositoryOwner {
 #[derive(Debug)]
 pub(crate) enum OwnerLockError {
     /// 另一个进程正持锁；附带可读到的 owner 元数据（通常存在）。
-    /// 元数据用于日志与测试断言，GUI 错误映射只需要稳定的用户文案。
-    #[allow(dead_code)]
+    /// 元数据只用于测试断言与诊断，生产错误映射只需要稳定的用户文案。
+    #[allow(dead_code)] // 生产代码只解构 `_`；owner 元数据由测试读取。
     Busy(Option<RepositoryOwner>),
     /// 本进程的另一个写者正持有写入闸门（`WaitPolicy::Try`）。
     InProcessBusy,
@@ -537,7 +537,7 @@ impl RepositoryOwnerLock {
     /// 零等待、不排队：`probe` 之外的调用方应优先用 [`Self::acquire_queued`]，
     /// 否则同进程的两条写路径会互相以 `repository_busy` 拒绝。headless 是单进程
     /// 单命令，仍然用它。
-    #[allow(dead_code)]
+    #[cfg_attr(not(feature = "headless"), allow(dead_code))] // headless 与测试使用。
     pub(crate) fn acquire(
         root: &Path,
         role: &str,

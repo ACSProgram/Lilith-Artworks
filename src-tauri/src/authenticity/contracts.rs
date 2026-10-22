@@ -1,12 +1,12 @@
 use rusqlite::Connection;
 
 use crate::{
-    contracts::{ManagedFile, ManagedFileOwner, ReferenceInventory, ValidationOutcome},
+    contracts::{ManagedFile, ManagedFileOwner, ReferenceInventory},
     storage,
 };
 
-/// 最终成品与认证输出的引用清单。认证导出路径在仓库之外，`deletable = false`：
-/// 失去引用后仍需用户在清理队列里逐条确认，不能进入自动重放。
+/// 最终成品与认证输出的引用清单。认证导出路径在仓库之外，失去引用后仍需用户在
+/// 清理队列里逐条确认，不能进入自动重放。
 pub(crate) struct ArtifactReferenceInventory;
 
 impl ReferenceInventory for ArtifactReferenceInventory {
@@ -31,44 +31,15 @@ impl ReferenceInventory for ArtifactReferenceInventory {
         let mut targets = Vec::new();
         for row in rows {
             let (path, kind) = row.map_err(storage::database_error)?;
-            let (owner, deletable) = match kind {
-                0 => (ManagedFileOwner::FinalArtifact, true),
-                1 => (ManagedFileOwner::CertificationStored, true),
-                _ => (ManagedFileOwner::CertificationOutput, false),
-            };
             targets.push(ManagedFile {
                 path,
-                owner,
-                deletable,
+                owner: match kind {
+                    0 => ManagedFileOwner::FinalArtifact,
+                    1 => ManagedFileOwner::CertificationStored,
+                    _ => ManagedFileOwner::CertificationOutput,
+                },
             });
         }
         Ok(targets)
-    }
-
-    fn validate_target(
-        &self,
-        connection: &Connection,
-        target: &ManagedFile,
-    ) -> Result<ValidationOutcome, String> {
-        let query = match target.owner {
-            ManagedFileOwner::FinalArtifact => {
-                "SELECT EXISTS(SELECT 1 FROM final_artifacts WHERE source_path = ?1)"
-            }
-            ManagedFileOwner::CertificationStored => {
-                "SELECT EXISTS(SELECT 1 FROM certification_records WHERE stored_path = ?1)"
-            }
-            ManagedFileOwner::CertificationOutput => {
-                "SELECT EXISTS(SELECT 1 FROM certification_records WHERE output_path = ?1)"
-            }
-            owner => return Ok(ValidationOutcome::OwnerMismatch(owner)),
-        };
-        let referenced = connection
-            .query_row(query, [&target.path], |row| row.get::<_, bool>(0))
-            .map_err(storage::database_error)?;
-        Ok(if referenced {
-            ValidationOutcome::Valid
-        } else {
-            ValidationOutcome::Unreferenced
-        })
     }
 }

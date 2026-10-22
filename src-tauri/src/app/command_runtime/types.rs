@@ -31,7 +31,6 @@ impl fmt::Display for OperationId {
 }
 
 /// 运行分类决定 coordinator 取哪一层锁。固定锁序见 `OperationCoordinator`。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum OperationClass {
@@ -41,8 +40,6 @@ pub(crate) enum OperationClass {
     Write,
     /// 前台长命令：先登记前台等待并请求后台让位，再取得共享运行锁。
     Foreground,
-    /// 后台调度任务：共享运行锁（AutomaticBackup）。
-    Background,
     /// 仓库写命令但不取共享运行锁（素材板保持既有语义）。
     RepositoryWrite,
 }
@@ -53,7 +50,6 @@ impl OperationClass {
             Self::Read => "read",
             Self::Write => "write",
             Self::Foreground => "foreground",
-            Self::Background => "background",
             Self::RepositoryWrite => "repositoryWrite",
         }
     }

@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import packageInfo from "../../package.json";
 import { dragSlideToEnd } from "../shared/slideToConfirmTesting";
 import type {
+  RepositoryBackupRun,
   RepositoryStorageDiskScan,
   RepositoryStorageOverview,
   SettingsSnapshot,
@@ -21,7 +22,7 @@ const appApi = vi.hoisted(() => ({
   getBackupDisableNoticeTarget: vi.fn(),
   scrubRepositoryIntegrity: vi.fn(),
   createRepositoryBackup: vi.fn(),
-  getLastRepositoryBackupRun: vi.fn(async () => null),
+  getLastRepositoryBackupRun: vi.fn(async (): Promise<RepositoryBackupRun | null> => null),
   getBackupRuntimeStatus: vi.fn(),
   cancelBackupOperation: vi.fn(),
   getRepositoryStorageOverview: vi.fn(),
@@ -103,7 +104,6 @@ const settings = (repositoryPath: string): SettingsSnapshot => ({
     },
     content: {
       density: "comfortable",
-      defaultPanel: "overview",
     },
     pinBoard: {
       textureCacheLevel: "medium",
@@ -361,8 +361,59 @@ describe("App repository switching", () => {
       expect(appApi.createRepositoryBackup).toHaveBeenCalledWith("C:\\backups");
     });
     expect(await screen.findByText(/备份已校验：4 个文件、2 个历史节点/)).toBeTruthy();
-    expect(await screen.findByText("最近一次结果（本次运行）")).toBeTruthy();
+    expect(await screen.findByText("最近一次结果")).toBeTruthy();
     expect(screen.getAllByText(/Lilith-Artworks-backup-1/).length).toBeGreaterThan(0);
+  });
+
+  it("loads the persisted last backup when the backup page opens", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    appApi.getLastRepositoryBackupRun.mockResolvedValue({
+      backupPath: "C:\\backups\\Lilith-Artworks-backup-persisted",
+      repositoryPath: "C:\\backups\\Lilith-Artworks-backup-persisted\\repository",
+      fileCount: 7,
+      totalBytes: 4096,
+      historyNodes: 3,
+      finalArtifacts: 1,
+      certificationRecords: 1,
+      createdMs: Date.parse("2026-10-20T08:00:00Z"),
+    });
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "备份" }));
+
+    expect(await screen.findByText("最近一次结果")).toBeTruthy();
+    expect(screen.getAllByText(/Lilith-Artworks-backup-persisted/).length).toBeGreaterThan(0);
+    expect(appApi.getLastRepositoryBackupRun).toHaveBeenCalled();
+  });
+
+  it("does not read the persisted last backup while the repository is not ready", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: false,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: "仓库不可用",
+    });
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "备份" }));
+
+    expect(await screen.findByText("尚无备份记录")).toBeTruthy();
+    expect(appApi.getLastRepositoryBackupRun).not.toHaveBeenCalled();
   });
 
   it("reports reclaimed staging directories after a repository backup", async () => {

@@ -85,7 +85,6 @@ impl CommandError {
         )
     }
 
-    #[allow(dead_code)]
     pub(crate) fn busy(message: impl Into<String>) -> Self {
         Self::new(CommandErrorKind::Busy, "repository_busy", message, true)
     }

@@ -10,18 +10,14 @@
 
 use std::{fs, path::Path};
 
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 
 use crate::{
-    contracts::{
-        ManagedFile, ManagedFileOwner, ReferenceInventory, ScanCandidateFile, ValidationOutcome,
-    },
+    contracts::{ManagedFile, ManagedFileOwner, ReferenceInventory, ScanCandidateFile},
     storage,
 };
 
-use super::repository::{
-    is_dds_name, is_item_dds_file, parse_board_dds_path, relative_item_dds, BOARD_DIRECTORY,
-};
+use super::repository::{is_dds_name, is_item_dds_file, relative_item_dds, BOARD_DIRECTORY};
 
 /// 单块画板的条目上限（全部 kind：位图、文字与笔迹合计）。
 pub(crate) const MAX_BOARD_ITEMS: usize = 20_000;
@@ -69,41 +65,9 @@ impl ReferenceInventory for PinBoardReferenceInventory {
             targets.push(ManagedFile {
                 path: relative_item_dds(&artwork_id, board_id, item_id),
                 owner: ManagedFileOwner::PinBoardDds,
-                deletable: true,
             });
         }
         Ok(targets)
-    }
-
-    fn validate_target(
-        &self,
-        connection: &Connection,
-        target: &ManagedFile,
-    ) -> Result<ValidationOutcome, String> {
-        if target.owner != ManagedFileOwner::PinBoardDds {
-            return Ok(ValidationOutcome::OwnerMismatch(target.owner));
-        }
-        let Some((artwork_id, board_id, item_id)) = parse_board_dds_path(&target.path) else {
-            return Ok(ValidationOutcome::Unreferenced);
-        };
-        let referenced = connection
-            .query_row(
-                "SELECT EXISTS(
-                   SELECT 1 FROM pin_board_items i
-                   JOIN pin_board_bitmaps bm ON bm.item_id = i.id
-                   JOIN pin_boards b ON b.id = i.board_id
-                   WHERE i.id = ?1 AND i.board_id = ?2 AND b.artwork_id = ?3
-                     AND bm.file_path = ?4
-                 )",
-                params![item_id, board_id, artwork_id, format!("{item_id}.dds")],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(storage::database_error)?;
-        Ok(if referenced {
-            ValidationOutcome::Valid
-        } else {
-            ValidationOutcome::Unreferenced
-        })
     }
 
     fn scan_candidates(

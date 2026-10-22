@@ -513,7 +513,7 @@ export function SettingsDialog() {
                 </div>
                 {lastRepositoryBackup ? (
                   <div className="settings-backup-result" role="status">
-                    <strong>最近一次结果（本次运行）</strong>
+                    <strong>最近一次结果</strong>
                     <small>
                       {new Date(lastRepositoryBackup.completedAtMs).toLocaleString()} ·
                       {" "}{lastRepositoryBackup.report.fileCount} 个文件 ·
@@ -530,7 +530,7 @@ export function SettingsDialog() {
                   </div>
                 ) : (
                   <p className="settings-backup-empty">
-                    本次运行尚未创建备份；重启后这里不会保留历史结果。
+                    尚无备份记录
                   </p>
                 )}
                 {visibleSettingsRuntime && (

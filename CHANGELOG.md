@@ -15,6 +15,20 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- Removed the unreferenced reference-inventory validation hooks, the unused
+  background runtime entry points, the obsolete `default_panel` setting and
+  stale `allow(dead_code)` suppressions. Settings files that still contain
+  `defaultPanel` keep loading and simply ignore the field.
+
+### Fixed
+
+- The settings "备份" page now shows the last repository backup as soon as the
+  dialog opens, including directly after a restart, instead of only after
+  visiting the "空间" page. The empty state no longer claims the result is not
+  kept across restarts and reads "尚无备份记录".
+
 ## 0.3.0-alpha.6 - 2026-10-21
 
 ### Added

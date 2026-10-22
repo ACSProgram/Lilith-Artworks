@@ -127,10 +127,10 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 `app/command_runtime/` 是 GUI、headless 与未来维护入口共用的执行底座：
 
-- `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_foreground_read`、
-  `run_background`，以及素材板专用的 `run_repository_write` / `run_repository_write_shutdown`
+- `OperationCoordinator` 提供 `run_read`、`run_write`、`run_foreground`、`run_foreground_read`，
+  以及素材板专用的 `run_repository_write` / `run_repository_write_shutdown`
   与设置保存专用的 `run_repository_switch`。固定锁序为「**进程内写入闸门（排队）** → 跨进程仓库
-  owner lock（零等待）→ 共享运行锁（写 / 前台 / 后台）→ 仓库 lease → 仓库操作锁 → SQLite
+  owner lock（零等待）→ 共享运行锁（写 / 前台）→ 仓库 lease → 仓库操作锁 → SQLite
   事务」；只读入口只取共享 lease，不取 owner lock。`run_repository_write` 保持素材板既有语义，
   不取共享运行锁；退出结算走 `run_repository_write_shutdown`。`run_foreground_read` 供纯只读的
   画板 DDS 检查等长任务使用：它取得前台运行锁与仓库操作锁保证扫描期间本进程不写入，但只**探测**

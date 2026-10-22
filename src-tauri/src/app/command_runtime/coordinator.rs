@@ -56,7 +56,7 @@ impl<'a> RepositorySession<'a> {
 /// GUI、headless 与未来维护入口共用的运行入口。
 ///
 /// 写操作的锁序固定为：**进程内写入闸门（排队）** → 跨进程仓库 owner lock（零等待）
-/// → 共享运行锁（仅写/前台/后台分类）→ 仓库 lease → 仓库操作锁 → SQLite 事务。
+/// → 共享运行锁（仅写/前台分类）→ 仓库 lease → 仓库操作锁 → SQLite 事务。
 ///
 /// 两层判定的分工：
 ///
@@ -81,7 +81,6 @@ struct Inner {
     observer: Arc<dyn OperationObserver>,
 }
 
-#[allow(dead_code)]
 impl OperationCoordinator {
     pub(crate) fn new(
         app_state: AppState,
@@ -98,6 +97,7 @@ impl OperationCoordinator {
         }
     }
 
+    #[cfg_attr(not(feature = "headless"), allow(dead_code))] // headless 运行时用它接收进度。
     pub(crate) fn with_observer(self, observer: Arc<dyn OperationObserver>) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -327,34 +327,6 @@ impl OperationCoordinator {
             Err(ExclusiveRunError::State(message)) => Err(CommandError::internal(message)),
             Err(ExclusiveRunError::Operation(error)) => Err(error),
         }
-    }
-
-    /// 后台任务：写入闸门（Background，只 try）→ 共享运行锁（AutomaticBackup）。
-    /// 「拿不到就跳过」由调度器负责，这里只把 busy 如实返回。
-    pub(crate) fn run_background<T>(
-        &self,
-        context: &CommandContext,
-        branch_id: Option<&str>,
-        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        context.set_class(OperationClass::Background);
-        let _owner = self.acquire_owner_lock(
-            context,
-            "background",
-            WritePriority::Background,
-            WaitPolicy::Try,
-            &CancelToken::standalone(),
-        )?;
-        let result = self.inner.backup_state.run_exclusive_typed(
-            branch_id,
-            BackupTaskKind::AutomaticBackup,
-            || {
-                self.inner
-                    .app_state
-                    .with_ready_repository_typed(|root| operation(&RepositorySession::new(root)))
-            },
-        );
-        self.finish_write(context, result)
     }
 
     /// 素材板等既有写命令：写入闸门（Interactive，排队）+ 跨进程 owner lock，
@@ -772,7 +744,6 @@ pub(crate) struct CommandContext {
     last_progress_log: Mutex<Option<(Instant, String)>>,
 }
 
-#[allow(dead_code)]
 impl CommandContext {
     pub(crate) fn operation_id(&self) -> &OperationId {
         &self.operation_id
@@ -870,14 +841,6 @@ impl CommandContext {
             .run_foreground_read(self, branch_id, operation)
     }
 
-    pub(crate) fn run_background<T>(
-        &self,
-        branch_id: Option<&str>,
-        operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
-    ) -> Result<T, CommandError> {
-        self.coordinator.run_background(self, branch_id, operation)
-    }
-
     pub(crate) fn run_repository_write<T>(
         &self,
         operation: impl FnOnce(&RepositorySession) -> Result<T, CommandError>,
@@ -908,10 +871,6 @@ impl CommandContext {
         self.coordinator.emit_progress(self, label, current, total);
         self.coordinator
             .report_runtime_progress(self, label, current, total);
-    }
-
-    pub(crate) fn emit_repository_changed(&self) {
-        self.coordinator.emit_repository_changed(self);
     }
 
     pub(crate) fn emit_cleanup_queue_changed(&self, pending_count: Option<u64>) {

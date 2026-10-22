@@ -1,6 +1,5 @@
 export type Theme = "system" | "light" | "dark";
 export type ContentDensity = "comfortable" | "compact";
-export type DefaultPanel = "overview" | "history" | "authenticity";
 export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 export type BackupCheckMode = "quick" | "full";
 
@@ -23,7 +22,6 @@ export interface WindowSettings {
 
 export interface ContentSettings {
   density: ContentDensity;
-  defaultPanel: DefaultPanel;
 }
 
 export interface AppSettings {

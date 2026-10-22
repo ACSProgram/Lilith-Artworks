@@ -112,7 +112,7 @@ pub(crate) trait EventSink: Send + Sync {
     fn emit(&self, event: &AppEvent);
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(any(test, feature = "headless")), allow(dead_code))] // 测试与 headless 运行时使用。
 pub(crate) struct NoopEventSink;
 
 impl EventSink for NoopEventSink {

@@ -36,6 +36,12 @@ export type SettingsOperation =
  */
 const SETTINGS_OPERATION_DOMAINS = new Set(["maintenance", "cleanup"]);
 
+/**
+ * 设置页展示的「最近一次整仓备份」：命令返回的报告加上完成时间。本次运行的结果与
+ * 数据库里的历史记录共用这一形状，避免两处各写一份字面量类型。
+ */
+type RepositoryBackupResult = { report: RepositoryBackupReport; completedAtMs: number };
+
 export interface RepositoryMaintenance {
   settingsOperation: SettingsOperation | null;
   pendingCleanup: PendingCleanupEntry[];
@@ -55,7 +61,7 @@ export interface RepositoryMaintenance {
   storageDiskScan: RepositoryStorageDiskScan | null;
   storageOverviewBusy: boolean;
   storageOverviewError: string | null;
-  lastRepositoryBackup: { report: RepositoryBackupReport; completedAtMs: number } | null;
+  lastRepositoryBackup: RepositoryBackupResult | null;
   scrubRepository: () => Promise<void>;
   backupRepository: () => Promise<void>;
   refreshPendingCleanup: () => Promise<void>;
@@ -94,10 +100,8 @@ export function useRepositoryMaintenance(
   const [storageDiskScan, setStorageDiskScan] = useState<RepositoryStorageDiskScan | null>(null);
   const [storageOverviewBusy, setStorageOverviewBusy] = useState(false);
   const [storageOverviewError, setStorageOverviewError] = useState<string | null>(null);
-  const [lastRepositoryBackup, setLastRepositoryBackup] = useState<{
-    report: RepositoryBackupReport;
-    completedAtMs: number;
-  } | null>(null);
+  const [lastRepositoryBackup, setLastRepositoryBackup] =
+    useState<RepositoryBackupResult | null>(null);
   const {
     begin: beginStorageRead,
     invalidate: invalidateStorageReads,
@@ -143,39 +147,49 @@ export function useRepositoryMaintenance(
     };
   }, [settings.repository.ready, settings.settingsOpen, settings.settingsPage]);
 
-  // 最近一次整仓备份跨重启保留；只读失败时保持空态，不打扰用户。
+  // 最近一次整仓备份跨重启保留，显示在「备份」页；读取与当前页签无关。
+  // 读取失败时保持当前显示（首次打开即空态），不打扰用户。
+  const loadLastRepositoryBackup = useCallback(async (): Promise<RepositoryBackupResult | null> => {
+    try {
+      const run = await appApi.getLastRepositoryBackupRun();
+      if (!run) return null;
+      return {
+        report: {
+          backupPath: run.backupPath,
+          repositoryPath: run.repositoryPath,
+          fileCount: run.fileCount,
+          totalBytes: run.totalBytes,
+          historyNodes: run.historyNodes,
+          finalArtifacts: run.finalArtifacts,
+          certificationRecords: run.certificationRecords,
+          // 暂存目录回收是本次运行的事实，不写进数据库；历史记录按 0 显示。
+          reclaimedStagingDirectories: 0,
+          failedStagingDirectories: 0,
+        },
+        completedAtMs: run.createdMs,
+      };
+    } catch {
+      return null;
+    }
+  }, []);
+
   useEffect(() => {
-    if (!settings.settingsOpen || settings.settingsPage !== "space" || !settings.repository.ready) {
+    if (!settings.settingsOpen || !settings.repository.ready) {
       return undefined;
     }
     let disposed = false;
-    void appApi.getLastRepositoryBackupRun()
-      .then((run) => {
-        if (disposed || !run) return;
-        // 读取期间可能刚完成一次备份：只接受不比当前结果更旧的记录。
-        setLastRepositoryBackup((current) => {
-          if (current && current.completedAtMs >= run.createdMs) return current;
-          return {
-            report: {
-              backupPath: run.backupPath,
-              repositoryPath: run.repositoryPath,
-              fileCount: run.fileCount,
-              totalBytes: run.totalBytes,
-              historyNodes: run.historyNodes,
-              finalArtifacts: run.finalArtifacts,
-              certificationRecords: run.certificationRecords,
-              reclaimedStagingDirectories: 0,
-              failedStagingDirectories: 0,
-            },
-            completedAtMs: run.createdMs,
-          };
-        });
-      })
-      .catch(() => undefined);
+    void loadLastRepositoryBackup().then((loaded) => {
+      if (disposed || !loaded) return;
+      // 读取期间可能刚完成一次备份：只接受不比当前结果更旧的记录。
+      setLastRepositoryBackup((current) => {
+        if (current && current.completedAtMs >= loaded.completedAtMs) return current;
+        return loaded;
+      });
+    });
     return () => {
       disposed = true;
     };
-  }, [settings.repository.ready, settings.settingsOpen, settings.settingsPage, settings.repository.rootPath]);
+  }, [loadLastRepositoryBackup, settings.repository.ready, settings.settingsOpen, settings.repository.rootPath]);
 
   const refreshPendingCleanup = useCallback(async () => {
     if (!settings.repository.ready) {

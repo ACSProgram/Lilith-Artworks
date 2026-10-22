@@ -5,7 +5,6 @@ use rusqlite::Connection;
 use crate::{
     contracts::{
         ManagedFile, ManagedFileOwner, RedundantFile, ReferenceInventory, ScanCandidateFile,
-        ValidationOutcome,
     },
     storage,
 };
@@ -56,41 +55,9 @@ impl ReferenceInventory for HistoryReferenceInventory {
                     1 => ManagedFileOwner::HistoryNodeDelta,
                     _ => ManagedFileOwner::HistoryEdgeDelta,
                 },
-                deletable: true,
             });
         }
         Ok(targets)
-    }
-
-    fn validate_target(
-        &self,
-        connection: &Connection,
-        target: &ManagedFile,
-    ) -> Result<ValidationOutcome, String> {
-        let query = match target.owner {
-            ManagedFileOwner::HistorySnapshot => {
-                "SELECT EXISTS(SELECT 1 FROM history_nodes WHERE snapshot_path = ?1)"
-            }
-            ManagedFileOwner::HistoryNodeDelta => {
-                "SELECT EXISTS(SELECT 1 FROM history_nodes node
-                                WHERE node.delta_path = ?1 AND node.snapshot_path IS NULL)"
-            }
-            ManagedFileOwner::HistoryEdgeDelta => {
-                "SELECT EXISTS(SELECT 1 FROM history_edges edge
-                                 JOIN history_nodes parent ON parent.id = edge.parent_history_id
-                                WHERE edge.delta_path = ?1
-                                  AND NOT (parent.is_checkpoint = 1 AND parent.snapshot_path IS NOT NULL))"
-            }
-            owner => return Ok(ValidationOutcome::OwnerMismatch(owner)),
-        };
-        let referenced = connection
-            .query_row(query, [&target.path], |row| row.get::<_, bool>(0))
-            .map_err(storage::database_error)?;
-        Ok(if referenced {
-            ValidationOutcome::Valid
-        } else {
-            ValidationOutcome::Unreferenced
-        })
     }
 
     fn scan_candidates(

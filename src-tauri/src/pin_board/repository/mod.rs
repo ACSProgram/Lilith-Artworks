@@ -44,8 +44,7 @@ pub(crate) use create::{
 #[cfg(feature = "headless")]
 pub(crate) use create::{create_strokes, StrokeInsert};
 pub(crate) use paths::{
-    board_relative_path, is_dds_name, is_item_dds_file, parse_board_dds_path, relative_item_dds,
-    BOARD_DIRECTORY,
+    board_relative_path, is_dds_name, is_item_dds_file, relative_item_dds, BOARD_DIRECTORY,
 };
 pub(crate) use save::{finalize_board, save_board};
 pub(crate) use view::{load_view, ImageTransform, PinBoardView};

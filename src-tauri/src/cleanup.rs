@@ -409,7 +409,7 @@ fn load_pending_entries(
 }
 
 /// 把领域 provider 提供的引用清单放进连接内临时表。表随连接结束消失，不产生
-/// 持久 schema 变更；持久路径索引留给阶段 7 的 v4 → v5 迁移。
+/// 持久 schema 变更；路径索引已由 v4 → v5 迁移建立。
 fn populate_reference_table(connection: &mut Connection) -> Result<(), String> {
     let targets = reference_inventories()
         .collect_targets(connection)
