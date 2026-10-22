@@ -9,7 +9,7 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     sync::OnceLock,
-    time::Instant,
+    time::{Instant, SystemTime},
 };
 
 use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, Rgb, RgbImage};
@@ -30,6 +30,20 @@ use super::{
 };
 
 static PREVIEW_CACHE_SESSION: OnceLock<String> = OnceLock::new();
+
+/// 会话内预览缓存的份数上限。
+///
+/// 每换一次参数（JPEG 质量、背景色、水印强度、框选区域、水印 ID）就留下一份全尺寸
+/// JPEG 与一份元数据；常见调参会有十几次迭代，16 份足够来回比较几组参数，又不会
+/// 让一次会话堆出几十份预览。当前正在使用的那份总是最新的，因此天然落在保留区间。
+const PREVIEW_CACHE_MAX_ENTRIES: usize = 16;
+
+/// 会话内预览缓存的 JPEG 总字节上限（512 MiB）。
+///
+/// 普通画布单份缓存只有几 MB，份数上限通常先生效；这个上限兜住超大画布连续调参
+/// 的情况（16K 成品单份就可能上百 MB）。超限时继续从最旧的删，直到不超或只剩一份。
+/// 同名元数据 JSON 只有几百字节，不计入这里统计的总量。
+const PREVIEW_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 /// 当前进程的预览缓存会话 id；本进程尚未写过任何质量预览缓存时为 `None`。
 /// 仓库临时目录清扫用它保留仍属于本进程的会话目录。
@@ -279,6 +293,7 @@ pub(crate) fn render_cached_rendition(
     metadata_temp.as_file_mut().flush()?;
     metadata_temp.as_file().sync_all()?;
     replace_cache_file(metadata_temp, &metadata_path)?;
+    prune_preview_cache(directory);
     Ok(CachedRendition {
         path: jpeg_path,
         width,
@@ -297,6 +312,49 @@ fn replace_cache_file(temp: NamedTempFile, destination: &Path) -> AuthenticityRe
     temp.persist(destination)
         .map_err(|error| AuthenticityError::Io(error.error))?;
     Ok(())
+}
+
+/// 会话内缓存淘汰：按 JPEG 修改时间从旧到新，先删到只剩最近
+/// [`PREVIEW_CACHE_MAX_ENTRIES`] 份，再在 JPEG 总字节超过 [`PREVIEW_CACHE_MAX_BYTES`]
+/// 时继续删最旧的，直到不超或只剩一份。
+///
+/// 每次写入新的缓存对之后调用。删除成功与否都不影响预览与发布结果——缓存不是
+/// 正确性路径，失败静默忽略，最多让目录多留几份等下次淘汰或会话结束清扫。
+fn prune_preview_cache(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut cached = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) != Some("jpg") {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+        cached.push((modified, metadata.len(), path));
+    }
+    let mut jpeg_bytes: u64 = cached.iter().map(|(_, bytes, _)| *bytes).sum();
+    if cached.len() <= PREVIEW_CACHE_MAX_ENTRIES && jpeg_bytes <= PREVIEW_CACHE_MAX_BYTES {
+        return;
+    }
+    cached.sort_by_key(|(modified, _, _)| *modified);
+    let mut remaining = cached.len();
+    for (_, bytes, jpeg_path) in cached {
+        // 至少留一份：正在使用的那份总是最新，走到这里只会剩下最旧的一份。
+        if remaining <= 1 {
+            break;
+        }
+        if remaining <= PREVIEW_CACHE_MAX_ENTRIES && jpeg_bytes <= PREVIEW_CACHE_MAX_BYTES {
+            break;
+        }
+        let _ = fs::remove_file(&jpeg_path);
+        let _ = fs::remove_file(jpeg_path.with_extension("json"));
+        jpeg_bytes = jpeg_bytes.saturating_sub(bytes);
+        remaining -= 1;
+    }
 }
 
 pub(crate) fn elapsed_ms(started: Instant) -> u64 {
@@ -512,6 +570,36 @@ mod tests {
             initial,
             rendition_cache_token(&source_sha256, &config, Some(&"0".repeat(40))).unwrap()
         );
+    }
+
+    #[test]
+    fn preview_cache_pruning_keeps_the_latest_entries_and_removes_metadata_pairs() {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = directory.path().join("authenticity-preview-test");
+        fs::create_dir(&cache).unwrap();
+        for index in 0..20 {
+            let jpeg = cache.join(format!("{index:02}.jpg"));
+            let metadata = cache.join(format!("{index:02}.json"));
+            fs::write(&jpeg, b"jpeg").unwrap();
+            fs::write(&metadata, b"{}").unwrap();
+            let stamp = filetime::FileTime::from_unix_time(1_700_000_000 + index, 0);
+            filetime::set_file_mtime(&jpeg, stamp).unwrap();
+        }
+
+        prune_preview_cache(&cache);
+
+        let mut names: Vec<String> = fs::read_dir(&cache)
+            .unwrap()
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        let mut expected: Vec<String> = (4..20)
+            .flat_map(|index| [format!("{index:02}.jpg"), format!("{index:02}.json")])
+            .collect();
+        expected.sort();
+        // 最旧的 4 份及其元数据成对删除，最近 16 份原样保留。
+        assert_eq!(names, expected);
     }
 
     fn target(source_sha256: &str) -> BranchPublicationTarget {

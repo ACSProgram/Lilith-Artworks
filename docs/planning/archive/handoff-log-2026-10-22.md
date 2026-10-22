@@ -3,10 +3,9 @@
 本文件收 2026-10-22 从 `../current-handoff.md` 清出的已完成、已提交批次摘要。当前批次状态
 改看 `../current-handoff.md`，未完成事项与未执行的人工验收看 `../todo.md`。
 
-0.3 收尾与认证整改（2026-10-22）第一至第六批的详细实施记录保留在活动计划
-`../0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 14 节，待全部批次完成并通过
-人工验收后随该计划一并归档；第四批的摘要已随该批提交移入本文件（见下），第一批的人工验收
-通过记录见文末。
+0.3 收尾与认证整改（2026-10-22）第一至第七批的详细实施记录见同目录的
+`0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 14 节（该计划已随第七批的收尾
+整理归档）；第四批的摘要已随该批提交移入本文件（见下），第一批的人工验收通过记录见文末。
 
 ## 0.3 收尾与认证整改第四批（已提交）
 
@@ -121,5 +120,25 @@ snapshot 整份复检、结构单元改缓冲顺序读，以及提交与恢复�
 - 设置页各字段显示正常，旧设置文件中的 `defaultPanel` 字段被忽略且不影响加载。
 
 备份记录的重启读取口径见 `docs/modules/history-and-backup.md`，行为变化见 `CHANGELOG.md` 的
-`## Unreleased`，计划见 `../0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 2 节。
-第三批、第六批的界面验收项与第七批的待实施项仍在 `../todo.md`。
+`## Unreleased`，计划见 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 2 节。
+第三批、第六批的界面验收项与第七批的人工确认项仍在 `../todo.md`。
+
+## 0.3 收尾与认证整改第七批（已提交，计划归档）
+
+取消发布不再无条件删除仓库内的成品与认证副本：`remove_artifact` 查询时一并取出
+`final_artifacts.source_sha256` 与 `certification_records.output_sha256`，登记待清理项前用
+`storage::verify_file_sha256` 比对磁盘内容，一致才入队；被替换或已不存在的文件不登记、原样
+留在仓库里，由 usecase 写一条 `[cleanup] retained <绝对路径>：内容已变化或文件不存在` 日志，
+交给设置页「空间」页的垃圾文件扫描发现。取消发布本身仍然成功，`CleanupReport` 与前端契约
+不变。质量预览缓存加了会话内上限：每写入一份新缓存就按 JPEG 修改时间从旧到新淘汰，保留最近
+16 份，JPEG 总字节超过 512 MiB 时继续删最旧的（至少留一份），`.jpg` 与同名 `.json` 成对删除，
+失败静默忽略。同批删除三个无前端消费方的响应字段——发布结果宽高、识别结果回显的解码区域、
+估算响应的源字节数（界面「原图」大小来自预览响应，不受影响）。
+
+计划正文与七批的逐批实施记录随本批收尾整理归档到
+`0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md`；模块口径见
+`docs/modules/authenticity.md`，行为变化见 `CHANGELOG.md` 的 `## Unreleased`。自动验证已通过
+（`cargo fmt --check`、`cargo check --all-targets`、`cargo test --lib`、`npx tsc --noEmit`、
+`npm test`、`git diff --check`）；两条文件行为确认项（被替换的文件是否真的留在仓库里、垃圾
+扫描能否列出，以及预览缓存目录体积）与第三、六批的界面验收一起仍待人工，验收项在
+`../todo.md`。

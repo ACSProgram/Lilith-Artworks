@@ -43,7 +43,7 @@ describe("usePublicationController", () => {
     localStorage.clear();
     vi.clearAllMocks();
     api.previewArtifact.mockResolvedValue(previewImage);
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.estimate.mockResolvedValue({ jpegBytes: 7 });
     api.cancelOperation.mockResolvedValue(true);
     api.previewRecord.mockResolvedValue(previewImage);
   });
@@ -134,8 +134,6 @@ describe("usePublicationController", () => {
     api.previewPublication.mockResolvedValue(outputPreview("1".repeat(40)));
     api.publish.mockResolvedValue({
       record: record("first"),
-      width: previewImage.width,
-      height: previewImage.height,
       watermarkWarnings: [],
       renditionCacheHit: true,
       renderMs: 0,

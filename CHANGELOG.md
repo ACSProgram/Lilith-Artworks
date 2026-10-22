@@ -66,9 +66,23 @@ entries for the reader; they are not a template every entry has to fill.
   "cancelled" notice is reported once whether the task or the cancel request
   finishes first. Path basenames and error text come from the shared
   `fileName` and `errorMessage` helpers instead of module-local copies.
+- The quality preview cache now evicts within a session. After each new cache
+  pair it keeps the most recent 16 entries, then trims the oldest until the
+  cached JPEGs total at most 512 MiB, deleting each JPEG and its metadata
+  together; eviction failures are ignored because the cache is not a
+  correctness path.
+- Removed three response fields with no frontend consumer: the publication
+  result width and height, the decode result's echoed selection region, and the
+  size estimate's source byte count. The preview image's source size is
+  separate and unchanged.
 
 ### Fixed
 
+- Cancelling a publication now compares each repository artifact and
+  certification copy with the SHA-256 stored in its record before enqueueing
+  cleanup. Files that were replaced or removed are left in place, logged as
+  `[cleanup] retained`, and fall to the garbage scan instead of being deleted
+  or stuck in the cleanup queue. The cancellation itself still succeeds.
 - Authenticity identification no longer decodes the whole image when the
   TrustMark models are unavailable; it reads the C2PA manifest only. Region
   decoding takes ownership of the decoded image instead of cloning it, and

@@ -212,8 +212,6 @@ pub(crate) fn publish(
     };
     Ok(PublishResult {
         record,
-        width: cached.width,
-        height: cached.height,
         watermark_warnings,
         rendition_cache_hit: cached.cache_hit,
         render_ms: cached.render_ms,

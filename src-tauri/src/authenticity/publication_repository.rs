@@ -35,6 +35,13 @@ pub(crate) struct BranchPublicationTarget {
     pub(crate) source_sha256: String,
 }
 
+/// 取消发布的结果：真正登记进待清理队列的条目，以及因内容已变化（或文件已不存在）
+/// 而留在仓库里的路径（仓库相对路径）。
+pub(crate) struct RemovedPublication {
+    pub(crate) cleanup_ids: Vec<String>,
+    pub(crate) retained_paths: Vec<String>,
+}
+
 pub(crate) struct NewFinalArtifact<'a> {
     pub(crate) id: &'a str,
     pub(crate) branch_id: &'a str,
@@ -154,41 +161,51 @@ pub(crate) fn find_artifact(root: &Path, branch_id: &str) -> Result<Option<Final
     Ok(artifact)
 }
 
-pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<Vec<String>, String> {
+/// 解除分支发布状态：事务内登记仓库内成品与认证副本的清理意图，再删除认证配置、
+/// 记录与成品行。
+///
+/// 清理登记前先核对磁盘内容与记录中的 SHA-256：一致才登记，被替换或已不存在的
+/// 文件不登记、原样留在仓库里，交由设置页的垃圾文件扫描发现。这里不采用「带哈希
+/// 登记后让清理失败」的做法，否则条目会长期留在队列里反复报同一句内容已变化。
+///
+/// 摘要就在事务内读取：取消发布本身已持独占运行锁，期间没有别的写者，成品与副本各读
+/// 一次不会额外争锁；这样「登记清理意图」与「删除发布态数据」仍留在同一个事务里。
+pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<RemovedPublication, String> {
     let mut connection = storage::open(root)?;
     let transaction = connection.transaction().map_err(storage::database_error)?;
-    let path: Option<String> = transaction
+    let artifact: Option<(String, String)> = transaction
         .query_row(
-            "SELECT source_path FROM final_artifacts WHERE branch_id = ?1",
+            "SELECT source_path, source_sha256 FROM final_artifacts WHERE branch_id = ?1",
             [branch_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(storage::database_error)?;
     let mut stored_statement = transaction
         .prepare(
-            "SELECT stored_path
+            "SELECT stored_path, output_sha256
              FROM certification_records WHERE branch_id = ?1",
         )
         .map_err(storage::database_error)?;
     let stored_paths = stored_statement
-        .query_map([branch_id], |row| row.get::<_, String>(0))
+        .query_map([branch_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(storage::database_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(storage::database_error)?;
     drop(stored_statement);
     let mut cleanup_ids = Vec::new();
-    if let Some(relative) = path.as_deref() {
+    let mut retained_paths = Vec::new();
+    for (relative, expected_sha256) in artifact.into_iter().chain(stored_paths) {
+        let absolute = storage::resolve_path(root, &relative)?;
+        if storage::verify_file_sha256(&absolute, &expected_sha256, "仓库文件").is_err() {
+            retained_paths.push(relative);
+            continue;
+        }
         cleanup_ids.push(cleanup::enqueue_repository_file(
             &transaction,
-            relative,
-            "cancel_branch_publication",
-        )?);
-    }
-    for stored_path in &stored_paths {
-        cleanup_ids.push(cleanup::enqueue_repository_file(
-            &transaction,
-            stored_path,
+            &relative,
             "cancel_branch_publication",
         )?);
     }
@@ -205,7 +222,10 @@ pub(crate) fn remove_artifact(root: &Path, branch_id: &str) -> Result<Vec<String
         )
         .map_err(storage::database_error)?;
     transaction.commit().map_err(storage::database_error)?;
-    Ok(cleanup_ids)
+    Ok(RemovedPublication {
+        cleanup_ids,
+        retained_paths,
+    })
 }
 
 fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {
@@ -223,6 +243,10 @@ fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use sha2::Digest;
+
     use super::*;
     use crate::authenticity::test_support::initialize_publication;
 
@@ -238,6 +262,52 @@ mod tests {
             media_type: "image/jpeg",
             byte_size: 1,
             created_ms: 0,
+        }
+    }
+
+    /// 在仓库内写入一个文件并返回其 SHA-256。
+    fn write_repository_file(root: &Path, relative: &str, bytes: &[u8]) -> String {
+        let absolute = storage::resolve_path(root, relative).unwrap();
+        fs::create_dir_all(absolute.parent().unwrap()).unwrap();
+        fs::write(&absolute, bytes).unwrap();
+        hex::encode_upper(sha2::Sha256::digest(bytes))
+    }
+
+    /// 写入一条已发布分支的成品行与配置行；`record` 给定时再写一条认证记录
+    /// （仓库副本相对路径、副本摘要）。
+    fn seed_publication(root: &Path, artifact_sha: &str, record: Option<(&str, &str)>) {
+        let connection = storage::open(root).unwrap();
+        connection
+            .execute(
+                "INSERT INTO final_artifacts
+                   (id, branch_id, history_id, source_path, source_sha256,
+                    media_type, byte_size, created_ms)
+                 VALUES ('artifact', 'branch', 'history', 'artworks/final.jpg', ?1,
+                         'image/jpeg', 1, 0)",
+                [artifact_sha],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO certification_configs (branch_id, updated_ms) VALUES ('branch', 0)",
+                [],
+            )
+            .unwrap();
+        if let Some((stored_path, output_sha)) = record {
+            connection
+                .execute(
+                    "INSERT INTO certification_records
+                       (id, final_artifact_id, branch_id, history_id, watermark_id,
+                        trustmark_enabled, output_path, stored_path, output_sha256,
+                        output_bytes, title, creator, rights_statement,
+                        authentication_content, regions_json, created_ms)
+                     VALUES
+                       ('record', 'artifact', 'branch', 'history', NULL, 0,
+                        'C:/published/output.jpg', ?1, ?2,
+                        1, 'Title', '', '', '', '[]', 0)",
+                    [stored_path, output_sha],
+                )
+                .unwrap();
         }
     }
 
@@ -298,32 +368,15 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         initialize_publication(&root);
-        let connection = storage::open(&root).unwrap();
-        connection
-            .execute_batch(
-                "INSERT INTO final_artifacts
-                   (id, branch_id, history_id, source_path, source_sha256,
-                    media_type, byte_size, created_ms)
-                 VALUES
-                   ('artifact', 'branch', 'history', 'artworks/final.jpg',
-                    '0000000000000000000000000000000000000000000000000000000000000000',
-                    'image/jpeg', 1, 0);
-                 INSERT INTO certification_configs (branch_id, updated_ms)
-                 VALUES ('branch', 0);
-                 INSERT INTO certification_records
-                   (id, final_artifact_id, branch_id, history_id, watermark_id,
-                    trustmark_enabled, output_path, stored_path, output_sha256,
-                    output_bytes, title, creator, rights_statement,
-                    authentication_content, regions_json, created_ms)
-                 VALUES
-                   ('record', 'artifact', 'branch', 'history', NULL, 0,
-                    'C:/published/output.jpg', 'artworks/certified.jpg',
-                    '0000000000000000000000000000000000000000000000000000000000000000',
-                    1, 'Title', '', '', '', '[]', 0);",
-            )
-            .unwrap();
+        let artifact_sha = write_repository_file(&root, "artworks/final.jpg", b"final artifact");
+        let record_sha = write_repository_file(&root, "artworks/certified.jpg", b"certification");
+        seed_publication(
+            &root,
+            &artifact_sha,
+            Some(("artworks/certified.jpg", &record_sha)),
+        );
 
-        let cleanup_ids = remove_artifact(&root, "branch").unwrap();
+        let removed = remove_artifact(&root, "branch").unwrap();
 
         let connection = storage::open(&root).unwrap();
         let counts: (i64, i64, i64) = connection
@@ -351,7 +404,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(counts, (0, 0, 0));
-        assert_eq!(cleanup_ids.len(), 2);
+        assert_eq!(removed.cleanup_ids.len(), 2);
+        assert!(removed.retained_paths.is_empty());
         assert_eq!(
             cleanup_entries,
             vec![
@@ -359,5 +413,50 @@ mod tests {
                 ("repository_file".into(), "artworks/final.jpg".into()),
             ]
         );
+    }
+
+    #[test]
+    fn cancel_publication_retains_files_whose_content_changed() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize_publication(&root);
+        // 记录里是写入时的摘要，磁盘上随后被替换：两者不再一致。
+        let artifact_sha = write_repository_file(&root, "artworks/final.jpg", b"final artifact");
+        let record_sha = write_repository_file(&root, "artworks/certified.jpg", b"certification");
+        seed_publication(
+            &root,
+            &artifact_sha,
+            Some(("artworks/certified.jpg", &record_sha)),
+        );
+        let artifact_path = storage::resolve_path(&root, "artworks/final.jpg").unwrap();
+        let record_path = storage::resolve_path(&root, "artworks/certified.jpg").unwrap();
+        fs::write(&artifact_path, b"replaced artifact").unwrap();
+        fs::remove_file(&record_path).unwrap();
+
+        let removed = remove_artifact(&root, "branch").unwrap();
+
+        assert!(removed.cleanup_ids.is_empty());
+        assert_eq!(
+            removed.retained_paths,
+            vec![
+                "artworks/final.jpg".to_owned(),
+                "artworks/certified.jpg".to_owned(),
+            ]
+        );
+        // 被替换的文件留在仓库里，消失的文件不会被登记成一条永远失败的清理项。
+        assert!(artifact_path.exists());
+        // 取消发布本身仍然成功：没有待清理项，发布态数据也全部解除。
+        let values: (i64, i64, i64) = storage::open(&root)
+            .unwrap()
+            .query_row(
+                "SELECT
+                   (SELECT COUNT(*) FROM pending_file_cleanup),
+                   (SELECT COUNT(*) FROM final_artifacts),
+                   (SELECT COUNT(*) FROM certification_records)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(values, (0, 0, 0));
     }
 }

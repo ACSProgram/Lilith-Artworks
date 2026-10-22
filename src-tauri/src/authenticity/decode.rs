@@ -38,10 +38,10 @@ fn decode_with(
     let input = canonical_existing_file(&request.input_path, "待识别图片")?;
     storage::ensure_outside_repository(root, &input, "待识别图片")
         .map_err(AuthenticityError::InvalidInput)?;
-    let decoded_region = request.region;
+    let region = request.region;
     let watermark_id = if state.model_files_ready() {
         let image = open_image(&input)?;
-        trustmark::decode_region(state, image, decoded_region)?
+        trustmark::decode_region(state, image, region)?
     } else {
         None
     };
@@ -75,7 +75,6 @@ fn decode_with(
     Ok(DecodeResult {
         watermark_present: watermark_id.is_some(),
         watermark_id,
-        decoded_region,
         c2pa_present: manifest.present,
         c2pa_validation_state: manifest.validation_state,
         c2pa_validation_status: manifest.validation_status,

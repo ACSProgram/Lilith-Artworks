@@ -8,39 +8,29 @@
 
 ## 当前批次状态
 
-2026-10-22 0.3 收尾与认证整改第六批（已实现、自动验证通过并提交）：
+2026-10-22 0.3 收尾与认证整改第七批（已提交，计划已归档）。**当前没有进行中的批次**：
 
-- 认证前端拆为 `PublicationView` / `IdentificationView` 两个页面，以及 `RecordView`、
-  `RecordList`、`RegionEditor`、`PublicationPreviewDialog`；`ArtworkWorkspace` 直接挂载
-  发布页或识别页，`AuthenticityModule.tsx` 删除。
-- 控制器拆为 `usePublicationController` / `useIdentificationController`，共享签名配置与
-  PEM 规范化移到 `publicationStorage.ts`；识别预览、解码与记录搜索改用共享
-  `useRequestEpoch` 请求代次。
-- 质量预览与签名发布共用 `useAuthenticityOperation` 的取消状态机，可见文案与提示时序不变；
-  补了取消、导出与识别乱序响应的定向测试。
-- `api.ts` 只由两个 controller 消费；模块文档、架构入口文档与 `CHANGELOG.md` 的
-  `Unreleased` 已同步。
-- 提交前做了一次收尾整理：路径取文件名与错误文案收敛到共享 `fileName` / `errorMessage`，
-  删掉 `RegionEditor` 里永不为真的空值判断与识别解码里已被请求代次覆盖的路径比较，并给
-  拆出的组件补上具名 props 接口；分支列表三态提示抽成 `BranchStateNotice`。
+- 取消发布在登记待清理项前按记录中的 SHA-256 核对仓库成品与认证副本；内容已变化的文件
+  不删除、不进清理队列，保留路径写一条 `[cleanup] retained` 日志，交给设置页「空间」页的
+  垃圾文件扫描发现。取消发布本身仍然成功。
+- 质量预览缓存增加会话内上限：每次写入新缓存后保留最近 16 份，JPEG 总量超过 512 MiB 时继续
+  从最旧的删，`.jpg` 与同名 `.json` 成对删除，淘汰失败静默忽略。
+- 删除发布结果宽高、识别结果解码区域与估算响应源字节数三个无消费方字段；界面「原图」大小
+  来自预览响应，不受影响。
+- `docs/modules/authenticity.md`、`CHANGELOG.md` 的 `Unreleased` 与归档索引已同步；七批的
+  逐批记录随计划归档到 `archive/0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md`
+  第 14 节。
 
-计划与逐批验证记录见 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 14 节。
-第一至第六批均已提交。
-
-第七批（取消发布清理核对、质量预览缓存会话内上限、删除三个无消费方字段）已按维护者
-2026-10-22 的决定定下范围，见计划 §8，**尚未实施**。计划 §12 的其余四项已明确不做或转入
-0.4（作品独立数据库、仓库升级规范化、控制总线按作品并行与前台作品优先、识别页独立化），
-草案见 `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
-
-第三批界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）与第六批界面部分
-（发布/识别页、取消时序、局部图与放大镜、只读记录、拖放导入）只做了自动验证与现有组件
-测试，标注为**待人工验收**，验收项在 `todo.md`。
+第三批（历史页视图、精简与悬停、设置六页的保存/取消/滚动）、第六批（发布/识别页、取消时序、
+局部图与放大镜、只读记录、拖放导入）与第七批（取消发布保留被替换文件、预览缓存目录体积）
+只做了自动验证与现有组件测试，标注为**待人工验收**，验收项在 `todo.md`。
 
 ## 下一步
 
-- 实施第七批；完成后把第七批的界面确认项补进 `todo.md`。
-- 人工验收第三批与第六批的界面行为；验收项见 `todo.md`。
-- 第三批与第六批的验收记录在通过后归档。
+- 人工验收第三、六批的界面行为与第七批的两条文件行为确认项；验收项见 `todo.md`。
+- 验收通过后补记到 `archive/handoff-log-2026-10-22.md` 并从 `todo.md` 删除。
+- 0.4 的草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）待完善，
+  见 `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
 - 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
   `docs/guides/release-policy.md`。
 

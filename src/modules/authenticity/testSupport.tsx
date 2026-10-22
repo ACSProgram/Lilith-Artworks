@@ -142,7 +142,6 @@ export const outputPreview = (watermarkId: string): PublicationPreview => ({
 export const decodeResult = (branchId: string): DecodeResult => ({
   watermarkPresent: true,
   watermarkId: "1".repeat(40),
-  decodedRegion: null,
   c2paPresent: true,
   c2paValidationState: "Valid",
   c2paValidationStatus: [],

@@ -3,7 +3,7 @@
 //! 不写文件、不签名；估算结果只用于界面提示，不缓存。输入仍是仓库内受控的最终
 //! 成品，不接受外部路径。
 
-use std::{fs, io::Write, path::Path};
+use std::{io::Write, path::Path};
 
 use image::codecs::jpeg::JpegEncoder;
 
@@ -25,7 +25,6 @@ pub(crate) fn estimate_output_size(
     let target = publication_repository::publication_target(root, request.branch_id.trim())
         .map_err(AuthenticityError::message)?;
     let path = Path::new(&target.artifact_path);
-    let source_bytes = fs::metadata(path)?.len();
     let source = image_resource::open(path)?;
     let flattened = flatten_to_rgb(&source, parse_background(&request.background_color)?);
     drop(source);
@@ -33,7 +32,6 @@ pub(crate) fn estimate_output_size(
     JpegEncoder::new_with_quality(&mut output, request.jpeg_quality).encode_image(&flattened)?;
     Ok(FileSizeEstimate {
         jpeg_bytes: output.bytes,
-        source_bytes,
     })
 }
 
@@ -88,9 +86,10 @@ mod tests {
         .unwrap();
 
         assert!(estimate.jpeg_bytes > 0);
+        // 估算响应只保留编码字节数；原图大小由预览响应的 `PreviewImage` 提供。
         assert_eq!(
-            estimate.source_bytes,
-            fs::metadata(&absolute).unwrap().len()
+            serde_json::to_value(&estimate).unwrap(),
+            serde_json::json!({ "jpegBytes": estimate.jpeg_bytes })
         );
         // 估算不产生输出文件，也不写入仓库 temp。
         assert!(fs::read_dir(root.join("temp")).unwrap().next().is_none());

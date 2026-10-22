@@ -7,6 +7,7 @@ use crate::{
         PublishResult,
     },
     backup, cleanup,
+    platform::path::display_path,
 };
 
 pub(crate) fn enter_publication(
@@ -100,9 +101,15 @@ pub(crate) fn cancel_publication(
     branch_id: &str,
 ) -> Result<cleanup::CleanupReport, CommandError> {
     context.run_write_scoped(Some(branch_id), |session| {
-        let cleanup_ids =
+        let removed =
             authenticity::remove_artifact(session.root(), branch_id).map_err(CommandError::from)?;
-        cleanup::run_cancellable(session.root(), &cleanup_ids, context.cancel())
+        for relative in &removed.retained_paths {
+            log::warn!(
+                "[cleanup] retained {}：内容已变化或文件不存在",
+                display_path(&session.root().join(relative))
+            );
+        }
+        cleanup::run_cancellable(session.root(), &removed.cleanup_ids, context.cancel())
             .map_err(CommandError::from)
     })
 }

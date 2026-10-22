@@ -14,7 +14,6 @@ export interface PreviewImage {
 
 export interface FileSizeEstimate {
   jpegBytes: number;
-  sourceBytes: number;
 }
 
 export interface CertificationConfig {
@@ -146,8 +145,6 @@ export interface WatermarkSizeWarning {
 
 export interface PublishResult {
   record: CertificationRecord;
-  width: number;
-  height: number;
   watermarkWarnings: WatermarkSizeWarning[];
   renditionCacheHit: boolean;
   renderMs: number;
@@ -163,7 +160,6 @@ export interface ValidationItem {
 export interface DecodeResult {
   watermarkPresent: boolean;
   watermarkId: string | null;
-  decodedRegion: NormalizedRegion | null;
   c2paPresent: boolean;
   c2paValidationState: string | null;
   c2paValidationStatus: ValidationItem[];

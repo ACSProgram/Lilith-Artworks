@@ -63,7 +63,7 @@ describe("PublicationView", () => {
   it("keeps cancellation reachable when the stored artifact preview is damaged", async () => {
     api.getPublication.mockResolvedValue(brokenPreviewPublication);
     api.previewArtifact.mockRejectedValue(new Error("成品文件已损坏"));
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.estimate.mockResolvedValue({ jpegBytes: 7 });
     api.cancelPublication.mockResolvedValue({ failures: [] });
     renderPublication();
 
@@ -89,7 +89,7 @@ describe("PublicationView", () => {
       config: { ...brokenPreviewPublication.config, certificatePath: "C:/certificate.pem" },
     });
     api.previewArtifact.mockResolvedValue(previewImage);
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 8 });
+    api.estimate.mockResolvedValue({ jpegBytes: 8 });
     api.previewPublication.mockReturnValue(pending.promise);
     renderPublication({ onError });
 
@@ -138,7 +138,7 @@ describe("PublicationView", () => {
     api.previewArtifact.mockResolvedValue(previewImage);
     api.previewRecord.mockResolvedValue(previewImage);
     api.deleteRecord.mockResolvedValue({ cleanedCount: 1, pendingCount: 0, failures: [] });
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.estimate.mockResolvedValue({ jpegBytes: 7 });
     renderPublication();
 
     fireEvent.click(await screen.findByRole("button", { name: /Certified artwork/ }));
@@ -201,7 +201,7 @@ describe("PublicationView", () => {
     };
     api.getPublication.mockResolvedValue(smallRegion);
     api.previewArtifact.mockResolvedValue(previewImage);
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 7 });
+    api.estimate.mockResolvedValue({ jpegBytes: 7 });
     renderPublication();
 
     // 1200x800 源图上的 0.1x0.1 选区只有 120x80 px，任一边小于 256：框选时就地提示。
@@ -214,7 +214,7 @@ describe("PublicationView", () => {
       config: { ...brokenPreviewPublication.config, certificatePath: "C:/certificate.pem" },
     });
     api.previewArtifact.mockResolvedValue(previewImage);
-    api.estimate.mockResolvedValue({ jpegBytes: 7, sourceBytes: 8 });
+    api.estimate.mockResolvedValue({ jpegBytes: 8 });
     api.previewPublication.mockResolvedValue(publicationPreview);
     renderPublication();
 

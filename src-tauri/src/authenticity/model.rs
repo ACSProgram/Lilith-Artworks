@@ -144,7 +144,6 @@ pub(crate) struct StageImportRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FileSizeEstimate {
     pub(crate) jpeg_bytes: u64,
-    pub(crate) source_bytes: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -228,8 +227,6 @@ pub(crate) struct WatermarkSizeWarning {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PublishResult {
     pub(crate) record: CertificationRecord,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
     pub(crate) watermark_warnings: Vec<WatermarkSizeWarning>,
     pub(crate) rendition_cache_hit: bool,
     pub(crate) render_ms: u64,
@@ -242,7 +239,6 @@ pub(crate) struct PublishResult {
 pub(crate) struct DecodeResult {
     pub(crate) watermark_present: bool,
     pub(crate) watermark_id: Option<String>,
-    pub(crate) decoded_region: Option<NormalizedRegion>,
     pub(crate) c2pa_present: bool,
     pub(crate) c2pa_validation_state: Option<String>,
     pub(crate) c2pa_validation_status: Vec<ValidationItem>,

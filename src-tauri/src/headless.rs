@@ -1536,7 +1536,8 @@ fn publish(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, Comman
 }
 
 /// 取消发布并回收仓库内副本。与 GUI 的 `cancel_branch_publication` 走同一批调用：
-/// `remove_artifact` 在事务内登记待清理项，提交后单遍 `cleanup::run`。首次导出的
+/// `remove_artifact` 先按记录中的 SHA-256 核对内容，只把未变的文件登记进待清理项，
+/// 提交后单遍 `cleanup::run`；被替换的文件留在仓库里交给垃圾扫描。首次导出的
 /// JPG 是用户产物，不在回收范围（与 GUI 语义一致）。
 fn cancel_publication(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {
     let branch_id = options.require("branch").map_err(CommandError::from)?;
