@@ -696,6 +696,26 @@ fn owner_lock_gate_error(error: GateError) -> OwnerLockError {
     }
 }
 
+/// 零等待取 owner lock：只尝试一次，绝不排队。
+///
+/// 后台任务与交互写的首轮尝试共用这条策略；`InProcessBusy` / `Busy` 如何映射
+/// （后台让位、交互写转排队）由调用方决定。`Try` 不等待，因此取消来源不影响结果。
+pub(crate) fn try_acquire(
+    root: &Path,
+    role: &str,
+    operation: &str,
+    priority: WritePriority,
+) -> Result<RepositoryOwnerLock, OwnerLockError> {
+    RepositoryOwnerLock::acquire_queued(
+        root,
+        role,
+        operation,
+        priority,
+        WaitPolicy::Try,
+        &CancelToken::standalone(),
+    )
+}
+
 /// 探测写锁是否被占用：`BEGIN IMMEDIATE` 成功即说明此刻没有写者，随后立即回滚，
 /// 不把只读命令变成写者之间的互斥来源。
 pub(crate) fn probe(root: &Path) -> Result<(), String> {

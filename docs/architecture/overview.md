@@ -6,7 +6,7 @@ Lilith Artworks 是本地优先的**平面美术个人项目**工作台，统一
 
 ## 层级
 
-代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。认证发布状态与成品绑定在 `authenticity/publication_repository.rs`，认证配置/记录查询在 `repository.rs`；历史破坏性删除通过 `history/deletion_repository.rs` 进入。
+代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。认证发布状态与成品绑定在 `authenticity/publication_repository.rs`，认证配置/记录查询在 `repository.rs`；历史破坏性删除通过 `history/deletion_repository.rs` 进入，节点校验状态在 `history/verification_repository.rs`，调度候选与分支状态在 `history/schedule_repository.rs`。
 
 ```text
 src/app/                 应用启动、窗口、全局设置与跨模块工作区编排

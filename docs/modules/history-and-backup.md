@@ -12,11 +12,11 @@
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
-- SQLite 历史图、分支和删除约束：`src-tauri/src/history/repository.rs`；不要为此加载 ChunkFile。
+- SQLite 历史图与分支：`src-tauri/src/history/repository.rs`（分支 CRUD、提交事务、链元数据、存储路径、缩略图与精简）、`deletion_repository.rs`（删除子树与分支）、`verification_repository.rs`（节点校验状态与批量写入）、`schedule_repository.rs`（调度候选、失败/跳过与通知）；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file/`。
 - `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。仅缩略图才需要的格式（`.sai2`、ZIP 容器、TGA 这类无魔数位图）在 `src-tauri/src/preview/` 内自行探测，不进 `format/container.rs`。
 - 节点缩略图抽取：`src-tauri/src/preview/`；只读传入的文件、按格式分派（提交时是工作文件，手动刷新时是 backup 物化到 `temp/` 的节点内容），失败只跳过预览，不改变提交或历史结果。
-- 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
+- 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`（主循环、执行与完成事件）、`scheduler/policy.rs`（静默期、间隔、到期选择与快速检查阈值）、`scheduler/idle.rs`（空闲完整性检查与门控）；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
 - 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
@@ -157,7 +157,7 @@ N = max(1, min(8 × 队列档 × 尺寸档, 7 天 / 有效检查间隔))
 
 自动备份成功或确认内容未变化时才推进 `last_check_ms`/`last_success_ms`，同时清零连续失败计数。自动任务失败会记录 `last_error` 并按分支间隔退避：首次失败 1 分钟后重试，随后分别等待原间隔的 1/4、1/2 和完整间隔（向上取整）；第 5 次连续失败时持久化关闭该分支自动备份并生成待确认通知。手动重新启用分支会清零失败状态和该通知；成功备份也会清零计数。系统时间读取失败进入调度器自身退避，不使用 `0` 时间戳继续计算。
 
-工作文件位于**网络位置**（UNC，`\\server\share\...`）或**设备命名空间**（`\\.\`、`\\?\`、`\Device\`）的分支不进入无人值守流程：调度器在候选筛选时跳过它，并在分支记录里写入明确原因（`mark_automatic_backup_skipped`，原因未变时不写库，也不计入连续失败、不设置重试时间、不自动关闭自动备份）；取得运行锁后的 `run_scheduled_backup` 再复查一次，命中即跳过；`quick_check_outcome` 作为最后一道兜底直接拒绝，不再对该路径取元数据。判定统一由 `storage::unattended_source_path_rejection` 给出，与「未选择工作文件的分支不参与自动备份」同一口径——这是路径资格判定，不是一次失败的备份，因此设置页的「已启用自动备份的工作文件数」也不把它们计入。手动提交与「打开所在文件夹」仍允许网络位置（NAS 是合法用法），但一律拒绝设备命名空间（`platform::path::ensure_not_device_path`）：设备路径指向的是设备对象而不是文件。打开既有仓库时的路径结构校验见 `docs/modules/library.md`。
+工作文件位于**网络位置**（UNC，`\\server\share\...`）或**设备命名空间**（`\\.\`、`\\?\`、`\Device\`）的分支不进入无人值守流程：调度器在候选筛选时跳过它，并在分支记录里写入明确原因（`history::record_branch_failure` 的 `BranchFailure::Ineligible`，原因未变时不写库，也不计入连续失败、不设置重试时间、不自动关闭自动备份）；取得运行锁后的 `run_scheduled_backup` 再复查一次，命中即跳过；`quick_check_outcome` 作为最后一道兜底直接拒绝，不再对该路径取元数据。判定统一由 `storage::unattended_source_path_rejection` 给出，与「未选择工作文件的分支不参与自动备份」同一口径——这是路径资格判定，不是一次失败的备份，因此设置页的「已启用自动备份的工作文件数」也不把它们计入。手动提交与「打开所在文件夹」仍允许网络位置（NAS 是合法用法），但一律拒绝设备命名空间（`platform::path::ensure_not_device_path`）：设备路径指向的是设备对象而不是文件。打开既有仓库时的路径结构校验见 `docs/modules/library.md`。
 
 History 公开只读的 `next_backup_disable_notice_target` 查询，按分支更新时间和 ID 稳定返回一个仍未进回收站的待确认 `{ artworkId, branchId }`。应用层命令使用它编排作品库告警到历史分支设置的导航；查询本身不确认通知，也不改变失败计数或重新启用状态。
 
@@ -184,7 +184,7 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 **三态与标记**：`verify_error` 一列承载三态，靠文案前缀分类（`history::classify_verify_failure`），不另建列。链上的受控文件打不开且 `ErrorKind::NotFound` 时写 `文件缺失：`（`VERIFY_MISSING_MARKER`）→ 文件丢失；其余读不出来、摘要不符的情形没有标记 → 文件损坏；目标被别人挡住时写 `无法检查：`（`VERIFY_UNVERIFIABLE_MARKER`）→ 没有结论，文案里点名挡住它的节点及其原因（不再叠加归类标记，避免一句话里出现两个前缀），用户据此知道先修哪一个。判定顺序必须是「无法检查」优先：被挡住的文案会引用原始原因，可能连 `os error 2` 一起带上，否则会被误判成「文件丢失」。旧记录（没有标记）按 `os error 2` 兜底，重查一次后即换用新文案。通过则写 `verified_ms` 并清空错误。
 
-**全库扫描按链走**：`scrub_history` 不再逐节点各自回到 snapshot，而是一次读出全部节点的链元数据（`history::verification_inventory`），从每个持有 snapshot 的节点出发沿父链往上走一趟，走过的节点顺带拿到结论。一个节点的内容本来就是由「更新版本的快照 + 一路反向增量」还原出来的，所以这趟遍历与逐节点校验等价，但共享前缀只解析一次：分叉后的共同祖先在一条分支上走过之后，另一条分支到那里就停下，不必每个节点都从 snapshot 重新回溯。走到已有确定结论的节点、或走到自带 snapshot 的祖先（它有独立的物化起点）就停。单步失败时只有那一步的父节点被标成丢失/损坏，它更早的祖先先记「无法检查」；若某个祖先还能经另一条分支到达，那条链会把它校验通过并覆盖掉灰色。块表与载荷分开判断：块表/摘要对不上才终止回溯，单块载荷损坏只影响该节点自己——祖先可能根本不引用那个坏块。没有可达 snapshot 的孤立节点退回单节点内核，归因仍然准确。手动重查复用同一个遍历内核（`walk_verification_inventory`），只是元数据换成分支范围的 `history::branch_verification_inventory`：分支内每个 head、检查点与分支起点都是独立起点，走到下一个 snapshot 或根节点为止，因此一条长链也只需把共享前缀解析一次。
+**全库扫描按链走**：`scrub_history` 不再逐节点各自回到 snapshot，而是一次读出全部节点的链元数据（`history::verification_inventory`），从每个持有 snapshot 的节点出发沿父链往上走一趟，走过的节点顺带拿到结论。结论经 `history::VerificationWriter` 每 128 条批量提交一次；扫描取消时未提交的一批丢弃，已提交批次保留。一个节点的内容本来就是由「更新版本的快照 + 一路反向增量」还原出来的，所以这趟遍历与逐节点校验等价，但共享前缀只解析一次：分叉后的共同祖先在一条分支上走过之后，另一条分支到那里就停下，不必每个节点都从 snapshot 重新回溯。走到已有确定结论的节点、或走到自带 snapshot 的祖先（它有独立的物化起点）就停。单步失败时只有那一步的父节点被标成丢失/损坏，它更早的祖先先记「无法检查」；若某个祖先还能经另一条分支到达，那条链会把它校验通过并覆盖掉灰色。块表与载荷分开判断：块表/摘要对不上才终止回溯，单块载荷损坏只影响该节点自己——祖先可能根本不引用那个坏块。没有可达 snapshot 的孤立节点退回单节点内核，归因仍然准确。手动重查复用同一个遍历内核（`walk_verification_inventory`），只是元数据换成分支范围的 `history::branch_verification_inventory`：分支内每个 head、检查点与分支起点都是独立起点，走到下一个 snapshot 或根节点为止，因此一条长链也只需把共享前缀解析一次。
 
 **失效规则**：新提交的节点天然未验证；精简、检查点建立/取消与 snapshot 替换会改写链文件，在同一事务内按作品粗粒度清空 `verified_ms` 与 `verify_error`，受影响节点重新进入待查集合。粗清的代价只是部分节点被重查，正确性无损。
 

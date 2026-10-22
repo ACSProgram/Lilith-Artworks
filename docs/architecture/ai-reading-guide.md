@@ -45,7 +45,9 @@
   变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
   DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。
 - `authenticity` 通过公开的 history/backup 能力建立检查点，不导入 library 内部。
-- 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经 `repository.rs`。
+- 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经
+  `repository.rs`，节点校验状态经 `verification_repository.rs`，调度候选与分支状态经
+  `schedule_repository.rs`。
 - 发布状态与 `final_artifacts` 绑定经 `src-tauri/src/authenticity/publication_repository.rs` 进入；
   认证配置与记录查询经 `repository.rs`。
 

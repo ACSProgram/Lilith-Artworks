@@ -48,7 +48,15 @@ pub(crate) fn commit(
                     log::warn!("failed to reset quick hit count for branch {branch_id}: {error}");
                 }
             }
-            Err(error) => history::mark_error(session.root(), branch_id, &error.to_string()),
+            Err(error) => {
+                let _ = history::record_branch_failure(
+                    session.root(),
+                    branch_id,
+                    history::BranchFailure::Manual {
+                        error: &error.to_string(),
+                    },
+                );
+            }
         }
         result.map_err(backup_error)
     });
@@ -124,7 +132,8 @@ pub(crate) fn delete_subtree(
     );
     context.run_foreground(None, |session| {
         let target = history::load_node(session.root(), history_id).map_err(CommandError::from)?;
-        history::validate_subtree_deletion(session.root(), history_id, branch_id)
+        // 预检必须在固化父节点检查点之前完成：被拒绝的删除请求不应留下检查点。
+        let preflight = history::preflight_subtree_deletion(session.root(), history_id, branch_id)
             .map_err(CommandError::from)?;
         if let Some(parent_id) = target.parent_id.as_deref() {
             context.report_progress("正在固化保留历史", 0, 1);
@@ -138,8 +147,9 @@ pub(crate) fn delete_subtree(
             .map_err(CommandError::from)?;
             context.report_progress("正在删除历史节点", 1, 1);
         }
-        let deletion = history::delete_subtree(session.root(), history_id, branch_id)
-            .map_err(CommandError::from)?;
+        let deletion =
+            history::delete_subtree_prechecked(session.root(), history_id, branch_id, &preflight)
+                .map_err(CommandError::from)?;
         // 已无引用的历史文件已在删除事务内入队，提交成功后单遍重放；
         // 失败只留队列可重试，不改变删除节点的成功语义。
         cleanup::replay(session.root(), &deletion.cleanup_ids);

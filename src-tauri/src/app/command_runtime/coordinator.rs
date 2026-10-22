@@ -522,6 +522,16 @@ impl OperationCoordinator {
         wait: WaitPolicy,
         cancel: &CancelToken,
     ) -> Result<RepositoryOwnerLock, OwnerLockError> {
+        // `Try` 的语义在 `repository_lock` 里只有一份实现；排队路径才需要
+        // 截止时刻与取消来源。
+        if matches!(wait, WaitPolicy::Try) {
+            return repository_lock::try_acquire(
+                root,
+                self.inner.app_state.process_role(),
+                operation,
+                priority,
+            );
+        }
         RepositoryOwnerLock::acquire_queued(
             root,
             self.inner.app_state.process_role(),

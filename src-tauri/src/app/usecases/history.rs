@@ -3,7 +3,7 @@ use std::path::Path;
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 
 use crate::{
-    app::command_runtime::{CommandContext, CommandError},
+    app::command_runtime::{CommandContext, CommandError, RepositorySession},
     backup, cleanup, history, preview, storage,
 };
 
@@ -108,28 +108,50 @@ pub(crate) fn rename_node(
     })
 }
 
+/// 新建分支的共用流程：先把起点固化成检查点，再在单个事务里插入分支并标记
+/// 起点。GUI 与无头入口只差外层是否再读整棵树。
+fn create_branch_at_checkpoint(
+    context: &CommandContext,
+    session: &RepositorySession<'_>,
+    artwork_id: &str,
+    from_history_id: &str,
+    title: &str,
+    source_path: &Path,
+    quick_default: bool,
+) -> Result<String, CommandError> {
+    backup::ensure_checkpoint(
+        session.root(),
+        from_history_id,
+        context.cancel(),
+        context.chunk_write_options(),
+    )
+    .map_err(CommandError::from)?;
+    history::create_branch(
+        session.root(),
+        artwork_id,
+        from_history_id,
+        title,
+        source_path,
+        quick_default,
+    )
+    .map_err(CommandError::from)
+}
+
 pub(crate) fn fork_branch(
     context: &CommandContext,
     request: history::ForkBranchRequest,
 ) -> Result<history::ArtworkHistory, CommandError> {
     let quick_default = context.app_state().automatic_backup_quick_default();
     let result = context.run_write(|session| {
-        backup::ensure_checkpoint(
-            session.root(),
-            &request.from_history_id,
-            context.cancel(),
-            context.chunk_write_options(),
-        )
-        .map_err(CommandError::from)?;
-        history::create_branch(
-            session.root(),
+        create_branch_at_checkpoint(
+            context,
+            session,
             &request.artwork_id,
             &request.from_history_id,
             &request.title,
             Path::new(&request.source_path),
             quick_default,
-        )
-        .map_err(CommandError::from)?;
+        )?;
         history::list(session.root(), &request.artwork_id).map_err(CommandError::from)
     });
     context.backup_state().wake_scheduler();
@@ -147,22 +169,15 @@ pub(crate) fn create_branch_created(
 ) -> Result<String, CommandError> {
     let quick_default = context.app_state().automatic_backup_quick_default();
     context.run_write(|session| {
-        backup::ensure_checkpoint(
-            session.root(),
-            from_history_id,
-            context.cancel(),
-            context.chunk_write_options(),
-        )
-        .map_err(CommandError::from)?;
-        history::create_branch(
-            session.root(),
+        create_branch_at_checkpoint(
+            context,
+            session,
             artwork_id,
             from_history_id,
             title,
             source_path,
             quick_default,
         )
-        .map_err(CommandError::from)
     })
 }
 

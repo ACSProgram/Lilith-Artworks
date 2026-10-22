@@ -495,10 +495,19 @@ pub(crate) fn scrub_history(
     let total = inventory.len() as u64;
     let mut failures = 0_u64;
     let mut first_error: Option<String> = None;
+    let mut writer = history::VerificationWriter::open(root)?;
 
     walk_verification_inventory(root, inventory, cancel, progress, |history_id, outcome| {
-        record_scrub_outcome(root, history_id, outcome, &mut failures, &mut first_error)
+        record_scrub_outcome(
+            &mut writer,
+            history_id,
+            outcome,
+            &mut failures,
+            &mut first_error,
+        )
     })?;
+    // 取消会让上面的遍历提前返回，此时写入器随作用域丢弃，未提交批次被丢弃。
+    writer.finish()?;
 
     match first_error {
         None => Ok(total),
@@ -525,9 +534,10 @@ pub(crate) fn verify_branch_history(
     let total = inventory.len() as u64;
     let mut failed = 0_u64;
     let mut blocked = 0_u64;
+    let mut writer = history::VerificationWriter::open(root)?;
 
     walk_verification_inventory(root, inventory, cancel, progress, |history_id, outcome| {
-        let Some(message) = apply_outcome(root, history_id, outcome)? else {
+        let Some(message) = apply_outcome(&mut writer, history_id, outcome)? else {
             return Ok(());
         };
         match outcome {
@@ -543,6 +553,7 @@ pub(crate) fn verify_branch_history(
         }
         Ok(())
     })?;
+    writer.finish()?;
 
     log::info!(
         "branch history reverified: branch_id={branch_id}, nodes={total}, failed={failed}, blocked={blocked}"
@@ -626,13 +637,13 @@ fn walk_verification_inventory(
 }
 
 fn record_scrub_outcome(
-    root: &Path,
+    writer: &mut history::VerificationWriter,
     history_id: &str,
     outcome: &ScrubOutcome,
     failures: &mut u64,
     first_error: &mut Option<String>,
 ) -> Result<(), String> {
-    let Some(message) = apply_outcome(root, history_id, outcome)? else {
+    let Some(message) = apply_outcome(writer, history_id, outcome)? else {
         return Ok(());
     };
     match outcome {
@@ -651,29 +662,28 @@ fn record_scrub_outcome(
 
 /// 写入一个节点的校验结论；确认有问题时返回可对外的文案，通过时返回 `None`。
 fn apply_outcome(
-    root: &Path,
+    writer: &mut history::VerificationWriter,
     history_id: &str,
     outcome: &ScrubOutcome,
 ) -> Result<Option<String>, String> {
     match outcome {
         ScrubOutcome::Verified => {
-            let verified_ms = storage::now_ms()?;
-            history::mark_node_verified(root, history_id, verified_ms)?;
+            writer.record_verified(history_id, storage::now_ms()?)?;
             Ok(None)
         }
         ScrubOutcome::Failed(failure) | ScrubOutcome::Blocked(failure) => {
             let message = failure.message_for(history_id);
-            history::mark_node_verify_error(root, history_id, &message)?;
+            writer.record_error(history_id, &message)?;
             Ok(Some(message))
         }
     }
 }
 
-/// 沿链还原出来的一份布局。
+/// 链上一步的产物：块表，加上「块表已经对上、但载荷读不出来」时的失败。
 ///
-/// `payload` 是「块表已经对上、但载荷读不出来」时给出的失败：链本身还能继续往上
-/// 回溯（父节点未必引用那个坏块），只是这个节点的内容确实读不回来。
-struct WalkedLayout {
+/// 载荷失败不阻止继续回溯：父节点未必引用那个坏块，只是这一步节点的内容确实
+/// 读不回来。单目标解析不读载荷（导出阶段会逐块验哈希），全库校验才会填它。
+struct ChainStep {
     layout: ChunkFile,
     payload: Option<ChainFailure>,
 }
@@ -697,8 +707,14 @@ fn walk_chain(
         .snapshot_path
         .as_deref()
         .ok_or_else(|| format!("历史节点 {} 的校验起点缺少 snapshot", start.id))?;
-    let mut walked = match open_snapshot_content(root, start, snapshot_relative, &mut store, &task)
-    {
+    let mut walked = match open_snapshot_step(
+        root,
+        &start.id,
+        &start.sha256,
+        snapshot_relative,
+        &mut store,
+        Some(&task),
+    ) {
         Ok(walked) => walked,
         Err(failure) => {
             let failure = VerifyFailure::from(failure);
@@ -725,14 +741,16 @@ fn walk_chain(
         if parent.has_snapshot() {
             break;
         }
-        walked = match resolve_parent_content(
+        walked = match resolve_parent_step(
             root,
-            current,
-            parent,
+            &parent.id,
+            &parent.sha256,
+            current.delta_path.as_deref(),
+            walked.layout,
             &mut store,
             &temp_directory,
-            walked.layout,
             &task,
+            true,
         ) {
             Ok(walked) => walked,
             Err(failure) => {
@@ -750,7 +768,7 @@ fn walk_chain(
 }
 
 /// 本次还原出来的节点自身结论：载荷读不出来就是它自己坏了，与链无关。
-fn outcome_of(walked: &WalkedLayout) -> ScrubOutcome {
+fn outcome_of(walked: &ChainStep) -> ScrubOutcome {
     match &walked.payload {
         Some(failure) => ScrubOutcome::Failed((*failure).clone().into()),
         None => ScrubOutcome::Verified,
@@ -783,23 +801,25 @@ fn blocked_ancestors(
     blocked
 }
 
-/// 校验一个节点自己持有的 snapshot，并把它当作后续回溯的基础布局返回。
+/// 打开并校验一个节点自己持有的 snapshot，把它当作后续回溯的基础布局。
 ///
 /// 块表与摘要决定「这份布局还能不能当基础用」：对不上就没有任何后续可走。载荷的
 /// 哈希只有整份读完才知道，而它只影响这个节点本身——单块损坏不必阻止回溯到祖先，
-/// 祖先可能根本不引用那个坏块。
-fn open_snapshot_content(
+/// 祖先可能根本不引用那个坏块。`with_payload` 为 `false` 时不做整份读取，留给
+/// 导出阶段逐块验哈希（单目标解析走这条路）。
+fn open_snapshot_step(
     root: &Path,
-    node: &history::VerifyChainNode,
+    node_id: &str,
+    sha256: &str,
     snapshot_relative: &str,
     store: &mut ChunkStore<'static>,
-    task: &ChunkTask<'_>,
-) -> Result<WalkedLayout, ChainFailure> {
+    task: Option<&ChunkTask<'_>>,
+) -> Result<ChainStep, ChainFailure> {
     let path = storage::resolve_path(root, snapshot_relative).map_err(ChainFailure::unknown)?;
-    let file = open_chain_file(&path, &node.id, "备份文件（起点 snapshot）")?;
+    let file = open_chain_file(&path, node_id, "备份文件（起点 snapshot）")?;
     store.append_file(file).map_err(|error| {
         ChainFailure::confirmed(
-            &node.id,
+            node_id,
             history::NodeVerifyIssue::Damaged,
             format!("的备份文件（起点 snapshot）无法读取：{error}"),
         )
@@ -808,70 +828,69 @@ fn open_snapshot_content(
         let mut reader = store.reader();
         ChunkFile::open(&mut reader).map_err(|error| {
             ChainFailure::confirmed(
-                &node.id,
+                node_id,
                 history::NodeVerifyIssue::Damaged,
                 format!("的备份文件（起点 snapshot）无法读取：{error}"),
             )
         })?
     };
-    if !layout
-        .file_digest()
-        .to_hex()
-        .eq_ignore_ascii_case(&node.sha256)
-    {
+    if !layout.file_digest().to_hex().eq_ignore_ascii_case(sha256) {
         return Err(ChainFailure::confirmed(
-            &node.id,
+            node_id,
             history::NodeVerifyIssue::Damaged,
             "的备份文件（起点 snapshot）与历史数据库记录不符",
         ));
     }
-    let payload = read_payload(store, &layout, task).err().map(|error| {
-        ChainFailure::confirmed(
-            &node.id,
-            history::NodeVerifyIssue::Damaged,
-            format!("的备份文件读取失败：{error}"),
-        )
+    let payload = task.and_then(|task| {
+        read_payload(store, &layout, task).err().map(|error| {
+            ChainFailure::confirmed(
+                node_id,
+                history::NodeVerifyIssue::Damaged,
+                format!("的备份文件读取失败：{error}"),
+            )
+        })
     });
-    Ok(WalkedLayout { layout, payload })
+    Ok(ChainStep { layout, payload })
 }
 
-/// 用 `current` 的反向增量还原出父节点 `parent` 的内容并校验。
+/// 用子边反向增量还原出父节点的内容并校验整文件摘要。
 ///
-/// 这条增量是「`parent` 的内容」的唯一表示，因此打开、解压、回溯与摘要比对任何
-/// 一步失败，坏掉都是 `parent`，与 `current` 无关。
-fn resolve_parent_content(
+/// 这条增量是「父节点的内容」的唯一表示，因此打开、解压、回溯与摘要比对任何一步
+/// 失败，坏掉都是父节点，与子节点无关。`with_payload` 控制是否顺带读完全部载荷；
+/// 全库校验需要它来发现单块损坏，单目标解析由导出阶段负责。
+fn resolve_parent_step(
     root: &Path,
-    current: &history::VerifyChainNode,
-    parent: &history::VerifyChainNode,
+    parent_id: &str,
+    parent_sha256: &str,
+    delta_relative: Option<&str>,
+    layout: ChunkFile,
     store: &mut ChunkStore<'static>,
     temp_directory: &Path,
-    layout: ChunkFile,
     task: &ChunkTask<'_>,
-) -> Result<WalkedLayout, ChainFailure> {
-    let delta_relative = current
-        .delta_path
-        .as_deref()
+    with_payload: bool,
+) -> Result<ChainStep, ChainFailure> {
+    let delta_relative = delta_relative
         .filter(|path| !path.trim().is_empty())
         .ok_or_else(|| {
             ChainFailure::confirmed(
-                &parent.id,
+                parent_id,
                 history::NodeVerifyIssue::Damaged,
                 "缺少指向本节点的反向增量",
             )
         })?;
     let path = storage::resolve_path(root, delta_relative).map_err(ChainFailure::unknown)?;
-    let mut delta_file = open_chain_file(&path, &parent.id, "备份文件（恢复链 delta）")?;
+    let mut delta_file = open_chain_file(&path, parent_id, "备份文件（恢复链 delta）")?;
     let delta =
         ChunkFileDelta::open_in(&mut delta_file, temp_directory, task).map_err(|error| {
             ChainFailure::confirmed(
-                &parent.id,
+                parent_id,
                 history::NodeVerifyIssue::Damaged,
                 format!("的备份文件（恢复链 delta）无法读取：{error}"),
             )
         })?;
     let resolved = delta.resolve(&layout, store, task).map_err(|error| {
         ChainFailure::confirmed(
-            &parent.id,
+            parent_id,
             history::NodeVerifyIssue::Damaged,
             format!("的备份文件（恢复链 delta）无法回溯：{error}"),
         )
@@ -879,22 +898,26 @@ fn resolve_parent_content(
     if !resolved
         .file_digest()
         .to_hex()
-        .eq_ignore_ascii_case(&parent.sha256)
+        .eq_ignore_ascii_case(parent_sha256)
     {
         return Err(ChainFailure::confirmed(
-            &parent.id,
+            parent_id,
             history::NodeVerifyIssue::Damaged,
             "的内容与历史数据库记录不符",
         ));
     }
-    let payload = read_payload(store, &resolved, task).err().map(|error| {
-        ChainFailure::confirmed(
-            &parent.id,
-            history::NodeVerifyIssue::Damaged,
-            format!("的备份文件读取失败：{error}"),
-        )
-    });
-    Ok(WalkedLayout {
+    let payload = with_payload
+        .then(|| {
+            read_payload(store, &resolved, task).err().map(|error| {
+                ChainFailure::confirmed(
+                    parent_id,
+                    history::NodeVerifyIssue::Damaged,
+                    format!("的备份文件读取失败：{error}"),
+                )
+            })
+        })
+        .flatten();
+    Ok(ChainStep {
         layout: resolved,
         payload,
     })
@@ -1002,52 +1025,22 @@ fn resolve_chain(
     let first = chain
         .first()
         .ok_or_else(|| ChainFailure::unknown("恢复链为空"))?;
-    let snapshot_path = storage::resolve_path(
-        root,
-        first.snapshot_path.as_deref().ok_or_else(|| {
-            ChainFailure::confirmed(
-                &first.id,
-                history::NodeVerifyIssue::Damaged,
-                "的恢复链起点缺少 snapshot 记录",
-            )
-        })?,
-    )
-    .map_err(ChainFailure::unknown)?;
-    let mut store = ChunkStore::new();
-    store
-        .append_file(open_chain_file(
-            &snapshot_path,
-            &first.id,
-            "备份文件（起点 snapshot）",
-        )?)
-        .map_err(|error| {
-            ChainFailure::confirmed(
-                &first.id,
-                history::NodeVerifyIssue::Damaged,
-                format!("的备份文件（起点 snapshot）无法读取：{error}"),
-            )
-        })?;
-    let mut layout = {
-        let mut reader = store.reader();
-        ChunkFile::open(&mut reader).map_err(|error| {
-            ChainFailure::confirmed(
-                &first.id,
-                history::NodeVerifyIssue::Damaged,
-                format!("的备份文件（起点 snapshot）无法读取：{error}"),
-            )
-        })?
-    };
-    if !layout
-        .file_digest()
-        .to_hex()
-        .eq_ignore_ascii_case(&first.sha256)
-    {
-        return Err(ChainFailure::confirmed(
+    let snapshot_relative = first.snapshot_path.as_deref().ok_or_else(|| {
+        ChainFailure::confirmed(
             &first.id,
             history::NodeVerifyIssue::Damaged,
-            "的备份文件（起点 snapshot）与历史数据库记录不符",
-        ));
-    }
+            "的恢复链起点缺少 snapshot 记录",
+        )
+    })?;
+    let mut store = ChunkStore::new();
+    let mut step = open_snapshot_step(
+        root,
+        &first.id,
+        &first.sha256,
+        snapshot_relative,
+        &mut store,
+        None,
+    )?;
 
     let total = chain.len() as u64;
     let temp_directory = root.join("temp");
@@ -1057,49 +1050,21 @@ fn resolve_chain(
         ensure_not_cancelled(cancel).map_err(ChainFailure::unknown)?;
         // 这一步要还原出来的节点：这条反向增量就是它的唯一表示。
         let expected = &chain[index + 1];
-        let delta_path = node
-            .delta_path
-            .as_deref()
-            .filter(|path| !path.trim().is_empty())
-            .ok_or_else(|| {
-                ChainFailure::confirmed(
-                    &expected.id,
-                    history::NodeVerifyIssue::Damaged,
-                    "缺少指向本节点的反向增量",
-                )
-            })?;
-        let delta_path = storage::resolve_path(root, delta_path).map_err(ChainFailure::unknown)?;
-        let mut delta_file =
-            open_chain_file(&delta_path, &expected.id, "备份文件（恢复链 delta）")?;
-        let delta =
-            ChunkFileDelta::open_in(&mut delta_file, &temp_directory, &task).map_err(|error| {
-                ChainFailure::confirmed(
-                    &expected.id,
-                    history::NodeVerifyIssue::Damaged,
-                    format!("的备份文件（恢复链 delta）无法读取：{error}"),
-                )
-            })?;
-        layout = delta.resolve(&layout, &mut store, &task).map_err(|error| {
-            ChainFailure::confirmed(
-                &expected.id,
-                history::NodeVerifyIssue::Damaged,
-                format!("的备份文件（恢复链 delta）无法回溯：{error}"),
-            )
-        })?;
-        if !layout
-            .file_digest()
-            .to_hex()
-            .eq_ignore_ascii_case(&expected.sha256)
-        {
-            return Err(ChainFailure::confirmed(
-                &expected.id,
-                history::NodeVerifyIssue::Damaged,
-                "的内容与历史数据库记录不符",
-            ));
-        }
+        step = resolve_parent_step(
+            root,
+            &expected.id,
+            &expected.sha256,
+            node.delta_path.as_deref(),
+            step.layout,
+            &mut store,
+            &temp_directory,
+            &task,
+            false,
+        )?;
         steps += 1;
         progress(step_label, index as u64 + 1, total);
     }
+    let layout = step.layout;
     Ok(ResolvedChain {
         layout,
         store,

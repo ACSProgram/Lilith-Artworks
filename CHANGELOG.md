@@ -21,6 +21,18 @@ entries for the reader; they are not a template every entry has to fill.
   background runtime entry points, the obsolete `default_panel` setting and
   stale `allow(dead_code)` suppressions. Settings files that still contain
   `defaultPanel` keep loading and simply ignore the field.
+- Split the history repository into graph, deletion, verification and
+  scheduling modules, and the backup scheduler into policy, idle-verification
+  and main-loop modules. Existing `history::*` read and graph paths are
+  unchanged; branch-status writes collapse into one `record_branch_failure`
+  entry with an explicit variant per meaning, and the subtree preflight
+  replaces the duplicate validation pass. `create_branch` now writes the branch
+  row and its root checkpoint in one transaction, and subtree deletion
+  validates once before the parent checkpoint is created.
+- Full-repository scrub, branch reverify and idle verification batches now
+  commit node results through one batched writer (128 rows per commit) instead
+  of opening a database connection per node. A cancelled scan keeps committed
+  batches and discards the unfinished one.
 
 ### Fixed
 

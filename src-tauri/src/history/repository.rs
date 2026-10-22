@@ -1,5 +1,10 @@
+//! 历史图的主仓储：分支 CRUD、提交事务、链元数据、存储路径、缩略图与精简。
+//!
+//! 这里负责图结构与 SQLite 事务，不读取 ChunkFile；破坏性删除见
+//! `deletion_repository`，校验状态见 `verification_repository`，调度状态见
+//! `schedule_repository`。
+
 use std::{
-    collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
 };
@@ -8,11 +13,12 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::{cleanup, storage};
 
+use super::verification_repository::{
+    clear_artwork_verification, derive_branch_verification, node_verification_states,
+};
 use super::{
-    classify_verify_failure, ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget,
-    BranchDeletion, BranchRecord, CheckMode, CompactionTarget, HistoryCommit, HistoryDeletion,
-    HistoryNode, HistoryRecord, NodeVerifyIssue, ScheduledBranch, VerifyChainNode,
-    VerifyNodeTarget,
+    classify_verify_failure, ArtworkBranch, ArtworkHistory, BranchRecord, CheckMode,
+    CompactionTarget, HistoryCommit, HistoryNode, HistoryRecord, NodeVerifyIssue,
 };
 
 pub(crate) fn list(root: &Path, artwork_id: &str) -> Result<ArtworkHistory, String> {
@@ -145,8 +151,11 @@ pub(crate) fn create_branch(
 ) -> Result<String, String> {
     storage::validate_title(title, "分支标题")?;
     let (source_display, source_key) = storage::normalize_source_path(root, source_path)?;
-    let connection = storage::open(root)?;
-    let origin_matches: bool = connection
+    let mut connection = storage::open(root)?;
+    // 分支行与起点 checkpoint 标记必须同进同退：只插入分支而没固化起点，会让
+    // 新分支依赖一个可能在后续提交中释放 snapshot 的父节点。
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let origin_matches: bool = transaction
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM history_nodes WHERE id = ?1 AND artwork_id = ?2)",
             params![from_history_id, artwork_id],
@@ -158,7 +167,7 @@ pub(crate) fn create_branch(
     }
     let id = storage::new_id();
     let now = storage::now_ms()?;
-    connection
+    transaction
         .execute(
             "INSERT INTO branches
              (id, artwork_id, title, source_path, source_path_key, head_history_id,
@@ -185,12 +194,13 @@ pub(crate) fn create_branch(
                 storage::database_error(error)
             }
         })?;
-    connection
+    transaction
         .execute(
             "UPDATE history_nodes SET is_checkpoint = 1 WHERE id = ?1",
             [from_history_id],
         )
         .map_err(storage::database_error)?;
+    transaction.commit().map_err(storage::database_error)?;
     Ok(id)
 }
 
@@ -436,77 +446,6 @@ pub(crate) fn store_thumbnail(
         return Err(format!("找不到历史节点 {history_id}"));
     }
     Ok(())
-}
-
-/// 全库扫描一次读出所有节点的链元数据，之后沿链走完整个仓库不再查库。
-///
-/// `delta_path` 取自节点的入边（`history_edges.child_history_id = id`），与
-/// `materialization_chain` 的口径一致：它是「本节点的内容还原出父节点」的反向
-/// 增量。空串按「没有增量」处理（检查点父节点名下的合法记账），兼容列只在没有
-/// 边记录时兜底。
-pub(crate) fn verification_inventory(root: &Path) -> Result<Vec<VerifyChainNode>, String> {
-    let connection = storage::open(root)?;
-    collect_verify_nodes(
-        &connection,
-        "SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
-                COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
-                node.created_ms
-         FROM history_nodes node
-         LEFT JOIN history_edges edge ON edge.child_history_id = node.id
-         ORDER BY node.created_ms, node.id",
-        &[],
-    )
-}
-
-/// 单条分支祖先链的节点元数据，字段口径与 [`verification_inventory`] 一致，
-/// 只是范围收在该分支 head 到根节点之间。手动重查按这条链走，不读取其它分支。
-pub(crate) fn branch_verification_inventory(
-    root: &Path,
-    branch_id: &str,
-) -> Result<Vec<VerifyChainNode>, String> {
-    let connection = storage::open(root)?;
-    collect_verify_nodes(
-        &connection,
-        "WITH RECURSIVE ancestors(id) AS (
-             SELECT head_history_id FROM branches
-             WHERE id = ?1 AND head_history_id IS NOT NULL
-             UNION ALL
-             SELECT node.parent_id
-             FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
-             WHERE node.parent_id IS NOT NULL
-         )
-         SELECT node.id, node.parent_id, node.sha256, node.snapshot_path,
-                COALESCE(NULLIF(TRIM(edge.delta_path), ''), NULLIF(TRIM(node.delta_path), '')),
-                node.created_ms
-         FROM history_nodes node
-         JOIN ancestors ON ancestors.id = node.id
-         LEFT JOIN history_edges edge ON edge.child_history_id = node.id
-         ORDER BY node.created_ms, node.id",
-        &[&branch_id],
-    )
-}
-
-fn collect_verify_nodes(
-    connection: &rusqlite::Connection,
-    sql: &str,
-    params: &[&dyn rusqlite::ToSql],
-) -> Result<Vec<VerifyChainNode>, String> {
-    let mut statement = connection.prepare(sql).map_err(storage::database_error)?;
-    let nodes = statement
-        .query_map(params, |row| {
-            Ok(VerifyChainNode {
-                id: row.get(0)?,
-                parent_id: row.get(1)?,
-                sha256: row.get(2)?,
-                snapshot_path: row.get(3)?,
-                delta_path: row.get(4)?,
-                created_ms: row.get(5)?,
-            })
-        })
-        .map_err(storage::database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(storage::database_error)?;
-    Ok(nodes)
 }
 
 /// 读取单个历史节点。
@@ -812,89 +751,6 @@ fn refresh_storage_metadata(
     Ok(())
 }
 
-pub(crate) fn mark_unchanged(root: &Path, branch_id: &str, checked_ms: i64) -> Result<(), String> {
-    storage::open(root)?.execute(
-        "UPDATE branches SET last_check_ms = ?2, last_success_ms = ?2, last_error = NULL,
-            consecutive_backup_failures = 0, backup_retry_at_ms = NULL, updated_ms = ?2 WHERE id = ?1",
-        params![branch_id, checked_ms]
-    ).map_err(storage::database_error)?;
-    Ok(())
-}
-
-/// 记录一次成功自动检查的耗时与方式。只由调度器在成功路径调用；失败、取消与
-/// 让位不写，避免把半途而废的检查当成代价依据。
-pub(crate) fn record_check_result(
-    root: &Path,
-    branch_id: &str,
-    elapsed_ms: i64,
-    mode: CheckMode,
-) -> Result<(), String> {
-    // 只有快速命中代表「这次又是靠指纹放过的」，计数递增；任何一次全量
-    // （内容包括变化、快速检查退回全量或主动强制确认）都完整读过文件，
-    // 盲区归零。
-    let quick = i64::from(mode == CheckMode::Quick);
-    storage::open(root)?
-        .execute(
-            "UPDATE branches SET
-                last_check_elapsed_ms = ?2,
-                last_check_mode = ?3,
-                quick_hit_count = CASE WHEN ?4 <> 0 THEN quick_hit_count + 1 ELSE 0 END
-             WHERE id = ?1",
-            params![branch_id, elapsed_ms.max(0), mode.as_str(), quick],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
-/// 完整确认过工作文件后清零连续快速命中计数。任何提交（含手动提交）无论是否
-/// 产生新节点都已经读过整份文件，因此与自动全量检查一样清掉盲区。
-pub(crate) fn reset_quick_hit_count(root: &Path, branch_id: &str) -> Result<(), String> {
-    storage::open(root)?
-        .execute(
-            "UPDATE branches SET quick_hit_count = 0 WHERE id = ?1 AND quick_hit_count <> 0",
-            [branch_id],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
-/// 读取上次全量检查成功后记录的工作文件元数据。
-/// `last_source_size` 为 NULL 表示还没有可信任的基线，快速检查必须退回全量。
-pub(crate) fn load_source_metadata(
-    root: &Path,
-    branch_id: &str,
-) -> Result<Option<(i64, Option<i64>)>, String> {
-    Ok(storage::open(root)?
-        .query_row(
-            "SELECT last_source_size, last_source_modified_ms FROM branches WHERE id = ?1",
-            [branch_id],
-            |row| Ok((row.get::<_, Option<i64>>(0)?, row.get::<_, Option<i64>>(1)?)),
-        )
-        .optional()
-        .map_err(storage::database_error)?
-        .and_then(|(size, modified)| size.map(|value| (value, modified))))
-}
-
-/// 在全量检查或提交成功后记录工作文件的大小与修改时间，作为快速检查的基线。
-pub(crate) fn record_source_metadata(
-    root: &Path,
-    branch_id: &str,
-    length: u64,
-    modified_ms: Option<i64>,
-) -> Result<(), String> {
-    storage::open(root)?
-        .execute(
-            "UPDATE branches SET last_source_size = ?2, last_source_modified_ms = ?3 WHERE id = ?1",
-            params![
-                branch_id,
-                i64::try_from(length).map_err(|_| "源文件大小超出范围")?,
-                modified_ms
-            ],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
 /// 为一个历史节点登记（或替换）snapshot 文件。
 ///
 /// 替换时旧 snapshot 不再由调用方在提交后直接删除：旧路径在同一事务内入队
@@ -1012,17 +868,15 @@ pub(crate) fn plan_checkpoint_release(
 ) -> Result<Option<CheckpointReleasePlan>, String> {
     let connection = storage::open(root)?;
     ensure_checkpoint_releasable(&connection, history_id)?;
-    let value: Option<(bool, Option<String>)> = connection
+    let marked: Option<bool> = connection
         .query_row(
-            "SELECT node.is_checkpoint, node.snapshot_path
-             FROM history_nodes node WHERE node.id = ?1",
+            "SELECT is_checkpoint FROM history_nodes WHERE id = ?1",
             [history_id],
-            |row| Ok((row.get::<_, i64>(0)? != 0, row.get(1)?)),
+            |row| Ok(row.get::<_, i64>(0)? != 0),
         )
         .optional()
         .map_err(storage::database_error)?;
-    let (marked, _snapshot) = value.ok_or("找不到历史节点")?;
-    if !marked {
+    if !marked.ok_or("找不到历史节点")? {
         return Ok(None);
     }
     let child: Option<(String, String, i64)> = connection
@@ -1201,10 +1055,9 @@ pub(crate) fn unmark_checkpoint(
 
 pub(crate) fn compaction_target(root: &Path, history_id: &str) -> Result<CompactionTarget, String> {
     let connection = storage::open(root)?;
-    let row: Option<(String, Option<String>, String, Option<String>, bool, i64)> = connection
+    let row: Option<(String, Option<String>, String, bool, i64)> = connection
         .query_row(
-            "SELECT node.artwork_id, node.parent_id, child.id,
-                    node.snapshot_path, node.is_checkpoint,
+            "SELECT node.artwork_id, node.parent_id, child.id, node.is_checkpoint,
                     (SELECT COUNT(*) FROM history_nodes child_count WHERE child_count.parent_id = node.id)
              FROM history_nodes node
              JOIN history_nodes child ON child.parent_id = node.id
@@ -1213,9 +1066,19 @@ pub(crate) fn compaction_target(root: &Path, history_id: &str) -> Result<Compact
              AND NOT EXISTS (SELECT 1 FROM branches WHERE head_history_id = node.id OR created_from_history_id = node.id)
              AND NOT EXISTS (SELECT 1 FROM final_artifacts WHERE history_id = node.id)",
             [history_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get::<_, i64>(4)? != 0, row.get(5)?)),
-        ).optional().map_err(storage::database_error)?;
-    let (artwork_id, parent_id, child_id, _snapshot, checkpoint, count) =
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get::<_, i64>(3)? != 0,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    let (artwork_id, parent_id, child_id, checkpoint, count) =
         row.ok_or("该节点不是可精简的中间节点")?;
     if parent_id.is_none() || checkpoint || count != 1 {
         return Err("只能精简有唯一子节点、且不是分支关键点或检查点的中间节点".into());
@@ -1306,891 +1169,6 @@ pub(crate) fn apply_compaction(
     Ok(cleanup_ids)
 }
 
-pub(crate) fn delete_subtree(
-    root: &Path,
-    history_id: &str,
-    branch_id: &str,
-) -> Result<HistoryDeletion, String> {
-    let mut connection = storage::open(root)?;
-    let transaction = connection.transaction().map_err(storage::database_error)?;
-    let artwork_id: String = transaction
-        .query_row(
-            "SELECT artwork_id FROM history_nodes WHERE id = ?1",
-            [history_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?
-        .ok_or("找不到历史节点")?;
-    let branch_valid: bool = transaction
-        .query_row(
-            "WITH RECURSIVE ancestors(id, parent_id) AS (
-               SELECT node.id, node.parent_id
-               FROM branches branch
-               JOIN history_nodes node ON node.id = branch.head_history_id
-               WHERE branch.id = ?2 AND branch.artwork_id = ?3
-               UNION ALL
-               SELECT parent.id, parent.parent_id
-               FROM history_nodes parent JOIN ancestors ON parent.id = ancestors.parent_id
-             )
-             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
-            params![history_id, branch_id, artwork_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)?;
-    if !branch_valid {
-        return Err("只能从当前分支的历史链删除节点".into());
-    }
-    if subtree_contains_publication(&transaction, history_id)? {
-        return Err("无法删除历史：这段历史包含已发布节点，发布记录必须保留可恢复基线".into());
-    }
-    transaction
-        .execute_batch("CREATE TEMP TABLE IF NOT EXISTS history_delete (id TEXT PRIMARY KEY);")
-        .map_err(storage::database_error)?;
-    transaction
-        .execute("DELETE FROM history_delete", [])
-        .map_err(storage::database_error)?;
-    transaction.execute(
-        "INSERT INTO history_delete WITH RECURSIVE descendants(id) AS (
-             SELECT id FROM history_nodes WHERE id = ?1
-             UNION ALL SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-         ) SELECT id FROM descendants", [history_id]
-    ).map_err(storage::database_error)?;
-    let conflict: Option<String> = transaction
-        .query_row(
-            "WITH RECURSIVE descendants(id) AS (
-                 SELECT id FROM history_nodes WHERE id = ?1
-                 UNION ALL SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-             )
-             SELECT b.title FROM branches b JOIN descendants d
-               ON b.head_history_id = d.id OR b.created_from_history_id = d.id
-             WHERE b.id <> ?2
-             LIMIT 1",
-            params![history_id, branch_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?;
-    if let Some(title) = conflict {
-        return Err(format!(
-            "无法删除历史：分支“{title}”仍然指向这段历史，请先删除该分支"
-        ));
-    }
-    let mut paths = HashSet::new();
-    let mut statement = transaction.prepare(
-        "SELECT snapshot_path FROM history_nodes WHERE id IN (SELECT id FROM history_delete)
-         UNION ALL SELECT delta_path FROM history_edges WHERE child_history_id IN (SELECT id FROM history_delete)
-         UNION ALL SELECT delta_path FROM history_nodes WHERE id IN (SELECT id FROM history_delete) AND delta_path IS NOT NULL"
-    ).map_err(storage::database_error)?;
-    for row in statement
-        .query_map([], |row| row.get::<_, Option<String>>(0))
-        .map_err(storage::database_error)?
-    {
-        if let Some(path) = row.map_err(storage::database_error)? {
-            paths.insert(path);
-        }
-    }
-    drop(statement);
-    let fallback: Option<String> = transaction
-        .query_row(
-            "SELECT parent_id FROM history_nodes WHERE id = ?1",
-            [history_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?
-        .flatten();
-    let mut branches = Vec::new();
-    let mut branch_statement = transaction.prepare("SELECT id, head_history_id, created_from_history_id FROM branches WHERE artwork_id = ?1").map_err(storage::database_error)?;
-    for row in branch_statement
-        .query_map([&artwork_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(storage::database_error)?
-    {
-        branches.push(row.map_err(storage::database_error)?);
-    }
-    drop(branch_statement);
-    for (branch_id, head, origin) in branches {
-        let origin_deleted = match origin.as_deref() {
-            Some(id) => transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM history_delete WHERE id = ?1)",
-                    [id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(storage::database_error)?,
-            None => false,
-        };
-        let Some(head) = head else {
-            if origin_deleted {
-                transaction.execute(
-                    "UPDATE branches SET created_from_history_id = ?2, updated_ms = ?3 WHERE id = ?1",
-                    params![branch_id, fallback, storage::now_ms()?],
-                ).map_err(storage::database_error)?;
-            }
-            continue;
-        };
-        let head_deleted = transaction
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM history_delete WHERE id = ?1)",
-                [&head],
-                |row| row.get::<_, bool>(0),
-            )
-            .map_err(storage::database_error)?;
-        if !head_deleted && !origin_deleted {
-            continue;
-        }
-        let mut cursor = head;
-        loop {
-            let deleted = transaction
-                .query_row(
-                    "SELECT EXISTS(SELECT 1 FROM history_delete WHERE id = ?1)",
-                    [&cursor],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(storage::database_error)?;
-            if !deleted {
-                break;
-            }
-            let parent: Option<String> = transaction
-                .query_row(
-                    "SELECT parent_id FROM history_nodes WHERE id = ?1",
-                    [&cursor],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(storage::database_error)?
-                .flatten();
-            let Some(parent) = parent else {
-                cursor.clear();
-                break;
-            };
-            cursor = parent;
-        }
-        transaction.execute(
-            "UPDATE branches SET head_history_id = NULLIF(?2, ''),
-                    created_from_history_id = CASE WHEN ?4 <> 0 THEN ?5 ELSE created_from_history_id END,
-                    updated_ms = ?3 WHERE id = ?1",
-            params![branch_id, cursor, storage::now_ms()?, i64::from(origin_deleted), fallback]
-        ).map_err(storage::database_error)?;
-    }
-    transaction
-        .execute(
-            "DELETE FROM history_nodes WHERE id IN (SELECT id FROM history_delete)",
-            [],
-        )
-        .map_err(storage::database_error)?;
-    // 被删除节点与边占用的仓库文件在同一事务内复查引用后入队；仍被其它分支或
-    // 节点引用的路径会被跳过，由调用方在提交成功后重放清理。
-    let cleanup_ids = cleanup::enqueue_released_repository_files(
-        &transaction,
-        &paths.into_iter().collect::<Vec<_>>(),
-        "history_subtree_deletion",
-    )?;
-    transaction.commit().map_err(storage::database_error)?;
-    Ok(HistoryDeletion {
-        artwork_id,
-        cleanup_ids,
-    })
-}
-
-pub(crate) fn validate_subtree_deletion(
-    root: &Path,
-    history_id: &str,
-    branch_id: &str,
-) -> Result<(), String> {
-    let connection = storage::open(root)?;
-    let artwork_id: String = connection
-        .query_row(
-            "SELECT artwork_id FROM history_nodes WHERE id = ?1",
-            [history_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?
-        .ok_or("找不到历史节点")?;
-    let branch_valid: bool = connection
-        .query_row(
-            "WITH RECURSIVE ancestors(id, parent_id) AS (
-               SELECT node.id, node.parent_id
-               FROM branches branch
-               JOIN history_nodes node ON node.id = branch.head_history_id
-               WHERE branch.id = ?2 AND branch.artwork_id = ?3
-               UNION ALL
-               SELECT parent.id, parent.parent_id
-               FROM history_nodes parent JOIN ancestors ON parent.id = ancestors.parent_id
-             )
-             SELECT EXISTS(SELECT 1 FROM ancestors WHERE id = ?1)",
-            params![history_id, branch_id, artwork_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)?;
-    if !branch_valid {
-        return Err("只能从当前分支的历史链删除节点".into());
-    }
-    if subtree_contains_publication(&connection, history_id)? {
-        return Err("无法删除历史：这段历史包含已发布节点，发布记录必须保留可恢复基线".into());
-    }
-    let conflict: Option<String> = connection
-        .query_row(
-            "WITH RECURSIVE descendants(id) AS (
-               SELECT id FROM history_nodes WHERE id = ?1
-               UNION ALL
-               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-             )
-             SELECT branch.title
-             FROM branches branch JOIN descendants
-               ON branch.head_history_id = descendants.id OR branch.created_from_history_id = descendants.id
-             WHERE branch.id <> ?2
-             LIMIT 1",
-            params![history_id, branch_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?;
-    if let Some(title) = conflict {
-        return Err(format!(
-            "无法删除历史：分支“{title}”仍然指向这段历史，请先删除该分支"
-        ));
-    }
-    Ok(())
-}
-
-fn subtree_contains_publication(
-    connection: &rusqlite::Connection,
-    history_id: &str,
-) -> Result<bool, String> {
-    connection
-        .query_row(
-            "WITH RECURSIVE descendants(id) AS (
-               SELECT id FROM history_nodes WHERE id = ?1
-               UNION ALL
-               SELECT child.id FROM history_nodes child JOIN descendants ON child.parent_id = descendants.id
-             )
-             SELECT EXISTS(
-               SELECT 1 FROM final_artifacts artifact JOIN descendants ON artifact.history_id = descendants.id
-             )",
-            [history_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)
-}
-
-/// 删除一个非主分支，回收只属于它的历史节点。
-///
-/// 删除前收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 与 `history_edges.delta_path`
-/// 作为候选；事务提交前复查当前图是否仍引用这些路径（事务可见本事务的删除结果），
-/// 只把已无引用的文件入队 `pending_file_cleanup`（原因 `history_branch_deletion`），
-/// 由调用方在提交成功后重放。仍被共享祖先或其它分支引用的文件保留。
-pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeletion, String> {
-    let mut connection = storage::open(root)?;
-    let transaction = connection.transaction().map_err(storage::database_error)?;
-    let branch: Option<(String, Option<String>, bool)> = transaction
-        .query_row(
-            "SELECT b.artwork_id, b.created_from_history_id,
-                    EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
-             FROM branches b WHERE b.id = ?1",
-            [branch_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()
-        .map_err(storage::database_error)?;
-    let (artwork_id, origin, locked) = branch.ok_or("找不到分支")?;
-    if origin.is_none() {
-        return Err("主分支不能删除".into());
-    }
-    if locked {
-        return Err("该分支已有最终成品，请先移除成品后再删除分支".into());
-    }
-
-    let mut paths = HashSet::new();
-    let mut owned = Vec::new();
-    let mut statement = transaction
-        .prepare(
-            "SELECT id, snapshot_path, delta_path FROM history_nodes
-             WHERE created_on_branch_id = ?1 ORDER BY created_ms DESC, id DESC",
-        )
-        .map_err(storage::database_error)?;
-    for row in statement
-        .query_map([branch_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-            ))
-        })
-        .map_err(storage::database_error)?
-    {
-        let row = row.map_err(storage::database_error)?;
-        if let Some(path) = row.1 {
-            paths.insert(path);
-        }
-        if let Some(path) = row.2 {
-            paths.insert(path);
-        }
-        owned.push(row.0);
-    }
-    drop(statement);
-    let mut edge_statement = transaction
-        .prepare(
-            "SELECT edge.delta_path
-             FROM history_edges edge
-             JOIN history_nodes child ON child.id = edge.child_history_id
-             WHERE child.created_on_branch_id = ?1",
-        )
-        .map_err(storage::database_error)?;
-    for path in edge_statement
-        .query_map([branch_id], |row| row.get::<_, String>(0))
-        .map_err(storage::database_error)?
-    {
-        paths.insert(path.map_err(storage::database_error)?);
-    }
-    drop(edge_statement);
-    loop {
-        let mut candidate = None;
-        for id in &owned {
-            let deletable = transaction
-                .query_row(
-                    "SELECT NOT EXISTS(SELECT 1 FROM history_nodes child WHERE child.parent_id = ?1)
-                            AND NOT EXISTS(
-                              SELECT 1 FROM branches other
-                              WHERE other.id <> ?2
-                                AND (other.head_history_id = ?1 OR other.created_from_history_id = ?1)
-                            )",
-                    params![id.as_str(), branch_id],
-                    |row| row.get::<_, bool>(0),
-                )
-                .map_err(storage::database_error)?;
-            if deletable {
-                candidate = Some(id.clone());
-                break;
-            }
-        }
-        let Some(candidate) = candidate else {
-            break;
-        };
-        transaction
-            .execute(
-                "DELETE FROM history_nodes WHERE id = ?1",
-                [candidate.as_str()],
-            )
-            .map_err(storage::database_error)?;
-        owned.retain(|id| id != &candidate);
-    }
-    if !owned.is_empty() {
-        let replacement: String = transaction
-            .query_row(
-                "SELECT id FROM branches WHERE artwork_id = ?1 AND id <> ?2 ORDER BY created_ms, id LIMIT 1",
-                params![artwork_id, branch_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(storage::database_error)?
-            .ok_or("分支仍有共享历史，且找不到可接管这些节点的分支")?;
-        transaction
-            .execute(
-                "UPDATE history_nodes SET created_on_branch_id = ?2 WHERE created_on_branch_id = ?1",
-                params![branch_id, replacement],
-            )
-            .map_err(storage::database_error)?;
-    }
-    transaction
-        .execute("DELETE FROM branches WHERE id = ?1", [branch_id])
-        .map_err(storage::database_error)?;
-    let cleanup_ids = cleanup::enqueue_released_repository_files(
-        &transaction,
-        &paths.into_iter().collect::<Vec<_>>(),
-        "history_branch_deletion",
-    )?;
-    transaction.commit().map_err(storage::database_error)?;
-    Ok(BranchDeletion {
-        artwork_id,
-        cleanup_ids,
-    })
-}
-
-pub(crate) fn mark_automatic_backup_error(
-    root: &Path,
-    branch_id: &str,
-    error: &str,
-    failed_ms: i64,
-) -> Result<bool, String> {
-    const MAX_CONSECUTIVE_FAILURES: u32 = 5;
-    let mut connection = storage::open(root)?;
-    let transaction = connection.transaction().map_err(storage::database_error)?;
-    let (previous_failures, interval_minutes): (u32, u32) = transaction
-        .query_row(
-            "SELECT consecutive_backup_failures, backup_interval_minutes FROM branches WHERE id = ?1",
-            [branch_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .map_err(storage::database_error)?;
-    let failures = previous_failures.saturating_add(1);
-    let disabled = failures >= MAX_CONSECUTIVE_FAILURES;
-    let retry_minutes = match failures {
-        1 => 1,
-        2 => interval_minutes.div_ceil(4),
-        3 => interval_minutes.div_ceil(2),
-        _ => interval_minutes,
-    };
-    let retry_at_ms = (!disabled)
-        .then(|| failed_ms.saturating_add(i64::from(retry_minutes).saturating_mul(60_000)));
-    transaction
-        .execute(
-            "UPDATE branches
-             SET last_error = ?2, consecutive_backup_failures = ?3,
-                 backup_retry_at_ms = ?4,
-                 backup_enabled = CASE WHEN ?5 <> 0 THEN 0 ELSE backup_enabled END,
-                 backup_disable_notice_pending = CASE WHEN ?5 <> 0 THEN 1 ELSE backup_disable_notice_pending END,
-                 updated_ms = ?6
-             WHERE id = ?1",
-            params![branch_id, error, failures, retry_at_ms, i64::from(disabled), failed_ms],
-        )
-        .map_err(storage::database_error)?;
-    transaction.commit().map_err(storage::database_error)?;
-    Ok(disabled)
-}
-
-pub(crate) fn mark_error(root: &Path, branch_id: &str, error: &str) {
-    if let Ok(connection) = storage::open(root) {
-        let _ = connection.execute(
-            "UPDATE branches SET last_error = ?2 WHERE id = ?1",
-            params![branch_id, error],
-        );
-    }
-}
-
-/// 记录「该分支不参与自动备份」的原因（工作文件位于网络位置或设备命名空间）。
-///
-/// 与 [`mark_automatic_backup_error`] 的区别是它**不**计入连续失败次数、不设置重试
-/// 时间、也不会自动关闭自动备份：这是一条路径资格判定，和「未选择工作文件的分支
-/// 不参与自动备份」同一口径，不是一次失败的备份。原因与已有值相同时不写库，因此
-/// 调度器每轮都会调用它也不会产生写入。
-pub(crate) fn mark_automatic_backup_skipped(
-    root: &Path,
-    branch_id: &str,
-    reason: &str,
-) -> Result<(), String> {
-    storage::open(root)?
-        .execute(
-            "UPDATE branches SET last_error = ?2, consecutive_backup_failures = 0,
-                backup_retry_at_ms = NULL
-             WHERE id = ?1 AND (last_error IS NULL OR last_error <> ?2)",
-            params![branch_id, reason],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
-pub(crate) fn acknowledge_backup_disable_notices(
-    root: &Path,
-    artwork_ids: &[String],
-) -> Result<(), String> {
-    let mut connection = storage::open(root)?;
-    let transaction = connection.transaction().map_err(storage::database_error)?;
-    for artwork_id in artwork_ids {
-        transaction
-            .execute(
-                "UPDATE branches SET backup_disable_notice_pending = 0
-             WHERE artwork_id = ?1 AND backup_disable_notice_pending <> 0",
-                [artwork_id],
-            )
-            .map_err(storage::database_error)?;
-    }
-    transaction.commit().map_err(storage::database_error)?;
-    Ok(())
-}
-
-pub(crate) fn next_backup_disable_notice_target(
-    root: &Path,
-) -> Result<Option<BackupDisableNoticeTarget>, String> {
-    storage::open(root)?
-        .query_row(
-            "SELECT b.artwork_id, b.id
-             FROM branches b
-             JOIN library_nodes n ON n.id = b.artwork_id
-             WHERE b.backup_disable_notice_pending <> 0 AND n.trashed_ms IS NULL
-             ORDER BY b.updated_ms DESC, b.id
-             LIMIT 1",
-            [],
-            |row| {
-                Ok(BackupDisableNoticeTarget {
-                    artwork_id: row.get(0)?,
-                    branch_id: row.get(1)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(storage::database_error)
-}
-
-pub(crate) fn list_scheduled(root: &Path) -> Result<Vec<ScheduledBranch>, String> {
-    let connection = storage::open(root)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
-                    b.last_check_elapsed_ms, b.quick_hit_count, b.last_source_size
-         FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
-         WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
-           AND TRIM(b.source_path) <> ''
-           AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)
-         ORDER BY b.id",
-        )
-        .map_err(storage::database_error)?;
-    let branches = statement
-        .query_map([], |row| {
-            Ok(ScheduledBranch {
-                id: row.get(0)?,
-                artwork_id: row.get(6)?,
-                source_path: row.get(1)?,
-                last_check_ms: row.get(2)?,
-                last_check_elapsed_ms: row.get(7)?,
-                quick_hit_count: row.get(8)?,
-                last_source_size: row.get(9)?,
-                interval_minutes: row.get(3)?,
-                quick_enabled: row.get::<_, i64>(4)? != 0,
-                retry_at_ms: row.get(5)?,
-            })
-        })
-        .map_err(storage::database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(storage::database_error)?;
-    Ok(branches)
-}
-
-pub(crate) fn load_scheduled(
-    root: &Path,
-    branch_id: &str,
-) -> Result<Option<ScheduledBranch>, String> {
-    storage::open(root)?
-        .query_row(
-            "SELECT b.id, b.source_path, b.last_check_ms, b.backup_interval_minutes,
-                    b.backup_quick_enabled, b.backup_retry_at_ms, b.artwork_id,
-                    b.last_check_elapsed_ms, b.quick_hit_count, b.last_source_size
-             FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
-             WHERE b.id = ?1 AND b.backup_enabled <> 0 AND n.trashed_ms IS NULL
-               AND TRIM(b.source_path) <> ''
-               AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
-            [branch_id],
-            |row| {
-                Ok(ScheduledBranch {
-                    id: row.get(0)?,
-                    artwork_id: row.get(6)?,
-                    source_path: row.get(1)?,
-                    last_check_ms: row.get(2)?,
-                    last_check_elapsed_ms: row.get(7)?,
-                    quick_hit_count: row.get(8)?,
-                    last_source_size: row.get(9)?,
-                    interval_minutes: row.get(3)?,
-                    quick_enabled: row.get::<_, i64>(4)? != 0,
-                    retry_at_ms: row.get(5)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(storage::database_error)
-}
-
-/// 派生待查集合：未进回收站的作品中，尚未校验且没有失败摘要的历史节点，最多
-/// 返回 `limit` 条。
-///
-/// 按 `created_ms` 最旧优先——最久未读的节点正是 bit rot 风险最高的节点。失败
-/// 节点（`verify_error` 非空）退出自动队列，直到被改写或用户手动重查。批次大小
-/// 由调用方给进 SQL：待查集合在旧仓库上可能有上万条，没必要整份读进内存再截断。
-pub(crate) fn list_pending_verify_nodes(
-    root: &Path,
-    limit: usize,
-) -> Result<Vec<VerifyNodeTarget>, String> {
-    let connection = storage::open(root)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT node.id
-             FROM history_nodes node
-             JOIN library_nodes artwork ON artwork.id = node.artwork_id
-             WHERE artwork.trashed_ms IS NULL
-               AND node.verified_ms IS NULL
-               AND node.verify_error IS NULL
-             ORDER BY node.created_ms, node.id
-             LIMIT ?1",
-        )
-        .map_err(storage::database_error)?;
-    let limit = limit.min(i64::MAX as usize) as i64;
-    let targets = statement
-        .query_map([limit], |row| {
-            Ok(VerifyNodeTarget {
-                history_id: row.get(0)?,
-            })
-        })
-        .map_err(storage::database_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(storage::database_error)?;
-    Ok(targets)
-}
-
-/// 与 [`list_pending_verify_nodes`] 同一口径的只读计数，供设置页展示。
-pub(crate) fn count_pending_verify_nodes(root: &Path) -> Result<usize, String> {
-    storage::open(root)?
-        .query_row(
-            "SELECT COUNT(*)
-             FROM history_nodes node
-             JOIN library_nodes artwork ON artwork.id = node.artwork_id
-             WHERE artwork.trashed_ms IS NULL
-               AND node.verified_ms IS NULL
-               AND node.verify_error IS NULL",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)
-}
-
-/// 最近一次**历史内容写入**的时间（最新历史节点的 `created_ms`）。
-///
-/// 空闲完整性检查用它实现「仓库静默」防抖；校验状态自身的写入不计入，否则每批
-/// 校验都会把下一次自动检查再推后十分钟。快速检查推进的 `last_check_ms` /
-/// `last_success_ms` 也不算——它们没有产生新节点，若计入，备份间隔小于 10 分钟的
-/// 分支会让静默条件永不满足。精简、检查点与快照修复不改这个时间戳，但它们已在
-/// 前台运行锁内完成，且不会与空闲批次并发。
-pub(crate) fn latest_history_write_ms(root: &Path) -> Result<Option<i64>, String> {
-    storage::open(root)?
-        .query_row("SELECT MAX(created_ms) FROM history_nodes", [], |row| {
-            row.get(0)
-        })
-        .map_err(storage::database_error)
-}
-
-/// 清除整条分支链的失败摘要，使这些节点重新进入自动队列；已通过校验的状态保留。
-pub(crate) fn clear_branch_verify_errors(root: &Path, branch_id: &str) -> Result<(), String> {
-    let connection = storage::open(root)?;
-    let exists: bool = connection
-        .query_row(
-            "SELECT EXISTS(SELECT 1 FROM branches WHERE id = ?1)",
-            [branch_id],
-            |row| row.get(0),
-        )
-        .map_err(storage::database_error)?;
-    if !exists {
-        return Err("找不到分支".into());
-    }
-    connection
-        .execute(
-            "WITH RECURSIVE ancestors(id) AS (
-               SELECT head_history_id FROM branches
-               WHERE id = ?1 AND head_history_id IS NOT NULL
-               UNION ALL
-               SELECT node.parent_id
-               FROM history_nodes node JOIN ancestors ON node.id = ancestors.id
-               WHERE node.parent_id IS NOT NULL
-             )
-             UPDATE history_nodes SET verify_error = NULL
-             WHERE id IN (SELECT id FROM ancestors)",
-            [branch_id],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
-/// 记录一个节点的校验通过；`verify_error` 同时清空。
-pub(crate) fn mark_node_verified(
-    root: &Path,
-    history_id: &str,
-    verified_ms: i64,
-) -> Result<(), String> {
-    record_node_verification(root, history_id, Some(verified_ms), None)
-}
-
-/// 记录一个节点的校验失败；失败节点退出自动队列，直到被改写或手动重查。
-pub(crate) fn mark_node_verify_error(
-    root: &Path,
-    history_id: &str,
-    error: &str,
-) -> Result<(), String> {
-    record_node_verification(root, history_id, None, Some(error))
-}
-
-/// 写入节点级校验状态。调用方都在共享运行锁内，节点不可能在校验与写回之间消失，
-/// 因此 0 行受影响只可能是 id 不属于本仓库，按错误处理而不是静默忽略。
-fn record_node_verification(
-    root: &Path,
-    history_id: &str,
-    verified_ms: Option<i64>,
-    error: Option<&str>,
-) -> Result<(), String> {
-    let changed = storage::open(root)?
-        .execute(
-            "UPDATE history_nodes SET verified_ms = ?2, verify_error = ?3 WHERE id = ?1",
-            params![history_id, verified_ms, error],
-        )
-        .map_err(storage::database_error)?;
-    if changed == 0 {
-        return Err(format!("找不到历史节点 {history_id}"));
-    }
-    Ok(())
-}
-
-struct NodeVerificationState {
-    parent_id: Option<String>,
-    verify_error: Option<String>,
-    verified_ms: Option<i64>,
-}
-
-fn node_verification_states(
-    connection: &rusqlite::Connection,
-    artwork_id: &str,
-) -> Result<HashMap<String, NodeVerificationState>, String> {
-    let mut statement = connection
-        .prepare(
-            "SELECT id, parent_id, verify_error, verified_ms
-             FROM history_nodes WHERE artwork_id = ?1",
-        )
-        .map_err(storage::database_error)?;
-    let states = statement
-        .query_map([artwork_id], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                NodeVerificationState {
-                    parent_id: row.get(1)?,
-                    verify_error: row.get(2)?,
-                    verified_ms: row.get(3)?,
-                },
-            ))
-        })
-        .map_err(storage::database_error)?
-        .collect::<Result<HashMap<_, _>, _>>()
-        .map_err(storage::database_error)?;
-    Ok(states)
-}
-
-/// 从 head 沿父链派生的分支校验状态。
-struct BranchVerification {
-    /// 链上第一个「有问题」节点的文案；全部正常时为空。
-    error: Option<String>,
-    /// 链上确认出问题的节点数（丢失/损坏）。摘要只说「无法读取」，计数让界面能说清
-    /// 「有几个」。
-    failure_count: u32,
-    /// 链上「无法检查」的节点数。它们自己的文件未必坏，只是链被更深的坏节点挡住。
-    unverifiable_count: u32,
-    /// 链上节点里最严重的一类，供界面统一配色。
-    issue: Option<NodeVerifyIssue>,
-    /// 链上全部节点都通过校验时取最旧的通过时间。
-    verified_ms: Option<i64>,
-}
-
-/// 从 head 沿父链派生分支的第三态：任一节点 `verify_error` 非空即有问题；否则
-/// 全部节点都有 `verified_ms` 时取最旧的通过时间，任一节点未验证则为 NULL。
-fn derive_branch_verification(
-    head_history_id: Option<&str>,
-    nodes: &HashMap<String, NodeVerificationState>,
-) -> BranchVerification {
-    let Some(mut current) = head_history_id else {
-        return BranchVerification {
-            error: None,
-            failure_count: 0,
-            unverifiable_count: 0,
-            issue: None,
-            verified_ms: None,
-        };
-    };
-    let mut error = None;
-    let mut blocked_error = None;
-    let mut failure_count = 0_u32;
-    let mut unverifiable_count = 0_u32;
-    let mut issue: Option<NodeVerifyIssue> = None;
-    let mut oldest_verified: Option<i64> = None;
-    let mut all_verified = true;
-    let mut seen = false;
-    while let Some(state) = nodes.get(current) {
-        seen = true;
-        if let Some(message) = state.verify_error.as_deref() {
-            let classified = classify_verify_failure(message);
-            // 「无法检查」不是这个节点自己的问题，单独计数：把它算进「无法读取」
-            // 会让用户以为坏了 N 个，而实际上可能有 N-1 个只是被别人挡住。
-            if classified == NodeVerifyIssue::Unverifiable {
-                unverifiable_count += 1;
-                blocked_error.get_or_insert_with(|| message.to_owned());
-            } else {
-                failure_count += 1;
-                error.get_or_insert_with(|| message.to_owned());
-            }
-            issue = Some(classified.worst(issue));
-        }
-        if let Some(verified_ms) = state.verified_ms {
-            oldest_verified = Some(match oldest_verified {
-                Some(oldest) => oldest.min(verified_ms),
-                None => verified_ms,
-            });
-        } else {
-            all_verified = false;
-        }
-        match state.parent_id.as_deref() {
-            Some(parent_id) => current = parent_id,
-            None => break,
-        }
-    }
-    let verified_ms = if seen && all_verified {
-        oldest_verified
-    } else {
-        None
-    };
-    BranchVerification {
-        // 优先给出「确认有问题」的那条：被挡住的文案引用的正是它的原因，用户据此
-        // 知道先修哪个节点；只有全链都无法检查时才退回到被挡住的文案。
-        error: error.or(blocked_error),
-        failure_count,
-        unverifiable_count,
-        issue,
-        verified_ms,
-    }
-}
-
-/// 按作品粗粒度失效校验状态：链文件被改写后，这些节点必须重新物化校验。
-fn clear_artwork_verification(
-    transaction: &rusqlite::Transaction<'_>,
-    artwork_id: &str,
-) -> Result<(), String> {
-    transaction
-        .execute(
-            "UPDATE history_nodes SET verified_ms = NULL, verify_error = NULL
-             WHERE artwork_id = ?1",
-            [artwork_id],
-        )
-        .map_err(storage::database_error)?;
-    Ok(())
-}
-
-pub(crate) fn count_scheduled_files(root: &Path) -> Result<usize, String> {
-    let connection = storage::open(root)?;
-    let mut statement = connection
-        .prepare(
-            "SELECT DISTINCT b.source_path_key, b.source_path
-             FROM branches b JOIN library_nodes n ON n.id = b.artwork_id
-             WHERE b.backup_enabled <> 0 AND n.trashed_ms IS NULL
-               AND TRIM(b.source_path) <> ''
-               AND NOT EXISTS(SELECT 1 FROM final_artifacts f WHERE f.branch_id = b.id)",
-        )
-        .map_err(storage::database_error)?;
-    // 与调度器同一口径：网络位置与设备命名空间的工作文件不参与自动备份，因此
-    // 不计入「已启用自动备份的工作文件数」。
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(storage::database_error)?;
-    let mut keys = HashSet::new();
-    for row in rows {
-        let (key, path) = row.map_err(storage::database_error)?;
-        if storage::unattended_source_path_rejection(&path).is_none() {
-            keys.insert(key);
-        }
-    }
-    Ok(keys.len())
-}
-
 pub(crate) fn artwork_directory(root: &Path, artwork_id: &str) -> PathBuf {
     root.join("artworks").join(artwork_id)
 }
@@ -2207,65 +1185,11 @@ pub(crate) fn ensure_directories(root: &Path, artwork_id: &str) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::{
+        count_scheduled_files,
+        test_support::{queued_paths, HistoryFixture},
+    };
     use crate::platform::path::display_path;
-    use std::io::Write;
-
-    struct HistoryFixture {
-        _directory: tempfile::TempDir,
-        root: PathBuf,
-        artwork_id: String,
-        main_branch_id: String,
-        fork_source: PathBuf,
-    }
-
-    impl HistoryFixture {
-        fn new() -> Self {
-            let directory = tempfile::tempdir().unwrap();
-            let root = directory.path().join("repository");
-            let main_source = directory.path().join("main.psd");
-            let fork_source = directory.path().join("fork.psd");
-            fs::write(&main_source, b"main").unwrap();
-            fs::write(&fork_source, b"fork").unwrap();
-            crate::library::initialize(&root).unwrap();
-            let artwork =
-                crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source, false)
-                    .unwrap();
-            Self {
-                _directory: directory,
-                root,
-                artwork_id: artwork.artwork_id,
-                main_branch_id: artwork.branch_id,
-                fork_source,
-            }
-        }
-
-        fn commit_node(&self, branch_id: &str, id: &str, parent_id: Option<&str>, created_ms: i64) {
-            let snapshot = format!("artworks/{id}.snapshot");
-            let delta = parent_id.map(|parent| format!("artworks/{id}-to-{parent}.delta"));
-            commit(
-                &self.root,
-                HistoryCommit {
-                    id,
-                    branch_id,
-                    parent_id,
-                    title: id,
-                    note: "",
-                    commit_kind: "manual",
-                    created_ms,
-                    logical_size: 1,
-                    chunk_file_size: 1,
-                    sha256: &format!("{:064X}", created_ms),
-                    chunk_count: 1,
-                    snapshot_path: &snapshot,
-                    delta_path: delta.as_deref(),
-                    delta_size: delta.as_ref().map(|_| 1),
-                    thumbnail: None,
-                    thumbnail_version: None,
-                },
-            )
-            .unwrap();
-        }
-    }
 
     #[test]
     fn node_source_path_follows_the_branch_work_file() {
@@ -2278,25 +1202,6 @@ mod tests {
         assert!(node_source_path(&fixture.root, "missing")
             .unwrap()
             .is_none());
-    }
-
-    #[test]
-    fn scheduled_file_count_tracks_enabled_branches() {
-        let fixture = HistoryFixture::new();
-        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 1);
-
-        update_branch(
-            &fixture.root,
-            &fixture.main_branch_id,
-            "Main",
-            true,
-            false,
-            10,
-            false,
-            None,
-        )
-        .unwrap();
-        assert_eq!(count_scheduled_files(&fixture.root).unwrap(), 0);
     }
 
     #[test]
@@ -2432,356 +1337,51 @@ mod tests {
         assert!(!side.source_path.is_empty());
     }
 
+    /// 分支行与起点 checkpoint 必须同进同退：第二步失败时第一步也要回滚，
+    /// 不能留下一个依赖未固化起点的半成品分支。
     #[test]
-    fn automatic_backup_failures_follow_interval_and_eventually_disable() {
-        let fixture = HistoryFixture::new();
-        mark_unchanged(&fixture.root, &fixture.main_branch_id, 100).unwrap();
-        update_branch(
-            &fixture.root,
-            &fixture.main_branch_id,
-            "Main",
-            true,
-            true,
-            120,
-            false,
-            None,
-        )
-        .unwrap();
-
-        let expected_delays = [1_i64, 30, 60, 120];
-        for (index, delay_minutes) in expected_delays.into_iter().enumerate() {
-            let failed_ms = 1_000 + index as i64;
-            assert!(!mark_automatic_backup_error(
-                &fixture.root,
-                &fixture.main_branch_id,
-                "temporary failure",
-                failed_ms,
-            )
-            .unwrap());
-            let retry_at: i64 = storage::open(&fixture.root)
-                .unwrap()
-                .query_row(
-                    "SELECT backup_retry_at_ms FROM branches WHERE id = ?1",
-                    [&fixture.main_branch_id],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(retry_at, failed_ms + delay_minutes * 60_000);
-        }
-        assert!(mark_automatic_backup_error(
-            &fixture.root,
-            &fixture.main_branch_id,
-            "persistent failure",
-            2_000,
-        )
-        .unwrap());
-
-        let state: (Option<i64>, Option<i64>, Option<String>, u32, bool, bool) =
-            storage::open(&fixture.root)
-                .unwrap()
-                .query_row(
-                    "SELECT last_check_ms, last_success_ms, last_error,
-                        consecutive_backup_failures, backup_enabled,
-                        backup_disable_notice_pending
-                 FROM branches WHERE id = ?1",
-                    [&fixture.main_branch_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    },
-                )
-                .unwrap();
-        assert_eq!(state.0, Some(100));
-        assert_eq!(state.1, Some(100));
-        assert_eq!(state.2.as_deref(), Some("persistent failure"));
-        assert_eq!(state.3, 5);
-        assert!(!state.4);
-        assert!(state.5);
-        assert_eq!(
-            next_backup_disable_notice_target(&fixture.root).unwrap(),
-            Some(BackupDisableNoticeTarget {
-                artwork_id: fixture.artwork_id.clone(),
-                branch_id: fixture.main_branch_id.clone(),
-            })
-        );
-
-        update_branch(
-            &fixture.root,
-            &fixture.main_branch_id,
-            "Renamed while stale",
-            true,
-            true,
-            60,
-            false,
-            None,
-        )
-        .unwrap();
-        let stale_update: (String, bool, u32, bool) = storage::open(&fixture.root)
-            .unwrap()
-            .query_row(
-                "SELECT title, backup_enabled, consecutive_backup_failures,
-                        backup_disable_notice_pending
-                 FROM branches WHERE id = ?1",
-                [&fixture.main_branch_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-            )
-            .unwrap();
-        assert_eq!(stale_update.0, "Renamed while stale");
-        assert!(!stale_update.1);
-        assert_eq!(stale_update.2, 5);
-        assert!(stale_update.3);
-
-        update_branch(
-            &fixture.root,
-            &fixture.main_branch_id,
-            "Renamed while stale",
-            false,
-            true,
-            60,
-            false,
-            None,
-        )
-        .unwrap();
-        let reenabled: (bool, u32, bool) = storage::open(&fixture.root)
-            .unwrap()
-            .query_row(
-                "SELECT backup_enabled, consecutive_backup_failures,
-                        backup_disable_notice_pending
-                 FROM branches WHERE id = ?1",
-                [&fixture.main_branch_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert!(reenabled.0);
-        assert_eq!(reenabled.1, 0);
-        assert!(!reenabled.2);
-
-        acknowledge_backup_disable_notices(&fixture.root, &[fixture.artwork_id.clone()]).unwrap();
-        let pending: bool = storage::open(&fixture.root)
-            .unwrap()
-            .query_row(
-                "SELECT backup_disable_notice_pending FROM branches WHERE id = ?1",
-                [&fixture.main_branch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(!pending);
-        assert_eq!(
-            next_backup_disable_notice_target(&fixture.root).unwrap(),
-            None
-        );
-    }
-
-    fn queued_paths(root: &Path) -> Vec<String> {
-        let connection = storage::open(root).unwrap();
-        let mut statement = connection
-            .prepare("SELECT path FROM pending_file_cleanup ORDER BY path")
-            .unwrap();
-        let paths = statement
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        paths
-    }
-
-    #[test]
-    fn branch_deletion_enqueues_released_edge_delta_paths() {
-        let directory = tempfile::tempdir().unwrap();
-        let root = directory.path().join("repository");
-        let main_source = directory.path().join("main.psd");
-        let fork_source = directory.path().join("fork.psd");
-        fs::File::create(&main_source)
-            .unwrap()
-            .write_all(b"main")
-            .unwrap();
-        fs::File::create(&fork_source)
-            .unwrap()
-            .write_all(b"fork")
-            .unwrap();
-        crate::library::initialize(&root).unwrap();
-        let artwork =
-            crate::library::create_artwork(&root, None, "Artwork", "Main", &main_source, false)
-                .unwrap();
-        let root_node = "root-node";
-        commit(
-            &root,
-            HistoryCommit {
-                id: root_node,
-                branch_id: &artwork.branch_id,
-                parent_id: None,
-                title: "Root",
-                note: "",
-                commit_kind: "manual",
-                created_ms: 1,
-                logical_size: 1,
-                chunk_file_size: 1,
-                sha256: &"A".repeat(64),
-                chunk_count: 1,
-                snapshot_path: "artworks/root.snapshot",
-                delta_path: None,
-                delta_size: None,
-                thumbnail: None,
-                thumbnail_version: None,
-            },
-        )
-        .unwrap();
-        let branch_id = create_branch(
-            &root,
-            &artwork.artwork_id,
-            root_node,
-            "Fork",
-            &fork_source,
-            false,
-        )
-        .unwrap();
-        commit(
-            &root,
-            HistoryCommit {
-                id: "fork-node",
-                branch_id: &branch_id,
-                parent_id: Some(root_node),
-                title: "Fork commit",
-                note: "",
-                commit_kind: "manual",
-                created_ms: 2,
-                logical_size: 1,
-                chunk_file_size: 1,
-                sha256: &"B".repeat(64),
-                chunk_count: 1,
-                snapshot_path: "artworks/fork.snapshot",
-                delta_path: Some("artworks/fork.delta"),
-                delta_size: Some(1),
-                thumbnail: None,
-                thumbnail_version: None,
-            },
-        )
-        .unwrap();
-
-        let deletion = delete_branch(&root, &branch_id).unwrap();
-
-        // 只属于该分支的 snapshot 与边 delta 在事务内入队；共享的祖先 snapshot
-        // 仍被主分支引用，因此不入队。删除本身由调用方在提交成功后重放。
-        assert!(!deletion.cleanup_ids.is_empty());
-        let queued = queued_paths(&root);
-        assert!(queued.iter().any(|path| path == "artworks/fork.delta"));
-        assert!(queued.iter().any(|path| path == "artworks/fork.snapshot"));
-        assert!(!queued.iter().any(|path| path == "artworks/root.snapshot"));
-
-        let report = crate::cleanup::run(&root, &deletion.cleanup_ids).unwrap();
-        assert!(report.failures.is_empty());
-        assert_eq!(report.pending_count, 0);
-    }
-
-    #[test]
-    fn subtree_preflight_rejects_published_history() {
+    fn create_branch_rolls_back_when_checkpointing_the_origin_fails() {
         let fixture = HistoryFixture::new();
         fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
-        fixture.commit_node(&fixture.main_branch_id, "published", Some("root"), 2);
         storage::open(&fixture.root)
             .unwrap()
-            .execute(
-                "INSERT INTO final_artifacts
-                 (id, branch_id, history_id, source_path, source_sha256, media_type, byte_size, created_ms)
-                 VALUES ('artifact', ?1, 'published', 'artworks/final.jpg', ?2, 'image/jpeg', 1, 3)",
-                params![fixture.main_branch_id, "A".repeat(64)],
-            )
-            .unwrap();
-
-        let error = validate_subtree_deletion(&fixture.root, "published", &fixture.main_branch_id)
-            .unwrap_err();
-
-        assert!(error.contains("已发布节点"), "{error}");
-    }
-
-    #[test]
-    fn subtree_deletion_does_not_update_unaffected_branches() {
-        let fixture = HistoryFixture::new();
-        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
-        fixture.commit_node(&fixture.main_branch_id, "cut", Some("root"), 2);
-        fixture.commit_node(&fixture.main_branch_id, "main-head", Some("cut"), 3);
-        let fork_branch = create_branch(
-            &fixture.root,
-            &fixture.artwork_id,
-            "root",
-            "Fork",
-            &fixture.fork_source,
-            false,
-        )
-        .unwrap();
-        fixture.commit_node(&fork_branch, "fork-head", Some("root"), 4);
-        storage::open(&fixture.root)
-            .unwrap()
-            .execute(
-                "UPDATE branches SET updated_ms = 777 WHERE id = ?1",
-                [&fork_branch],
-            )
-            .unwrap();
-
-        delete_subtree(&fixture.root, "cut", &fixture.main_branch_id).unwrap();
-
-        let connection = storage::open(&fixture.root).unwrap();
-        let main_head: Option<String> = connection
-            .query_row(
-                "SELECT head_history_id FROM branches WHERE id = ?1",
-                [&fixture.main_branch_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let fork_state: (Option<String>, i64) = connection
-            .query_row(
-                "SELECT head_history_id, updated_ms FROM branches WHERE id = ?1",
-                [&fork_branch],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(main_head.as_deref(), Some("root"));
-        assert_eq!(fork_state.0.as_deref(), Some("fork-head"));
-        assert_eq!(fork_state.1, 777);
-    }
-
-    #[test]
-    fn subtree_deletion_propagates_branch_row_errors() {
-        let fixture = HistoryFixture::new();
-        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
-        fixture.commit_node(&fixture.main_branch_id, "cut", Some("root"), 2);
-        let fork_branch = create_branch(
-            &fixture.root,
-            &fixture.artwork_id,
-            "root",
-            "Fork",
-            &fixture.fork_source,
-            false,
-        )
-        .unwrap();
-        let connection = storage::open(&fixture.root).unwrap();
-        connection
             .execute_batch(
-                "PRAGMA foreign_keys = OFF;
-                 DROP TRIGGER fork_origin_update_matches_artwork;",
+                "CREATE TRIGGER fail_branch_checkpoint
+                 BEFORE UPDATE OF is_checkpoint ON history_nodes
+                 BEGIN SELECT RAISE(ABORT, 'injected checkpoint failure'); END;",
             )
             .unwrap();
-        connection
-            .execute(
-                "UPDATE branches SET created_from_history_id = X'80' WHERE id = ?1",
-                [&fork_branch],
-            )
-            .unwrap();
-        drop(connection);
 
-        let error = delete_subtree(&fixture.root, "cut", &fixture.main_branch_id).unwrap_err();
+        let error = create_branch(
+            &fixture.root,
+            &fixture.artwork_id,
+            "root",
+            "Side",
+            &fixture.fork_source,
+            false,
+        )
+        .unwrap_err();
 
         assert!(error.contains("数据库操作失败"), "{error}");
+        let connection = storage::open(&fixture.root).unwrap();
+        let branch_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM branches WHERE artwork_id = ?1",
+                [&fixture.artwork_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(branch_count, 1, "失败的新建分支必须整体回滚");
+        let checkpoint: bool = connection
+            .query_row(
+                "SELECT is_checkpoint <> 0 FROM history_nodes WHERE id = 'root'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!checkpoint, "失败的新建分支不得留下起点 checkpoint");
     }
 
-    /// 只有检查点父节点可以在没有反向增量时提交；其余情况必须拒绝——那条增量
-    /// 是父节点释放 snapshot 之后的唯一表示。
     #[test]
     fn only_a_checkpoint_parent_may_commit_without_a_reverse_delta() {
         let fixture = HistoryFixture::new();

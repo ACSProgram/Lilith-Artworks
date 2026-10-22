@@ -8,18 +8,19 @@
 
 ## 当前批次状态
 
-2026-10-22 0.3 收尾与认证整改第一批（已提交）：设置页「备份」页不再依赖先打开「空间」页——
-最近一次整仓备份在设置弹窗打开且仓库就绪时即从数据库读取，标题改为「最近一次结果」、空态改为
-「尚无备份记录」，仓库切换仍清空旧结果；新增备份读取与仓库未就绪两条前端用例。同批删除无调用
-的引用清单校验接口（`validate_target` / `ValidationOutcome` / `ManagedFile.deletable`）与后台
-运行入口（`run_background` / `OperationClass::Background`），移除无消费者的 `default_panel`
-设置（旧设置文件含 `defaultPanel` 仍可加载），并把只被测试使用的非 typed 包装改为
-`#[cfg(test)]`；同步修正 `library.md` 的 schema v6 迁移链、`cleanup` / `storage_overview` /
-命令底座文档的过期阶段描述与锁序。计划与验证记录见
+2026-10-22 0.3 收尾与认证整改第二批（已提交）：恢复与校验共用链步进内核；全库扫描、
+分支重查与空闲校验改经 `history::VerificationWriter` 每 128 条批量写入；history 仓储按
+职责拆为主仓储、删除、校验与调度四个模块，`create_branch` 改为单事务；调度器拆出
+`scheduler/policy.rs` 与 `scheduler/idle.rs`，零等待 owner lock 的获取收敛到
+`repository_lock::try_acquire`。删除子树改为「预检一次 + 预检版删除」，被拒绝的请求不再
+留下父节点检查点。计划与验证记录见
 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 13 节。自动验证已通过
-（`cargo fmt --check`、`cargo check --lib`、`cargo check --tests`、`cargo test --lib`、
-`tsc --noEmit`、`npm test` 441 条），**重启后直接打开备份页、仓库切换清空结果仍待人工确认**。
-第二至第六批待执行。
+（`cargo fmt --check`、`cargo check --lib`、`cargo check --tests`、`cargo test --lib
+history/backup/cleanup`），本批无新增人工验收项。第三批待执行。
+
+第一批（已提交）：设置页「备份」页改为在弹窗打开且仓库就绪时读取持久化记录，并清理无调用的
+校验接口、后台入口、`default_panel` 设置与过期文档。**重启后直接打开备份页、仓库切换清空
+结果仍待人工确认**（验收项在 `todo.md`）。
 
 2026-10-21 错误边界与上下文拆分（已提交 `0c2f5d0`）：渲染期异常不再卸载整棵 React 树——根边界包在
 `NoticeCenter` / `AppRuntimeProvider` **之外**（三个 context hook 在 provider 缺失时都抛错，边界
@@ -106,7 +107,7 @@ schema v6`；README 与 `docs/planning/` 的版本引用一并更新。该版本
 
 - 0.3 收尾与认证整改第一批的人工确认：重启应用后直接打开「备份」页应显示数据库中最新一条
   备份记录，从未备份过时显示「尚无备份记录」；切换仓库后旧仓库结果被清空。验收项见 `todo.md`。
-- 第一批已提交，下一步继续第二批（后端算法与 history 仓储拆分）。
+- 第二批已提交；下一步第三批（应用层、前端结构与文档归位）。
 - 错误边界的界面验收：根兜底顶条与窗口按钮、区块兜底的作用范围（含素材板窗格内的位置）、
   热更新不再整棵卸载，以及 `[boundary]` 日志能否按标签筛到。验收项见 `todo.md`。
 - 测试体检第二批的收尾：随发布前压力测试轮运行 C9/C10（含 4.8 新增的临时文件清理闭环），并用
