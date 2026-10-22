@@ -33,6 +33,12 @@ entries for the reader; they are not a template every entry has to fill.
   commit node results through one batched writer (128 rows per commit) instead
   of opening a database connection per node. A cancelled scan keeps committed
   batches and discards the unfinished one.
+- Split the settings service into model, service, state, window and command
+  modules under `app/settings/`, keeping the existing `app::settings::*`
+  exports. Settings-page maintenance actions now share one busy-check and
+  cleanup template, and the history page and settings dialog are split into
+  preview/selection hooks and per-view/per-page components with unchanged
+  controlled state and interaction contracts.
 
 ### Fixed
 

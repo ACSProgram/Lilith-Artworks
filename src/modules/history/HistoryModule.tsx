@@ -3,23 +3,26 @@ import {
   ListCollapse, Pencil, Play, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent } from "react";
+import type { MouseEvent } from "react";
 import { formatBytes } from "../../shared/format";
 import { useMenuPlacement } from "../../shared/useMenuPlacement";
 import {
   BranchScheduleStatus, BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
 } from "./HistoryControls";
 import type { ConfirmRequest } from "./HistoryControls";
-import { HistoryTimeline, Mindmap } from "./HistoryGraph";
+import { HistoryBranchView, HistoryInspector } from "./HistoryBranchView";
+import { HistoryOverview } from "./HistoryOverview";
 import {
-  branchesContainingNode, buildBranchLine, buildHistoryTree, canCompact,
-  isForcedCheckpoint, isRenamedNode, needsCompactSecondConfirm, suggestedRestorePath,
-  verifyIssueLabel, verifyIssueNotice,
+  branchesContainingNode, buildBranchLine, canCompact, HISTORY_NODE_WIDTH_MAX,
+  HISTORY_NODE_WIDTH_MIN, isForcedCheckpoint, isRenamedNode, needsCompactSecondConfirm,
+  suggestedRestorePath, verifyIssueLabel, verifyIssueNotice,
+  type HistoryViewMode,
 } from "./historyModel";
-import { HoverPreview, InspectorPreview } from "./NodePreview";
-import type { PreviewAnchor } from "./NodePreview";
-import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode, NodePreview } from "./types";
+import { HoverPreview } from "./NodePreview";
+import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import { useCompactSelection } from "./useCompactSelection";
 import { useHistoryController } from "./useHistoryController";
+import { useNodePreview } from "./useNodePreview";
 
 interface HistoryModuleProps {
   artworkId: string;
@@ -30,16 +33,12 @@ interface HistoryModuleProps {
   onError: (message: string | null) => void;
 }
 
-type ViewMode = "overview" | "branch";
-
 const MINDMAP_NODE_WIDTH_KEY = "lilith-artworks.history-node-min-width-v1";
-const MIN_NODE_WIDTH = 220;
-const MAX_NODE_WIDTH = 420;
 
 function loadMindmapNodeWidth(): number {
   const stored = Number(window.localStorage.getItem(MINDMAP_NODE_WIDTH_KEY));
   return Number.isFinite(stored)
-    ? Math.min(MAX_NODE_WIDTH, Math.max(MIN_NODE_WIDTH, stored))
+    ? Math.min(HISTORY_NODE_WIDTH_MAX, Math.max(HISTORY_NODE_WIDTH_MIN, stored))
     : 280;
 }
 
@@ -51,40 +50,50 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
-  const [nodeFormat, setNodeFormat] = useState<{
-    nodeId: string;
-    value: string | null;
-    loading: boolean;
-  } | null>(null);
-  const [nodeThumbnail, setNodeThumbnail] = useState<{
-    nodeId: string;
-    value: NodePreview | null;
-    loading: boolean;
-  } | null>(null);
-  const [hover, setHover] = useState<{
-    nodeId: string;
-    anchor: PreviewAnchor;
-    value: NodePreview | null;
-    loading: boolean;
-  } | null>(null);
   const [commitNote, setCommitNote] = useState("");
   const [commitFeedback, setCommitFeedback] = useState<string | null>(null);
-  const [view, setView] = useState<ViewMode>("overview");
+  const [view, setView] = useState<HistoryViewMode>("overview");
   const [forkOpen, setForkOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [actionNode, setActionNode] = useState<HistoryNode | null>(null);
   const [context, setContext] = useState<{ x: number; y: number } | null>(null);
   const [confirmRequest, setConfirmRequest] = useState<ConfirmRequest | null>(null);
-  const [compactMode, setCompactMode] = useState(false);
-  const [compactSelection, setCompactSelection] = useState<Set<string>>(new Set());
   const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const [mindmapNodeWidth, setMindmapNodeWidth] = useState(loadMindmapNodeWidth);
   const nodeElements = useRef(new Map<string, HTMLButtonElement>());
-  /** 缩略图按节点缓存在内存里：同一节点重复悬停与选中不再重复请求。 */
-  const previewCache = useRef(new Map<string, NodePreview>());
-  const hoverRequest = useRef(0);
-  const hoverCloseTimer = useRef<number | null>(null);
   const contextPlacement = useMenuPlacement(context);
+
+  const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
+  const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const branchLine = useMemo(() => selectedBranch && history
+    ? buildBranchLine(history.nodes, selectedBranch.headHistoryId) : [], [history, selectedBranch]);
+  const branchNodeIds = useMemo(() => new Set(branchLine.map((node) => node.id)), [branchLine]);
+  const {
+    compactMode,
+    compactSelection,
+    beginCompactMode,
+    exitCompactMode,
+    toggleCompactNode,
+    orderedCompactSelection,
+  } = useCompactSelection(history, branchLine);
+  const {
+    nodeFormat,
+    nodeThumbnail,
+    hover,
+    showHoverPreview,
+    scheduleHoverClose,
+    clearHoverTimer,
+    refreshThumbnail,
+  } = useNodePreview({
+    artworkId,
+    view,
+    history,
+    selectedNode,
+    readNodeFormat,
+    readNodeThumbnail,
+    refreshNodeThumbnail,
+  });
+  const hoverNode = hover ? history?.nodes.find((node) => node.id === hover.nodeId) ?? null : null;
 
   useEffect(() => {
     setSelectedNodeId(null);
@@ -96,28 +105,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     setActionNode(null);
     setContext(null);
     setConfirmRequest(null);
-    setCompactMode(false);
-    setCompactSelection(new Set());
-    setHover(null);
-    clearHoverTimer();
-  }, [artworkId]);
+    exitCompactMode();
+  }, [artworkId, exitCompactMode]);
 
   useEffect(() => setCommitFeedback(null), [selectedBranchId]);
 
   useEffect(() => {
     setSelectedNodeId((current) => current && history?.nodes.some((node) => node.id === current)
       ? current : null);
-  }, [history]);
-
-  // 精简中途被取消时，已删除的节点不能再留在选择里：否则计数会虚高，而它们已经
-  // 没有卡片可以取消勾选。
-  useEffect(() => {
-    if (!history) return;
-    setCompactSelection((current) => {
-      const valid = new Set(history.nodes.map((node) => node.id));
-      const next = new Set([...current].filter((id) => valid.has(id)));
-      return next.size === current.size ? current : next;
-    });
   }, [history]);
 
   useEffect(() => {
@@ -136,134 +131,6 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     return () => window.removeEventListener("click", close);
   }, []);
 
-  const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
-  const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
-  const hoverNode = hover ? history?.nodes.find((node) => node.id === hover.nodeId) ?? null : null;
-
-  // 详情面板的格式版本只按选中的节点读取文件头；历史刷新后节点对象会更新，
-  // 因此检查点替换快照等操作也会重新读取。
-  useEffect(() => {
-    if (!selectedNode || view !== "branch") {
-      setNodeFormat(null);
-      return;
-    }
-    let cancelled = false;
-    setNodeFormat({ nodeId: selectedNode.id, value: null, loading: true });
-    void readNodeFormat(selectedNode.id).then((value) => {
-      if (!cancelled) setNodeFormat({ nodeId: selectedNode.id, value, loading: false });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [readNodeFormat, selectedNode, view]);
-
-  // 缩略图随节点行保存，选中时单独读取；历史刷新后重新拉取，不进入图轮询。
-  // 只有节点集合真的换了才作废缓存：后台检查的刷新会替换节点的校验字段，那
-  // 不该让已取到的缩略图重读一次。
-  const nodeIdKey = history?.nodes.map((node) => node.id).join("|");
-  useEffect(() => {
-    previewCache.current.clear();
-  }, [artworkId, nodeIdKey]);
-
-  useEffect(() => {
-    if (!selectedNode || view !== "branch") {
-      setNodeThumbnail(null);
-      return;
-    }
-    const cached = previewCache.current.get(selectedNode.id);
-    setNodeThumbnail({ nodeId: selectedNode.id, value: cached ?? null, loading: !cached });
-    if (cached) return;
-    let cancelled = false;
-    void readNodeThumbnail(selectedNode.id).then((value) => {
-      if (cancelled) return;
-      previewCache.current.set(selectedNode.id, value);
-      setNodeThumbnail({ nodeId: selectedNode.id, value, loading: false });
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [readNodeThumbnail, selectedNode, view]);
-
-  const clearHoverTimer = () => {
-    if (hoverCloseTimer.current === null) return;
-    window.clearTimeout(hoverCloseTimer.current);
-    hoverCloseTimer.current = null;
-  };
-
-  // 浮层不在卡片内部，指针从卡片移到浮层会先触发一次 leave：留一点宽限时间，
-  // 由浮层自己的 enter 取消关闭。
-  const scheduleHoverClose = () => {
-    clearHoverTimer();
-    hoverCloseTimer.current = window.setTimeout(() => setHover(null), 140);
-  };
-
-  /**
-   * 悬停预览只在总览提供：当前分支视图的「节点信息」栏本来就会显示选中节点的
-   * 缩略图，再弹一层浮层是重复的。格式不支持缩略图时不显示任何浮层，与悬停前
-   * 完全一致。
-   */
-  const showHoverPreview = (event: MouseEvent<HTMLButtonElement>, node: HistoryNode) => {
-    if (view !== "overview") return;
-    clearHoverTimer();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const anchor = { top: rect.top, left: rect.left, right: rect.right };
-    const cached = previewCache.current.get(node.id);
-    if (cached) {
-      setHover({ nodeId: node.id, anchor, value: cached, loading: false });
-      return;
-    }
-    const request = ++hoverRequest.current;
-    setHover({ nodeId: node.id, anchor, value: null, loading: true });
-    void readNodeThumbnail(node.id).then((value) => {
-      previewCache.current.set(node.id, value);
-      // 结果到达时指针可能已经移到别的节点或离开卡片，只更新仍然指向它的浮层。
-      if (hoverRequest.current !== request) return;
-      setHover((current) => current?.nodeId === node.id
-        ? { nodeId: node.id, anchor: current.anchor, value, loading: false }
-        : current);
-    });
-  };
-
-  useEffect(() => {
-    if (!hover) return;
-    const close = () => setHover(null);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [hover?.nodeId]);
-
-  // 切到当前分支视图时收起总览留下的浮层。
-  useEffect(() => {
-    if (view !== "overview") setHover(null);
-  }, [view]);
-
-  useEffect(() => () => clearHoverTimer(), []);
-
-  const refreshThumbnail = (node: HistoryNode) => {
-    const previous = previewCache.current.get(node.id);
-    setNodeThumbnail((current) => current?.nodeId === node.id ? { ...current, loading: true } : current);
-    setHover((current) => current?.nodeId === node.id ? { ...current, loading: true } : current);
-    void refreshNodeThumbnail(node.id).then((dataUrl) => {
-      // A refresh that extracts nothing must not hide a preview that is still
-      // stored; the backend only replaces the row when extraction succeeds.
-      // Selecting another node hands the state to the read effect, so a result
-      // that arrives after the selection moved on must not overwrite it.
-      const value: NodePreview = dataUrl
-        ? { dataUrl, supported: previous?.supported ?? true }
-        : { dataUrl: previous?.dataUrl ?? null, supported: previous?.supported ?? true };
-      if (dataUrl) previewCache.current.set(node.id, value);
-      setNodeThumbnail((current) => current?.nodeId === node.id ? { ...current, value, loading: false } : current);
-      setHover((current) => current?.nodeId === node.id ? { ...current, value, loading: false } : current);
-    });
-  };
-
-  const roots = useMemo(() => buildHistoryTree(history?.nodes ?? []), [history?.nodes]);
-  const branchLine = useMemo(() => selectedBranch && history
-    ? buildBranchLine(history.nodes, selectedBranch.headHistoryId) : [], [history, selectedBranch]);
-  const branchNodeIds = useMemo(() => new Set(branchLine.map((node) => node.id)), [branchLine]);
   const commit = async () => {
     if (!selectedBranch) return;
     setCommitFeedback(null);
@@ -294,26 +161,18 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const enterBranch = (branch: ArtworkBranch) => {
     onSelectBranch(branch.id);
     setView("branch");
-    setCompactMode(false);
-    setCompactSelection(new Set());
+    exitCompactMode();
     setContext(null);
   };
 
-  const beginCompactMode = () => {
-    setCompactSelection(new Set());
-    setCompactMode(true);
+  const startCompactMode = () => {
+    beginCompactMode();
     setSelectedNodeId(null);
   };
 
-  // 精简按分支链从后向前处理，与后端的单节点改接契约保持一致。
-  const orderedCompactSelection = () => branchLine
-    .filter((node) => compactSelection.has(node.id))
-    .reverse();
-
   const runCompact = async (ordered: HistoryNode[]) => {
     if (await compactNodes(ordered)) {
-      setCompactMode(false);
-      setCompactSelection(new Set());
+      exitCompactMode();
     }
   };
 
@@ -385,11 +244,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       onClick={() => {
         if (compactMode) {
           if (!selectable) return;
-          setCompactSelection((current) => {
-            const next = new Set(current);
-            if (next.has(node.id)) next.delete(node.id); else next.add(node.id);
-            return next;
-          });
+          toggleCompactNode(node.id);
         } else {
           setSelectedNodeId(node.id);
         }
@@ -437,13 +292,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="history-header-actions">
         {visibleRuntime.busy && <OperationProgress runtime={visibleRuntime} onCancel={cancelOperation} />}
         <div className="segmented-control" aria-label="历史视图">
-          <button className={view === "overview" ? "active" : ""} onClick={() => { setView("overview"); setCompactMode(false); setCompactSelection(new Set()); }}>总览</button>
+          <button className={view === "overview" ? "active" : ""} onClick={() => { setView("overview"); exitCompactMode(); }}>总览</button>
           <button className={view === "branch" ? "active" : ""} onClick={() => setView("branch")}>当前分支</button>
         </div>
         <select value={selectedBranchId ?? ""} onChange={(event) => {
           onSelectBranch(event.target.value);
-          setCompactMode(false);
-          setCompactSelection(new Set());
+          exitCompactMode();
           if (view === "branch") setSelectedNodeId(null);
         }}>
           {history.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
@@ -472,9 +326,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         {selectedBranch && !selectedBranch.sourcePath && <span className="commit-feedback muted" role="status">该分支未选择工作文件，自动备份与主动提交不可用。</span>}
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
-      {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={() => {
-        beginCompactMode();
-      }}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
+      {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={startCompactMode}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
     </section>
 
     {compactMode && <div className="compact-mode-bar">
@@ -483,69 +335,34 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <button className="danger-button" type="button" disabled={!compactSelection.size || busy || runtime.busy} onClick={() => {
         setConfirmRequest({ kind: "compact", selectedCount: compactSelection.size });
       }}><Trash2 size={15} />删除节点</button>
-      <button className="text-button" type="button" onClick={() => { setCompactMode(false); setCompactSelection(new Set()); }}>退出</button>
+      <button className="text-button" type="button" onClick={exitCompactMode}>退出</button>
     </div>}
 
     <div className={`history-main${view === "overview" && mindmapMode === "timeline" ? " with-timeline" : ""}`}>
-      {view === "overview" && mindmapMode === "timeline" && <HistoryTimeline branches={history.branches} nodes={history.nodes} selectedNodeId={selectedNodeId} onJump={jumpToNode} />}
-      <section
-        className={`history-graph ${view === "overview" ? "mindmap" : "branch-list"}`}
-        style={view === "overview" ? { "--mindmap-node-width": `${mindmapNodeWidth}px` } as CSSProperties : undefined}
-      >
-        <header>
-          <div className="history-graph-title"><strong>{view === "overview" ? "历史总览" : selectedBranch?.title}</strong><span>{history.nodes.length} 个节点 · {history.branches.length} 个分支</span></div>
-          {view === "overview" && <div className="mindmap-controls">
-            <label title="调整历史节点卡片的最小宽度"><span>节点宽度</span><input type="range" min={MIN_NODE_WIDTH} max={MAX_NODE_WIDTH} step={10} value={mindmapNodeWidth} onChange={(event) => setMindmapNodeWidth(Number(event.target.value))} /><output>{mindmapNodeWidth}px</output></label>
-            <div className="segmented-control" aria-label="历史排列"><button className={mindmapMode === "compact" ? "active" : ""} type="button" onClick={() => setMindmapMode("compact")}>紧凑</button><button className={mindmapMode === "timeline" ? "active" : ""} type="button" onClick={() => setMindmapMode("timeline")}>时间轴</button></div>
-          </div>}
-        </header>
-        {!history.nodes.length && <div className="history-empty">提交工作文件以创建第一个历史节点。</div>}
-        {view === "overview" ? <Mindmap branches={roots} renderNode={nodeCard} mode={mindmapMode} branchesByNode={history.branches} /> : <div className="branch-line">{branchLine.map(nodeCard)}</div>}
-      </section>
-      <aside className="history-inspector">
-        <header>节点信息</header>
-        {selectedNode ? <>
-          <InspectorPreview
-            title={selectedNode.title}
-            preview={nodeThumbnail?.nodeId === selectedNode.id ? nodeThumbnail.value : null}
-            refreshing={nodeThumbnail?.nodeId === selectedNode.id && nodeThumbnail.loading}
-            disabled={busy || runtime.busy}
-            onRefresh={() => refreshThumbnail(selectedNode)}
-          />
-          <dl>
-            <div><dt>名称</dt><dd>{selectedNode.title}</dd></div>
-            {selectedNode.note && <div><dt>提交备注</dt><dd>{selectedNode.note}</dd></div>}
-            <div><dt>提交类型</dt><dd>{selectedNode.commitKind === "automatic" ? "自动备份" : "主动提交"}</dd></div>
-            <div>
-              <dt>格式版本</dt>
-              <dd>
-                {nodeFormat?.nodeId === selectedNode.id && !nodeFormat.loading
-                  ? nodeFormat.value
-                    ? <span className="history-format-tag">ChunkFile {nodeFormat.value}</span>
-                    : <span className="history-format-muted">未知</span>
-                  : <span className="history-format-muted">读取中…</span>}
-              </dd>
-            </div>
-            <div><dt>原文件</dt><dd>{formatBytes(selectedNode.logicalSize)}</dd></div>
-            <div><dt>当前存储</dt><dd>{formatBytes(selectedNode.chunkFileSize)}</dd></div>
-            <div><dt>数据块</dt><dd>{selectedNode.chunkCount}</dd></div>
-            <div className="history-verify-row">
-              <dt>文件状态</dt>
-              <dd>
-                {selectedNode.verifyIssue
-                  ? <span className={`history-verify-state ${selectedNode.verifyIssue}`}>{verifyIssueLabel(selectedNode.verifyIssue)}</span>
-                  : selectedNode.verifiedMs != null
-                    ? <span className="history-verify-state ok">正常</span>
-                    : <span className="history-format-muted">尚未检查</span>}
-                {selectedNode.verifiedMs != null && !selectedNode.verifyIssue && <small className="history-verify-time">{new Date(selectedNode.verifiedMs).toLocaleString()}</small>}
-              </dd>
-              {selectedNode.verifyIssue && <dd className="history-verify-note">{verifyIssueNotice(selectedNode.verifyIssue)}</dd>}
-              {selectedNode.verifyError && <dd className="history-verify-detail">{selectedNode.verifyError}</dd>}
-            </div>
-            <div><dt>SHA-256</dt><dd><code>{selectedNode.sha256}</code></dd></div>
-          </dl>
-        </> : <p>左键选择节点查看信息；右键打开节点操作。进入分支只在节点唯一属于一个分支时提供。</p>}
-      </aside>
+      {view === "overview"
+        ? <HistoryOverview
+          history={history}
+          selectedNodeId={selectedNodeId}
+          mindmapMode={mindmapMode}
+          onMindmapModeChange={setMindmapMode}
+          mindmapNodeWidth={mindmapNodeWidth}
+          onMindmapNodeWidthChange={setMindmapNodeWidth}
+          renderNode={nodeCard}
+          onJump={jumpToNode}
+        />
+        : <HistoryBranchView
+          history={history}
+          selectedBranch={selectedBranch}
+          branchLine={branchLine}
+          renderNode={nodeCard}
+        />}
+      <HistoryInspector
+        selectedNode={selectedNode}
+        nodeFormat={nodeFormat}
+        nodeThumbnail={nodeThumbnail}
+        disabled={busy || runtime.busy}
+        onRefreshThumbnail={refreshThumbnail}
+      />
     </div>
 
     {hoverNode && hover?.value && (hover.value.dataUrl || hover.value.supported) && <HoverPreview

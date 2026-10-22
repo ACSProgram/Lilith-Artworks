@@ -1,5 +1,17 @@
 import type { ArtworkBranch, ArtworkHistory, CheckMode, HistoryNode, NodeVerifyIssue } from "./types";
 
+/** 历史页的两个视图。页面切换状态与预览 hook 共用同一个联合类型。 */
+export type HistoryViewMode = "overview" | "branch";
+
+/**
+ * 节点卡片宽度的允许范围，单位像素。
+ *
+ * 总览的滑条用它限定可选值，`HistoryModule` 用它夹紧 `localStorage` 里读回的旧值；
+ * 两处必须一致，否则滑条会显示一个存不进去的宽度。
+ */
+export const HISTORY_NODE_WIDTH_MIN = 220;
+export const HISTORY_NODE_WIDTH_MAX = 420;
+
 export interface HistoryTreeNode {
   node: HistoryNode;
   children: HistoryTreeNode[];

@@ -666,7 +666,7 @@ C 组五档合计约 172 分钟；不含 `manual` 的四档约 50 分钟；整�
 九组轻量分组（cancel / crash / cleanup / damage / format / pin_board / authenticity /
 concurrency / input，合计约 30 秒）已进 Windows CI，随每次提交自动运行；其余分组（`stress_large` /
 `stress_scale` / `stress_bench`）只在发布前手动运行。`stress_baseline` 已于 2026-10-21 退役删除
-（它是 0.3 阶段 0 的一次性采集，历史数值见 `docs/planning/0.3-baseline-2026-10-18.md`）。
+（它是 0.3 阶段 0 的一次性采集，历史数值见 `docs/planning/archive/0.3-baseline-2026-10-18.md`）。
 本文 C 组的实测数字来自 2026-10-21 之前那几轮，之后新增的 C9（并行管道中间强杀）与 C10（4 MiB
 管道边界）尚未实际运行，因此上表没有它们的行。
 

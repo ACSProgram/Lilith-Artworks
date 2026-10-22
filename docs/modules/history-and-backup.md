@@ -4,7 +4,7 @@
 
 按问题只读取一条路径：
 
-- 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`。
+- 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；总览与时间轴：`HistoryOverview.tsx`；当前分支列表与「节点信息」栏：`HistoryBranchView.tsx`；节点格式/缩略图/悬停浮层状态：`useNodePreview.ts`；精简模式的选择集合：`useCompactSelection.ts`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`。
 - 工作区摘要（作品标题与分支列表）的非历史页兜底读取：`src/modules/history/useArtworkSummary.ts`；由 `src/app/ArtworkWorkspace.tsx` 在活动视图不是历史页且当前作品分支尚未加载时启用，只消费同一个 `history/api.ts`。
 - 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
@@ -17,7 +17,7 @@
 - `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。仅缩略图才需要的格式（`.sai2`、ZIP 容器、TGA 这类无魔数位图）在 `src-tauri/src/preview/` 内自行探测，不进 `format/container.rs`。
 - 节点缩略图抽取：`src-tauri/src/preview/`；只读传入的文件、按格式分派（提交时是工作文件，手动刷新时是 backup 物化到 `temp/` 的节点内容），失败只跳过预览，不改变提交或历史结果。
 - 运行进度、取消和调度：`src-tauri/src/backup/runtime.rs`、`scheduler.rs`（主循环、执行与完成事件）、`scheduler/policy.rs`（静默期、间隔、到期选择与快速检查阈值）、`scheduler/idle.rs`（空闲完整性检查与门控）；跨模块取消标志的唯一类型在 `src-tauri/src/cancel.rs`。
-- 设置持久化与托盘：`src-tauri/src/app/settings.rs`、`src-tauri/src/lib.rs`。
+- 设置持久化与托盘：`src-tauri/src/app/settings/`（`model` 设置文件、`service` revision/CAS、`state` 运行态与仓库租约、`window` 窗口几何、`commands` 命令与仓库准备）、`src-tauri/src/lib.rs`；前端弹窗外壳与分页见 `src/app/SettingsDialog.tsx` 与 `src/app/settings/`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -277,7 +277,7 @@ scan_repository_storage_disk
 | 损坏的 snapshot/delta 被内容级校验（`scrub`）发现；数据库级校验（`verify`）不读取文件内容因此仍通过；head snapshot 损坏后，内容未变化的提交直接返回「内容未变化」且不改写该文件；恢复损坏节点被拒绝且不留半成品 | `stress_damage` R1–R2（另有 `backup/worker.rs`、`backup/restore.rs` 单测） |
 | head snapshot 已损坏、工作文件内容又发生变化时，提交仍要打开旧快照生成反向增量，因此必须干净失败：错误可读（退出码 1、无 panic）、历史不推进、无新增 snapshot/delta、损坏文件不被改写或回收、仓库可重开、恢复旧节点仍被拒绝 | `stress_damage` R7 |
 | GUI、无头与维护入口的每次写操作先在同一进程的写入闸门里按优先级排队、再取跨进程 owner lock：同进程的第二个写者排队等待而不是与前者竞态，跨进程则仍拿到明确拒绝；锁由内核在句柄关闭时释放，因此强杀不残留，随后仍能取得锁。锁库与 owner 元数据不参与数据库发现、灾备复制或未引用文件判定 | `stress_concurrency` I1、I2；`repository_lock` 与 `library::repository` 单测 |
-| 写进程持 owner lock 期间只读命令仍作答并看到一致状态（含「快照已发布、事务未提交」的窗口）；并发读互不阻塞 | `stress_concurrency` J1、J2（跨进程）；`app/settings.rs` 单测（进程内长写持锁时的读租约） |
+| 写进程持 owner lock 期间只读命令仍作答并看到一致状态（含「快照已发布、事务未提交」的窗口）；并发读互不阻塞 | `stress_concurrency` J1、J2（跨进程）；`app/settings/state.rs` 单测（进程内长写持锁时的读租约） |
 | 主库文件本身（`lilith-artworks.sqlite3`）被误写或清空时，两层校验都干净失败并给出可行动的错误，且失败的打开不会把空文件重建为空仓库 | `stress_damage` R3–R4 |
 | 大文件提交在任意取消检查点被取消、或中途被强杀，都不留残留、历史不推进、可重试；强杀后 head 恢复逐字节一致 | `stress_large` C7 |
 | 大文件提交在**并行快照管道写到一半**时被强杀：不产生半成品 snapshot/delta，仓库可重开并通过校验，历史不推进；残留的临时文件不阻塞后续提交，head 恢复逐字节一致 | `stress_large` C9 |
@@ -310,7 +310,7 @@ scan_repository_storage_disk
 - 「当前分支」视图的「节点信息」栏在选中节点时按需读取该节点当前存储文件的 ChunkFile 头，显示 `ChunkFile v1` / `ChunkFile v2` 标签：节点持有 snapshot 时取快照，否则取与 `chunk_file_size` 相同口径的子边增量（多个子节点时取最小的一条），最后回退兼容列 `delta_path`。读取只消费文件前 10 个字节；delta 文件整体是 zstd 流，识别到 zstd 帧魔数后先流式解压出前 10 字节再判版本（`stored_format_label`），snapshot 则按明文读取。走只读命令 `get_history_node_format`，不新增 schema，也不进入历史图轮询；文件缺失或不可读时显示「未知」，不进入全局错误提示。
 - 同一个「节点信息」栏在选中节点时按需显示该节点的缩略图：命令 `get_history_node_thumbnail` 只读取该行的 `thumbnail` BLOB 并返回 data URL 与该格式是否支持缩略图；无预览、读取失败或节点已无缩略图时显示「无可用预览」和重新获取按钮，已有预览时同一按钮叠在预览右上角，便于替换旧的模糊缓存；格式不支持缩略图时整块预览区不显示。占位与刷新都不进入全局错误提示，也不触发 restore 或工作文件读取。刷新按钮经 `refresh_history_node_thumbnail` 从节点自身存储的内容重新抽取并写回；请求只随选中节点、历史刷新、悬停或用户点击发起，不进入图轮询。
 - 总览的节点卡片悬停时在卡片旁给出缩略图浮层（`NodePreview.tsx`）：有缩略图显示图片，没有但格式支持时显示「无可用预览」与刷新按钮，格式不支持时不出现浮层；当前分支视图不提供浮层，避免与「节点信息」栏重复。浮层与「节点信息」栏共用同一份按节点缓存的读取结果，刷新后同步更新两侧。
-- `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留页面选择、上下文菜单、确认窗口和视图渲染。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
+- `src/modules/history/useHistoryController.ts` 是历史前端状态与命令编排层，也是 `history/api.ts` 的唯一消费者；它负责请求代次、Artwork ID 校验、运行状态和 mutation 回填。运行状态由统一 `AppEvent` 即时唤醒：`history` / `backup` / `authenticity` 域的 `operationFinished` 与 `repositoryChanged` 会立刻读取共享状态，并在 `completionRevision` 推进时刷新历史；3 秒快照轮询保留为丢事件、启动恢复和后台调度任务的兜底（0.3 阶段 3 的口径）。`HistoryModule.tsx` 只保留视图切换、弹窗编排、节点卡片与确认流程；总览、时间轴、当前分支列表和「节点信息」栏拆到 `HistoryOverview.tsx` / `HistoryBranchView.tsx`，节点格式与缩略图缓存、悬停浮层由 `useNodePreview.ts` 管理，精简选择由 `useCompactSelection.ts` 管理。`ArtworkWorkspace.tsx` 不重复读取历史，只接收 controller 回推的 DTO，并用刷新版本通知历史页重新读取。
 - 发布、进入发布或取消发布完成后，工作区递增历史刷新版本并立即重新读取历史 DTO，发布标签和计数不等待运行状态轮询。
 - 节点卡片固定使用滑条给出的宽度并在所属子树内居中，父节点不会被多分支画布横向拉长；时间轴下沉节点的竖向连接线延伸到卡片顶部。
 - 窄布局下页面标题、分支选择、提交区和精简工具栏分行排列，长 Artwork 标题使用省略显示；未保存状态使用主题化警告色。

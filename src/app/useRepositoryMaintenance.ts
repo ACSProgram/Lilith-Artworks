@@ -36,11 +36,14 @@ export type SettingsOperation =
  */
 const SETTINGS_OPERATION_DOMAINS = new Set(["maintenance", "cleanup"]);
 
+/** 设置页长任务互斥提示：四个入口共用同一份文案，避免各写一遍。 */
+const SETTINGS_BUSY_MESSAGE = "已有备份操作正在运行，请等待完成或先取消当前操作。";
+
 /**
  * 设置页展示的「最近一次整仓备份」：命令返回的报告加上完成时间。本次运行的结果与
  * 数据库里的历史记录共用这一形状，避免两处各写一份字面量类型。
  */
-type RepositoryBackupResult = { report: RepositoryBackupReport; completedAtMs: number };
+export type RepositoryBackupResult = { report: RepositoryBackupReport; completedAtMs: number };
 
 export interface RepositoryMaintenance {
   settingsOperation: SettingsOperation | null;
@@ -209,7 +212,12 @@ export function useRepositoryMaintenance(
     if (event.type === "cleanupQueueChanged") void refreshPendingCleanup();
   }, { enabled: settings.settingsOpen && settings.repository.ready });
 
-  const scrubRepository = useCallback(async () => {
+  // 四个设置页长任务共用的前置流程：读取运行状态 → busy 拒绝 → 占位 → 清提示 →
+  // 执行 → 统一收尾。各入口只保留自己的命令调用、结果文案与成功副作用。
+  const runSettingsOperation = useCallback(async (
+    operation: SettingsOperation,
+    action: () => Promise<void>,
+  ): Promise<void> => {
     let current: BackupRuntimeStatus;
     try {
       current = await refreshRuntime();
@@ -218,12 +226,23 @@ export function useRepositoryMaintenance(
       return;
     }
     if (current.busy) {
-      notify("已有备份操作正在运行，请等待完成或先取消当前操作。");
+      notify(SETTINGS_BUSY_MESSAGE);
       return;
     }
-    setSettingsOperation("repository-scrub");
+    setSettingsOperation(operation);
     notify(null);
     try {
+      await action();
+    } catch (error) {
+      notify(errorMessage(error));
+    } finally {
+      setSettingsOperation(null);
+    }
+  }, [notify, refreshRuntime]);
+
+  const scrubRepository = useCallback(() => runSettingsOperation(
+    "repository-scrub",
+    async () => {
       const report = await appApi.scrubRepositoryIntegrity();
       const pinBoardIssues =
         report.pinBoardMissingDds + report.pinBoardCorruptDds + report.pinBoardOrphanDds;
@@ -232,12 +251,8 @@ export function useRepositoryMaintenance(
           ? `完整性检查完成，但发现画板 DDS 问题：缺失 ${report.pinBoardMissingDds}、损坏 ${report.pinBoardCorruptDds}、孤儿 ${report.pinBoardOrphanDds}（共 ${report.pinBoardBitmaps} 个画板位图）。`
           : `完整性检查通过：${report.historyNodes} 个历史节点、${report.finalArtifacts} 个最终成品、${report.certificationRecords} 条认证记录、${report.pinBoardBitmaps} 个画板位图。`,
       );
-    } catch (error) {
-      notify(errorMessage(error));
-    } finally {
-      setSettingsOperation(null);
-    }
-  }, [notify, refreshRuntime]);
+    },
+  ), [notify, runSettingsOperation]);
 
   const backupRepository = useCallback(async () => {
     const selected = await open({
@@ -246,20 +261,7 @@ export function useRepositoryMaintenance(
       title: "选择备份保存位置",
     });
     if (typeof selected !== "string") return;
-    let current: BackupRuntimeStatus;
-    try {
-      current = await refreshRuntime();
-    } catch (error) {
-      notify(errorMessage(error));
-      return;
-    }
-    if (current.busy) {
-      notify("已有备份操作正在运行，请等待完成或先取消当前操作。");
-      return;
-    }
-    setSettingsOperation("repository-backup");
-    notify(null);
-    try {
+    await runSettingsOperation("repository-backup", async () => {
       const report = await appApi.createRepositoryBackup(selected);
       setLastRepositoryBackup({ report, completedAtMs: Date.now() });
       const reclaimed = report.reclaimedStagingDirectories > 0
@@ -271,12 +273,8 @@ export function useRepositoryMaintenance(
       notify(
         `备份已校验：${report.fileCount} 个文件、${report.historyNodes} 个历史节点${reclaimed}${reclaimFailed}。恢复时选择 ${report.repositoryPath}`,
       );
-    } catch (error) {
-      notify(errorMessage(error));
-    } finally {
-      setSettingsOperation(null);
-    }
-  }, [notify, refreshRuntime]);
+    });
+  }, [notify, runSettingsOperation]);
 
   const refreshStorageOverview = useCallback(async () => {
     if (!settings.repository.ready) {
@@ -300,31 +298,15 @@ export function useRepositoryMaintenance(
     }
   }, [beginStorageRead, isStorageReadCurrent, settings.repository.ready]);
 
-  const scanStorageDisk = useCallback(async () => {
-    let current: BackupRuntimeStatus;
-    try {
-      current = await refreshRuntime();
-    } catch (error) {
-      notify(errorMessage(error));
-      return;
-    }
-    if (current.busy) {
-      notify("已有备份操作正在运行，请等待完成或先取消当前操作。");
-      return;
-    }
-    setSettingsOperation("storage-scan");
-    notify(null);
-    try {
+  const scanStorageDisk = useCallback(() => runSettingsOperation(
+    "storage-scan",
+    async () => {
       const scan = await appApi.scanRepositoryStorageDisk();
       setStorageDiskScan(scan);
       await refreshStorageOverview();
       notify(`磁盘占用扫描完成：${scan.fileCount} 个文件，共 ${formatBytes(scan.totalBytes)}。`);
-    } catch (error) {
-      notify(errorMessage(error));
-    } finally {
-      setSettingsOperation(null);
-    }
-  }, [notify, refreshRuntime, refreshStorageOverview]);
+    },
+  ), [notify, refreshStorageOverview, runSettingsOperation]);
 
   const retryCleanup = useCallback(async (ids: string[]) => {
     setCleanupBusy(true);
@@ -346,22 +328,10 @@ export function useRepositoryMaintenance(
     }
   }, [notify, refreshPendingCleanup]);
 
-  const scanUnreferenced = useCallback(async () => {
-    let current: BackupRuntimeStatus;
-    try {
-      current = await refreshRuntime();
-    } catch (error) {
-      notify(errorMessage(error));
-      return;
-    }
-    if (current.busy) {
-      notify("已有备份操作正在运行，请等待完成或先取消当前操作。");
-      return;
-    }
-    setSettingsOperation("unreferenced-scan");
-    setScanCandidates(null);
-    notify(null);
-    try {
+  const scanUnreferenced = useCallback(() => runSettingsOperation(
+    "unreferenced-scan",
+    async () => {
+      setScanCandidates(null);
       const candidates = await appApi.scanRepositoryUnreferenced();
       setScanCandidates(candidates);
       notify(
@@ -369,12 +339,8 @@ export function useRepositoryMaintenance(
           ? `垃圾文件扫描完成：发现 ${candidates.length} 个可清理文件，请确认后清理。`
           : "垃圾文件扫描完成：没有发现可清理的文件。",
       );
-    } catch (error) {
-      notify(errorMessage(error));
-    } finally {
-      setSettingsOperation(null);
-    }
-  }, [notify, refreshRuntime]);
+    },
+  ), [notify, runSettingsOperation]);
 
   const purgeScanCandidates = useCallback(async () => {
     if (!scanCandidates || scanCandidates.length === 0) return;
