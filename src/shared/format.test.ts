@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes } from "./format";
+import { fileName, formatBytes } from "./format";
+
+describe("fileName", () => {
+  it("keeps only the last path segment for either separator style", () => {
+    expect(fileName("C:\\artworks\\final.png")).toBe("final.png");
+    expect(fileName("/home/user/final.png")).toBe("final.png");
+  });
+
+  it("falls back to the input when no separator is present", () => {
+    expect(fileName("final.png")).toBe("final.png");
+    expect(fileName("")).toBe("");
+  });
+});
 
 describe("formatBytes", () => {
   it("formats binary units with stable precision", () => {

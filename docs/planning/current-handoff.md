@@ -8,29 +8,33 @@
 
 ## 当前批次状态
 
-2026-10-22 0.3 收尾与认证整改第五批（已实现、自动验证通过并提交）：
+2026-10-22 0.3 收尾与认证整改第六批（已实现、自动验证通过并提交）：
 
-- 删除认证后端 `pipeline.rs`，按职责拆为发布、渲染、预览、识别、导出、估算与文件操作模块；
-  `commands.rs` 只保留参数/路径授权校验与读取命令的薄适配，预览、导出与估算经
-  `app/usecases/authenticity.rs` 进入领域模块。
-- 文件复制、缩略图、成品/认证副本路径、扩展名→MIME 与清单声明比对各只有一处实现；发布直接
-  返回 `PublishResult`，删除无消费者的 `watermarkRegionCount`。
-- 识别在 TrustMark 模型不可用时只读取 C2PA 清单、不解码整图；区域解码不再复制整幅
-  `DynamicImage`；模型摘要改为固定缓冲流式读取。
-- 测试夹具收进 `#[cfg(test)] authenticity/test_support`；缓存、tile、发布、识别、导出与估算
-  的用例随实现迁移，并补上模型不可用路径与文件不覆盖发布的断言。
+- 认证前端拆为 `PublicationView` / `IdentificationView` 两个页面，以及 `RecordView`、
+  `RecordList`、`RegionEditor`、`PublicationPreviewDialog`；`ArtworkWorkspace` 直接挂载
+  发布页或识别页，`AuthenticityModule.tsx` 删除。
+- 控制器拆为 `usePublicationController` / `useIdentificationController`，共享签名配置与
+  PEM 规范化移到 `publicationStorage.ts`；识别预览、解码与记录搜索改用共享
+  `useRequestEpoch` 请求代次。
+- 质量预览与签名发布共用 `useAuthenticityOperation` 的取消状态机，可见文案与提示时序不变；
+  补了取消、导出与识别乱序响应的定向测试。
+- `api.ts` 只由两个 controller 消费；模块文档、架构入口文档与 `CHANGELOG.md` 的
+  `Unreleased` 已同步。
+- 提交前做了一次收尾整理：路径取文件名与错误文案收敛到共享 `fileName` / `errorMessage`，
+  删掉 `RegionEditor` 里永不为真的空值判断与识别解码里已被请求代次覆盖的路径比较，并给
+  拆出的组件补上具名 props 接口；分支列表三态提示抽成 `BranchStateNotice`。
 
 计划与逐批验证记录见 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 13 节。
-第一至第五批已提交；第六批未开始。
+第一至第六批均已提交。
 
-第三批界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）只做了自动验证与现有
-组件测试，标注为**待人工验收**，验收项在 `todo.md`。
+第三批界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）与第六批界面部分
+（发布/识别页、取消时序、局部图与放大镜、只读记录、拖放导入）只做了自动验证与现有组件
+测试，标注为**待人工验收**，验收项在 `todo.md`。
 
 ## 下一步
 
-- 第六批（认证前端拆分、边界收口与文档同步）待开始。
-- 第三批界面验收：历史总览/当前分支视图切换、精简模式选择与二段确认、节点悬停与缩略图刷新、
-  设置六页的保存/取消/滚动与空间页确认弹窗；验收项见 `todo.md`。
+- 人工验收第三批与第六批的界面行为；验收项见 `todo.md`。
+- 第三批与第六批的验收记录在通过后归档。
 - 第一、二批遗留的人工确认（备份页持久化记录、仓库切换清空）见 `todo.md`。
 - 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
   `docs/guides/release-policy.md`。

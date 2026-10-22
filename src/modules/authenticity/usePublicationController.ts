@@ -1,16 +1,22 @@
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { errorMessage } from "../../shared/errors";
 import type { CleanupFailure, CleanupReport } from "../../shared/fileCleanup";
+import { fileName } from "../../shared/format";
 import { useAsyncOperation } from "../../shared/useAsyncOperation";
 import { useRequestEpoch } from "../../shared/useRequestEpoch";
 import { authenticityApi } from "./api";
+import {
+  clearSharedSigning,
+  loadSharedSigning,
+  privateKeyPem,
+  saveSharedSigning,
+} from "./publicationStorage";
 import type {
   AuthenticityBranch,
   BranchPublication,
   CertificationConfig,
   CertificationRecord,
-  DecodeResult,
-  NormalizedRegion,
   OutputPreviewTileSource,
   PreviewImage,
   PublicationPreview,
@@ -18,34 +24,7 @@ import type {
 } from "./types";
 import { publicationPreviewError, publicationPreviewSignature } from "./publicationValidation";
 import type { TileRequest } from "./previewTile";
-
-const SHARED_SIGNING_KEY = "lilith-artworks.certification-signing-v1";
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function privateKeyPem(value: string): string {
-  const trimmed = value.trim();
-  const pem = trimmed.match(/-----BEGIN ([A-Z0-9 ]*PRIVATE KEY)-----([\s\S]*?)-----END \1-----/i);
-  const label = pem?.[1]?.toUpperCase() || "PRIVATE KEY";
-  const body = (pem?.[2] || trimmed).replace(/\s+/g, "");
-  const lines = body.match(/.{1,64}/g)?.join("\n") || "";
-  return `-----BEGIN ${label}-----\n${lines}\n-----END ${label}-----`;
-}
-
-function loadSharedSigning(): Partial<CertificationConfig> {
-  try { return JSON.parse(localStorage.getItem(SHARED_SIGNING_KEY) ?? "{}"); }
-  catch { return {}; }
-}
-
-function saveSharedSigning(config: CertificationConfig) {
-  localStorage.setItem(SHARED_SIGNING_KEY, JSON.stringify({
-    certificatePath: config.certificatePath,
-    signingAlgorithm: config.signingAlgorithm,
-    timestampUrl: config.timestampUrl,
-  }));
-}
+import { useAuthenticityOperation } from "./useAuthenticityOperation";
 
 interface PublicationControllerOptions {
   artworkTitle: string;
@@ -79,7 +58,6 @@ export function usePublicationController({
   const [outputPreviewOpen, setOutputPreviewOpen] = useState(false);
   const [outputPreviewBusy, setOutputPreviewBusy] = useState(false);
   const [publishing, setPublishing] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [watermarkId, setWatermarkId] = useState("");
   const [busy, setBusy] = useState(false);
@@ -113,11 +91,6 @@ export function usePublicationController({
   } = useRequestEpoch();
   const { busy: exporting, run: runExport } = useAsyncOperation();
   const { busy: deletingRecord, run: runDeleteRecord } = useAsyncOperation();
-  const activeOperation = useRef(false);
-  const activeOperationKind = useRef<"preview" | "publish" | null>(null);
-  const cancellationNotice = useRef<"preview" | "publish" | null>(null);
-  const completedCancellation = useRef<"preview" | "publish" | null>(null);
-  const operationCancelRequested = useRef(false);
   const selectedBranchIdRef = useRef(selectedBranchId);
   const configRef = useRef(config);
   const watermarkIdRef = useRef(watermarkId);
@@ -125,6 +98,23 @@ export function usePublicationController({
   configRef.current = config;
   watermarkIdRef.current = watermarkId;
   const selectedBranch = branches.find((branch) => branch.id === selectedBranchId) ?? null;
+  const resetOperationBusy = useCallback(() => {
+    setOutputPreviewBusy(false);
+    setPublishing(false);
+  }, []);
+  const {
+    cancelling,
+    isActive: isOperationActive,
+    isCancelRequested,
+    begin: beginOperation,
+    finish: finishOperation,
+    resetCancelling: resetOperationCancelling,
+    cancel: cancelAuthenticityOperation,
+  } = useAuthenticityOperation({
+    onError,
+    cancelOperation: authenticityApi.cancelOperation,
+    onCancelRejected: resetOperationBusy,
+  });
 
   const applyPublication = useCallback((next: BranchPublication) => {
     setPublication(next);
@@ -150,7 +140,7 @@ export function usePublicationController({
     } catch (error) {
       if (isArtifactPreviewCurrent(requestId)
         && selectedBranchIdRef.current === branchId) {
-        setArtifactPreviewError(message(error));
+        setArtifactPreviewError(errorMessage(error));
       }
     } finally {
       if (isArtifactPreviewCurrent(requestId)) setArtifactPreviewBusy(false);
@@ -177,7 +167,7 @@ export function usePublicationController({
       }
     } catch (error) {
       if (isLoadCurrent(requestId) && selectedBranchIdRef.current === branchId) {
-        onError(message(error));
+        onError(errorMessage(error));
       }
     } finally {
       if (isLoadCurrent(requestId)) setBusy(false);
@@ -204,7 +194,7 @@ export function usePublicationController({
     setOutputPreviewOpen(false);
     setOutputPreviewBusy(false);
     setPublishing(false);
-    setCancelling(false);
+    resetOperationCancelling();
     invalidateOutputPreview();
     setViewingRecord(null);
     setResult(null);
@@ -213,11 +203,13 @@ export function usePublicationController({
     setBusy(Boolean(selectedBranchId));
     void load();
     return invalidateLoad;
-  }, [invalidateArtifactPreview, invalidateLoad, invalidateOutputPreview, load, selectedBranchId]);
+  }, [invalidateArtifactPreview, invalidateLoad, invalidateOutputPreview, load, resetOperationCancelling, selectedBranchId]);
 
+  // 切换分支或卸载时中断仍在运行的质量预览/签名任务；`selectedBranchId` 进入依赖
+  // 就是为了在切换那一刻触发一次清理。
   useEffect(() => () => {
-    if (activeOperation.current) void authenticityApi.cancelOperation();
-  }, [selectedBranchId]);
+    if (isOperationActive()) void authenticityApi.cancelOperation();
+  }, [isOperationActive, selectedBranchId]);
 
   useEffect(() => {
     if (config && (!config.trustmarkEnabled || config.additionalRegions.length === 0)) {
@@ -275,7 +267,7 @@ export function usePublicationController({
         if (isViewingCurrent(requestId)) setViewingPreview(next);
       })
       .catch((error) => {
-        if (isViewingCurrent(requestId)) onError(message(error));
+        if (isViewingCurrent(requestId)) onError(errorMessage(error));
       });
     return invalidateViewing;
   }, [beginViewing, invalidateViewing, isViewingCurrent, onError, viewingRecord]);
@@ -301,7 +293,7 @@ export function usePublicationController({
         onPublicationChanged?.() ?? Promise.resolve(),
       ]);
     } catch (error) {
-      if (isLoadCurrent(requestId)) onError(message(error));
+      if (isLoadCurrent(requestId)) onError(errorMessage(error));
     } finally {
       if (isLoadCurrent(requestId)) setBusy(false);
     }
@@ -346,11 +338,7 @@ export function usePublicationController({
     const branchId = selectedBranch.id;
     const signature = publicationPreviewSignature(config, watermarkId);
     const requestId = beginOutputPreview();
-    operationCancelRequested.current = false;
-    cancellationNotice.current = null;
-    completedCancellation.current = null;
-    activeOperation.current = true;
-    activeOperationKind.current = "preview";
+    beginOperation("preview");
     setOutputPreviewBusy(true);
     setOutputPreview(null);
     onError(null);
@@ -369,28 +357,20 @@ export function usePublicationController({
       setOutputPreview(next);
       setOutputPreviewOpen(true);
     } catch (error) {
-      if (isOutputPreviewCurrent(requestId) && !operationCancelRequested.current) {
-        onError(message(error));
+      if (isOutputPreviewCurrent(requestId) && !isCancelRequested()) {
+        onError(errorMessage(error));
       }
-      cancelled = operationCancelRequested.current;
+      cancelled = isCancelRequested();
     } finally {
-      activeOperation.current = false;
-      activeOperationKind.current = null;
       if (isOutputPreviewCurrent(requestId)) setOutputPreviewBusy(false);
-      setCancelling(false);
-      operationCancelRequested.current = false;
-      if (cancelled && cancellationNotice.current === "preview") {
-        cancellationNotice.current = null;
-        onError("质量预览已取消。");
-      } else if (cancelled) {
-        completedCancellation.current = "preview";
-      } else {
-        cancellationNotice.current = null;
-      }
+      finishOperation("preview", cancelled);
     }
   }, [
+    beginOperation,
     beginOutputPreview,
     config,
+    finishOperation,
+    isCancelRequested,
     isOutputPreviewCurrent,
     onError,
     privateKey,
@@ -398,38 +378,6 @@ export function usePublicationController({
     selectedBranch,
     watermarkId,
   ]);
-
-  const cancelAuthenticityOperation = useCallback(async () => {
-    const operationKind = activeOperationKind.current;
-    operationCancelRequested.current = true;
-    setCancelling(true);
-    try {
-      const accepted = await authenticityApi.cancelOperation();
-      if (accepted && operationKind) {
-        if (completedCancellation.current === operationKind) {
-          completedCancellation.current = null;
-          onError(operationKind === "preview" ? "质量预览已取消。" : "签名发布已取消。");
-        } else if (activeOperationKind.current === operationKind) {
-          cancellationNotice.current = operationKind;
-        }
-      } else {
-        activeOperation.current = false;
-        activeOperationKind.current = null;
-        operationCancelRequested.current = false;
-        cancellationNotice.current = null;
-        completedCancellation.current = null;
-        setOutputPreviewBusy(false);
-        setPublishing(false);
-        setCancelling(false);
-      }
-    } catch (error) {
-      operationCancelRequested.current = false;
-      cancellationNotice.current = null;
-      completedCancellation.current = null;
-      setCancelling(false);
-      onError(message(error));
-    }
-  }, [onError]);
 
   const publish = useCallback(async () => {
     if (!selectedBranch || !config) return;
@@ -450,14 +398,9 @@ export function usePublicationController({
     });
     if (!outputPath) return;
     const branchId = selectedBranch.id;
+    beginOperation("publish");
     setBusy(true);
     setPublishing(true);
-    setCancelling(false);
-    operationCancelRequested.current = false;
-    cancellationNotice.current = null;
-    completedCancellation.current = null;
-    activeOperation.current = true;
-    activeOperationKind.current = "publish";
     setResult(null);
     setPublishMetrics(null);
     onError(null);
@@ -483,25 +426,14 @@ export function usePublicationController({
       await onPublicationChanged?.();
     } catch (error) {
       setOutputPreviewOpen(false);
-      if (!operationCancelRequested.current) onError(message(error));
-      cancelled = operationCancelRequested.current;
+      if (!isCancelRequested()) onError(errorMessage(error));
+      cancelled = isCancelRequested();
     } finally {
-      activeOperation.current = false;
-      activeOperationKind.current = null;
       setPublishing(false);
-      setCancelling(false);
       if (selectedBranchIdRef.current === branchId) setBusy(false);
-      operationCancelRequested.current = false;
-      if (cancelled && cancellationNotice.current === "publish") {
-        cancellationNotice.current = null;
-        onError("签名发布已取消。");
-      } else if (cancelled) {
-        completedCancellation.current = "publish";
-      } else {
-        cancellationNotice.current = null;
-      }
+      finishOperation("publish", cancelled);
     }
-  }, [artworkTitle, config, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
+  }, [artworkTitle, beginOperation, config, finishOperation, isCancelRequested, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
 
   const cancelPublication = useCallback(async () => {
     if (!selectedBranch) return;
@@ -513,7 +445,7 @@ export function usePublicationController({
       if (report.failures.length > 0) {
         onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
       }
-      localStorage.removeItem(SHARED_SIGNING_KEY);
+      clearSharedSigning();
       if (selectedBranchIdRef.current === branchId) {
         setDeleteConfirmOpen(false);
         setPublication(null);
@@ -529,7 +461,7 @@ export function usePublicationController({
       }
       await onPublicationChanged?.();
     } catch (error) {
-      onError(message(error));
+      onError(errorMessage(error));
     } finally {
       if (selectedBranchIdRef.current === branchId) setBusy(false);
     }
@@ -544,7 +476,7 @@ export function usePublicationController({
       setCleanupFailures(report.failures);
       if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
     } catch (error) {
-      onError(message(error));
+      onError(errorMessage(error));
     } finally {
       setBusy(false);
     }
@@ -587,7 +519,7 @@ export function usePublicationController({
 
   const exportRecord = useCallback(async (record: CertificationRecord) => {
     const outputPath = await save({
-      defaultPath: record.outputPath.split(/[\\/]/).pop() || record.outputPath,
+      defaultPath: fileName(record.outputPath),
       filters: [{ name: "JPEG", extensions: ["jpg", "jpeg"] }],
     });
     if (!outputPath) return;
@@ -595,7 +527,7 @@ export function usePublicationController({
     try {
       await runExport(
         () => authenticityApi.exportRecord(record.id, outputPath),
-        { onError: (error) => onError(message(error)) },
+        { onError: (error) => onError(errorMessage(error)) },
       );
     } catch {
       // 错误已由 onError 提示。
@@ -615,7 +547,7 @@ export function usePublicationController({
           setViewingRecord(null);
           await load();
         }
-      }, { onError: (error) => onError(message(error)) });
+      }, { onError: (error) => onError(errorMessage(error)) });
     } catch {
       // 错误已由 onError 提示。
     }
@@ -664,136 +596,5 @@ export function usePublicationController({
     exportRecord,
     deletingRecord,
     deleteRecord,
-  };
-}
-
-interface IdentificationControllerOptions {
-  onError: (message: string | null) => void;
-}
-
-export function useIdentificationController({ onError }: IdentificationControllerOptions) {
-  const [path, setPath] = useState("");
-  const [preview, setPreview] = useState<PreviewImage | null>(null);
-  const [region, setRegion] = useState<NormalizedRegion | null>(null);
-  const [result, setResult] = useState<DecodeResult | null>(null);
-  const [query, setQuery] = useState("");
-  const [records, setRecords] = useState<CertificationRecord[]>([]);
-  const [previewBusy, setPreviewBusy] = useState(false);
-  const [decodeBusy, setDecodeBusy] = useState(false);
-  const [searching, setSearching] = useState(false);
-  const previewRequest = useRef(0);
-  const decodeRequest = useRef(0);
-  const searchRequest = useRef(0);
-
-  const applyPreview = useCallback(async (selected: string, requestId: number) => {
-    try {
-      const nextPreview = await authenticityApi.previewExternal(selected);
-      if (requestId !== previewRequest.current) return;
-      setPath(selected);
-      setPreview(nextPreview);
-      setRegion(null);
-      setResult(null);
-    } catch (error) {
-      if (requestId === previewRequest.current) onError(message(error));
-    } finally {
-      if (requestId === previewRequest.current) setPreviewBusy(false);
-    }
-  }, [onError]);
-
-  const choose = useCallback(async () => {
-    const selected = await open({
-      multiple: false,
-      filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }],
-    });
-    if (typeof selected !== "string") return;
-    const requestId = ++previewRequest.current;
-    decodeRequest.current += 1;
-    setPreviewBusy(true);
-    await applyPreview(selected, requestId);
-  }, [applyPreview]);
-
-  // 拖放导入：前端读取原始字节后由后端落到系统临时目录并授权，再走同一条外部
-  // 图片预览路径，因此识别仍使用受控的文件路径。
-  const importDropped = useCallback(async (fileName: string, dataBase64: string) => {
-    const requestId = ++previewRequest.current;
-    decodeRequest.current += 1;
-    setPreviewBusy(true);
-    onError(null);
-    try {
-      const staged = await authenticityApi.stageDroppedImage({ fileName, dataBase64 });
-      if (requestId !== previewRequest.current) return;
-      await applyPreview(staged, requestId);
-    } catch (error) {
-      if (requestId === previewRequest.current) {
-        setPreviewBusy(false);
-        onError(message(error));
-      }
-    }
-  }, [applyPreview, onError]);
-
-  const decode = useCallback(async () => {
-    if (!path) return;
-    const requestId = ++decodeRequest.current;
-    const inputPath = path;
-    const inputRegion = region;
-    setDecodeBusy(true);
-    onError(null);
-    try {
-      const next = await authenticityApi.decode(inputPath, inputRegion);
-      if (requestId === decodeRequest.current && inputPath === path) setResult(next);
-    } catch (error) {
-      if (requestId === decodeRequest.current) onError(message(error));
-    } finally {
-      if (requestId === decodeRequest.current) setDecodeBusy(false);
-    }
-  }, [onError, path, region]);
-
-  const searchRecords = useCallback(async () => {
-    const requestId = ++searchRequest.current;
-    const requestedQuery = query.trim();
-    if (!requestedQuery) {
-      setRecords([]);
-      setSearching(false);
-      return;
-    }
-    setSearching(true);
-    try {
-      const next = await authenticityApi.searchRecords(requestedQuery);
-      if (requestId === searchRequest.current) setRecords(next);
-    } catch (error) {
-      if (requestId === searchRequest.current) onError(message(error));
-    } finally {
-      if (requestId === searchRequest.current) setSearching(false);
-    }
-  }, [onError, query]);
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => { void searchRecords(); }, 220);
-    return () => window.clearTimeout(timer);
-  }, [searchRecords]);
-
-  // 框选放大镜：识别页的取样源是待识别图片本身（仓库之外的外部文件），
-  // 由后端按同一条路径授权检查访问。
-  const previewLoupe = useCallback((tile: TileRequest) => {
-    if (!path) return Promise.reject(new Error("尚未选择待识别图片"));
-    return authenticityApi.previewTile({ source: "external", cacheToken: null, branchId: null, path, ...tile });
-  }, [path]);
-
-  return {
-    path,
-    preview,
-    region,
-    setRegion,
-    result,
-    query,
-    setQuery,
-    records,
-    busy: previewBusy || decodeBusy,
-    searching,
-    choose,
-    importDropped,
-    decode,
-    searchRecords,
-    previewLoupe,
   };
 }

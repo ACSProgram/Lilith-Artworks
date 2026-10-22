@@ -33,8 +33,10 @@
   `OperationCoordinator` 与 `CommandContext`，业务入口放在 `src-tauri/src/app/usecases/`，
   GUI 与 headless 共享；跨领域流程仍由 `src-tauri/src/app/workflows.rs` 的适配器编排。
   领域模块只暴露单领域服务。
-- History、Library、Authenticity、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费，
-  页面组件不直接调用命令。controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，
+- History、Library、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费；Authenticity 的
+  `api.ts` 只由 `usePublicationController.ts` 与 `useIdentificationController.ts` 消费，质量预览
+  与签名发布共用一个活动任务取消状态机（`useAuthenticityOperation.ts`），页面组件不直接调用命令。
+  controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，
   busy 与错误上报来自 `useAsyncOperation.ts`（素材板的传输忙碌由传输流程自己持有），
   事件只经 `src/shared/useRuntimeSubscription.ts` 订阅，不各自 `listen`。
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
@@ -44,7 +46,8 @@
 - `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `run_read`，
   变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
   DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。
-- `authenticity` 通过公开的 history/backup 能力建立检查点，不导入 library 内部。
+- 认证发布检查点由 `src-tauri/src/app/usecases/authenticity.rs` 调用公开的
+  `backup::ensure_checkpoint` 建立；`authenticity` 模块本身不导入 backup、不读取 `chunk_file/`。
 - 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经
   `repository.rs`，节点校验状态经 `verification_repository.rs`，调度候选与分支状态经
   `schedule_repository.rs`。

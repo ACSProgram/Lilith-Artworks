@@ -57,6 +57,15 @@ entries for the reader; they are not a template every entry has to fill.
   frontend type. Typed authenticity errors now map to stable command error
   kinds, while errors that still arrive as strings keep the classification
   they had.
+- Split the authenticity frontend into a publication view, an identification
+  view, shared record/region/preview components and two controllers.
+  Shared signing storage and PEM normalization moved to
+  `publicationStorage.ts`, and the identification controller now uses the
+  shared request epochs for preview, decode and search. Quality-preview and
+  publication cancellation share one operation state machine, so the
+  "cancelled" notice is reported once whether the task or the cancel request
+  finishes first. Path basenames and error text come from the shared
+  `fileName` and `errorMessage` helpers instead of module-local copies.
 
 ### Fixed
 

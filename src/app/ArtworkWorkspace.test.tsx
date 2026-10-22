@@ -11,11 +11,15 @@ vi.mock("../modules/history/HistoryModule", () => ({
 
 vi.mock("../modules/history/api", () => ({ historyApi }));
 
-vi.mock("../modules/authenticity/AuthenticityModule", () => ({
-  AuthenticityModule: (props: { mode: string }) => {
+vi.mock("../modules/authenticity/PublicationView", () => ({
+  PublicationView: (props: unknown) => {
     captured.latest = props;
-    return <div data-testid={`${props.mode}-module`} />;
+    return <div data-testid="publish-module" />;
   },
+}));
+
+vi.mock("../modules/authenticity/IdentificationView", () => ({
+  IdentificationView: () => <div data-testid="identify-module" />,
 }));
 
 const pinBoardSettings = {

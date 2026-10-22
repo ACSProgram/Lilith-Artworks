@@ -3,9 +3,10 @@
 ## 上下文入口
 
 - Artwork 级页面切换与跨作品跳转：`src/app/App.tsx`、`src/app/ArtworkWorkspace.tsx`；Library 只接收应用层转换后的导航目标。
-- 发布、局部范围和识别 UI：`src/modules/authenticity/AuthenticityModule.tsx`，样式只读 `src/styles/authenticity.css`。
-- 发布/识别状态、命令、预览、搜索和请求代次：`src/modules/authenticity/useAuthenticityController.ts`。
-- 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由 controller 消费。
+- 发布 UI：`PublicationView.tsx`（发布页、取消发布与记录列表）、`RecordView.tsx`（只读记录）、`PublicationPreviewDialog.tsx`（质量预览对话框）；样式只读 `src/styles/authenticity.css`。
+- 识别 UI：`IdentificationView.tsx`；发布页、识别结果与记录搜索共用的记录列表是 `RecordList.tsx`，发布、识别与只读记录共用的框选组件是 `RegionEditor.tsx`，放大镜是 `RegionLoupe.tsx` + `loupe.ts`；预览几何与局部图纯函数在 `previewViewport.ts`、`previewTile.ts`。
+- 发布状态、预览、发布、导出与删除：`usePublicationController.ts`；识别预览、解码与记录搜索：`useIdentificationController.ts`；两者共用的活动任务取消状态机：`useAuthenticityOperation.ts`；共享签名配置与 PEM 规范化：`publicationStorage.ts`。
+- 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由上述两个 controller 消费。
 - 发布编排、签名后清单核对与失败回滚：`src-tauri/src/authenticity/publish.rs`；最终成品固化：`src-tauri/src/authenticity/artifact.rs`（`store_final_artifact`）。
 - 渲染与预览：`src-tauri/src/authenticity/rendition.rs`（配置归一化、缓存令牌、合成/编码）与 `src-tauri/src/authenticity/preview/`（`quality.rs` 质量预览、`tile.rs` 高清局部、`thumbnail.rs` 固定尺寸缩略图）。
 - 识别：`src-tauri/src/authenticity/decode.rs`（C2PA 回读、TrustMark 区域解码与候选合并）；导出与大小估算：`export.rs`、`estimate.rs`；复制、不覆盖发布与摘要：`file_ops.rs`。
@@ -99,7 +100,7 @@ cancel_authenticity_operation
 ## 前端交互约定
 
 - Authenticity 不直接导入 App、Library 或 History。应用层传入只含 `id`、`title`、`headHistoryId` 的认证分支视图，注入清理重试，并把认证记录转换为 Library 导航目标。
-- `useAuthenticityController.ts` 是 `authenticity/api.ts` 的唯一消费者；发布页和识别页只渲染控制器状态。发布状态、成品预览、记录预览、大小估算、识别和记录搜索分别使用共享 `useRequestEpoch` 的请求代次，分支或输入变化后旧响应不会回填当前页面；导出与删除记录的 busy/错误走共享 `useAsyncOperation`，错误先接到统一提示通道再原样抛给调用方。
+- `usePublicationController.ts` 与 `useIdentificationController.ts` 是 `authenticity/api.ts` 仅有的消费者；`PublicationView` 与 `IdentificationView` 只渲染控制器状态，不自行调用命令。发布状态、成品预览、记录预览、大小估算、识别预览/解码与记录搜索分别使用共享 `useRequestEpoch` 的请求代次，分支或输入变化后旧响应不会回填当前页面；导出与删除记录的 busy/错误走共享 `useAsyncOperation`，错误先接到统一提示通道再原样抛给调用方。质量预览与签名发布共享 `useAuthenticityOperation` 的活动任务生命周期：取消请求先被接受、任务随后结束时由任务收尾报告「质量预览已取消。」/「签名发布已取消。」；任务先于取消请求结束时由取消入口报告同一条提示，正常完成不会误报为已取消。
 - 取消发布与删除记录的确认弹窗统一走共享 `ConfirmDialog`，模块内不再有手写的同类弹窗标记；两个入口的文案、危险样式与页脚布局由共享组件决定，不可逆的那一个（取消发布）额外走滑动确认。两者都是一步到位的短操作、底层没有取消检查点（`app/workflows.rs` 在共享运行锁内一次事务 + 一次清理重放），因此**确认后立即关窗**，不把弹窗留在运行态：共享控件的 `busy` 契约规定，不可中断的操作不应提供「取消操作」入口，否则就变成点了不生效的假取消（见 `docs/architecture/overview.md` 的「前端共享控件」）。
 - 当前分支由 `ArtworkWorkspace` 统一持有；历史页和发布页共用同一选择，任一页面切换分支都会同步到另一页面。发布、进入发布和取消发布后刷新 Artwork 工作区分支数据，发布状态与当前内容保持同步。识别/搜索结果跳转携带单调递增的导航代次；即使目标仍是同一 Artwork 或同一记录，也会重新切到发布页并选择目标分支，同时保留已经加载的分支列表。
 - 工作区分支数据有两条来源：历史页回调，以及应用层在「活动视图不是历史页且当前作品的分支尚未加载」时发起的工作区摘要读取（`src/modules/history/useArtworkSummary.ts`，同样只消费 `history/api.ts`）。因此直接以发布/识别视图进入不再依赖历史页挂载：加载期间发布页显示「读取分支历史…」并禁用分支选择，失败时显示内联错误与重试入口；只有加载完成且确实没有分支时才显示「此 Artwork 尚无分支。」。跳转携带的 `branchId` 在摘要到达后被保留，只有该分支已不存在时才回退到首个分支。
@@ -113,7 +114,7 @@ cancel_authenticity_operation
 - 识别区域支持撤销并恢复整图识别；识别结果继续提供匹配记录与记录搜索。
 - 识别页支持把外部图片拖入左侧预览面板导入：前端用 `FileReader` 读取原始字节，经 `stage_authenticity_input` 落到系统临时目录（仓库之外）并加入 filesystem scope，再走与文件选择器相同的外部图片预览与识别流程；只接受 PNG、JPEG、WebP、TIFF，拖放失败以统一操作提示报告，拖放期间显示覆盖提示。应用层统一取消窗口级 `dragover`/`drop` 默认行为，避免拖入文件时 WebView 导航到该文件。
 - 拖放暂存的落盘目录是 `%TEMP%/lilith-artworks-drop-<UUID>`（`authenticity/drop_stage.rs`），生命周期三条：首次落盘才创建；进程退出（确认退出与兜底强退都算）时整目录删除；进程被强杀留下的目录由下一次启动按 10 分钟宽限期清扫。清扫只认「前缀 + 合法 UUID」的目录名，手工放在系统临时目录里的同名条目不动。因此暂存目录不会随启动次数静默累积。
-- 图片预览、识别和记录搜索均使用独立请求序号丢弃乱序响应；识别 busy 与记录搜索 busy 独立，后台搜索不会解除或阻塞正在进行的图片识别。
+- 图片预览、识别和记录搜索各自使用共享 `useRequestEpoch` 的请求代次丢弃乱序响应；识别 busy 与记录搜索 busy 独立，后台搜索不会解除或阻塞正在进行的图片识别。
 - 发布预览和识别预览的文件标题栏使用固定内容高度，图片舞台独占剩余空间；超大分辨率图片不能拉高标题栏。
 - 只读记录中的输出路径、Manifest 标签和 SHA-256 允许完整换行，不用省略号隐藏校验信息；窄布局下危险区改为纵向排列，长 Artwork 标题在操作按钮前省略。
 - 警告文本使用主题变量，在浅色与深色主题分别保持可读对比度。

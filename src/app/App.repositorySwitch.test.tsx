@@ -72,8 +72,11 @@ vi.mock("../modules/history/HistoryModule", () => ({
     </div>
   ),
 }));
-vi.mock("../modules/authenticity/AuthenticityModule", () => ({
-  AuthenticityModule: () => null,
+vi.mock("../modules/authenticity/PublicationView", () => ({
+  PublicationView: () => null,
+}));
+vi.mock("../modules/authenticity/IdentificationView", () => ({
+  IdentificationView: () => null,
 }));
 
 import { App } from "./App";
