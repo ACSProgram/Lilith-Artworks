@@ -7,6 +7,17 @@
 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 14 节（该计划已随第七批的收尾
 整理归档）；第四批的摘要已随该批提交移入本文件（见下），第一批的人工验收通过记录见文末。
 
+## 历史节点缩略图悬停预览交互调整（已提交）
+
+2026-10-22：历史总览的节点缩略图浮层改为「静止判定 + 粘性会话」：首次需在同一卡片内基本
+静止 300ms 才出现，移动中不触发也不读取缩略图；出现后离开卡片不关闭，会话内切换节点立即
+生效（阈值 0）；离开所有卡片 500ms、按 Esc、点击空白、滚动、切视图或打开右键菜单时收起，
+滚动结束后 250ms 内不触发。缩略图先离屏解码取得原始宽高，再按最长边不超过 280×216 等比
+决定浮层尺寸并以 100ms 交叉淡入替换旧图；浮层主体 `pointer-events: none`，不拦截相邻卡片
+的悬停，只有刷新按钮可点。维护者已实测确认手感与显示范围；自动验证为 `tsc --noEmit` 与
+`vitest run src/modules/history/HistoryModule.test.tsx`。当前契约见
+`../../modules/history-and-backup.md`，行为变化见 `CHANGELOG.md` 的 `Unreleased`。
+
 ## 0.3 收尾与认证整改第四批（已提交）
 
 发布质量预览的高清局部图请求移回 `usePublicationController.previewOutputTile`：`compressed`

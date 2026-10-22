@@ -80,9 +80,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     nodeFormat,
     nodeThumbnail,
     hover,
-    showHoverPreview,
+    hoverRefreshingNodeId,
+    handleNodeEnter,
+    handleNodeMove,
     scheduleHoverClose,
-    clearHoverTimer,
+    cancelHoverClose,
+    closeHover,
     refreshThumbnail,
   } = useNodePreview({
     artworkId,
@@ -153,6 +156,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const openContext = (event: MouseEvent, node: HistoryNode) => {
     event.preventDefault();
     event.stopPropagation();
+    closeHover();
     setSelectedNodeId(node.id);
     setActionNode(node);
     setContext({ x: event.clientX, y: event.clientY });
@@ -259,7 +263,8 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         }
       }}
       onContextMenu={(event) => openContext(event, node)}
-      onMouseEnter={(event) => showHoverPreview(event, node)}
+      onMouseEnter={(event) => handleNodeEnter(event, node)}
+      onMouseMove={(event) => handleNodeMove(event, node)}
       onMouseLeave={scheduleHoverClose}
     >
       <CircleDot size={16} />
@@ -365,14 +370,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       />
     </div>
 
-    {hoverNode && hover?.value && (hover.value.dataUrl || hover.value.supported) && <HoverPreview
+    {hoverNode && hover && (hover.value.dataUrl || hover.value.supported) && <HoverPreview
       anchor={hover.anchor}
       title={hoverNode.title}
       preview={hover.value}
-      refreshing={hover.loading}
+      refreshing={hoverRefreshingNodeId === hover.nodeId}
       disabled={busy || runtime.busy}
       onRefresh={() => refreshThumbnail(hoverNode)}
-      onEnter={clearHoverTimer}
+      onEnter={cancelHoverClose}
       onLeave={scheduleHoverClose}
     />}
 

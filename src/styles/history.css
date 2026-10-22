@@ -274,9 +274,12 @@
 .history-preview-empty { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; }
 .history-preview-refresh { width: 22px; height: 22px; color: var(--muted); }
 .history-preview-refresh-overlay { position: absolute; top: 6px; right: 6px; border: 1px solid var(--border); background: color-mix(in srgb, var(--surface) 88%, transparent); box-shadow: 0 1px 3px rgb(0 0 0 / 8%); }
-.history-hover-preview { position: fixed; z-index: 15; display: grid; place-items: center; min-width: 172px; max-width: 296px; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: 0 12px 34px rgb(0 0 0 / 18%); }
-.history-hover-preview img { display: block; max-width: 280px; max-height: 216px; border: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 4px; object-fit: contain; }
-.history-hover-preview .history-preview-empty { min-height: 96px; padding: 0 16px; }
+.history-hover-preview { position: fixed; z-index: 15; overflow: hidden; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: 0 12px 34px rgb(0 0 0 / 18%); pointer-events: none; }
+.history-hover-image { position: absolute; top: 50%; left: 50%; display: block; transform: translate(-50%, -50%); border: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 4px; object-fit: contain; }
+.history-hover-image-incoming { animation: history-hover-fade 100ms ease-out; }
+@keyframes history-hover-fade { from { opacity: 0; } to { opacity: 1; } }
+.history-hover-preview .history-preview-empty { position: absolute; inset: 8px; display: flex; align-items: center; justify-content: center; min-height: 0; padding: 0; }
+.history-hover-preview .history-preview-refresh { pointer-events: auto; }
 .history-inspector p { padding: 16px; color: var(--muted); font-size: 11px; line-height: 1.6; }
 .history-inspector dl { margin: 0; padding: 7px 16px 20px; }
 .history-inspector dl div { padding: 10px 0; border-bottom: 1px solid var(--border); }

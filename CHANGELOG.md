@@ -75,6 +75,14 @@ entries for the reader; they are not a template every entry has to fill.
   result width and height, the decode result's echoed selection region, and the
   size estimate's source byte count. The preview image's source size is
   separate and unchanged.
+- The history overview node thumbnail popover now waits for the pointer to
+  settle before it appears (300 ms on the first node) and stays open while
+  the pointer moves between nodes; once open, switching takes effect
+  immediately. Thumbnails are decoded off-screen, sized to their aspect
+  ratio within 280×216, cross-fades over 100 ms, and the overlay ignores
+  pointer events except for its refresh button, so brushing across the
+  graph no longer flashes a thumbnail. Scrolling, Escape, clicking
+  elsewhere or leaving all cards for 500 ms closes it.
 
 ### Fixed
 
