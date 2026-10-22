@@ -190,3 +190,11 @@
   决策结论，以及 §14 的逐批实施记录（改动文件、验证结果、遗留项）。七批均已实现、通过自动
   验证并提交；有效契约并入 `docs/modules/`、`docs/architecture/` 与 `CHANGELOG.md` 的
   `## Unreleased`。第三、六、七批的界面与文件行为仍待维护者人工验收，验收项在 `../todo.md`。
+- `0.4-artwork-database-upgrade-scheduling-and-identification-plan-improvement-recommendations-2026-10-22.md`：
+  作品独立数据库拆库计划的第一轮架构审阅意见（原文自 `../` 移入）——建议保留的作品库事务
+  边界、根库只拥有仓库级事实、升级不复制载荷、命令显式携带作品 ID、领域模型不合并；开工前
+  应修正的六项（存储迁移与并发调度分阶段、投影索引一致性协议、升级作为可恢复的多文件协议、
+  复用现有命令协调器、去掉通用生命周期钩子、开始界面沿用窗口装饰）；建议的落地顺序与故障
+  注入覆盖。采纳与取舍结论已并入
+  `../0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md` 的
+  §0.1；该计划仍在细化中，本审阅意见不再单独作为执行依据。

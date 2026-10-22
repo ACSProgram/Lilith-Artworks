@@ -29,8 +29,12 @@
 
 - 人工验收第三、六批的界面行为与第七批的两条文件行为确认项；验收项见 `todo.md`。
 - 验收通过后补记到 `archive/handoff-log-2026-10-22.md` 并从 `todo.md` 删除。
-- 0.4 的草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）待完善，
-  见 `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
+- 0.4 的草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成
+  第二轮修订：按审阅意见加入投影 outbox、升级维护租约/批次标识/自检窗口、调度范围收窄，
+  并定下三档并发档位（低 1 / 中 2 / 高 4），清掉全部待决策项，待维护者批准；见
+  `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`，
+  审阅记录已归档到
+  `archive/0.4-artwork-database-upgrade-scheduling-and-identification-plan-improvement-recommendations-2026-10-22.md`。
 - 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
   `docs/guides/release-policy.md`。
 
