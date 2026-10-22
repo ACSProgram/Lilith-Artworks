@@ -6,15 +6,16 @@
 - 发布、局部范围和识别 UI：`src/modules/authenticity/AuthenticityModule.tsx`，样式只读 `src/styles/authenticity.css`。
 - 发布/识别状态、命令、预览、搜索和请求代次：`src/modules/authenticity/useAuthenticityController.ts`。
 - 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由 controller 消费。
-- 发布/识别流水线：`src-tauri/src/authenticity/pipeline.rs`。
+- 发布编排、签名后清单核对与失败回滚：`src-tauri/src/authenticity/publish.rs`；最终成品固化：`src-tauri/src/authenticity/artifact.rs`（`store_final_artifact`）。
+- 渲染与预览：`src-tauri/src/authenticity/rendition.rs`（配置归一化、缓存令牌、合成/编码）与 `src-tauri/src/authenticity/preview/`（`quality.rs` 质量预览、`tile.rs` 高清局部、`thumbnail.rs` 固定尺寸缩略图）。
+- 识别：`src-tauri/src/authenticity/decode.rs`（C2PA 回读、TrustMark 区域解码与候选合并）；导出与大小估算：`export.rs`、`estimate.rs`；复制、不覆盖发布与摘要：`file_ops.rs`。
 - C2PA 和 TrustMark 实现：`src-tauri/src/authenticity/c2pa.rs`、`trustmark.rs`。
-- 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`。
-- 最终成品固化与发布编排：`src-tauri/src/authenticity/artifact.rs`
-  （`store_final_artifact`、`publish_artifact`）。
+- 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`；成品/发布/路径布局：`publication_repository.rs`。
 - 强制发布检查点和共享运行锁：`src-tauri/src/app/usecases/authenticity.rs` 调用公开
   `backup::ensure_checkpoint` 后进入认证服务；跨领域的进入/取消/发布命令适配器在
-  `src-tauri/src/app/workflows.rs`，单领域预览与识别适配器在
-  `src-tauri/src/authenticity/commands.rs`；认证模块不导入 backup 或读取 `chunk_file/`。
+  `src-tauri/src/app/workflows.rs`，单领域的预览、导出、估算与识别经由
+  `app/usecases/authenticity.rs`，`authenticity/commands.rs` 只保留参数与路径授权校验、
+  读取命令的薄适配和错误转换；认证模块不导入 backup 或读取 `chunk_file/`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
@@ -40,7 +41,7 @@ C2PA 是每次认证导出的强制基础，不能关闭。发布版固定输出
 
 TrustMark 可关闭。启用时使用 Q/BCH_SUPER 模型和 40 位二进制 ID，只在用户框选的最多 8 个矩形区域内嵌入，强度范围为 0.50 到 1.50；没有框选区域时自动降级为仅 C2PA。模型文件不可用时 UI 也强制降级为仅 C2PA。模型变体和编码/解码模型 SHA-256 由后端读取后显示，不在前端写死。私钥只存在于单次命令内并用 `Zeroizing` 包装，不写入配置、数据库、localStorage 或日志。
 
-**小选区水印警告**：编码前按每个选区在 rendition 上的像素边界判定（`trustmark::region_bounds`，与 `encode_regions` 共用同一套换算，起点 `floor`、终点 `ceil`）；任一边长小于 `WATERMARK_MIN_STABLE_EDGE = 256` 时，发布结果（`PublishResult.watermarkWarnings`，经 `pipeline::PublishedOutput` → `artifact::publish_artifact` 透传）回传结构化警告（区域序号、rendition 像素边长、阈值）并写一行 `log::warn!`。前端在框选时就地提示（按源像素尺寸=rendition 像素尺寸即时算出），并在发布结果区显示后端返回的同一警告。这是提示不是错误：发布照常成功。阈值 256 取实测最小稳定边长（见 `docs/user/stress-test-report.md`），是降低风险而不是保证——更大的选区或更平滑的内容仍可能失败，C2PA 声明与本地记录匹配始终不受影响。
+**小选区水印警告**：编码前按每个选区在 rendition 上的像素边界判定（`trustmark::region_bounds`，与 `encode_regions` 共用同一套换算，起点 `floor`、终点 `ceil`）；任一边长小于 `WATERMARK_MIN_STABLE_EDGE = 256` 时，发布结果（`PublishResult.watermarkWarnings`，由 `publish::publish` 直接返回）回传结构化警告（区域序号、rendition 像素边长、阈值）并写一行 `log::warn!`。前端在框选时就地提示（按源像素尺寸=rendition 像素尺寸即时算出），并在发布结果区显示后端返回的同一警告。这是提示不是错误：发布照常成功。阈值 256 取实测最小稳定边长（见 `docs/user/stress-test-report.md`），是降低风险而不是保证——更大的选区或更平滑的内容仍可能失败，C2PA 声明与本地记录匹配始终不受影响。
 
 **模型完整性**：两个随包 ONNX 文件（`encoder_Q.onnx` / `decoder_Q.onnx`，约 62 MB）的 SHA-256 固化为 `authenticity/state.rs` 的常量，与 `src-tauri/resources/models/README.md` 记录的值一致。首次需要模型时（`model_files_ready` / `model_info` / `with_engine`）读一次摘要并缓存结论；文件缺失或摘要不匹配时 `model_files_ready` 为假、`with_engine` 直接拒绝加载并给出明确错误（指明是编码器还是解码器），不再静默加载被替换的模型。缓存意味着运行期间替换文件要到下次启动才被发现，与引擎只初始化一次的语义一致。`pinned_digests_match_the_shipped_models` 单测把常量与本仓 `resources/models` 的实际文件对齐，换模型忘记更新常量会在提交前失败；**换模型时必须同步更新这两个常量与该 README**。模型目录只从随包资源目录解析，不保留编译期 `CARGO_MANIFEST_DIR` 回退路径——开发机路径不应进入发布产物，也不该让「模型是否被替换」多一个不可预测的落点。
 
@@ -68,7 +69,7 @@ RFC 3161 时间戳请求使用无重定向客户端，单次硬超时为 30 秒�
 
 `src-tauri/tests/fixtures/authenticity/` 保存约 41 KB 的公开测试专用 ES256 凭据、128 x 128 源图、真实 C2PA/TrustMark 签名图和覆盖字节被篡改的签名图。定向 Rust 测试使用生产回读、TrustMark 模型解码与发布校验函数，固定覆盖合格状态、像素水印与 C2PA 中的 record ID/TrustMark ID/全部声明匹配，以及文件替换、C2PA 无效状态和声明不匹配的 fail-closed 行为；fixture 私钥不得用于生产。
 
-识别始终读取 C2PA；模型可用时还会对整图或用户框选区域解码 TrustMark。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
+识别始终读取 C2PA；模型不可用时只读取 C2PA 清单，不打开整图，模型可用时还会对整图或用户框选区域解码 TrustMark（区域解码接收拥有的解码图，裁剪后释放原图，不再复制整幅图）。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
 
 ## 命令
 
@@ -118,7 +119,7 @@ cancel_authenticity_operation
 - 警告文本使用主题变量，在浅色与深色主题分别保持可读对比度。
 - 框选坐标只相对 `object-fit: contain` 后的实际图片矩形归一化；舞台留黑不进入坐标。图片显示矩形由 `ResizeObserver` 随窗口尺寸同步更新，标签禁用文本选择。识别页开始新拖动时立即清除唯一旧框，并在有效拖动完成后写入新框。
 - 发布页与识别页的框选（`RegionEditor`）在指针悬停到图片上时显示放大镜（`RegionLoupe`）：镜片以指针所在源像素为中心、相对主视图固定 3× 放大，取样跨度按主视图显示比例反比缩放（= 镜片边长 /（3 × 显示比例）），因此始终覆盖源图的固定比例，大画布不会被过度放大，十字准星标出精确落点（镜片为 1:1 或放大时另显示像素框），镜片跟随指针并在舞台边缘翻转到另一侧；覆盖层 `pointer-events: none`，不参与命中测试、也不改变归一化坐标语义，只读记录视图不显示放大镜。
-- 放大镜是无缝的：镜片内容用 canvas 绘制，指针移动只重绘、**不产生任何请求**，因此不存在「一移动就重新加载」。像素按优先级取用——覆盖当前窗口的**源分辨率瓦片** → 本页已加载的**整幅降采样底图**（预览缩略图）→ 底色。瓦片边长取「至少 512 源像素、窗口更大时按窗口的 1.25 倍放大」（源图更小时退化为整幅），保证窗口恒被完整覆盖；输出边长取该格在镜片内的显示尺寸（含设备像素比），上限为源分辨率与 1024 px，因此大画布下镜片是缩小取样、按显示分辨率传输而不是源像素，缩小后的瓦片用平滑取样，指针停留 120 ms 后取当前格、再停留 400 ms 预取四个相邻格，按「来源 + 格子 + 输出边长」缓存（上限 12 块，按插入顺序淘汰、命中不重排），切换来源时清空；底图保证镜片在瓦片到达前立即出画，因此从不出现加载状态或空白。瓦片通道是 `preview_authenticity_tile`：发布页的源是分支最终成品（`original`，按 branchId 解析受控路径），识别页的源是待识别图片（`external`，携带绝对路径，与 `decode_authenticity` 共用同一条 `ensure_dialog_authorized` 授权检查，并在流水线内做仓库边界与源矩形范围校验）。
+- 放大镜是无缝的：镜片内容用 canvas 绘制，指针移动只重绘、**不产生任何请求**，因此不存在「一移动就重新加载」。像素按优先级取用——覆盖当前窗口的**源分辨率瓦片** → 本页已加载的**整幅降采样底图**（预览缩略图）→ 底色。瓦片边长取「至少 512 源像素、窗口更大时按窗口的 1.25 倍放大」（源图更小时退化为整幅），保证窗口恒被完整覆盖；输出边长取该格在镜片内的显示尺寸（含设备像素比），上限为源分辨率与 1024 px，因此大画布下镜片是缩小取样、按显示分辨率传输而不是源像素，缩小后的瓦片用平滑取样，指针停留 120 ms 后取当前格、再停留 400 ms 预取四个相邻格，按「来源 + 格子 + 输出边长」缓存（上限 12 块，按插入顺序淘汰、命中不重排），切换来源时清空；底图保证镜片在瓦片到达前立即出画，因此从不出现加载状态或空白。瓦片通道是 `preview_authenticity_tile`：发布页的源是分支最终成品（`original`，按 branchId 解析受控路径），识别页的源是待识别图片（`external`，携带绝对路径，与 `decode_authenticity` 共用同一条 `ensure_dialog_authorized` 授权检查，并在 `preview::tile` 内做仓库边界与源矩形范围校验）。
 - PEM 私钥非空检查在生成质量预览时进入统一操作提示，不常驻显示独立警告行，也不因输入为空而禁用预览按钮。
 - 质量预览生成前先检查标题、创作者、证书链和 PEM 私钥；图片超出视口时显示导航小图，可点击或拖动视口框快速定位。
 - 质量预览没有独立的“适应”模式：缩放始终是数值且以源像素为基准（显示尺寸 = 源像素 × 倍率，100% 即 1:1），初始值由画布尺寸与源图尺寸算出的适应倍率决定（画布尺寸尚未测得时退化为 1），画布拖拽从打开预览起即可用；普通滚轮用原生非被动监听按滚轮增量平滑缩放（鼠标滚轮约 10%/格，触控板保留更细粒度），工具栏按钮按 10% 比例步进；缩放时保持鼠标指向的图像位置，放大后通过画布拖拽或导航小图定位，不显示滚动条。“适应窗口”只把数值缩放重置回当前适应倍率，并在画布尺寸变化时自动跟随。

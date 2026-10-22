@@ -12,5 +12,5 @@ remains readable while C2PA validation fails.
 To regenerate the signed files after an intentional format change, run:
 
 ```text
-cargo test --manifest-path src-tauri/Cargo.toml --lib authenticity::pipeline::tests::regenerate_c2pa_fixtures -- --ignored --exact
+cargo test --manifest-path src-tauri/Cargo.toml --lib authenticity::publish::tests::regenerate_c2pa_fixtures -- --ignored --exact
 ```

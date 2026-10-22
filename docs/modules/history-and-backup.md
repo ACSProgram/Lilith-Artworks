@@ -27,7 +27,7 @@
 - `src-tauri/src/history/`：分支、历史节点、创建分支、head 和历史元数据事务。
 - `src-tauri/src/backup/`：原始 ChunkFile、提交、checkpoint、恢复、取消与托盘调度。
 - `src-tauri/src/preview/`：历史节点派生缩略图。只读传入的文件、按格式分派（`.clip` 内嵌 SQLite、`.psd`/`.psb`、`.sai2` 画布内嵌缩略图、ZIP 容器内的预览条目、直接位图），任何失败只让该节点没有预览，不改提交或刷新结果；不参与 ChunkFile、摘要、scrub 与恢复。
-- `src-tauri/src/authenticity/`：认证聚合边界；内部的 `c2pa`、`trustmark`、`pipeline` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
+- `src-tauri/src/authenticity/`：认证聚合边界；内部的 `publish`、`rendition`、`preview`、`c2pa`、`trustmark` 和 `repository` 已实现，详细契约见 `docs/modules/authenticity.md`。
 - `src-tauri/src/cleanup.rs`：`pending_file_cleanup` 清理账本——事务内入队、提交后单遍重放、失败留队可重试。history/backup/library/pin_board 的「提交成功后才应发生的仓库文件删除」统一收敛到它；引用判定与垃圾文件扫描由中立契约 `contracts::ReferenceInventory` 的领域实现提供（history/authenticity/pin_board 各自实现，应用层注册），cleanup 不再导入画板路径常量。批量清理在连接内建立 `TEMP` 引用表并用 anti-join 一次判定未引用集合，按 512 条分批、每批可取消且幂等提交；`scan_unreferenced` 只报告，`cleanup_unreferenced` 登记摘要后入队重放，`list_pending` 提供只读队列。
 - `src-tauri/src/storage.rs`：共享 SQLite 连接、ID、时间、路径与基本校验，不包含领域流程。
 
@@ -63,7 +63,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 设置页「空间」页的「文件清理」区把队列与发现机制暴露给用户：队列列表展示每条待清理条目的路径、原因、上次失败原因与最近尝试时间，支持单条重试与全部重试（`retry_pending_file_cleanup`）；同一区提供**垃圾文件扫描**按钮（一次扫描覆盖上面两类候选，复用可取消的统一运行状态与进度展示）与扫描结果的确认清理入口，确认前经应用内确认对话框二次确认。清理检查点冗余增量是破坏性但可重建的动作：取消该检查点时按需重建增量，没有取消过的检查点不受影响。队列列表由只读命令 `list_pending_file_cleanup` 提供，它走共享读租约、不取运行锁，因此在备份、恢复等长任务运行期间也能返回，且不写 `last_attempt_ms` / `last_error`；除路径与原因外还返回期望 SHA-256 与所属作品标题（后者按导出路径回查认证记录，查不到时为空）。
 
-仓库根 `temp/` 不进入引用清单，因此走一条更直接的自动清扫：仓库打开成功后（`prepare_repository`）执行 `cleanup::sweep_repository_temp`，只删除两类名字——超期（同一 30 分钟宽限期）的 `authenticity-preview-<UUID>` 预览缓存会话目录（`authenticity::pipeline` 每进程一个，丢失只让下一次预览重算）与 `.tmp` 前缀的 `NamedTempFile` 暂存残留（恢复链解析在进程被强杀或断电时留下的孤儿）——本进程当前会话目录一律保留，命名不符的手工条目一律不动；只碰顶层、不跟随符号链接，删除失败只记日志，不阻断打开。作品级 `artworks/<artwork>/temp/` 的 `.tmp*` 残留不在此列，仍走垃圾文件扫描的报告→确认流程。
+仓库根 `temp/` 不进入引用清单，因此走一条更直接的自动清扫：仓库打开成功后（`prepare_repository`）执行 `cleanup::sweep_repository_temp`，只删除两类名字——超期（同一 30 分钟宽限期）的 `authenticity-preview-<UUID>` 预览缓存会话目录（`authenticity::rendition` 每进程一个，丢失只让下一次预览重算）与 `.tmp` 前缀的 `NamedTempFile` 暂存残留（恢复链解析在进程被强杀或断电时留下的孤儿）——本进程当前会话目录一律保留，命名不符的手工条目一律不动；只碰顶层、不跟随符号链接，删除失败只记日志，不阻断打开。作品级 `artworks/<artwork>/temp/` 的 `.tmp*` 残留不在此列，仍走垃圾文件扫描的报告→确认流程。
 
 **空 id 不再等于「处理全部」**：`retry_pending_file_cleanup` 传空 id 时只重放**仓库内条目**（`repository_file` / `repository_directory`），`external_file` 条目一律跳过。外部条目保存的是仓库之外的绝对路径，删除它等于一条任意路径删除，唯一门槛只是攻击者需要知道目标文件的 SHA-256；若它随启动自动重放，被投毒的仓库就等于自带一条「自动、无确认的删除任意文件」原语。因此外部条目改为在队列里**逐条显式确认**：列表直接展示完整路径、所属作品与期望 SHA-256，点击「确认删除…」后由滑动确认控件（`ConfirmDialog` 的 `slideToConfirm`）承担最终动作，确认后以**显式 id** 调用同一命令执行；「全部重试」按钮在只剩外部条目时禁用，并注明它只重放仓库内条目。既有的「摘要不匹配即不删」约束不变（`cleanup::remove_external_file` 仍只在 SHA-256 相等时删除）。首次启动时应用仍会自动重放一次仓库内条目，队列中的残留仓库内条目即上次未清干净的文件。
 

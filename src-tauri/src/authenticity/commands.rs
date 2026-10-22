@@ -1,14 +1,14 @@
-use std::{
-    fs::{self, File},
-    io::{Cursor, Write},
-    path::{Path, PathBuf},
-};
+//! 认证领域的 Tauri 命令适配器。
+//!
+//! 这里只保留参数与路径授权校验、读取命令的薄适配和错误转换；发布、导出、估算与
+//! 质量预览的业务体在 use-case 与领域模块中。跨领域命令（进入/取消发布、删除记录）
+//! 在 `app/workflows.rs`。
+
+use std::path::{Path, PathBuf};
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
-use image::{codecs::jpeg::JpegEncoder, GenericImageView, ImageFormat};
 use tauri::State;
 use tauri_plugin_fs::FsExt;
-use tempfile::NamedTempFile;
 
 use crate::{
     app::{
@@ -21,13 +21,12 @@ use crate::{
 
 use super::{
     error::{AuthenticityError, AuthenticityResult},
-    image_resource,
     model::{
         BranchPublication, CertificationRecord, DecodeRequest, DecodeResult, EstimateRequest,
-        ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PublicationPreview,
-        PublicationPreviewRequest, StageImportRequest,
+        ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PreviewTileRequest,
+        PreviewTileSource, PublicationPreview, PublicationPreviewRequest, StageImportRequest,
     },
-    pipeline, publication_repository, repository,
+    preview, publication_repository, rendition, repository,
     state::AuthenticityState,
 };
 
@@ -108,8 +107,8 @@ pub(crate) async fn preview_authenticity_image(
         .spawn(OperationDomain::Authenticity, move |context| {
             context.run_read("preview_authenticity_image", |session| {
                 let source = external_image_path(session.root(), &path, "预览图片")
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))?;
-                make_preview(source).map_err(|error| CommandError::from_legacy(error.to_string()))
+                    .map_err(CommandError::from)?;
+                preview::make_preview(source).map_err(CommandError::from)
             })
         })
         .await
@@ -135,10 +134,7 @@ pub(crate) async fn stage_authenticity_input(
         .and_then(|value| value.to_str())
         .map(str::to_ascii_lowercase)
         .unwrap_or_default();
-    if !matches!(
-        extension.as_str(),
-        "png" | "jpg" | "jpeg" | "webp" | "tif" | "tiff"
-    ) {
+    if !rendition::supports_image_extension(&extension) {
         return Err(AuthenticityError::InvalidInput(
             "拖入的图片必须是 PNG、JPEG、WebP 或 TIFF".into(),
         ));
@@ -171,10 +167,9 @@ pub(crate) async fn preview_branch_artifact(
             context.run_read("preview_branch_artifact", |session| {
                 let source =
                     publication_repository::publication_target(session.root(), branch_id.trim())
-                        .map_err(|error| CommandError::from_legacy(error.to_string()))?
+                        .map_err(CommandError::from)?
                         .artifact_path;
-                make_preview(PathBuf::from(source))
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))
+                preview::make_preview(PathBuf::from(source)).map_err(CommandError::from)
             })
         })
         .await
@@ -194,14 +189,10 @@ pub(crate) async fn preview_branch_artifact_output(
         "证书链",
     )?;
     let state = authenticity_state.inner().clone();
-    let operation = state.begin_operation("发布质量预览")?;
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("preview_branch_artifact_output", |session| {
-                pipeline::preview(session.root(), &state, &operation, request)
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))
-            })
+            usecases::authenticity::preview_output(context, &state, request)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -219,17 +210,17 @@ pub(crate) fn cancel_authenticity_operation(
 ///
 /// 压缩源的令牌即缓存文件名，因此先做严格格式校验；原始源按分支解析受控成品路径；
 /// 外部源与 `decode_authenticity` 使用同一条 `ensure_dialog_authorized` 授权检查，
-/// 再由流水线做仓库边界与矩形范围校验。解码复用统一资源预算。
+/// 再由 `preview::tile` 做仓库边界与矩形范围校验。解码复用统一资源预算。
 ///
 /// 命令走仓库共享读租约，不参与认证活动任务锁；前端在发布/签名进行中不发起新的
 /// 局部图请求，并保留已加载的局部图。
 #[tauri::command]
 pub(crate) async fn preview_authenticity_tile(
-    request: super::model::PreviewTileRequest,
+    request: PreviewTileRequest,
     coordinator: State<'_, OperationCoordinator>,
     window: tauri::WebviewWindow,
 ) -> AuthenticityResult<PreviewImage> {
-    if request.source == super::model::PreviewTileSource::External {
+    if request.source == PreviewTileSource::External {
         let path = request
             .path
             .as_deref()
@@ -242,8 +233,7 @@ pub(crate) async fn preview_authenticity_tile(
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
             context.run_read("preview_authenticity_tile", |session| {
-                pipeline::preview_tile(session.root(), &request)
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))
+                preview::preview_tile(session.root(), &request).map_err(CommandError::from)
             })
         })
         .await
@@ -260,8 +250,8 @@ pub(crate) async fn preview_certification_record(
         .spawn(OperationDomain::Authenticity, move |context| {
             context.run_read("preview_certification_record", |session| {
                 let source = repository::record_source_path(session.root(), record_id.trim())
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))?;
-                make_preview(source).map_err(|error| CommandError::from_legacy(error.to_string()))
+                    .map_err(CommandError::from)?;
+                preview::make_preview(source).map_err(CommandError::from)
             })
         })
         .await
@@ -282,55 +272,7 @@ pub(crate) async fn export_certification_record(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("export_certification_record", |session| {
-                let root = session.root();
-                let source = repository::record_source_path(root, request.record_id.trim())
-                    .map_err(CommandError::from)?;
-                let destination = PathBuf::from(request.output_path.trim());
-                if !destination.is_absolute() {
-                    return Err(CommandError::from_legacy("导出路径必须是绝对路径"));
-                }
-                if destination
-                    .extension()
-                    .and_then(|value| value.to_str())
-                    .is_none_or(|value| {
-                        !matches!(value.to_ascii_lowercase().as_str(), "jpg" | "jpeg")
-                    })
-                {
-                    return Err(CommandError::from_legacy(
-                        "认证图片必须导出为 .jpg 或 .jpeg",
-                    ));
-                }
-                if destination.exists() {
-                    return Err(CommandError::from_legacy(
-                        "导出目标已存在；请选择新的文件名",
-                    ));
-                }
-                storage::ensure_outside_repository(root, &destination, "再次导出路径")
-                    .map_err(CommandError::from)?;
-                let directory = destination
-                    .parent()
-                    .ok_or_else(|| CommandError::from_legacy("导出目录无效"))?;
-                fs::create_dir_all(directory).map_err(|error| {
-                    CommandError::from_legacy(format!("无法创建导出目录：{error}"))
-                })?;
-                let mut input = File::open(source).map_err(|error| {
-                    CommandError::from_legacy(format!("无法读取认证图片：{error}"))
-                })?;
-                let mut temp = NamedTempFile::new_in(directory).map_err(|error| {
-                    CommandError::from_legacy(format!("无法创建导出临时文件：{error}"))
-                })?;
-                std::io::copy(&mut input, &mut temp).map_err(|error| {
-                    CommandError::from_legacy(format!("无法写出认证图片：{error}"))
-                })?;
-                temp.as_file().sync_all().map_err(|error| {
-                    CommandError::from_legacy(format!("无法同步认证图片：{error}"))
-                })?;
-                temp.persist_noclobber(&destination).map_err(|error| {
-                    CommandError::from_legacy(format!("无法发布认证图片：{}", error.error))
-                })?;
-                Ok(())
-            })
+            usecases::authenticity::export_record(context, request)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -344,36 +286,7 @@ pub(crate) async fn estimate_authenticity_output_size(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("estimate_authenticity_output_size", |session| {
-                if !(1..=100).contains(&request.jpeg_quality) {
-                    return Err(CommandError::from_legacy("JPEG 质量必须在 1 到 100 之间"));
-                }
-                let path = publication_repository::publication_target(
-                    session.root(),
-                    request.branch_id.trim(),
-                )
-                .map_err(|error| CommandError::from_legacy(error.to_string()))?
-                .artifact_path;
-                let source_bytes = fs::metadata(&path)
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))?
-                    .len();
-                let source = image_resource::open(Path::new(&path))
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))?;
-                let flattened = super::trustmark::flatten_to_rgb(
-                    &source,
-                    super::trustmark::parse_background(&request.background_color)
-                        .map_err(|error| CommandError::from_legacy(error.to_string()))?,
-                );
-                drop(source);
-                let mut output = CountingWriter::default();
-                JpegEncoder::new_with_quality(&mut output, request.jpeg_quality)
-                    .encode_image(&flattened)
-                    .map_err(|error| CommandError::from_legacy(error.to_string()))?;
-                Ok(FileSizeEstimate {
-                    jpeg_bytes: output.bytes,
-                    source_bytes,
-                })
-            })
+            usecases::authenticity::estimate_output(context, request)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -409,43 +322,6 @@ pub(crate) fn ensure_dialog_authorized(
 ) -> AuthenticityResult<()> {
     crate::path_scope::ensure_authorized(scope, path, label)
         .map_err(AuthenticityError::InvalidInput)
-}
-
-fn make_preview(path: PathBuf) -> AuthenticityResult<PreviewImage> {
-    if !path.is_file() {
-        return Err(AuthenticityError::InvalidInput("预览图片不存在".into()));
-    }
-    let source = image_resource::open(&path)?;
-    let (width, height) = source.dimensions();
-    let preview = source.thumbnail(1600, 1600);
-    drop(source);
-    let mut encoded = Cursor::new(Vec::new());
-    preview.write_to(&mut encoded, ImageFormat::Png)?;
-    Ok(PreviewImage {
-        data_url: format!(
-            "data:image/png;base64,{}",
-            STANDARD.encode(encoded.into_inner())
-        ),
-        width,
-        height,
-        source_bytes: fs::metadata(path)?.len(),
-    })
-}
-
-#[derive(Default)]
-struct CountingWriter {
-    bytes: u64,
-}
-
-impl Write for CountingWriter {
-    fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
-        self.bytes = self.bytes.saturating_add(buffer.len() as u64);
-        Ok(buffer.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
 }
 
 #[cfg(test)]

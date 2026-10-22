@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager, State};
 
 use crate::app::{command_runtime::OperationDomain, usecases, OperationCoordinator};
-use crate::authenticity::pipeline;
+use crate::authenticity::preview_session_id;
 use crate::backup::BackupState;
 use crate::platform::{
     path::ensure_not_device_path,
@@ -115,7 +115,7 @@ pub(crate) fn prepare_repository(
 /// 仓库就绪后清扫超期的仓库 `temp/`（认证预览会话目录与 `.tmp*` 暂存残留）。
 /// 清扫只碰不被引用的临时条目，失败只记日志，绝不阻断仓库打开。
 fn sweep_stale_repository_temp(root: &Path) {
-    let report = cleanup::sweep_repository_temp(root, pipeline::preview_session_id());
+    let report = cleanup::sweep_repository_temp(root, preview_session_id());
     if report.reclaimed > 0 || report.failed > 0 {
         log::info!(
             "仓库打开时清扫临时目录：回收 {} 项，失败 {} 项",

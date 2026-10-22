@@ -257,13 +257,12 @@ pub(crate) fn certification_storage_path(
         .optional()
         .map_err(storage::database_error)?
         .ok_or("找不到发布记录所属分支")?;
-    Ok(root
-        .join("artworks")
-        .join(artwork_id)
-        .join("artifacts")
-        .join(branch_id)
-        .join("certifications")
-        .join(format!("{record_id}.jpg")))
+    Ok(super::publication_repository::certification_copy_path(
+        root,
+        &artwork_id,
+        branch_id,
+        record_id,
+    ))
 }
 
 pub(crate) fn record_source_path(root: &Path, record_id: &str) -> Result<PathBuf, String> {
@@ -405,45 +404,7 @@ mod tests {
     use sha2::Digest;
 
     use super::*;
-
-    fn record_fixture(root: &Path, stored_path: &str, output_sha256: &str) {
-        crate::library::initialize(root).unwrap();
-        storage::open(root)
-            .unwrap()
-            .execute_batch(&format!(
-                "INSERT INTO library_nodes
-                   (id, kind, title, position, created_ms, updated_ms)
-                 VALUES ('artwork', 'artwork', 'Artwork', 0, 0, 0);
-                 INSERT INTO artworks (id, description, created_ms, updated_ms)
-                 VALUES ('artwork', '', 0, 0);
-                 INSERT INTO branches
-                   (id, artwork_id, title, source_path, source_path_key,
-                    backup_enabled, backup_interval_minutes, created_ms, updated_ms)
-                 VALUES ('branch', 'artwork', 'Main', 'source.psd', 'source.psd', 1, 5, 0, 0);
-                 INSERT INTO history_nodes
-                   (id, artwork_id, created_on_branch_id, title, note, commit_kind,
-                    is_checkpoint, created_ms, logical_size, chunk_file_size, sha256,
-                    chunk_count, snapshot_path)
-                 VALUES ('history', 'artwork', 'branch', 'History', '', 'manual',
-                         1, 0, 1, 1, '{zeros}', 1, 'artworks/snapshot.chunk');
-                 UPDATE branches SET head_history_id = 'history' WHERE id = 'branch';
-                 INSERT INTO final_artifacts
-                   (id, branch_id, history_id, source_path, source_sha256,
-                    media_type, byte_size, created_ms)
-                 VALUES ('artifact', 'branch', 'history', 'artworks/final.jpg',
-                         '{zeros}', 'image/jpeg', 1, 0);
-                 INSERT INTO certification_records
-                   (id, final_artifact_id, branch_id, history_id, watermark_id,
-                    trustmark_enabled, output_path, stored_path, output_sha256,
-                    output_bytes, title, creator, rights_statement,
-                    authentication_content, regions_json, created_ms)
-                 VALUES ('record', 'artifact', 'branch', 'history', NULL, 0,
-                         'C:/published/output.jpg', '{stored_path}', '{output_sha256}',
-                         8, 'Title', '', '', '', '[]', 0);",
-                zeros = "0".repeat(64),
-            ))
-            .unwrap();
-    }
+    use crate::authenticity::test_support::initialize_record_fixture;
 
     #[test]
     fn invalid_regions_json_is_not_silently_replaced() {
@@ -470,7 +431,7 @@ mod tests {
         let root = directory.path().join("repository");
         let stored_path = "artworks/certified.jpg";
         let expected = hex::encode_upper(sha2::Sha256::digest(b"original"));
-        record_fixture(&root, stored_path, &expected);
+        initialize_record_fixture(&root, stored_path, &expected);
         let absolute = storage::resolve_path(&root, stored_path).unwrap();
         fs::create_dir_all(absolute.parent().unwrap()).unwrap();
         fs::write(&absolute, b"replacement").unwrap();
@@ -486,7 +447,7 @@ mod tests {
         let root = directory.path().join("repository");
         let stored_path = "artworks/certified.jpg";
         let expected = hex::encode_upper(sha2::Sha256::digest(b"original"));
-        record_fixture(&root, stored_path, &expected);
+        initialize_record_fixture(&root, stored_path, &expected);
         let absolute = storage::resolve_path(&root, stored_path).unwrap();
         fs::create_dir_all(absolute.parent().unwrap()).unwrap();
         fs::write(&absolute, b"original").unwrap();

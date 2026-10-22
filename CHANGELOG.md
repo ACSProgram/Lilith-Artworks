@@ -46,9 +46,25 @@ entries for the reader; they are not a template every entry has to fill.
   `FileSizeEstimate` type. Tile sources, the debounce and the cache limit are
   now named in one place, and the loupe's eviction list is no longer called an
   LRU, since it evicts in insertion order.
+- Split the authenticity backend into publication, rendering, preview, decode,
+  export, estimate and file-operation modules behind the existing command
+  names. Commands are thin adapters again, with preview, export and estimate
+  running through the authenticity use-case. File copying, thumbnail
+  rendering, artifact/certification path layout, image-format mapping and
+  manifest claim checks each have a single implementation, and `publish`
+  returns `PublishResult` directly instead of copying it field by field. The
+  unused `watermarkRegionCount` field is gone from the response and the
+  frontend type. Typed authenticity errors now map to stable command error
+  kinds, while errors that still arrive as strings keep the classification
+  they had.
 
 ### Fixed
 
+- Authenticity identification no longer decodes the whole image when the
+  TrustMark models are unavailable; it reads the C2PA manifest only. Region
+  decoding takes ownership of the decoded image instead of cloning it, and
+  model digests are hashed through a streaming read rather than one allocation
+  of roughly 62 MB per model.
 - The settings "备份" page now shows the last repository backup as soon as the
   dialog opens, including directly after a restart, instead of only after
   visiting the "空间" page. The empty state no longer claims the result is not

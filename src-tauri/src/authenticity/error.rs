@@ -30,3 +30,10 @@ impl Serialize for AuthenticityError {
 }
 
 pub(crate) type AuthenticityResult<T> = Result<T, AuthenticityError>;
+
+impl AuthenticityError {
+    /// 原样保留文案的领域错误（仓储字符串、命令层已有的参数提示）。
+    pub(crate) fn message(message: impl Into<String>) -> Self {
+        Self::Other(anyhow::Error::msg(message.into()))
+    }
+}

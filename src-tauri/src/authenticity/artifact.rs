@@ -1,27 +1,16 @@
-//! 最终成品的固化与发布编排。
+//! 最终成品固化：把用户选择的成品复制进仓库、登记摘要，并在失败路径上回收孤儿文件。
 //!
-//! `store_final_artifact` 把用户选择的成品复制进仓库、登记摘要，并在失败路径上把
-//! 已登记的文件入队清理；`publish_artifact` 在调用方取得的认证操作（`AuthenticityOperation`）
-//! 范围内完成渲染、编码与签名。两者都是领域逻辑：Tauri 适配器与无头入口经 use-case
-//! 调用它们，不在适配器里复制文件或登记摘要。
+//! 这是领域逻辑：Tauri 适配器与无头入口经 use-case 调用它，不在适配器里复制文件
+//! 或登记摘要。发布态的渲染与签名见 `publish`。
 
-use std::{
-    fs::{self, File},
-    io::{Read, Write},
-    path::Path,
-};
-
-use sha2::Digest;
-use tempfile::NamedTempFile;
+use std::{fs, path::Path};
 
 use crate::{cleanup, storage};
 
 use super::{
-    error::AuthenticityError,
-    model::{PublishBranchRequest, PublishResult},
-    pipeline,
+    file_ops::stage_copy_with_sha256,
     publication_repository::{self, NewFinalArtifact},
-    state::{AuthenticityOperation, AuthenticityState},
+    rendition::image_media_type,
 };
 
 pub(crate) fn store_final_artifact(
@@ -43,45 +32,19 @@ pub(crate) fn store_final_artifact(
         .and_then(|value| value.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    let media_type = match extension.as_str() {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "webp" => "image/webp",
-        "tif" | "tiff" => "image/tiff",
-        _ => return Err("最终成品仅支持 PNG、JPEG、WebP 或 TIFF".into()),
-    };
+    let media_type = image_media_type(&extension)
+        .ok_or_else(|| "最终成品仅支持 PNG、JPEG、WebP 或 TIFF".to_owned())?;
     let artifact_id = storage::new_id();
-    let artifact_directory = root
-        .join("artworks")
-        .join(publication_repository::branch_head(root, branch_id)?.0)
-        .join("artifacts")
-        .join(branch_id);
+    let (artwork_id, _) = publication_repository::branch_head(root, branch_id)?;
+    let artifact_directory =
+        publication_repository::final_artifact_directory(root, &artwork_id, branch_id);
     fs::create_dir_all(&artifact_directory)
         .map_err(|error| format!("无法创建成品目录：{error}"))?;
     let final_path = artifact_directory.join(format!("{artifact_id}.{extension}"));
-    let mut source_file =
-        File::open(&source).map_err(|error| format!("无法读取最终成品：{error}"))?;
-    let mut temp = NamedTempFile::new_in(&artifact_directory)
-        .map_err(|error| format!("无法创建成品临时文件：{error}"))?;
-    let mut hasher = sha2::Sha256::new();
-    let mut size = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = source_file
-            .read(&mut buffer)
-            .map_err(|error| format!("无法读取最终成品：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        temp.write_all(&buffer[..read])
-            .map_err(|error| format!("无法写入最终成品：{error}"))?;
-        hasher.update(&buffer[..read]);
-        size += read as u64;
-    }
-    temp.as_file()
-        .sync_all()
-        .map_err(|error| format!("无法同步最终成品：{error}"))?;
-    let source_sha256 = hex::encode_upper(hasher.finalize());
+    let staged = stage_copy_with_sha256(&source, &artifact_directory)
+        .map_err(|error| format!("无法保存最终成品：{error}"))?;
+    let source_sha256 = staged.sha256.clone();
+    let byte_size = staged.bytes;
     let stored_path = storage::relative_path(root, &final_path)?;
     let created_ms = storage::now_ms()?;
     let cleanup_id = {
@@ -96,12 +59,12 @@ pub(crate) fn store_final_artifact(
         transaction.commit().map_err(storage::database_error)?;
         id
     };
-    if let Err(error) = temp.persist_noclobber(&final_path) {
+    if let Err(error) = staged.persist_noclobber(&final_path) {
         let message = match cleanup::discard(root, std::slice::from_ref(&cleanup_id)) {
-            Ok(()) => format!("无法发布最终成品：{}", error.error),
+            Ok(()) => format!("无法发布最终成品：{error}"),
             Err(cleanup_error) => format!(
                 "无法发布最终成品：{}；无法撤销清理登记：{}",
-                error.error, cleanup_error
+                error, cleanup_error
             ),
         };
         return Err(message);
@@ -113,7 +76,7 @@ pub(crate) fn store_final_artifact(
         source_path: &stored_path,
         source_sha256: &source_sha256,
         media_type,
-        byte_size: size,
+        byte_size,
         created_ms,
     };
     if let Err(error) = publication_repository::insert_final_artifact(root, &artifact, &cleanup_id)
@@ -121,26 +84,6 @@ pub(crate) fn store_final_artifact(
         return Err(recover_failed_artifact(root, &cleanup_id, error));
     }
     Ok(())
-}
-
-pub(crate) fn publish_artifact(
-    root: &Path,
-    state: &AuthenticityState,
-    operation: &AuthenticityOperation,
-    request: PublishBranchRequest,
-) -> Result<PublishResult, AuthenticityError> {
-    let published = pipeline::publish(root, state, operation, request)?;
-    Ok(PublishResult {
-        record: published.record,
-        width: published.width,
-        height: published.height,
-        watermark_region_count: published.watermark_region_count,
-        watermark_warnings: published.watermark_warnings,
-        rendition_cache_hit: published.rendition_cache_hit,
-        render_ms: published.render_ms,
-        encode_ms: published.encode_ms,
-        signing_ms: published.signing_ms,
-    })
 }
 
 fn recover_failed_artifact(root: &Path, cleanup_id: &str, error: String) -> String {

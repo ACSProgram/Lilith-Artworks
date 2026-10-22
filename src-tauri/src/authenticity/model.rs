@@ -230,7 +230,6 @@ pub(crate) struct PublishResult {
     pub(crate) record: CertificationRecord,
     pub(crate) width: u32,
     pub(crate) height: u32,
-    pub(crate) watermark_region_count: u32,
     pub(crate) watermark_warnings: Vec<WatermarkSizeWarning>,
     pub(crate) rendition_cache_hit: bool,
     pub(crate) render_ms: u64,

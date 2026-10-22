@@ -1,10 +1,32 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use rusqlite::{params, OptionalExtension, Row};
 
 use crate::{cleanup, platform::path::display_path, storage};
 
 use super::model::FinalArtifact;
+
+/// 最终成品的唯一存放目录：`artworks/<artwork>/artifacts/<branch>/`。
+///
+/// 最终成品与认证副本的路径布局只在这里拼接，`artifact` 与 `repository` 共用。
+pub(crate) fn final_artifact_directory(root: &Path, artwork_id: &str, branch_id: &str) -> PathBuf {
+    root.join("artworks")
+        .join(artwork_id)
+        .join("artifacts")
+        .join(branch_id)
+}
+
+/// 认证仓库副本的路径：成品目录下的 `certifications/<record>.jpg`。
+pub(crate) fn certification_copy_path(
+    root: &Path,
+    artwork_id: &str,
+    branch_id: &str,
+    record_id: &str,
+) -> PathBuf {
+    final_artifact_directory(root, artwork_id, branch_id)
+        .join("certifications")
+        .join(format!("{record_id}.jpg"))
+}
 
 pub(crate) struct BranchPublicationTarget {
     pub(crate) history_id: String,
@@ -202,33 +224,9 @@ fn final_artifact_from_row(row: &Row<'_>) -> rusqlite::Result<FinalArtifact> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::authenticity::test_support::initialize_publication;
 
-    fn publication_fixture(root: &Path) {
-        crate::library::initialize(root).unwrap();
-        storage::open(root)
-            .unwrap()
-            .execute_batch(
-                "INSERT INTO library_nodes
-                   (id, kind, title, position, created_ms, updated_ms)
-                 VALUES ('artwork', 'artwork', 'Artwork', 0, 0, 0);
-                 INSERT INTO artworks (id, description, created_ms, updated_ms)
-                 VALUES ('artwork', '', 0, 0);
-                 INSERT INTO branches
-                   (id, artwork_id, title, source_path, source_path_key,
-                    backup_enabled, backup_interval_minutes, created_ms, updated_ms)
-                 VALUES ('branch', 'artwork', 'Main', 'source.psd', 'source.psd', 1, 5, 0, 0);
-                 INSERT INTO history_nodes
-                   (id, artwork_id, created_on_branch_id, title, note, commit_kind,
-                    is_checkpoint, created_ms, logical_size, chunk_file_size, sha256,
-                    chunk_count, snapshot_path)
-                 VALUES ('history', 'artwork', 'branch', 'History', '', 'manual',
-                         1, 0, 1, 1,
-                         '0000000000000000000000000000000000000000000000000000000000000000',
-                         1, 'artworks/snapshot.chunk');
-                 UPDATE branches SET head_history_id = 'history' WHERE id = 'branch';",
-            )
-            .unwrap();
-    }
+    const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
     fn artifact<'a>(source_path: &'a str) -> NewFinalArtifact<'a> {
         NewFinalArtifact {
@@ -236,7 +234,7 @@ mod tests {
             branch_id: "branch",
             history_id: "history",
             source_path,
-            source_sha256: "0000000000000000000000000000000000000000000000000000000000000000",
+            source_sha256: ZERO_SHA256,
             media_type: "image/jpeg",
             byte_size: 1,
             created_ms: 0,
@@ -247,7 +245,7 @@ mod tests {
     fn final_artifact_atomically_takes_over_cleanup_intent() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
-        publication_fixture(&root);
+        initialize_publication(&root);
         let mut connection = storage::open(&root).unwrap();
         let transaction = connection.transaction().unwrap();
         let cleanup_id = cleanup::enqueue_repository_file_with_hash(
@@ -278,7 +276,7 @@ mod tests {
     fn missing_cleanup_intent_rolls_back_final_artifact() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
-        publication_fixture(&root);
+        initialize_publication(&root);
 
         let error = insert_final_artifact(
             &root,
@@ -299,7 +297,7 @@ mod tests {
     fn cancel_publication_keeps_external_outputs_and_resets_config() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
-        publication_fixture(&root);
+        initialize_publication(&root);
         let connection = storage::open(&root).unwrap();
         connection
             .execute_batch(

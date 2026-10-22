@@ -148,7 +148,6 @@ export interface PublishResult {
   record: CertificationRecord;
   width: number;
   height: number;
-  watermarkRegionCount: number;
   watermarkWarnings: WatermarkSizeWarning[];
   renditionCacheHit: boolean;
   renderMs: number;

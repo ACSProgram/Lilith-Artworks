@@ -2,7 +2,9 @@ use crate::{
     app::command_runtime::{CommandContext, CommandError},
     authenticity::{
         self, AuthenticityState, BranchPublication, DecodeRequest, DecodeResult,
-        EnterPublicationRequest, PublishBranchRequest, PublishResult,
+        EnterPublicationRequest, EstimateRequest, ExportCertificationRecordRequest,
+        FileSizeEstimate, PublicationPreview, PublicationPreviewRequest, PublishBranchRequest,
+        PublishResult,
     },
     backup, cleanup,
 };
@@ -44,13 +46,52 @@ pub(crate) fn publish(
     state: &AuthenticityState,
     request: PublishBranchRequest,
 ) -> Result<PublishResult, CommandError> {
-    let operation = state
-        .begin_operation("认证签名发布")
-        .map_err(|error| CommandError::from_legacy(error.to_string()))?;
+    let operation = state.begin_operation("认证签名发布")?;
     let branch_id = request.branch_id.clone();
     context.run_foreground(Some(&branch_id), |session| {
-        authenticity::publish_artifact(session.root(), state, &operation, request)
-            .map_err(|error| CommandError::from_legacy(error.to_string()))
+        authenticity::publish(session.root(), state, &operation, request)
+            .map_err(CommandError::from)
+    })
+}
+
+/// 发布质量预览：认证活动任务的启动与 `publish` 对齐，命令层只做授权与调度。
+pub(crate) fn preview_output(
+    context: &CommandContext,
+    state: &AuthenticityState,
+    request: PublicationPreviewRequest,
+) -> Result<PublicationPreview, CommandError> {
+    // 命令层会把这里的错误再包成 `Task`；先去掉领域错误自带的「后台任务失败」前缀，
+    // 保持前端看到的文案与改造前一致。
+    let operation = state
+        .begin_operation("发布质量预览")
+        .map_err(|error| match error {
+            authenticity::AuthenticityError::Task(message) => CommandError::internal(message),
+            other => CommandError::from(other),
+        })?;
+    context.run_read("preview_branch_artifact_output", |session| {
+        authenticity::preview_publication(session.root(), state, &operation, request)
+            .map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn export_record(
+    context: &CommandContext,
+    request: ExportCertificationRecordRequest,
+) -> Result<(), CommandError> {
+    context.run_read("export_certification_record", |session| {
+        let source = authenticity::record_source_path(session.root(), request.record_id.trim())
+            .map_err(CommandError::from)?;
+        authenticity::export_record(session.root(), &source, &request.output_path)
+            .map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn estimate_output(
+    context: &CommandContext,
+    request: EstimateRequest,
+) -> Result<FileSizeEstimate, CommandError> {
+    context.run_read("estimate_authenticity_output_size", |session| {
+        authenticity::estimate_output_size(session.root(), &request).map_err(CommandError::from)
     })
 }
 
@@ -89,7 +130,6 @@ pub(crate) fn decode(
     request: DecodeRequest,
 ) -> Result<DecodeResult, CommandError> {
     context.run_read("decode_authenticity", |session| {
-        authenticity::pipeline::decode(session.root(), state, request)
-            .map_err(|error| CommandError::from_legacy(error.to_string()))
+        authenticity::decode(session.root(), state, request).map_err(CommandError::from)
     })
 }

@@ -69,7 +69,7 @@ pub(crate) fn commit_marker() -> bool {
 /// 认证流水线的取消检查点（渲染 / 编码 / 签名）。
 ///
 /// 与 [`commit_marker`] 同一范式，是两处为测试而触及产品代码的标记点中的**第二处**：
-/// 调用点在领域函数 `authenticity::pipeline` 内部、由 `feature = "headless"` 门控，
+/// 调用点在领域函数 `authenticity::rendition` 内部、由 `feature = "headless"` 门控，
 /// 发布产物中不存在，GUI 路径行为逐位不变。
 /// 返回「此刻是否已请求取消」，调用方据此放弃发布。
 pub(crate) fn auth_checkpoint(stage: &str) -> bool {
@@ -1470,7 +1470,7 @@ fn enter_publication(options: &Options, runtime: &HeadlessRuntime) -> Result<Val
 }
 
 /// 认证签名发布。与 GUI 的 `publish_branch_artifact` 走同一领域函数
-/// `authenticity::publish_artifact`（渲染 → TrustMark 编码 → JPEG 编码 → C2PA 签名），
+/// `authenticity::publish`（渲染 → TrustMark 编码 → JPEG 编码 → C2PA 签名），
 /// 在同一把运行锁与认证操作锁下执行。取消检查点在流水线内部（headless-only 门控），
 /// 因此 `--cancel-on-stdin` 的闸门能精确命中渲染 / 编码 / 签名三个阶段。
 fn publish(options: &Options, runtime: &HeadlessRuntime) -> Result<Value, CommandError> {

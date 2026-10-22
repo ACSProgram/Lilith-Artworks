@@ -31,7 +31,7 @@ const CLEANUP_BATCH_SIZE: usize = 512;
 pub(crate) const SCAN_GRACE_MS: i64 = 30 * 60 * 1000;
 
 /// 仓库根 `temp/` 中认证预览缓存会话目录的命名前缀，由
-/// `authenticity::pipeline::preview_cache_directory` 写入。
+/// `authenticity::rendition::preview_cache_directory` 写入。
 const PREVIEW_SESSION_PREFIX: &str = "authenticity-preview-";
 /// `tempfile::NamedTempFile` 的默认文件名前缀（与 `history::contracts` 的
 /// 暂存文件命名口径一致）；仓库根 `temp/` 下的崩溃残留只认它。

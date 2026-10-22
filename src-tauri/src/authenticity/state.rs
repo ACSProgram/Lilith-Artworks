@@ -196,8 +196,19 @@ fn inspect_models(models_dir: &Path) -> ModelStatus {
 }
 
 fn file_sha256(path: &std::path::Path) -> Option<String> {
-    let bytes = std::fs::read(path).ok()?;
-    Some(hex::encode_upper(sha2::Sha256::digest(bytes)))
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = [0_u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).ok()?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Some(hex::encode_upper(hasher.finalize()))
 }
 
 #[cfg(test)]

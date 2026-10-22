@@ -8,33 +8,30 @@
 
 ## 当前批次状态
 
-2026-10-22 0.3 收尾与认证整改第四批（已实现、自动验证通过并提交）：
+2026-10-22 0.3 收尾与认证整改第五批（已实现、自动验证通过并提交）：
 
-- 发布质量预览的高清局部图请求移回 `usePublicationController.previewOutputTile`：`compressed`
-  绑定本次预览的缓存 token，`original` 绑定当前分支，各自缺所需上下文时明确拒绝；
-  `PublicationPreviewDialog` 只保留请求代次、缓存与去抖，`AuthenticityModule.tsx` 不再直接
-  导入 `authenticityApi`。
-- 局部图来源收敛为 `types.ts` 的 `OutputPreviewTileSource`；对话框去抖与缓存上限改为具名常量；
-  `loupe.ts` 的 `lru` 变量改名 `insertionOrder`，与「按插入顺序淘汰、命中不重排」的实际行为一致。
-- 删除无引用的 `.scope-reset` 样式；估算命令返回值统一使用已有的 `FileSizeEstimate`。
-- `docs/modules/authenticity.md` 修正质量预览缓存位置、放大镜淘汰策略与记录搜索字段，并补上
-  局部图请求经 controller 绑定上下文这一边界；
-  tile 命令注释改为「走仓库共享读租约，发布/签名中前端不发起新请求」。
-- 测试：dialog 局部图用例改为断言只提交来源与矩形，controller 新增压缩/原图参数绑定与
-  缺上下文拒绝的用例。
+- 删除认证后端 `pipeline.rs`，按职责拆为发布、渲染、预览、识别、导出、估算与文件操作模块；
+  `commands.rs` 只保留参数/路径授权校验与读取命令的薄适配，预览、导出与估算经
+  `app/usecases/authenticity.rs` 进入领域模块。
+- 文件复制、缩略图、成品/认证副本路径、扩展名→MIME 与清单声明比对各只有一处实现；发布直接
+  返回 `PublishResult`，删除无消费者的 `watermarkRegionCount`。
+- 识别在 TrustMark 模型不可用时只读取 C2PA 清单、不解码整图；区域解码不再复制整幅
+  `DynamicImage`；模型摘要改为固定缓冲流式读取。
+- 测试夹具收进 `#[cfg(test)] authenticity/test_support`；缓存、tile、发布、识别、导出与估算
+  的用例随实现迁移，并补上模型不可用路径与文件不覆盖发布的断言。
 
 计划与逐批验证记录见 `0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 13 节。
-第一至第四批已提交；第五、六批未开始。
+第一至第五批已提交；第六批未开始。
 
 第三批界面部分（历史页视图、精简与悬停、设置六页的保存/取消/滚动）只做了自动验证与现有
 组件测试，标注为**待人工验收**，验收项在 `todo.md`。
 
 ## 下一步
 
+- 第六批（认证前端拆分、边界收口与文档同步）待开始。
 - 第三批界面验收：历史总览/当前分支视图切换、精简模式选择与二段确认、节点悬停与缩略图刷新、
   设置六页的保存/取消/滚动与空间页确认弹窗；验收项见 `todo.md`。
 - 第一、二批遗留的人工确认（备份页持久化记录、仓库切换清空）见 `todo.md`。
-- 第五批（认证后端结构重组与识别路径）待开始。
 - 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
   `docs/guides/release-policy.md`。
 

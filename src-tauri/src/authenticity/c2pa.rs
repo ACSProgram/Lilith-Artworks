@@ -239,7 +239,11 @@ pub(crate) fn sign_jpeg(
             "label": "source-artwork"
         })
         .to_string(),
-        image_format_hint(source_path)?,
+        super::rendition::image_media_type_for_path(source_path).ok_or_else(|| {
+            AuthenticityError::InvalidInput(
+                "C2PA ingredient 仅支持 PNG、JPEG、WebP 或 TIFF 原图".into(),
+            )
+        })?,
         &mut source_file,
     )?;
     if config.trustmark_enabled {
@@ -282,24 +286,6 @@ pub(super) fn supported_signing_algorithm(value: &str) -> AuthenticityResult<Sig
     }
     SigningAlg::from_str(&normalized)
         .map_err(|_| AuthenticityError::InvalidInput("不支持的 C2PA 签名算法".into()))
-}
-
-fn image_format_hint(path: &Path) -> AuthenticityResult<&'static str> {
-    match path
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "png" => Ok("image/png"),
-        "jpg" | "jpeg" => Ok("image/jpeg"),
-        "webp" => Ok("image/webp"),
-        "tif" | "tiff" => Ok("image/tiff"),
-        _ => Err(AuthenticityError::InvalidInput(
-            "C2PA ingredient 仅支持 PNG、JPEG、WebP 或 TIFF 原图".into(),
-        )),
-    }
 }
 
 pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> {
@@ -387,6 +373,31 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
             .map(str::to_owned),
         manifest_json: Some(reader.json()),
     })
+}
+
+/// 期望的清单声明：发布后的回读核对与全库扫描共用同一组字段与比较规则。
+pub(crate) struct ClaimExpectation<'a> {
+    pub(crate) record_id: &'a str,
+    /// 启用 TrustMark 时为本次软绑定 ID；未启用时必须是 `None`（清单里不得出现）。
+    pub(crate) watermark_id: Option<&'a str>,
+    pub(crate) title: &'a str,
+    pub(crate) creator: &'a str,
+    pub(crate) rights_statement: &'a str,
+    pub(crate) authentication_content: &'a str,
+}
+
+/// 比对清单中的 record ID、TrustMark ID 与四项声明；不检查清单是否存在或验证状态，
+/// 这两项由调用方按各自文案先行判定。
+pub(crate) fn matches_expectation(
+    manifest: &ManifestSummary,
+    expected: &ClaimExpectation<'_>,
+) -> bool {
+    manifest.record_id.as_deref() == Some(expected.record_id)
+        && manifest.watermark_id.as_deref() == expected.watermark_id
+        && manifest.title.as_deref() == Some(expected.title)
+        && manifest.creator.as_deref() == Some(expected.creator)
+        && manifest.rights_statement.as_deref() == Some(expected.rights_statement)
+        && manifest.authentication_content.as_deref() == Some(expected.authentication_content)
 }
 
 #[cfg(test)]

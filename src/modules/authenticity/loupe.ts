@@ -46,7 +46,7 @@ export const LOUPE_REGION_CACHE = 12;
 export const LOUPE_FETCH_DEBOUNCE_MS = 120;
 /** 当前格到位后预取相邻格的延迟，避免移动过程中堆积无用请求。 */
 export const LOUPE_PREFETCH_DELAY_MS = 400;
-/** 后端裁剪的输出边长下限，与 `pipeline::TILE_MIN_EDGE` 一致。 */
+/** 后端裁剪的输出边长下限，与 `preview::tile::TILE_MIN_EDGE` 一致。 */
 const LOUPE_MIN_EDGE = 64;
 
 function clamp(value: number, min: number, max: number): number {

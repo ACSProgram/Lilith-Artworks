@@ -221,6 +221,37 @@ impl From<CommandError> for String {
     }
 }
 
+/// 认证领域的类型错误直接映射到命令分类，消息保持 `Display` 原样。
+///
+/// 只有 `Task` 中明确表示「已取消」的才归为 `Cancelled`；其余任务失败与图片、
+/// TrustMark、C2PA、序列化错误统一归为 `Internal`，避免把领域内部失败误报成输入
+/// 问题。
+///
+/// `Other` 是「原样文案」通道：仓储返回的 `String` 与命令层的参数提示都包在它里面
+/// （见 `AuthenticityError::message`），这些文案在 typed 通道出现前就按内容分类，
+/// 因此继续走 [`CommandError::from_legacy`] 的启发式——否则「已存在」「必须」这类
+/// 输入问题会被降级成 `operation_failed`。
+impl From<crate::authenticity::AuthenticityError> for CommandError {
+    fn from(error: crate::authenticity::AuthenticityError) -> Self {
+        use crate::authenticity::AuthenticityError;
+
+        if matches!(error, AuthenticityError::Other(_)) {
+            return Self::from_legacy(error.to_string());
+        }
+        let (kind, code, retryable) = match &error {
+            AuthenticityError::InvalidInput(_) => {
+                (CommandErrorKind::InvalidInput, "invalid_input", false)
+            }
+            AuthenticityError::Task(message) if message.contains("已取消") => {
+                (CommandErrorKind::Cancelled, "cancelled", false)
+            }
+            AuthenticityError::Io(_) => (CommandErrorKind::Io, "io_failed", true),
+            _ => (CommandErrorKind::Internal, "operation_failed", false),
+        };
+        Self::new(kind, code, error.to_string(), retryable)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +280,44 @@ mod tests {
         // 「不能取消」描述的是用户操作不合法，不应被当成任务被取消。
         let error = CommandError::from("该检查点是恢复祖先历史所需的唯一 snapshot，不能取消");
         assert_eq!(error.kind, CommandErrorKind::Internal);
+    }
+
+    #[test]
+    fn authenticity_errors_map_to_stable_command_kinds() {
+        use crate::authenticity::AuthenticityError;
+
+        let invalid = CommandError::from(AuthenticityError::InvalidInput("坏参数".into()));
+        assert_eq!(invalid.kind, CommandErrorKind::InvalidInput);
+        assert_eq!(invalid.code, "invalid_input");
+        assert_eq!(invalid.message, "参数无效：坏参数");
+
+        let cancelled = CommandError::from(AuthenticityError::Task("认证任务已取消".into()));
+        assert_eq!(cancelled.kind, CommandErrorKind::Cancelled);
+
+        let io = CommandError::from(AuthenticityError::Io(std::io::Error::other("磁盘错误")));
+        assert_eq!(io.kind, CommandErrorKind::Io);
+        assert!(io.retryable);
+
+        let internal = CommandError::from(AuthenticityError::Task("未知失败".into()));
+        assert_eq!(internal.kind, CommandErrorKind::Internal);
+    }
+
+    #[test]
+    fn authenticity_string_errors_keep_their_legacy_classification() {
+        use crate::authenticity::AuthenticityError;
+
+        // 仓储与参数提示走 `Other`，分类仍按文案，不降级成 `operation_failed`。
+        let invalid =
+            CommandError::from(AuthenticityError::message("JPEG 质量必须在 1 到 100 之间"));
+        assert_eq!(invalid.kind, CommandErrorKind::InvalidInput);
+        assert_eq!(invalid.message, "JPEG 质量必须在 1 到 100 之间");
+
+        let conflict = CommandError::from(AuthenticityError::message(
+            "导出目标已存在；请选择新的文件名",
+        ));
+        assert_eq!(conflict.kind, CommandErrorKind::Conflict);
+
+        let missing = CommandError::from(AuthenticityError::message("找不到分支的最终成品"));
+        assert_eq!(missing.kind, CommandErrorKind::NotFound);
     }
 }

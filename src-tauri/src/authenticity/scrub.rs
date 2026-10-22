@@ -82,14 +82,15 @@ pub(crate) fn scrub_controlled_files(
                 record.id
             ));
         }
-        if manifest.record_id.as_deref() != Some(record.id.as_str())
-            || manifest.watermark_id != record.watermark_id
-            || manifest.title.as_deref() != Some(record.title.as_str())
-            || manifest.creator.as_deref() != Some(record.creator.as_str())
-            || manifest.rights_statement.as_deref() != Some(record.rights_statement.as_str())
-            || manifest.authentication_content.as_deref()
-                != Some(record.authentication_content.as_str())
-        {
+        let expected = c2pa::ClaimExpectation {
+            record_id: &record.id,
+            watermark_id: record.watermark_id.as_deref(),
+            title: &record.title,
+            creator: &record.creator,
+            rights_statement: &record.rights_statement,
+            authentication_content: &record.authentication_content,
+        };
+        if !c2pa::matches_expectation(&manifest, &expected) {
             return Err(format!("认证记录 {} 的 C2PA 声明与数据库不匹配", record.id));
         }
         checked += 1;
