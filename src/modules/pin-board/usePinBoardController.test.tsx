@@ -88,6 +88,7 @@ function fakeRenderer(): PinBoardRenderer {
     setTextureCacheBudgets: vi.fn(),
     setTool: vi.fn(),
     finishActiveInteraction: vi.fn(),
+    cancelTextPlacement: vi.fn(),
     finalize: vi.fn(async () => true),
   } as unknown as PinBoardRenderer;
 }

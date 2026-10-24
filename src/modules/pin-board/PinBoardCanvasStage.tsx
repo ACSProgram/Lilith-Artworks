@@ -37,6 +37,7 @@ import { textureBudgetsForLevel, type PinBoardTextureBudgets } from "./texturePo
 import { PinBoardLayersPanel } from "./PinBoardLayersPanel";
 import { PinBoardColorPicker } from "./PinBoardColorPicker";
 import { PinBoardTextEditor } from "./PinBoardTextEditor";
+import type { PinBoardNewTextRequest } from "./textEditing";
 import {
   MAX_STROKE_WIDTH,
   MIN_STROKE_WIDTH,
@@ -363,6 +364,8 @@ export interface PinBoardCanvasStageProps {
   onState: (state: PinBoardInteractionState) => void;
   onContextMenu: (request: PinBoardContextMenuRequest | null) => void;
   onStrokeCommit: (request: StrokeCommitRequest) => void;
+  /** 新建文字提交：落库成功后返回 null，失败返回原因并保留编辑框。 */
+  onCreateText: (request: PinBoardNewTextRequest) => Promise<string | null>;
   onImportDropped: (files: FileList, clientX: number, clientY: number) => Promise<void>;
   onSelectTool: (tool: PinBoardTool) => void;
   onToggleLayer: (layer: number, visible: boolean) => void;
@@ -394,6 +397,7 @@ export function PinBoardCanvasStage({
   onState,
   onContextMenu,
   onStrokeCommit,
+  onCreateText,
   onImportDropped,
   onSelectTool,
   onToggleLayer,
@@ -458,6 +462,7 @@ export function PinBoardCanvasStage({
           key={interaction.textEditing.sessionId}
           editing={interaction.textEditing}
           renderer={renderer}
+          onCreateText={onCreateText}
         />
       )}
       {view && !unavailable && (

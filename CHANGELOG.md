@@ -29,8 +29,24 @@ entries for the reader; they are not a template every entry has to fill.
   and text changes merge into one save, and non-text items carrying a text
   payload are rejected. Background board settlement now carries text payloads
   so switching away from an edited board keeps the committed text.
+- New pin-board text is placed directly on the canvas. The toolbar button
+  starts a placement mode with an I-beam cursor: a left click opens the inline
+  editor at that point, and a right click, `Escape` or a second click on the
+  button cancels. The blank-area context menu skips placement and opens the
+  editor at the right-click point. The same editor sets content, effective font
+  size, color and alignment, and the first commit creates the item through
+  `create_pin_board_text`.
+- Entering an existing text now puts the caret at the clicked character
+  boundary (line and alignment aware) instead of always at the end, and text
+  that would render below 10 CSS pixels is auto-zoomed to about 20 pixels for
+  editing without touching the stored font size.
 
 ### Changed
+
+- The pin-board "add text" dialog is gone; its content, size, color and
+  alignment controls live in the inline editor and its placement is the
+  canvas placement mode. Text styles remembered for the next new item come
+  from the last committed draft (48 / black / centered on first use).
 
 - Removed the unreferenced reference-inventory validation hooks, the unused
   background runtime entry points, the obsolete `default_panel` setting and

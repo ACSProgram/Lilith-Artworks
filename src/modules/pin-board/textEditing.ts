@@ -10,10 +10,11 @@ import {
   PIN_BOARD_TEXT_MAX_CHARS,
   PIN_BOARD_TEXT_MAX_DIMENSION,
   measurePinBoardText,
+  pinBoardTextCaretIndex,
 } from "./textLayout";
 import type { PinBoardTextAlign, PinBoardTextItem } from "./types";
 
-/** 字体栏的有效字号输入口径，与旧“添加文字”对话框一致。 */
+/** 字体栏的有效字号输入范围（CSS 像素无关：显示值与数据库字号 × 条目缩放同单位）。 */
 export const PIN_BOARD_TEXT_EDIT_MIN_FONT_SIZE = 12;
 export const PIN_BOARD_TEXT_EDIT_MAX_FONT_SIZE = 240;
 /** 与 Rust 文字载荷校验一致：数据库字号不得超过该值。 */
@@ -43,6 +44,22 @@ export interface PinBoardTextEditGeometry {
   /** CSS 像素 / 世界单位。 */
   pixelsPerWorldUnit: number;
 }
+
+/** 新建文字提交给 `create_pin_board_text` 的载荷。 */
+export interface PinBoardNewTextRequest {
+  text: string;
+  fontSize: number;
+  color: string;
+  align: PinBoardTextAlign;
+  measuredWidth: number;
+  measuredHeight: number;
+  centerX: number;
+  centerY: number;
+}
+
+export type PinBoardNewTextResult =
+  | { ok: true; request: PinBoardNewTextRequest }
+  | { ok: false; error: string };
 
 export interface PinBoardTextScreenMetrics {
   screenFontSize: number;
@@ -216,6 +233,62 @@ export function resolvePinBoardTextDraft(
 
 function matchesAlign(align: string): align is PinBoardTextAlign {
   return align === "left" || align === "center" || align === "right";
+}
+
+/**
+ * 校验新建文字的草稿并解出创建载荷。
+ *
+ * 新条目的条目缩放为 1：测量宽高就是四边形宽高，字号就是有效字号。角度固定 0，
+ * 提交后由创建命令按中心点落成水平四边形。
+ */
+export function resolveNewPinBoardTextDraft(
+  draft: PinBoardTextDraft,
+  center: Point,
+): PinBoardNewTextResult {
+  const resolved = resolvePinBoardTextDraft(draft, { x: 1, y: 1 }, center, 0);
+  if (!resolved.ok) return resolved;
+  return {
+    ok: true,
+    request: {
+      text: draft.text,
+      fontSize: resolved.fontSize,
+      color: resolved.color,
+      align: resolved.align,
+      measuredWidth: resolved.width,
+      measuredHeight: resolved.height,
+      centerX: center[0],
+      centerY: center[1],
+    },
+  };
+}
+
+/**
+ * 把世界坐标落成文字条目里的光标位置。
+ *
+ * 四角构成仿射映射（平移 + 旋转 + 缩放 + 镜像），反解出局部坐标后交给
+ * `pinBoardTextCaretIndex`。四边形退化时返回 null，调用方退回文本末尾。
+ */
+export function pinBoardTextCaretIndexAtPoint(
+  item: Pick<PinBoardTextItem, "text" | "fontSize" | "align" | "width" | "height" | "points">,
+  point: Point,
+): number | null {
+  const [origin, right, , bottom] = item.points;
+  const edgeX: Point = [right[0] - origin[0], right[1] - origin[1]];
+  const edgeY: Point = [bottom[0] - origin[0], bottom[1] - origin[1]];
+  const determinant = edgeX[0] * edgeY[1] - edgeX[1] * edgeY[0];
+  if (Math.abs(determinant) < 1e-9) return null;
+  const deltaX = point[0] - origin[0];
+  const deltaY = point[1] - origin[1];
+  const alongX = (deltaX * edgeY[1] - deltaY * edgeY[0]) / determinant;
+  const alongY = (edgeX[0] * deltaY - edgeX[1] * deltaX) / determinant;
+  return pinBoardTextCaretIndex(
+    item.text,
+    item.fontSize,
+    item.align,
+    item.width,
+    Math.min(1, Math.max(0, alongX)) * item.width,
+    Math.min(1, Math.max(0, alongY)) * item.height,
+  );
 }
 
 /** 世界四边形第一条边（左上 → 右上）的世界旋转角。 */

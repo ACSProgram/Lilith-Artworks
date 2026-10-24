@@ -13,6 +13,7 @@ import {
 } from "./renderer";
 import { getBoardSession, getSelectedBoardId, setSelectedBoardId } from "./session";
 import type { PinBoardTool, StrokeCommitRequest } from "./strokeDrawing";
+import type { PinBoardNewTextRequest } from "./textEditing";
 import { textureBudgetsForLevel } from "./texturePolicy";
 import { usePinBoardTransfers } from "./usePinBoardTransfers";
 import type {
@@ -58,7 +59,8 @@ export interface PinBoardController {
   pasteItems: () => void;
   importImages: () => Promise<void>;
   importDroppedFiles: (files: FileList, clientX: number, clientY: number) => Promise<void>;
-  addText: (text: string, fontSize: number, color: string, placement: [number, number]) => Promise<void>;
+  /** 新建文字：成功返回 null，失败返回要显示在编辑框上的原因。 */
+  createText: (request: PinBoardNewTextRequest) => Promise<string | null>;
   setTool: (tool: PinBoardTool) => void;
   /** 提交一笔刚画完的笔迹：先落地未保存的改动，再创建条目。 */
   commitStroke: (request: StrokeCommitRequest) => void;
@@ -502,7 +504,7 @@ export function usePinBoardController({
     pasteItems,
     importImages: transfers.importImages,
     importDroppedFiles: transfers.importDroppedFiles,
-    addText: transfers.addText,
+    createText: transfers.createText,
     setTool,
     commitStroke: transfers.commitStroke,
     deleteImages,

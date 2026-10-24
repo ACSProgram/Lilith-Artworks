@@ -25,6 +25,7 @@ import {
   databaseFontSizeFor,
   effectivePinBoardFontSize,
   pinBoardTextScreenMetrics,
+  type PinBoardNewTextRequest,
   type PinBoardTextDraft,
 } from "./textEditing";
 import type { PinBoardTextAlign } from "./types";
@@ -67,23 +68,31 @@ function pressedOnCanvas(target: EventTarget | null): boolean {
 /**
  * 文字就地编辑框：与四边形同中心、同旋转的 textarea，外加屏幕水平的字体栏。
  *
- * 草稿只存在这里；每次变化同步推给渲染器，提交/取消由渲染器统一处理。编辑期间
- * 模型不变，因此自动保存不会写出半成品。
+ * 草稿只存在这里；每次变化同步推给渲染器。已有文字的提交/取消由渲染器统一处理，
+ * 新建文字则在本地校验后经 `onCreateText` 走创建命令。编辑期间模型不变，因此自动
+ * 保存不会写出半成品。
  */
 export function PinBoardTextEditor({
   editing,
   renderer,
+  onCreateText,
 }: {
   editing: PinBoardTextEditState;
   renderer: PinBoardRenderer;
+  /** 新建会话的提交入口：成功返回 null，失败返回要显示在编辑框上的原因。 */
+  onCreateText: (request: PinBoardNewTextRequest) => Promise<string | null>;
 }) {
   const [draft, setDraft] = useState<PinBoardTextDraft>(editing.draft);
+  /** 草稿的最新值：异步创建与失焦提交都读它，避免闭包拿到上一帧的草稿。 */
+  const draftRef = useRef(draft);
   const [effectiveText, setEffectiveText] = useState(() => (
     formatFontSize(effectivePinBoardFontSize(editing.draft.fontSize, editing.scale))
   ));
   const [error, setError] = useState<string | null>(null);
   const [composing, setComposing] = useState(false);
+  const [creating, setCreating] = useState(false);
   const composingRef = useRef(false);
+  const creatingRef = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -97,12 +106,38 @@ export function PinBoardTextEditor({
 
   const applyDraft = useCallback((next: PinBoardTextDraft) => {
     setDraft(next);
+    draftRef.current = next;
     setError(null);
     renderer.updateTextEditDraft(next);
   }, [renderer]);
 
   const commit = useCallback((suppressClickEdit = false) => {
-    if (composingRef.current) return false;
+    if (composingRef.current || creatingRef.current) return false;
+    if (editing.isNew) {
+      // 新建会话没有模型可改：校验通过后交给创建命令，失败时保留编辑框与输入。
+      if (draftRef.current.text.trim().length === 0) {
+        renderer.cancelTextEdit();
+        return true;
+      }
+      const resolved = renderer.resolveNewTextEdit();
+      if (!resolved.ok) {
+        setError(resolved.error);
+        textareaRef.current?.focus({ preventScroll: true });
+        return true;
+      }
+      creatingRef.current = true;
+      setCreating(true);
+      setError(null);
+      void onCreateText(resolved.request).then((message) => {
+        creatingRef.current = false;
+        setCreating(false);
+        if (message) {
+          setError(message);
+          textareaRef.current?.focus({ preventScroll: true });
+        }
+      });
+      return true;
+    }
     const message = renderer.commitTextEdit({ suppressClickEdit });
     if (message) {
       setError(message);
@@ -110,20 +145,21 @@ export function PinBoardTextEditor({
       return false;
     }
     return true;
-  }, [renderer]);
+  }, [editing.isNew, onCreateText, renderer]);
 
   const cancel = useCallback(() => {
     renderer.cancelTextEdit();
   }, [renderer]);
 
-  // 进入会话时把光标放在末尾；第一版不做点击定位。
+  // 进入会话时聚焦；有落点信息就把光标放到点击处，否则放在末尾。
   useEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
     textarea.focus({ preventScroll: true });
-    const end = textarea.value.length;
-    textarea.setSelectionRange(end, end);
-  }, [editing.sessionId]);
+    const caret = editing.caret ?? textarea.value.length;
+    const position = Math.min(Math.max(caret, 0), textarea.value.length);
+    textarea.setSelectionRange(position, position);
+  }, [editing.sessionId, editing.caret]);
 
   // 点击编辑框外部即提交。放在 document 捕获阶段，先于画布/工具栏自己的 pointerdown，
   // 这样“提交后照常执行这次点击”对下层控件成立。校验失败时吞掉这次按下并保留草稿。
@@ -137,14 +173,16 @@ export function PinBoardTextEditor({
         event.stopPropagation();
         return;
       }
-      if (!commit(pressedOnCanvas(event.target))) {
+      if (!commit(pressedOnCanvas(event.target)) || editing.isNew) {
+        // 新建草稿的提交是异步创建：这次按下不能再交给画布（否则会立刻把编辑会话
+        // 当成失焦收掉，并在原地开始一次选中/拖动）。
         event.preventDefault();
         event.stopPropagation();
       }
     };
     document.addEventListener("pointerdown", handlePointerDown, true);
     return () => document.removeEventListener("pointerdown", handlePointerDown, true);
-  }, [commit]);
+  }, [commit, editing.isNew]);
 
   const applyEffectiveFontSize = (value: number) => {
     const next = clampEffectiveFontSize(value);
@@ -199,14 +237,14 @@ export function PinBoardTextEditor({
         // 结束会话的按键在这里统一收口：textarea 与字体栏的按键都冒泡到这里。
         // 组合期间不响应，交给输入法自己处理。
         if (event.key === "Escape") {
-          if (composingRef.current) return;
+          if (composingRef.current || creatingRef.current) return;
           event.preventDefault();
           event.stopPropagation();
           cancel();
           return;
         }
         if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-          if (composingRef.current) return;
+          if (composingRef.current || creatingRef.current) return;
           event.preventDefault();
           event.stopPropagation();
           commit();
@@ -220,7 +258,8 @@ export function PinBoardTextEditor({
         value={draft.text}
         wrap="off"
         spellCheck={false}
-        aria-label="编辑文字"
+        readOnly={creating}
+        aria-label={editing.isNew ? "添加文字" : "编辑文字"}
         onChange={(event) => applyDraft({ ...draft, text: event.target.value })}
         onCompositionStart={() => {
           composingRef.current = true;
@@ -251,7 +290,7 @@ export function PinBoardTextEditor({
           <button
             type="button"
             aria-label="减小字号"
-            disabled={composing || effectiveFontSize <= PIN_BOARD_TEXT_EDIT_MIN_FONT_SIZE}
+            disabled={composing || creating || effectiveFontSize <= PIN_BOARD_TEXT_EDIT_MIN_FONT_SIZE}
             onClick={() => applyEffectiveFontSize(effectiveFontSize - 1)}
           >
             <Minus size={13} aria-hidden="true" />
@@ -275,7 +314,7 @@ export function PinBoardTextEditor({
           <button
             type="button"
             aria-label="增大字号"
-            disabled={composing || effectiveFontSize >= PIN_BOARD_TEXT_EDIT_MAX_FONT_SIZE}
+            disabled={composing || creating || effectiveFontSize >= PIN_BOARD_TEXT_EDIT_MAX_FONT_SIZE}
             onClick={() => applyEffectiveFontSize(effectiveFontSize + 1)}
           >
             <Plus size={13} aria-hidden="true" />
@@ -296,7 +335,7 @@ export function PinBoardTextEditor({
               aria-pressed={draft.align === align}
               aria-label={label}
               title={label}
-              disabled={composing}
+              disabled={composing || creating}
               onClick={() => applyDraft({ ...draft, align })}
             >
               <Icon size={15} aria-hidden="true" />

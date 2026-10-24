@@ -1,5 +1,5 @@
 /**
- * 素材板的传输类操作：导入（选择器 / 剪贴板 / 拖入）、导出图片、整画布导出、添加文字
+ * 素材板的传输类操作：导入（选择器 / 剪贴板 / 拖入）、导出图片、整画布导出、新建文字
  * 与笔迹落库队列的共同样板。
  *
  * busy 标记、进度状态、取消标记与「先保存再改」的 `replaceAfterImageMutation` 链都在
@@ -30,7 +30,7 @@ import {
   type PinBoardInteractionState,
 } from "./renderer";
 import { strokeToolId, type StrokeCommitRequest } from "./strokeDrawing";
-import { measurePinBoardText } from "./textLayout";
+import type { PinBoardNewTextRequest } from "./textEditing";
 import type {
   PinBoardMutationResult,
   PinBoardTransferProgress,
@@ -86,12 +86,8 @@ export interface PinBoardTransfers {
   ) => Promise<PinBoardMutationResult | null>;
   importImages: () => Promise<void>;
   importDroppedFiles: (files: FileList, clientX: number, clientY: number) => Promise<void>;
-  addText: (
-    text: string,
-    fontSize: number,
-    color: string,
-    placement: [number, number],
-  ) => Promise<void>;
+  /** 新建文字：成功返回 null，失败返回要显示在编辑框上的原因。 */
+  createText: (request: PinBoardNewTextRequest) => Promise<string | null>;
   commitStroke: (request: StrokeCommitRequest) => void;
   exportImages: () => Promise<void>;
   cancelTransfer: () => void;
@@ -169,6 +165,8 @@ export function usePinBoardTransfers({
     if (!current
       || current.interactionState.locked
       || current.interactionState.textEditing) return null;
+    // 粘贴/导入会改变画板内容：先退出文字放置模式，避免下一次点击意外落成新文字。
+    current.cancelTextPlacement();
     const sequence = beginLoad();
     if (!await current.save() || !isLoadCurrent(sequence)) return null;
     try {
@@ -325,47 +323,53 @@ export function usePinBoardTransfers({
     }
   }, [arrangementGapRatio, rendererRef, replaceAfterImageMutation, selected, setStatus]);
 
-  const addText = useCallback(async (
-    text: string,
-    fontSize: number,
-    color: string,
-    placement: [number, number],
-  ) => {
+  /**
+   * 提交新建文字：先把未保存的改动落地，再用创建命令一次写库。
+   *
+   * 不复用 `replaceAfterImageMutation`：那条样板要求「没有编辑会话」，而新建文字本身
+   * 就在编辑会话里；另外这里要把失败原因回传给编辑框，不能只写状态栏。创建命令是瞬时
+   * 的，不显示传输进度条，失败时状态栏与编辑框同时给出原因。
+   */
+  const createText = useCallback(async (
+    request: PinBoardNewTextRequest,
+  ): Promise<string | null> => {
     const current = rendererRef.current;
     if (!current
       || current.interactionState.locked
-      || current.interactionState.textEditing
       || selected === null
-      || transferBusyRef.current) return;
+      || transferBusyRef.current) return "当前画板无法添加文字";
+    if (!current.interactionState.textEditing?.isNew) return "当前没有正在新建的文字";
     transferBusyRef.current = true;
-    transferOperationId.current = null;
-    setTransferProgress({ label: "正在添加文字", current: 0, total: 1 });
+    const sequence = beginLoad();
     try {
-      // 度量与渲染共用 `textLayout`；Rust 只持久化度量结果与载荷，不生成图片。
-      // 对话框不提供对齐选项，条目统一按居中排版（Rust 侧已校验取值）。
-      const metrics = measurePinBoardText(text, fontSize);
-      await replaceAfterImageMutation((_renderer, revision) => {
-        const [centerX, centerY] = placement;
-        return pinBoardApi.createPinBoardText(
-          selected,
-          text,
-          fontSize,
-          color,
-          "center",
-          metrics.width,
-          metrics.height,
-          centerX,
-          centerY,
-          revision,
-        );
-      }, () => "已添加文字");
+      // 新文字不经过保存载荷：先落地未保存的改动，再由创建命令一次写库。
+      if (!await current.save()) return "画板保存失败，文字尚未添加";
+      if (!isLoadCurrent(sequence)) return "画板已切换，文字尚未添加";
+      const result = await pinBoardApi.createPinBoardText(
+        selected,
+        request.text,
+        request.fontSize,
+        request.color,
+        request.align,
+        request.measuredWidth,
+        request.measuredHeight,
+        request.centerX,
+        request.centerY,
+        current.boardRevision,
+      );
+      if (!isLoadCurrent(sequence)) return "画板已切换，文字尚未添加";
+      current.applyMutationResult(result.view, result.itemIds);
+      current.completeNewTextEdit();
+      setInteraction(current.interactionState);
+      return null;
     } catch (error) {
-      setStatus(`无法添加文字：${errorMessage(error)}`);
+      const message = errorMessage(error);
+      setStatus(`无法添加文字：${message}`);
+      return message;
     } finally {
-      setTransferProgress(null);
       transferBusyRef.current = false;
     }
-  }, [rendererRef, replaceAfterImageMutation, selected, setStatus]);
+  }, [beginLoad, isLoadCurrent, rendererRef, selected, setInteraction, setStatus]);
 
   /**
    * 提交一笔刚画完的笔迹。
@@ -539,7 +543,7 @@ export function usePinBoardTransfers({
     replaceAfterImageMutation,
     importImages,
     importDroppedFiles,
-    addText,
+    createText,
     commitStroke,
     exportImages,
     cancelTransfer,

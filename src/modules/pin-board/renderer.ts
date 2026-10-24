@@ -113,12 +113,15 @@ import {
 } from "./texturePolicy";
 import { requestedTextTextureDimension } from "./textLayout";
 import {
+  pinBoardTextCaretIndexAtPoint,
   pinBoardTextEditGeometry,
   pinBoardTextScale,
   pinBoardTextSignature,
+  resolveNewPinBoardTextDraft,
   resolvePinBoardTextDraft,
   textDraftFromItem,
   textQuadAngle,
+  type PinBoardNewTextResult,
   type PinBoardTextDraft,
   type PinBoardTextScale,
 } from "./textEditing";
@@ -197,8 +200,13 @@ type ImageSnapshot = {
 export interface PinBoardTextEditState {
   /** 每次进入编辑自增；编辑器用它作为组件 key，草稿不会跨会话串台。 */
   sessionId: number;
-  itemId: number;
+  /** 新建会话还没有条目 id；提交时才由创建命令分配。 */
+  itemId: number | null;
+  /** 正在新建文字：提交走 `create_pin_board_text`，不经过保存载荷。 */
+  isNew: boolean;
   draft: PinBoardTextDraft;
+  /** 进入编辑时的光标位置（UTF-16 偏移）；null 表示放在末尾。 */
+  caret: number | null;
   /** 条目缩放（四边形宽 ÷ 测量宽）。有效字号 = `draft.fontSize × scale`。 */
   scale: number;
   centerX: number;
@@ -243,6 +251,8 @@ export interface PinBoardInteractionState {
   exporting: boolean;
   /** 正在就地编辑的文字；null 表示没有编辑会话。 */
   textEditing: PinBoardTextEditState | null;
+  /** 文字放置模式：画布光标为 I 字型，左键落点新建文字，右键或 Escape 取消。 */
+  placingText: boolean;
 }
 
 /** 未装载画板或没有渲染器时的交互状态：锁定、无选中、工具为选择。 */
@@ -262,6 +272,7 @@ export const DEFAULT_PIN_BOARD_INTERACTION: PinBoardInteractionState = {
   visibleLayers: normalizeLayerVisibility(null),
   exporting: false,
   textEditing: null,
+  placingText: false,
 };
 
 export interface PinBoardContextMenuRequest {
@@ -301,6 +312,9 @@ const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
 /** 第二次点击文字时，按下到抬起的位移超过该值仍按拖动处理。 */
 const TEXT_EDIT_CLICK_TOLERANCE_CSS_PIXELS = 3;
+/** 屏幕字号低于该值时，进入编辑会自动放大视图到可读尺寸。 */
+const TEXT_EDIT_READABLE_MIN_CSS_PIXELS = 10;
+const TEXT_EDIT_READABLE_TARGET_CSS_PIXELS = 20;
 /** 橡皮环形光标的视觉最小直径（CSS 像素）：再小就看不见了。 */
 const ERASER_RING_MIN_CSS_PIXELS = 4;
 /**
@@ -403,14 +417,26 @@ export class PinBoardRenderer {
   /** 就地编辑会话；草稿由 React 编辑器推入，渲染器负责模型与提交。 */
   private textEdit: {
     sessionId: number;
-    itemId: number;
-    before: ImageSnapshot;
+    /** 新建会话为 null，提交时由创建命令分配条目 id。 */
+    itemId: number | null;
+    isNew: boolean;
+    before: ImageSnapshot | null;
     draft: PinBoardTextDraft;
     scale: PinBoardTextScale;
     center: Point;
     angle: number;
+    caret: number | null;
   } | null = null;
   private textEditSessionId = 0;
+  /** 上次提交的新文字样式：下一次新建沿用，首次为 48 / 黑 / 居中。 */
+  private textDefaults: PinBoardTextDraft = {
+    text: "",
+    fontSize: 48,
+    color: "#000000",
+    align: "center",
+  };
+  /** 文字放置模式：左键落点新建，右键或 Escape 取消。 */
+  private placingText = false;
   /** 提交后抑制紧随其后的 pointerup 再次进入编辑（点击同一条文字时会发生）。 */
   private suppressClickEdit = false;
   /** 本次按下的起点与拖动判定：第二次点击同一文字且没有拖动才进入编辑。 */
@@ -728,7 +754,9 @@ export class PinBoardRenderer {
   private detachCurrentBoard(stagePending: boolean) {
     if (!this.loaded) return;
     // 草稿先同步提交进模型，随快照进入后台结算；无效草稿按取消处理并保留原文。
+    // 新建中的文字还没有模型，切画板时直接取消。
     if (!this.settleTextEdit()) this.cancelTextEdit();
+    this.placingText = false;
     this.finishActiveInteraction();
     this.persistSession();
     // 挂起的自动保存由快照接手：队列会写同一份内容，不必再走一次防抖保存。
@@ -791,6 +819,7 @@ export class PinBoardRenderer {
     this.imageById.clear();
     this.savedTextSignatures.clear();
     this.textEdit = null;
+    this.placingText = false;
     this.suppressClickEdit = false;
     this.resetPressState();
     this.selectedIds.clear();
@@ -1203,6 +1232,7 @@ export class PinBoardRenderer {
    * 还要等下一次 pointerdown 才换成笔尖。
    */
   setTool(tool: PinBoardTool) {
+    if (this.placingText) this.cancelTextPlacement();
     if (!this.loaded || this.locked || this.exporting || this.tool === tool) return;
     if (!this.settleTextEdit()) return;
     this.finishActiveInteraction();
@@ -1233,7 +1263,8 @@ export class PinBoardRenderer {
     if (next[layer] === visible) return;
     // 正在编辑的文字不能被藏在看不见的图层里：先提交再隐藏。
     if (!visible
-      && this.textEdit
+      && this.textEdit !== null
+      && this.textEdit.itemId !== null
       && this.imageById.get(this.textEdit.itemId)?.layer === layer
       && !this.settleTextEdit()) {
       return;
@@ -1312,23 +1343,43 @@ export class PinBoardRenderer {
       visibleLayers: normalizeLayerVisibility(this.visibleLayers),
       exporting: this.exporting,
       textEditing: this.textEditState(),
+      placingText: this.placingText,
     };
   }
 
   private textEditState(): PinBoardTextEditState | null {
     const edit = this.textEdit;
     if (!edit) return null;
+    const rect = this.canvas.getBoundingClientRect();
+    if (edit.isNew) {
+      const [centerX, centerY] = worldToScreen(edit.center, rect, this.viewport);
+      return {
+        sessionId: edit.sessionId,
+        itemId: null,
+        isNew: true,
+        draft: { ...edit.draft },
+        caret: edit.caret,
+        scale: 1,
+        centerX,
+        centerY,
+        angle: 0,
+        pixelsPerWorldUnit: rect.height / Math.max(this.viewport.height, 1e-9),
+      };
+    }
+    if (edit.itemId === null) return null;
     const image = this.imageById.get(edit.itemId);
     if (!image || image.kind !== "text") return null;
     const geometry = pinBoardTextEditGeometry(
       image,
-      this.canvas.getBoundingClientRect(),
+      rect,
       this.viewport,
     );
     return {
       sessionId: edit.sessionId,
       itemId: edit.itemId,
+      isNew: false,
       draft: { ...edit.draft },
+      caret: edit.caret,
       scale: edit.scale.x,
       ...geometry,
     };
@@ -1377,12 +1428,58 @@ export class PinBoardRenderer {
   }
 
   /**
+   * 进入文字放置模式：画布光标变为 I 字型，下一次左键点击在落点新建文字，
+   * 右键或 Escape 取消。与就地编辑共用同一个草稿编辑框。
+   *
+   * 只有工具栏按钮走这里：按钮本身不含落点，由用户到画布上自己点。右键菜单
+   * 已经有落点，直接走 `addTextAtClientPoint`。
+   */
+  startTextPlacement(): boolean {
+    if (!this.loaded || this.locked || this.exporting || this.gpuUnavailable) return false;
+    if (!this.settleTextEdit()) return false;
+    this.finishActiveInteraction();
+    this.placingText = true;
+    this.tool = "select";
+    this.selectedIds.clear();
+    this.marqueeBaseIds.clear();
+    this.updateMarqueeOverlay(null);
+    this.canvas.classList.remove("over-text");
+    this.refreshSelectionVisuals();
+    this.emitState();
+    return true;
+  }
+
+  cancelTextPlacement() {
+    if (!this.placingText) return;
+    this.placingText = false;
+    this.emitState();
+  }
+
+  /**
+   * 在视口坐标处直接打开空白编辑框：右键菜单「添加文字」用它，落点就是右键位置，
+   * 不经过放置模式。
+   */
+  addTextAtClientPoint(clientX: number, clientY: number): boolean {
+    if (!this.loaded || this.locked || this.exporting || this.gpuUnavailable) return false;
+    if (!this.settleTextEdit()) return false;
+    this.finishActiveInteraction();
+    this.placingText = false;
+    this.onContextMenu(null);
+    const point = screenToWorld(clientX, clientY, this.canvas.getBoundingClientRect(), this.viewport);
+    this.cursorWorld = point;
+    return this.beginNewTextEdit(point);
+  }
+
+  /**
    * 进入文字就地编辑：只接受恰好一条、当前可见的文字。
    *
    * 入口有三个：第二次点击已选中的单条文字、`F2` 与右键菜单。进入时不对模型做任何
    * 修改，草稿留在编辑会话里；因此编辑期间自动保存不会写出半成品。
+   *
+   * `caretPoint` 是第二次点击的世界坐标：用它把光标落到点击处；从菜单或 `F2`
+   * 进入时为空，光标放在末尾。
    */
-  beginTextEdit(itemId?: number): boolean {
+  beginTextEdit(itemId?: number, caretPoint?: Point): boolean {
     if (!this.loaded || this.locked || this.exporting || this.gpuUnavailable) return false;
     if (!this.settleTextEdit()) return false;
     this.finishActiveInteraction();
@@ -1397,6 +1494,7 @@ export class PinBoardRenderer {
       || !isLayerVisible(this.visibleLayers, image.layer)) {
       return false;
     }
+    this.placingText = false;
     this.selectedIds.clear();
     this.selectedIds.add(targetId);
     this.tool = "select";
@@ -1406,16 +1504,58 @@ export class PinBoardRenderer {
     this.textEdit = {
       sessionId: ++this.textEditSessionId,
       itemId: targetId,
+      isNew: false,
       before,
       draft: textDraftFromItem(image),
       scale: pinBoardTextScale(image),
       center: quadCenter(image.points),
       angle: textQuadAngle(image.points),
+      caret: caretPoint ? pinBoardTextCaretIndexAtPoint(image, caretPoint) : null,
     };
+    this.ensureTextEditReadable();
     this.updateSelectionOverlay();
     this.draw();
     this.emitState();
     return true;
+  }
+
+  /** 在放置点打开空白编辑框；提交时才创建条目，不修改模型。 */
+  private beginNewTextEdit(center: Point): boolean {
+    if (!this.loaded || this.locked || this.exporting || this.gpuUnavailable) return false;
+    this.selectedIds.clear();
+    this.tool = "select";
+    this.textEdit = {
+      sessionId: ++this.textEditSessionId,
+      itemId: null,
+      isNew: true,
+      before: null,
+      draft: { ...this.textDefaults, text: "" },
+      scale: { x: 1, y: 1 },
+      center: [...center] as Point,
+      angle: 0,
+      caret: 0,
+    };
+    this.ensureTextEditReadable();
+    this.updateSelectionOverlay();
+    this.draw();
+    this.emitState();
+    return true;
+  }
+
+  /**
+   * 屏幕字号太小时自动放大视图：有效字号不变，只改变观看比例。
+   * 以编辑框中心为锚点，避免文字跳走。
+   */
+  private ensureTextEditReadable() {
+    const edit = this.textEdit;
+    if (!edit) return;
+    const rect = this.canvas.getBoundingClientRect();
+    if (rect.height <= 0 || this.viewport.height <= 0) return;
+    const screenFont = edit.draft.fontSize * edit.scale.x * rect.height / this.viewport.height;
+    if (screenFont >= TEXT_EDIT_READABLE_MIN_CSS_PIXELS) return;
+    const factor = Math.max(0.01, screenFont / TEXT_EDIT_READABLE_TARGET_CSS_PIXELS);
+    const [centerX, centerY] = worldToScreen(edit.center, rect, this.viewport);
+    this.zoomAt(factor, rect.left + centerX, rect.top + centerY);
   }
 
   /** React 编辑器每次输入/改样式都把草稿推回来；不触发状态广播，避免打字时整页重渲染。 */
@@ -1441,8 +1581,23 @@ export class PinBoardRenderer {
   commitTextEdit({ suppressClickEdit = false }: { suppressClickEdit?: boolean } = {}): string | null {
     const edit = this.textEdit;
     if (!edit) return null;
+    if (edit.isNew) {
+      // 新建会话由编辑器走创建命令；这里只负责「收回草稿」的入口（切画板、锁定等），
+      // 没提交过的空白文字没有可写入的模型，直接按取消处理。
+      this.closeTextEdit(suppressClickEdit);
+      return null;
+    }
+    if (edit.itemId === null) {
+      this.cancelTextEdit();
+      return null;
+    }
     const image = this.imageById.get(edit.itemId);
     if (!image || image.kind !== "text") {
+      this.cancelTextEdit();
+      return null;
+    }
+    const before = edit.before;
+    if (!before) {
       this.cancelTextEdit();
       return null;
     }
@@ -1480,13 +1635,36 @@ export class PinBoardRenderer {
     this.suppressClickEdit = suppressClickEdit;
     this.invalidateTextTexture(edit.itemId);
     const after = this.snapshot([edit.itemId]);
-    this.pushHistory([edit.before], after);
+    this.pushHistory([before], after);
     this.afterModelChange([edit.itemId]);
     return null;
   }
 
   cancelTextEdit() {
     if (!this.textEdit) return;
+    this.closeTextEdit(false);
+  }
+
+  /** 校验并解出新建文字的创建载荷；失败时编辑会话与草稿保留。 */
+  resolveNewTextEdit(): PinBoardNewTextResult {
+    const edit = this.textEdit;
+    if (!edit?.isNew) return { ok: false, error: "当前没有正在新建的文字" };
+    return resolveNewPinBoardTextDraft(edit.draft, edit.center);
+  }
+
+  /**
+   * 新建文字已由创建命令落库：记住本次样式，关闭编辑会话并让选中框落到新条目上。
+   * 由创建流程在 `applyMutationResult` 之后调用。
+   */
+  completeNewTextEdit() {
+    const edit = this.textEdit;
+    if (!edit?.isNew) return;
+    this.textDefaults = {
+      text: "",
+      fontSize: edit.draft.fontSize,
+      color: edit.draft.color.toLowerCase(),
+      align: edit.draft.align,
+    };
     this.closeTextEdit(false);
   }
 
@@ -1620,6 +1798,7 @@ export class PinBoardRenderer {
     if (!this.loaded || this.exporting || this.destroyed || this.gpuUnavailable) {
       throw new Error("当前画板无法导出");
     }
+    this.placingText = false;
     if (!this.settleTextEdit()) throw new Error("文字编辑尚未提交，无法导出");
     const boardId = this.boardId;
     const tiles = canvasExportTiles(plan);
@@ -1900,6 +2079,7 @@ export class PinBoardRenderer {
     if (!this.locked) {
       if (!this.settleTextEdit()) return;
       this.finishInteraction(false);
+      this.placingText = false;
       this.selectedIds.clear();
       this.onContextMenu(null);
     }
@@ -2198,6 +2378,8 @@ export class PinBoardRenderer {
   private emitState() {
     if (this.destroyed || !this.loaded) return;
     this.canvas.classList.toggle("locked", this.locked);
+    // 文字放置模式用 I 字型光标：落点即文字中心。
+    this.canvas.classList.toggle("placing-text", this.placingText);
     // 画笔用笔尖光标，橡皮用一个 DOM 空心圆（见 `updateEraserRing`），其余工具保持十字。
     this.canvas.classList.toggle("tool-pen", this.tool === "pen");
     this.canvas.classList.toggle("tool-eraser", this.tool === "eraser");
@@ -2218,6 +2400,18 @@ export class PinBoardRenderer {
   private readonly keyDown = (event: KeyboardEvent) => {
     if (!this.active || this.exporting) return;
     if (!shortcutCanHandle(event)) return;
+    // 放置模式下只认 Escape 与保存：右键/Esc 取消，其余画板快捷键先停用。
+    if (this.placingText) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        this.cancelTextPlacement();
+      } else if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+        event.preventDefault();
+        void this.save();
+      }
+      return;
+    }
     // 编辑会话期间所有画板快捷键停用：Ctrl+Z 留给 textarea 的原生撤销。
     if (this.textEdit) return;
     if (event.key === "F2"
@@ -2314,6 +2508,18 @@ export class PinBoardRenderer {
   private readonly pointerDown = (event: PointerEvent) => {
     if (event.button !== 0 && event.button !== 1) return;
     if (this.dragMode || this.exporting) return;
+    // 文字放置模式：左键落点打开空白编辑框，中键仍可平移。
+    if (this.placingText && event.button === 0) {
+      const rect = this.canvas.getBoundingClientRect();
+      const world = screenToWorld(event.clientX, event.clientY, rect, this.viewport);
+      this.cursorWorld = world;
+      this.placingText = false;
+      this.canvas.classList.remove("placing-text");
+      this.onContextMenu(null);
+      if (!this.beginNewTextEdit(world)) this.emitState();
+      event.preventDefault();
+      return;
+    }
     // 编辑器在 document 捕获阶段已经提交过；这里兜一次并阻止无效草稿继续拖动。
     // 中键是平移手势，不结束编辑会话。
     let closedTextEditor = false;
@@ -2460,6 +2666,7 @@ export class PinBoardRenderer {
         "over-text",
         !this.locked
           && !this.textEdit
+          && !this.placingText
           && this.tool === "select"
           && hovered?.kind === "text"
           && this.selectedIds.size === 1
@@ -2624,6 +2831,8 @@ export class PinBoardRenderer {
       && this.selectedIds.has(this.pressItemId)
       ? this.pressItemId
       : null;
+    // 按下点就是光标落点；没有拖动时 `dragWorld` 仍是按下时的世界坐标。
+    const editClickPoint: Point | null = editItemId === null ? null : [...this.dragWorld] as Point;
     const pointerId = this.dragPointerId;
     if (this.dragMode === "erase") {
       // 一次拖拽 = 一条撤销记录：`before` 是按下时整板可见笔迹的快照。
@@ -2665,7 +2874,7 @@ export class PinBoardRenderer {
     );
     this.resetPressState();
     this.emitState();
-    if (editItemId !== null) this.beginTextEdit(editItemId);
+    if (editItemId !== null) this.beginTextEdit(editItemId, editClickPoint ?? undefined);
   }
 
   /**
@@ -2849,6 +3058,12 @@ export class PinBoardRenderer {
 
   private readonly contextMenu = (event: MouseEvent) => {
     event.preventDefault();
+    // 放置模式下右键取消，不打开画板菜单。
+    if (this.placingText) {
+      this.cancelTextPlacement();
+      this.onContextMenu(null);
+      return;
+    }
     if (this.dragMode || this.exporting) {
       this.onContextMenu(null);
       return;

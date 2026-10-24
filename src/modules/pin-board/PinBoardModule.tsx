@@ -39,7 +39,7 @@ import { PinBoardSidebar } from "./PinBoardSidebar";
 import { PinBoardToolbar } from "./PinBoardToolbar";
 import { PinBoardCanvasStage } from "./PinBoardCanvasStage";
 import { PinBoardContextMenu } from "./PinBoardContextMenu";
-import { PinBoardTextDialog, PinBoardExportDialog } from "./PinBoardDialogs";
+import { PinBoardExportDialog } from "./PinBoardDialogs";
 import { PinBoardTransferProgress } from "./PinBoardTransferProgress";
 
 /**
@@ -153,7 +153,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     pasteItems,
     importImages,
     importDroppedFiles,
-    addText,
+    createText,
     setTool,
     commitStroke,
     deleteImages,
@@ -173,9 +173,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   const pendingSettle = usePendingSettle();
   const [sidebar, setSidebar] = useState(getSidebarVisible);
   const [fullscreen, setFullscreen] = useState(false);
-  const [textDialogOpen, setTextDialogOpen] = useState(false);
   const [exportDialogOpen, setExportDialogOpen] = useState(false);
-  const [textOptions, setTextOptions] = useState({ fontSize: 48, color: "#000000" });
   /** 标注样式：工具栏的取色器与「大小」输入共同决定下一笔的外观（大小同时是橡皮直径）。 */
   const [strokeStyle, setStrokeStyle] = useState({
     color: DEFAULT_STROKE_COLOR,
@@ -197,7 +195,6 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   >(null);
   const [contextMenu, setContextMenu] = useState<PinBoardContextMenuRequest | null>(null);
   const workspaceRef = useRef<HTMLDivElement>(null);
-  const textPlacementRef = useRef<[number, number] | null>(null);
   const fullscreenRef = useRef(false);
   const fullscreenBusyRef = useRef(false);
 
@@ -235,28 +232,22 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
   }, [renderer, view, unavailable]);
 
   useEffect(() => {
-    if (!active) setContextMenu(null);
-  }, [active]);
+    if (!active) {
+      setContextMenu(null);
+      renderer?.cancelTextPlacement();
+    }
+  }, [active, renderer]);
 
-  const openTextDialog = useCallback(() => {
+  /**
+   * 进入/退出文字放置模式：左键落点新建文字，右键或 Escape 取消。
+   * 与工具栏按钮形成同一个开关，重复点击即取消；右键菜单有落点，直接开框，不走这里。
+   */
+  const startTextPlacement = useCallback(() => {
     const current = renderer;
-    if (!current || current.interactionState.locked) return;
-    textPlacementRef.current = current.placementPoint;
-    setTextDialogOpen(true);
+    if (!current) return;
+    if (current.interactionState.placingText) current.cancelTextPlacement();
+    else current.startTextPlacement();
   }, [renderer]);
-
-  const closeTextDialog = useCallback(() => {
-    textPlacementRef.current = null;
-    setTextDialogOpen(false);
-  }, []);
-
-  const submitText = useCallback((text: string, fontSize: number, color: string) => {
-    const placement = textPlacementRef.current ?? renderer?.placementPoint ?? [0, 0];
-    textPlacementRef.current = null;
-    setTextOptions({ fontSize, color });
-    setTextDialogOpen(false);
-    void addText(text, fontSize, color, placement);
-  }, [addText, renderer]);
 
   const submitLabelPrompt = useCallback((label: string) => {
     const trimmed = label.trim();
@@ -344,8 +335,9 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     const current = renderer;
     fullscreenBusyRef.current = true;
     fullscreenRef.current = next;
-    // 全屏是布局切换：先把文字草稿提交进模型，避免编辑框在布局变化中丢失关联。
-    if (current) {
+    // 全屏是布局切换：已有文字的草稿先提交进模型；新建草稿没有模型，编辑框随布局
+    // 重新定位即可，提交仍由用户自己的动作触发。
+    if (current && !current.interactionState.textEditing?.isNew) {
       const textError = current.commitTextEdit();
       if (textError) {
         fullscreenRef.current = previous;
@@ -356,9 +348,8 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     }
     current?.finishActiveInteraction();
     current?.beginViewportResize();
+    current?.cancelTextPlacement();
     setContextMenu(null);
-    textPlacementRef.current = null;
-    setTextDialogOpen(false);
     try {
       setFullscreen(next);
       await setPinBoardWindowFullscreen(next);
@@ -492,7 +483,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           onCopyClipboard={() => void copyImageToClipboard()}
           onPaste={pasteItems}
           onImport={() => void importImages()}
-          onAddText={openTextDialog}
+          onAddText={startTextPlacement}
           onExport={() => void exportImages()}
           onExportCanvas={() => setExportDialogOpen(true)}
           onToggleLock={toggleLock}
@@ -560,6 +551,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           onState={setInteraction}
           onContextMenu={handleRendererContextMenu}
           onStrokeCommit={commitStroke}
+          onCreateText={createText}
           onImportDropped={importDroppedFiles}
           onSelectTool={setTool}
           onToggleLayer={(layer, visible) => run(() => renderer?.setLayerVisible(layer, visible))}
@@ -568,14 +560,6 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           onStrokeWidthTextChange={setStrokeWidthText}
           onStrokeWidthCommit={commitStrokeWidth}
         />
-        {textDialogOpen && (
-          <PinBoardTextDialog
-            initialFontSize={textOptions.fontSize}
-            initialColor={textOptions.color}
-            onSubmit={submitText}
-            onClose={closeTextDialog}
-          />
-        )}
         {exportDialogOpen && (
           <PinBoardExportDialog
             limit={canvasExportLimit}
@@ -617,7 +601,10 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
             onCopyClipboard={() => void copyImageToClipboard()}
             onPaste={pasteItems}
             onImport={() => void importImages()}
-            onAddText={openTextDialog}
+            onAddText={() => {
+              setContextMenu(null);
+              renderer.addTextAtClientPoint(contextMenu.clientX, contextMenu.clientY);
+            }}
             onExport={() => void exportImages()}
             onExportCanvas={() => {
               setContextMenu(null);

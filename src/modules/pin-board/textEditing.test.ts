@@ -4,10 +4,12 @@ import {
   buildTextQuad,
   databaseFontSizeFor,
   effectivePinBoardFontSize,
+  pinBoardTextCaretIndexAtPoint,
   pinBoardTextEditGeometry,
   pinBoardTextScale,
   pinBoardTextScreenMetrics,
   pinBoardTextSignature,
+  resolveNewPinBoardTextDraft,
   resolvePinBoardTextDraft,
   textDraftFromItem,
   textQuadAngle,
@@ -166,5 +168,67 @@ describe("pin-board text payload", () => {
       const result = resolvePinBoardTextDraft(draft, scale, [0, 0], 0);
       expect(result.ok).toBe(false);
     }
+  });
+});
+
+describe("pin-board new text payload", () => {
+  it("resolves the draft into a create request with item scale 1", () => {
+    const result = resolveNewPinBoardTextDraft(
+      { text: "abcd", fontSize: 20, color: "#AABBCC", align: "right" },
+      [100, 50],
+    );
+    expect(result).toEqual({
+      ok: true,
+      request: {
+        text: "abcd",
+        fontSize: 20,
+        color: "#aabbcc",
+        align: "right",
+        measuredWidth: 40,
+        measuredHeight: 26,
+        centerX: 100,
+        centerY: 50,
+      },
+    });
+  });
+
+  it("keeps the validation errors of the shared draft resolver", () => {
+    const result = resolveNewPinBoardTextDraft(
+      { text: "   ", fontSize: 20, color: "#000000", align: "center" },
+      [0, 0],
+    );
+    expect(result.ok).toBe(false);
+  });
+});
+
+describe("pin-board text caret from a world point", () => {
+  it("maps a click inside an axis-aligned quad to the nearest boundary", () => {
+    const item = textItem({
+      text: "ab",
+      width: 20,
+      height: 26,
+      fontSize: 20,
+      points: [[0, 0], [40, 0], [40, 52], [0, 52]],
+    });
+    expect(pinBoardTextCaretIndexAtPoint(item, [30, 0])).toBe(1);
+    expect(pinBoardTextCaretIndexAtPoint(item, [0, 0])).toBe(0);
+    expect(pinBoardTextCaretIndexAtPoint(item, [40, 0])).toBe(2);
+  });
+
+  it("follows a rotated quad", () => {
+    const points = buildTextQuad([100, 50], Math.PI / 6, 40, 52);
+    const item = textItem({ text: "ab", width: 20, height: 26, fontSize: 20, points });
+    // 四边形的几何中心落在两个字符之间。
+    expect(pinBoardTextCaretIndexAtPoint(item, [100, 50])).toBe(1);
+  });
+
+  it("returns null for a degenerate quad", () => {
+    const item = textItem({
+      text: "ab",
+      width: 20,
+      height: 26,
+      points: [[0, 0], [0, 0], [0, 0], [0, 0]],
+    });
+    expect(pinBoardTextCaretIndexAtPoint(item, [0, 0])).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   measurePinBoardText,
+  pinBoardTextCaretIndex,
   rasterizePinBoardText,
   requestedTextTextureDimension,
   textRgbaPayload,
@@ -65,6 +66,30 @@ describe("pin-board text layout", () => {
       width: 20,
       height: 52,
       lineHeight: 26,
+    });
+  });
+
+  describe("caret position from a point", () => {
+    // measureText 桩把每个字符量成 10 宽，行高 = ceil(fontSize × 1.3)。
+    it("picks the nearest character boundary on the clicked line", () => {
+      expect(pinBoardTextCaretIndex("abc", 10, "left", 30, 21, 0)).toBe(2);
+      expect(pinBoardTextCaretIndex("abc", 10, "left", 30, 0, 0)).toBe(0);
+      expect(pinBoardTextCaretIndex("abc", 10, "left", 30, 30, 0)).toBe(3);
+    });
+
+    it("adds the offset of preceding lines", () => {
+      // 第二行从第 3 个 UTF-16 单元开始（"ab\n"）。
+      expect(pinBoardTextCaretIndex("ab\ncd", 10, "left", 20, 0, 20)).toBe(3);
+    });
+
+    it("clamps a point outside the block to the nearest line", () => {
+      expect(pinBoardTextCaretIndex("ab\ncd", 10, "left", 20, 0, 500)).toBe(3);
+      expect(pinBoardTextCaretIndex("ab\ncd", 10, "left", 20, 0, -50)).toBe(0);
+    });
+
+    it("applies the alignment offset before matching prefixes", () => {
+      // 居中时 "c" 这一行（宽 10）从 5 开始：点 6 应落在行首。
+      expect(pinBoardTextCaretIndex("ab\nc", 10, "center", 20, 6, 20)).toBe(3);
     });
   });
 

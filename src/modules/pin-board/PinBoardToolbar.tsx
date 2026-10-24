@@ -130,7 +130,14 @@ export function PinBoardToolbar({
         <button className="icon-button" disabled={!renderer || interaction.selectedCount !== 1 || interaction.exportableCount === 0 || editingBlocked} onClick={onCopyClipboard} title="复制图片到剪贴板" aria-label="复制图片到剪贴板"><ClipboardCopy size={17} /></button>
         <button className="icon-button" disabled={!renderer || clipboardCount === 0 || editingBlocked} onClick={onPaste} title="粘贴画板条目" aria-label="粘贴画板条目"><ClipboardPaste size={17} /></button>
         <button className="icon-button" disabled={!renderer || editingBlocked || transferBusy} onClick={onImport} title="导入图片" aria-label="导入图片"><Upload size={17} /></button>
-        <button className="icon-button" disabled={!renderer || editingBlocked || transferBusy} onClick={onAddText} title="添加文字" aria-label="添加文字"><Type size={17} /></button>
+        <button
+          className={`icon-button${interaction.placingText ? " active" : ""}`}
+          disabled={!renderer || (!interaction.placingText && (editingBlocked || transferBusy))}
+          onClick={onAddText}
+          title={interaction.placingText ? "取消添加文字（右键或 Esc）" : "添加文字"}
+          aria-label={interaction.placingText ? "取消添加文字" : "添加文字"}
+          aria-pressed={interaction.placingText}
+        ><Type size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.exportableCount === 0 || editingBlocked || transferBusy} onClick={onExport} title="导出图片" aria-label="导出图片"><Download size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.itemCount === 0 || editingBlocked || transferBusy} onClick={onExportCanvas} title="导出画布 PNG" aria-label="导出画布 PNG"><ImageDown size={17} /></button>
         <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer || interaction.exporting} onClick={onToggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>

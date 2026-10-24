@@ -420,6 +420,8 @@
 .pin-board-canvas.over-resize-nesw { cursor: nesw-resize; }
 /* 悬停在“已选中的单条文字”上时提示再点一次可编辑；拖动态与其它手柄光标优先。 */
 .pin-board-canvas.over-text { cursor: text; }
+/* 文字放置模式：I 字型光标，落点即新建文字的中心。 */
+.pin-board-canvas.placing-text { cursor: text; }
 .pin-board-canvas.selecting,
 /* 画笔保持笔尖光标：`:not(.tool-pen)` 让这条规则不再盖掉上面的 `.tool-pen`。 */
 .pin-board-canvas.drawing:not(.tool-pen) { cursor: crosshair; }
@@ -740,12 +742,10 @@
   text-align: right;
 }
 
-.pin-board-text-backdrop { z-index: 2300; }
-.pin-board-text-dialog { width: min(560px, 100%); }
-/* 取色浮层要超出卡片下沿，不能被共享 Modal 的 overflow: hidden 裁掉。 */
-.modal.pin-board-text-dialog { overflow: visible; }
-.pin-board-text-header { display: flex; align-items: flex-start; gap: 12px; padding: 20px 18px 16px 22px; }
-.pin-board-text-header-icon {
+/* 素材板本地对话框（整画布导出）的外壳。 */
+.pin-board-dialog-backdrop { z-index: 2300; }
+.pin-board-dialog-header { display: flex; align-items: flex-start; gap: 12px; padding: 20px 18px 16px 22px; }
+.pin-board-dialog-header-icon {
   display: grid;
   place-items: center;
   width: 36px;
@@ -755,43 +755,14 @@
   color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
 }
-.pin-board-text-heading { min-width: 0; flex: 1; padding-top: 1px; }
-.pin-board-text-heading h2 { margin: 0; font-size: 16px; line-height: 1.3; }
-.pin-board-text-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
-.pin-board-text-header .icon-button { margin: -2px -2px 0 0; }
-.pin-board-text-body { display: grid; gap: 16px; padding: 0 22px 20px; }
+.pin-board-dialog-heading { min-width: 0; flex: 1; padding-top: 1px; }
+.pin-board-dialog-heading h2 { margin: 0; font-size: 16px; line-height: 1.3; }
+.pin-board-dialog-heading p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.pin-board-dialog-header .icon-button { margin: -2px -2px 0 0; }
+.pin-board-dialog-body { display: grid; gap: 16px; padding: 0 22px 20px; }
 
-.pin-board-text-preview {
-  display: grid;
-  place-items: center;
-  min-height: 88px;
-  max-height: 150px;
-  overflow: hidden;
-  padding: 16px 20px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--pin-board-bg);
-}
-.pin-board-text-preview > span {
-  display: -webkit-box;
-  max-width: 100%;
-  max-height: 2.7em;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
-  line-height: 1.35;
-  overflow-wrap: anywhere;
-  text-align: center;
-  white-space: pre-wrap;
-}
-.pin-board-text-preview-placeholder {
-  color: color-mix(in srgb, var(--text) 40%, transparent);
-  font-size: 13px;
-}
-
-.pin-board-text-field { display: grid; min-width: 0; gap: 7px; }
-.pin-board-text-label {
+.pin-board-dialog-field { display: grid; min-width: 0; gap: 7px; }
+.pin-board-dialog-label {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
@@ -799,74 +770,6 @@
   color: var(--pb-text-soft);
   font-size: 12px;
 }
-.pin-board-text-count { color: var(--pb-text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
-.pin-board-text-input {
-  width: 100%;
-  min-height: 116px;
-  max-height: 240px;
-  padding: 10px 12px;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--control-bg);
-  font-size: 13px;
-  line-height: 1.6;
-  outline: none;
-  resize: vertical;
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
-.pin-board-text-input::placeholder { color: var(--muted); }
-.pin-board-text-input:focus {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-.pin-board-text-options {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  align-items: start;
-  gap: 16px;
-}
-.pin-board-text-size {
-  display: grid;
-  height: 38px;
-  grid-template-columns: 34px minmax(0, 1fr) 34px;
-  overflow: hidden;
-  border: 1px solid var(--control-border);
-  border-radius: 9px;
-  background: var(--control-bg);
-  transition: border-color 120ms ease, box-shadow 120ms ease;
-}
-.pin-board-text-size:focus-within {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
-}
-.pin-board-text-size button {
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 0;
-  color: var(--muted);
-  background: transparent;
-  cursor: pointer;
-}
-.pin-board-text-size button:hover:not(:disabled) { color: var(--text); background: var(--surface-subtle); }
-.pin-board-text-size button:disabled { opacity: .35; cursor: default; }
-.pin-board-text-size input {
-  width: 100%;
-  min-width: 0;
-  height: 100%;
-  padding: 0;
-  border: 0;
-  color: var(--text);
-  background: transparent;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-  text-align: center;
-  outline: none;
-  appearance: textfield;
-}
-.pin-board-text-size input::-webkit-outer-spin-button,
-.pin-board-text-size input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
 
 .pin-board-color-field { position: relative; min-width: 0; }
 .pin-board-color-trigger {
@@ -901,7 +804,7 @@
 .pin-board-color-hex { flex: 1; text-align: left; font-size: 12px; font-variant-numeric: tabular-nums; }
 .pin-board-color-trigger svg { flex: none; color: var(--muted); }
 /* 取色浮层挂到页面根部：工具条的 overflow 会裁掉内联绝对定位的浮层。
-   z-index 要高于文字对话框（2300），它可能盖在全屏画布（2000）之上。 */
+   z-index 要高于素材板对话框（2300），它可能盖在全屏画布（2000）之上。 */
 .pin-board-color-popover {
   position: fixed;
   z-index: 2400;
@@ -997,9 +900,8 @@
 .pin-board-color-preset:hover { transform: translateY(-1px); }
 .pin-board-color-preset:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .pin-board-color-preset[aria-pressed="true"] { box-shadow: 0 0 0 2px var(--surface), 0 0 0 3px var(--accent); }
-.pin-board-text-dialog .modal-footer { border-radius: 0 0 7px 7px; }
 
-/* 整画布导出对话框：沿用添加文字卡片的骨架，多出位置、倍率、摘要与超限警告。 */
+/* 整画布导出对话框：沿用素材板对话框骨架，多出位置、倍率、摘要与超限警告。 */
 .pin-board-export-dialog { width: min(520px, 100%); }
 .pin-board-export-path {
   display: flex;

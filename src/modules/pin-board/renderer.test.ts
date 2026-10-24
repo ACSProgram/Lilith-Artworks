@@ -68,6 +68,9 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     // 文字就地编辑的状态：类字段不会在替身对象上初始化。
     savedTextSignatures: new Map(),
     textEdit: null,
+    placingText: false,
+    textDefaults: { text: "", fontSize: 48, color: "#000000", align: "center" },
+    textEditSessionId: 0,
     suppressClickEdit: false,
     pressClient: null,
     pressMoved: false,
@@ -76,6 +79,7 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     pressSuppressEdit: false,
     marqueeBaseIds: new Set(),
     dragBefore: [],
+    dragWorld: [0, 0],
     // 橡皮擦的环形光标与擦除状态：同样是类字段初始化，替身要手工补齐。
     eraserRing: { hidden: true, style: {}, remove: vi.fn() },
     eraserPointer: null,
@@ -2089,7 +2093,8 @@ describe("pin-board text inline editing", () => {
     };
 
     finish({ moved: false, selectedCount: 1 });
-    expect(beginTextEdit).toHaveBeenCalledWith(7);
+    // 按下点随进入编辑一起传下去，用来把光标落到点击处。
+    expect(beginTextEdit).toHaveBeenCalledWith(7, [0, 0]);
 
     beginTextEdit.mockClear();
     finish({ moved: true, selectedCount: 1 });
@@ -2097,5 +2102,121 @@ describe("pin-board text inline editing", () => {
 
     finish({ moved: false, selectedCount: 2 });
     expect(beginTextEdit).not.toHaveBeenCalled();
+  });
+
+  it("opens a blank draft at the click point while placing text", () => {
+    const renderer = textRenderer([], {
+      refreshSelectionVisuals: vi.fn(),
+      updateMarqueeOverlay: vi.fn(),
+      onContextMenu: vi.fn(),
+    });
+
+    expect(renderer.startTextPlacement()).toBe(true);
+    expect(renderer.interactionState.placingText).toBe(true);
+    renderer.cancelTextPlacement();
+    expect(renderer.interactionState.placingText).toBe(false);
+
+    // 落点由 `pointerDown` 换算成世界坐标后交给这里；两种进入方式共用同一段开框逻辑。
+    (renderer as unknown as {
+      beginNewTextEdit: (center: [number, number]) => void;
+    }).beginNewTextEdit([0, 0]);
+
+    const editing = renderer.interactionState.textEditing;
+    expect(editing?.isNew).toBe(true);
+    expect(editing?.itemId).toBeNull();
+    expect(editing?.caret).toBe(0);
+    expect(editing?.draft).toEqual({
+      text: "",
+      fontSize: 48,
+      color: "#000000",
+      align: "center",
+    });
+    const defaults = (renderer as unknown as {
+      textDefaults: { fontSize: number; color: string; align: string };
+    }).textDefaults;
+    expect(defaults.fontSize).toBe(48);
+    renderer.updateTextEditDraft({ text: "hi", fontSize: 64, color: "#AABBCC", align: "left" });
+    const resolved = renderer.resolveNewTextEdit();
+    expect(resolved).toMatchObject({
+      ok: true,
+      request: {
+        text: "hi",
+        fontSize: 64,
+        color: "#aabbcc",
+        align: "left",
+        measuredWidth: 20,
+        measuredHeight: 84,
+      },
+    });
+
+    renderer.completeNewTextEdit();
+    expect(renderer.interactionState.textEditing).toBeNull();
+    // 下一次新建沿用这次提交的样式。
+    const nextDefaults = (renderer as unknown as {
+      textDefaults: { fontSize: number; color: string; align: string };
+    }).textDefaults;
+    expect(nextDefaults).toEqual({ text: "", fontSize: 64, color: "#aabbcc", align: "left" });
+  });
+
+  it("cancels text placement without opening a menu", () => {
+    const renderer = textRenderer([], {
+      refreshSelectionVisuals: vi.fn(),
+      updateMarqueeOverlay: vi.fn(),
+      onContextMenu: vi.fn(),
+    });
+    renderer.startTextPlacement();
+
+    renderer.cancelTextPlacement();
+
+    expect(renderer.interactionState.placingText).toBe(false);
+    expect(renderer.interactionState.textEditing).toBeNull();
+  });
+
+  it("opens the blank draft at the right-click point without placement mode", () => {
+    const onContextMenu = vi.fn();
+    const renderer = textRenderer([], {
+      refreshSelectionVisuals: vi.fn(),
+      updateMarqueeOverlay: vi.fn(),
+      onContextMenu,
+    });
+
+    // 菜单项带自己的落点：画布 100×100、视口高 100 时右下角对应世界坐标 (50, 50)。
+    expect(renderer.addTextAtClientPoint(100, 0)).toBe(true);
+
+    const state = renderer.interactionState;
+    expect(state.placingText).toBe(false);
+    expect(state.textEditing?.isNew).toBe(true);
+    const edit = (renderer as unknown as { textEdit: { center: [number, number] } }).textEdit;
+    expect(edit.center).toEqual([50, 50]);
+    // 编辑框回到点击处：屏幕坐标应与右键位置一致。
+    expect(state.textEditing?.centerX).toBeCloseTo(100, 10);
+    expect(state.textEditing?.centerY).toBeCloseTo(0, 10);
+    expect(onContextMenu).toHaveBeenCalledWith(null);
+  });
+
+  it("zooms the view in when the text would be too small to edit", () => {
+    const image = textItem({
+      fontSize: 1,
+      width: 10,
+      height: 2,
+      points: [[0, 0], [10, 0], [10, 2], [0, 2]],
+    });
+    const renderer = textRenderer([image]);
+
+    expect(renderer.beginTextEdit(7)).toBe(true);
+
+    // 1 世界单位 = 1 CSS 像素，屏幕字号只有 1 像素：视图放大到下限（视口高 20）。
+    expect((renderer as unknown as { viewport: { height: number } }).viewport.height).toBe(20);
+    // 只改观看比例，数据库字号与字体栏显示的有效字号都不变。
+    expect(renderer.interactionState.textEditing?.draft.fontSize).toBe(1);
+    expect(renderer.interactionState.textEditing?.scale).toBe(1);
+  });
+
+  it("puts the caret where the second click landed", () => {
+    const image = textItem({ text: "ab", width: 20, fontSize: 20 });
+    const renderer = textRenderer([image]);
+
+    expect(renderer.beginTextEdit(7, [30, 0])).toBe(true);
+    expect(renderer.interactionState.textEditing?.caret).toBe(1);
   });
 });

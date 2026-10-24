@@ -2,9 +2,6 @@ import {
   AlertTriangle,
   FolderOpen,
   ImageDown,
-  Minus,
-  Plus,
-  Type,
   X,
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
@@ -17,15 +14,13 @@ import {
   type CanvasExportPlan,
 } from "./exportPolicy";
 import { pickPinBoardExportDirectory } from "./api";
-import { PinBoardColorPicker } from "./PinBoardColorPicker";
-import { PIN_BOARD_TEXT_MAX_CHARS } from "./textLayout";
 
 /**
  * 素材板本地对话框外壳：backdrop 点击与 Escape 关闭、统一的头部与页脚。
  *
- * 结构与样式类与原对话框一致（`modal-backdrop pin-board-text-backdrop` +
- * `modal <className>` + `pin-board-text-header/body` + `modal-footer`），因此复用
- * 外壳不会改变任何观感；观感本身留给人工验收。
+ * 结构是 `modal-backdrop pin-board-dialog-backdrop` + `modal <className>` +
+ * `pin-board-dialog-header/body` + `modal-footer`；样式在 `src/styles/pin-board.css`
+ * 的「对话框」段，观感本身留给人工验收。
  */
 function PinBoardDialog({
   className,
@@ -50,7 +45,7 @@ function PinBoardDialog({
 }) {
   return (
     <div
-      className="modal-backdrop pin-board-text-backdrop"
+      className="modal-backdrop pin-board-dialog-backdrop"
       role="presentation"
       onPointerDown={(event) => {
         if (event.target === event.currentTarget) onClose();
@@ -69,11 +64,11 @@ function PinBoardDialog({
           onSubmit();
         }}
       >
-        <header className="pin-board-text-header">
-          <span className="pin-board-text-header-icon" aria-hidden="true">
+        <header className="pin-board-dialog-header">
+          <span className="pin-board-dialog-header-icon" aria-hidden="true">
             {icon}
           </span>
-          <div className="pin-board-text-heading">
+          <div className="pin-board-dialog-heading">
             <h2 id={titleId}>{title}</h2>
             <p>{subtitle}</p>
           </div>
@@ -81,123 +76,10 @@ function PinBoardDialog({
             <X size={17} />
           </button>
         </header>
-        <div className="pin-board-text-body">{children}</div>
+        <div className="pin-board-dialog-body">{children}</div>
         <footer className="modal-footer">{footer}</footer>
       </form>
     </div>
-  );
-}
-
-export function PinBoardTextDialog({
-  initialFontSize,
-  initialColor,
-  onSubmit,
-  onClose,
-}: {
-  initialFontSize: number;
-  initialColor: string;
-  onSubmit: (text: string, fontSize: number, color: string) => void;
-  onClose: () => void;
-}) {
-  const [text, setText] = useState("");
-  const [fontSize, setFontSize] = useState(initialFontSize);
-  const [sizeText, setSizeText] = useState(String(initialFontSize));
-  const [color, setColor] = useState(initialColor);
-  const filled = text.trim().length > 0;
-  const setSize = (next: number) => {
-    const clamped = Math.min(240, Math.max(12, Math.round(next)));
-    setFontSize(clamped);
-    setSizeText(String(clamped));
-  };
-
-  return (
-    <PinBoardDialog
-      className="pin-board-text-dialog"
-      titleId="pin-board-text-title"
-      icon={<Type size={18} />}
-      title="添加文字"
-      subtitle="调整内容与样式，文字会添加到当前画板"
-      onSubmit={() => {
-        if (filled) onSubmit(text, fontSize, color);
-      }}
-      onClose={onClose}
-      footer={(
-        <>
-          <button className="secondary-button" type="button" onClick={onClose}>取消</button>
-          <button className="primary-button" type="submit" disabled={!filled}>添加</button>
-        </>
-      )}
-    >
-      <div className="pin-board-text-preview" aria-hidden="true">
-        <span
-          className={filled ? undefined : "pin-board-text-preview-placeholder"}
-          style={filled
-            ? { color, fontSize: `${Math.min(34, Math.max(fontSize, 14))}px` }
-            : undefined}
-        >
-          {filled ? text : "文字预览"}
-        </span>
-      </div>
-      <label className="pin-board-text-field">
-        <span className="pin-board-text-label">
-          <span>内容</span>
-          <span className="pin-board-text-count">{text.length} / {PIN_BOARD_TEXT_MAX_CHARS}</span>
-        </span>
-        <textarea
-          className="pin-board-text-input"
-          autoFocus
-          maxLength={PIN_BOARD_TEXT_MAX_CHARS}
-          rows={5}
-          placeholder="输入要添加的文字，支持多行"
-          value={text}
-          onChange={(event) => setText(event.target.value)}
-        />
-      </label>
-      <div className="pin-board-text-options">
-        <div className="pin-board-text-field">
-          <span className="pin-board-text-label"><span>字号</span></span>
-          <div className="pin-board-text-size">
-            <button
-              type="button"
-              aria-label="减小字号"
-              disabled={fontSize <= 12}
-              onClick={() => setSize(fontSize - 1)}
-            >
-              <Minus size={14} aria-hidden="true" />
-            </button>
-            <input
-              type="number"
-              min={12}
-              max={240}
-              step={1}
-              value={sizeText}
-              aria-label="字号"
-              onChange={(event) => {
-                const raw = event.target.value;
-                setSizeText(raw);
-                const parsed = Number(raw);
-                if (Number.isFinite(parsed) && parsed >= 12 && parsed <= 240) {
-                  setFontSize(Math.round(parsed));
-                }
-              }}
-              onBlur={() => setSize(Number(sizeText) || fontSize)}
-            />
-            <button
-              type="button"
-              aria-label="增大字号"
-              disabled={fontSize >= 240}
-              onClick={() => setSize(fontSize + 1)}
-            >
-              <Plus size={14} aria-hidden="true" />
-            </button>
-          </div>
-        </div>
-        <div className="pin-board-text-field">
-          <span className="pin-board-text-label"><span>颜色</span></span>
-          <PinBoardColorPicker value={color} onChange={setColor} />
-        </div>
-      </div>
-    </PinBoardDialog>
   );
 }
 
@@ -359,8 +241,8 @@ export function PinBoardExportDialog({
         </>
       )}
     >
-      <div className="pin-board-text-field">
-        <span className="pin-board-text-label"><span>导出位置</span></span>
+      <div className="pin-board-dialog-field">
+        <span className="pin-board-dialog-label"><span>导出位置</span></span>
         <div className="pin-board-export-path">
           <span title={directory ?? undefined}>
             {directory ?? "尚未选择文件夹"}
@@ -371,8 +253,8 @@ export function PinBoardExportDialog({
           </button>
         </div>
       </div>
-      <div className="pin-board-text-field">
-        <span className="pin-board-text-label"><span>文件名</span></span>
+      <div className="pin-board-dialog-field">
+        <span className="pin-board-dialog-label"><span>文件名</span></span>
         <div className="pin-board-export-input">
           <input
             type="text"
@@ -386,8 +268,8 @@ export function PinBoardExportDialog({
         </div>
       </div>
       <div className="pin-board-export-grid">
-        <div className="pin-board-text-field">
-          <span className="pin-board-text-label"><span>倍率</span></span>
+        <div className="pin-board-dialog-field">
+          <span className="pin-board-dialog-label"><span>倍率</span></span>
           <div className="pin-board-export-input">
             <input
               type="number"
@@ -402,8 +284,8 @@ export function PinBoardExportDialog({
             <span className="pin-board-export-suffix">×</span>
           </div>
         </div>
-        <div className="pin-board-text-field">
-          <span className="pin-board-text-label"><span>宽度（像素）</span></span>
+        <div className="pin-board-dialog-field">
+          <span className="pin-board-dialog-label"><span>宽度（像素）</span></span>
           <div className="pin-board-export-input">
             <input
               type="number"
@@ -419,8 +301,8 @@ export function PinBoardExportDialog({
             />
           </div>
         </div>
-        <div className="pin-board-text-field">
-          <span className="pin-board-text-label"><span>边距（像素）</span></span>
+        <div className="pin-board-dialog-field">
+          <span className="pin-board-dialog-label"><span>边距（像素）</span></span>
           <div className="pin-board-export-input">
             <input
               type="number"

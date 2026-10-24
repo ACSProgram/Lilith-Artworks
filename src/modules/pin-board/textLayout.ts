@@ -2,7 +2,7 @@ import {
   PIN_BOARD_NATIVE_TEXTURE_LIMIT,
   PIN_BOARD_RGBA_PREVIEW_BUDGET_BYTES,
 } from "./texturePolicy";
-import type { PinBoardTextItem } from "./types";
+import type { PinBoardTextAlign, PinBoardTextItem } from "./types";
 
 /** 与 Rust `pin_board::repository::TEXT_FONT_FAMILY` 保持一致。 */
 export const PIN_BOARD_TEXT_FONT_FAMILY =
@@ -66,6 +66,58 @@ export function measurePinBoardText(text: string, fontSize: number): PinBoardTex
     height: Math.max(1, lineHeight * lines.length),
     lineHeight,
   };
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+/**
+ * 把文字块内的局部坐标换算成 `textarea` 的光标位置（UTF-16 偏移）。
+ *
+ * 进入就地编辑时用它把右键/第二次点击的位置落成插入点。行按 1.3 倍行盒取，
+ * 列按当前对齐方式对到该行行首，再在逐字前缀宽度里找最近的位置；点击落在行外
+ * 时收敛到最近的一行，不会把光标放到不存在的行。
+ */
+export function pinBoardTextCaretIndex(
+  text: string,
+  fontSize: number,
+  align: PinBoardTextAlign,
+  blockWidth: number,
+  localX: number,
+  localY: number,
+): number {
+  const metrics = measurePinBoardText(text, fontSize);
+  const lineIndex = Math.min(
+    metrics.lines.length - 1,
+    Math.max(0, Math.floor(localY / Math.max(metrics.lineHeight, 1))),
+  );
+  const line = metrics.lines[lineIndex];
+  const context = metricContext();
+  context.font = `${Math.max(1, fontSize)}px ${PIN_BOARD_TEXT_FONT_FAMILY}`;
+  const lineWidth = context.measureText(line).width;
+  const lineStart = align === "left"
+    ? 0
+    : align === "right"
+      ? blockWidth - lineWidth
+      : (blockWidth - lineWidth) / 2;
+  const target = clamp01((localX - lineStart) / Math.max(lineWidth, 1)) * lineWidth;
+  let offset = 0;
+  for (let index = 0; index < lineIndex; index += 1) offset += metrics.lines[index].length + 1;
+  let prefix = "";
+  let position = 0;
+  let best = 0;
+  let bestDistance = Math.abs(target);
+  for (const character of Array.from(line)) {
+    prefix += character;
+    position += character.length;
+    const distance = Math.abs(target - context.measureText(prefix).width);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = position;
+    }
+  }
+  return offset + best;
 }
 
 function budgetedTextDimension(item: PinBoardTextItem): number {
