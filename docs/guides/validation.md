@@ -314,12 +314,18 @@ LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authent
 - `release.yml`：推送 `v*` tag 时运行，含同样的审计，Rust 侧为 `cargo fmt --check` +
   `cargo test --lib`（不含压力测试——发布前的候选版验收另有一套完整重跑，见本文与
   `docs/user/stress-test-report.md`）。
-- 两处易踩的坑：
+- 三处易踩的坑：
   1. `rustsec/audit-check` 的 `ignore` 输入**只按逗号切分**。用 YAML 块标量每行写一个
      advisory ID 会被当成**单个**非法参数传给 `cargo-audit`，报错后 stdout 为空，action
      最终失败并只显示 `Unexpected end of JSON input`。必须写成单行逗号分隔。
   2. `trustmark` 用 `=` 精确锁定 `ort` / `ort-sys` 版本，无法单独 `cargo update`。升级前先
      确认目标 ort 版本使用的下载地址（rc.10 起为 `cdn.pyke.io`，rc.9 及更早的
      `parcel.pyke.io` 已失效）。
+  3. Windows runner 的默认 shell 是 PowerShell；一个 `run: |` 步骤里串多条命令时，只有
+     **最后一条**的退出码决定步骤成败。多命令步骤必须显式写 `shell: bash`（GitHub 的
+     bash 以 `-eo pipefail` 运行），否则前面的失败会被后面的成功掩盖。必须留在
+     PowerShell 的步骤要在每条原生命令后检查 `$LASTEXITCODE`。2026-10-24 的
+     `stress_authenticity` 栈溢出就是这样在 10 月 22 日被记成成功的：九组测试串在一个
+     PowerShell 步骤里，最后一条 `stress_input` 通过，整步返回 0。
 
 当接口跨越重依赖边界且静态检查无法提供足够保证时，停止阶段并请用户执行一次完整编译和针对性手工测试；收到结果后再继续，避免错误跨阶段累计。

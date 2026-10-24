@@ -43,6 +43,7 @@ jobs:
         run: npm run verify:release-metadata
 
       - name: Audit npm dependencies against the official registry
+        shell: bash
         run: |
           npm audit --omit=dev --audit-level=high --registry=https://registry.npmjs.org
           npm audit --audit-level=high --registry=https://registry.npmjs.org
@@ -54,20 +55,23 @@ jobs:
           working-directory: src-tauri
           # Keep this comma-separated list identical to the one in
           # windows-ci.yml; audit-check only splits the value on commas. The
-          # rationale for the ignored zip advisories lives next to that list.
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369
+          # rationale for the ignored advisories lives next to that list.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0387
 
       - name: Generate and verify Windows target licenses
+        shell: bash
         run: |
           npm run legal
           git diff --exit-code -- licenses/THIRD_PARTY_LICENSES.html
 
       - name: Build and test frontend
+        shell: bash
         run: |
           npm run build
           npm test
 
       - name: Format and test Rust library
+        shell: bash
         run: |
           cargo fmt --check --manifest-path src-tauri/Cargo.toml
           cargo test --manifest-path src-tauri/Cargo.toml --lib
@@ -145,6 +149,9 @@ jobs:
           $notes = Join-Path $env:RUNNER_TEMP "release-notes.md"
           $env:LILITH_RELEASE_SIGNATURE = $signature
           node .\tools\release\write-release-notes.mjs $notes
+          # pwsh 不会因原生命令非零退出而自动失败；显式检查，避免 node 的失败被
+          # 后面的 gh 成功掩盖。
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # Only versions with a prerelease suffix (-alpha.N / -rc.N) are flagged
           # as prerelease; a stable tag like v0.2.0 creates a plain draft so the
           # flag does not have to be flipped manually before publishing.

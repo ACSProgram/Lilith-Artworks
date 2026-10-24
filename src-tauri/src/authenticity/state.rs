@@ -200,7 +200,8 @@ fn file_sha256(path: &std::path::Path) -> Option<String> {
 
     let mut file = std::fs::File::open(path).ok()?;
     let mut hasher = sha2::Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // Windows 的主线程栈只有 1 MiB，1 MiB 的栈缓冲会让发布入口直接栈溢出。
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         let read = file.read(&mut buffer).ok()?;
         if read == 0 {

@@ -123,6 +123,12 @@ entries for the reader; they are not a template every entry has to fill.
   pointer events except for its refresh button, so brushing across the
   graph no longer flashes a thumbnail. Scrolling, Escape, clicking
   elsewhere or leaving all cards for 500 ms closes it.
+- The RustSec audit ignore list now includes `RUSTSEC-2026-0387`
+  (`crypto-bigint 0.5.5`). The advisory is a timing side channel in
+  constant-time arithmetic, reached through c2pa's ECDSA stack; there is no
+  fixed 0.5 release, and c2pa 0.91.x still pins the same stack. The
+  rationale is beside both workflow ignore lists and tracked in
+  `docs/planning/todo.md`.
 
 ### Fixed
 
@@ -146,6 +152,16 @@ entries for the reader; they are not a template every entry has to fill.
   dialog opens, including directly after a restart, instead of only after
   visiting the "空间" page. The empty state no longer claims the result is not
   kept across restarts and reads "尚无备份记录".
+- Authenticity model digesting no longer allocates its 1 MiB read buffer on
+  the stack. The Windows headless entry has a 1 MiB main-thread stack, so
+  `enter-publication` overflowed before the first progress stage and took
+  down the G3–G6 authenticity stress scenarios. The buffer is now heap
+  allocated.
+- Windows CI's nine cheap stress groups now run under `shell: bash`, so the
+  first failing group stops the step instead of being masked by the last
+  group's exit code. The release workflow's multi-command steps use the same
+  shell, and the release-draft step checks `$LASTEXITCODE` after generating
+  notes so a PowerShell native-command failure cannot be masked by `gh`.
 
 ## 0.3.0-alpha.6 - 2026-10-21
 

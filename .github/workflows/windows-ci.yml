@@ -56,7 +56,15 @@ jobs:
           # now fail "claim.malformed"), which would fail closed every
           # previously published record. Ignored until upstream offers a
           # migration path for old manifests; tracked in docs/planning/todo.md.
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369
+          #
+          # RUSTSEC-2026-0387 (crypto-bigint 0.5.5): c2pa 0.90.11's ECDSA
+          # stack (ecdsa/p256/p384/p521 -> elliptic-curve 0.13.8) still uses
+          # crypto-bigint 0.5. The patched 0.7.6 line needs ecdsa 0.17 /
+          # p256 0.14, which c2pa_raw_crypto 0.1.2 (also used by c2pa 0.91.x)
+          # does not provide yet. The advisory is a timing side channel; this
+          # app signs locally rather than exposing a network signing service,
+          # so the exposure is accepted and tracked in docs/planning/todo.md.
+          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0387
 
       - name: Generate source dependency SBOM
         uses: anchore/sbom-action@v0.24.0
@@ -143,6 +151,9 @@ jobs:
         run: cargo build --manifest-path src-tauri/Cargo.toml --features headless
 
       - name: Run headless stress tests (fast groups)
+        # Windows 默认 shell 是 PowerShell；一个 run 块里串多条命令时只有
+        # 最后一条的退出码决定步骤成败。bash 以 -e 运行，任一测试失败即停。
+        shell: bash
         run: |
           cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_cancel
           cargo test --manifest-path src-tauri/Cargo.toml --features headless --test stress_crash
