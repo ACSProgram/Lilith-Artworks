@@ -2,13 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   PIN_BOARD_FULLSCREEN_SHORTCUT,
   PIN_BOARD_LOCK_SHORTCUT,
-  PIN_BOARD_TOOLBAR_SHORTCUT,
   pinBoardLayersPanelDisabled,
   pinBoardLockIndicatorVisible,
   pinBoardUnavailableNotice,
 } from "./PinBoardModule";
 import { shortcutMatches } from "./shortcuts";
-import { toolForShortcut } from "./strokeDrawing";
+import { PIN_BOARD_DRAWBAR_SHORTCUT, toolForShortcut } from "./strokeDrawing";
 
 describe("pin-board module entry", () => {
   it("loads through its public React entry without starting native work", async () => {
@@ -29,14 +28,14 @@ describe("pin-board default shortcuts", () => {
     expect(PIN_BOARD_FULLSCREEN_SHORTCUT).toBe("F11");
   });
 
-  it("binds the toolbar toggle to an unmodified T", () => {
-    // 只验证快捷键绑定本身（常量与按键匹配）；工具栏显示/隐藏的界面行为需要组件
-    // 渲染夹具，见 docs/planning/todo.md 的待办。
-    expect(PIN_BOARD_TOOLBAR_SHORTCUT).toBe("T");
-    expect(toolForShortcut(PIN_BOARD_TOOLBAR_SHORTCUT)).toBeNull();
+  it("binds the drawbar toggle to an unmodified T", () => {
+    // 这个键位必须与工具键位空开（`toolForShortcut` 返回 null），否则按下 T 会先
+    // 切工具。主工具栏按钮的渲染、点亮态与置灰在 `PinBoardToolbar.test.tsx` 里覆盖。
+    expect(PIN_BOARD_DRAWBAR_SHORTCUT).toBe("T");
+    expect(toolForShortcut(PIN_BOARD_DRAWBAR_SHORTCUT)).toBeNull();
     expect(shortcutMatches(
       { key: "t", code: "KeyT", ctrlKey: false, metaKey: false, altKey: false, shiftKey: false } as KeyboardEvent,
-      PIN_BOARD_TOOLBAR_SHORTCUT,
+      PIN_BOARD_DRAWBAR_SHORTCUT,
     )).toBe(true);
   });
 });

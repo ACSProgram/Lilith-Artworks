@@ -47,6 +47,15 @@ entries for the reader; they are not a template every entry has to fill.
   alignment controls live in the inline editor and its placement is the
   canvas placement mode. Text styles remembered for the next new item come
   from the last committed draft (48 / black / centered on first use).
+- The pin-board toolbar no longer carries the selected-image scale and rotate
+  buttons; scaling and rotation stay on the selection handles, and the view
+  zoom controls are unchanged. A pen-tool button now shares the `T` shortcut's
+  state to show or hide the annotation bar, so a hidden bar can be restored
+  without remembering the shortcut. The renderer helpers that only backed the
+  removed buttons are gone with them.
+- The pin-board layers panel now starts collapsed on every application launch
+  and workspace remount. Expansion is kept only for the current process and is
+  lost on exit.
 
 - Removed the unreferenced reference-inventory validation hooks, the unused
   background runtime entry points, the obsolete `default_panel` setting and

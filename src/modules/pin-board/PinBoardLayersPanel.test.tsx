@@ -12,9 +12,14 @@ function visibility(...hidden: number[]): PinBoardLayerVisibility {
 describe("pin-board layers panel", () => {
   afterEach(() => cleanup());
 
-  it("starts expanded and lists the four layers from top to bottom", () => {
+  it("starts collapsed and expands to list the four layers from top to bottom", () => {
     render(<PinBoardLayersPanel visibility={visibility()} onToggle={vi.fn()} disabled={false} />);
 
+    // 默认只剩图层按钮：启动应用时面板是收起的。
+    expect(screen.getAllByRole("button").map((button) => button.getAttribute("aria-label")))
+      .toEqual(["图层可见性"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "图层可见性" }));
     expect(screen.getAllByRole("button").map((button) => (
       button.getAttribute("aria-label") ?? button.textContent?.trim()
     ))).toEqual([
@@ -33,6 +38,7 @@ describe("pin-board layers panel", () => {
     const { rerender } = render(
       <PinBoardLayersPanel visibility={visibility()} onToggle={onToggle} disabled={false} />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "图层可见性" }));
 
     fireEvent.click(screen.getByRole("button", { name: "标注层" }));
     expect(onToggle).toHaveBeenCalledWith(STROKE_LAYER, false);
@@ -55,6 +61,7 @@ describe("pin-board layers panel", () => {
         disabled={false}
       />,
     );
+    fireEvent.click(screen.getByRole("button", { name: "图层可见性" }));
 
     // 标注层不显示数字；其余三层按 layer 下标取数，0 也照常显示。
     const counts = screen.getAllByText(/^\d+$/).map((node) => node.textContent);
@@ -81,6 +88,7 @@ describe("pin-board layers panel", () => {
 
   it("omits counts entirely when the caller passes none", () => {
     render(<PinBoardLayersPanel visibility={visibility()} onToggle={vi.fn()} disabled={false} />);
+    fireEvent.click(screen.getByRole("button", { name: "图层可见性" }));
     expect(screen.queryAllByText(/^\d+$/)).toHaveLength(0);
   });
 
@@ -88,6 +96,9 @@ describe("pin-board layers panel", () => {
     render(
       <PinBoardLayersPanel visibility={visibility(0)} onToggle={vi.fn()} disabled={false} />,
     );
+    // 收起状态的高亮也可见：有图层被隐藏时按钮保持 filtering。
+    expect(screen.getByRole("button", { name: "图层可见性" }).className).toContain("filtering");
+    fireEvent.click(screen.getByRole("button", { name: "图层可见性" }));
     fireEvent.click(screen.getByRole("button", { name: "收起图层" }));
 
     // 收起后只剩图层按钮本身；有图层被隐藏时按钮高亮。

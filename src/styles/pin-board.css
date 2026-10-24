@@ -150,7 +150,7 @@
   box-shadow: var(--pb-shadow-modal);
   transform: translateX(-50%);
 }
-/* 工具条收起后自身不可见，显隐只由快捷键 T 负责，条上不放显隐按钮。 */
+/* 工具条收起后自身不可见，显隐由主工具栏的画笔栏按钮与快捷键 T 共同负责，条上不放显隐按钮。 */
 .pin-board-drawbar::-webkit-scrollbar { display: none; }
 .pin-board-tools { display: flex; align-items: center; gap: 2px; }
 .pin-board-tools .icon-button.active {

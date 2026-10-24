@@ -30,6 +30,7 @@ import { shortcutCanHandle, shortcutMatches } from "./shortcuts";
 import {
   DEFAULT_STROKE_COLOR,
   DEFAULT_STROKE_WIDTH,
+  PIN_BOARD_DRAWBAR_SHORTCUT,
   clampStrokeWidth,
 } from "./strokeDrawing";
 import { usePinBoardController } from "./usePinBoardController";
@@ -49,13 +50,6 @@ import { PinBoardTransferProgress } from "./PinBoardTransferProgress";
  */
 export const PIN_BOARD_LOCK_SHORTCUT = "CommandOrControl+R";
 export const PIN_BOARD_FULLSCREEN_SHORTCUT = "F11";
-/**
- * 标注工具条的显示/隐藏快捷键。
- *
- * 工具条收起后自身不可见，任何放在工具条上的按钮都无法再把它叫回来，因此显隐只由这一个
- * 对称的快捷键负责，主工具栏与浮动条本身都不放按钮。
- */
-export const PIN_BOARD_TOOLBAR_SHORTCUT = "T";
 
 /**
  * 阵列间距的默认值与上下限，单位是「统一图片高度的比例」。
@@ -180,7 +174,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     width: DEFAULT_STROKE_WIDTH,
   });
   const [strokeWidthText, setStrokeWidthText] = useState(String(DEFAULT_STROKE_WIDTH));
-  /** 标注工具条的显隐，只由快捷键 `T` 切换。 */
+  /** 标注工具条的显隐：主工具栏按钮与快捷键 `T` 共用这一份状态。 */
   const [drawbarVisible, setDrawbarVisible] = useState(true);
   /** 统一的命名输入对话框状态，替代原生 `window.prompt`。 */
   const [labelPrompt, setLabelPrompt] = useState<
@@ -389,7 +383,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
       if (!active || !shortcutCanHandle(event)) return;
       // 单键开关：带修饰键的组合留给应用与系统，不与工具键位抢。
       if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey) return;
-      if (event.key.toLowerCase() !== PIN_BOARD_TOOLBAR_SHORTCUT.toLowerCase()) return;
+      if (event.key.toLowerCase() !== PIN_BOARD_DRAWBAR_SHORTCUT.toLowerCase()) return;
       if (!renderer || !view || unavailable !== null) return;
       event.preventDefault();
       event.stopImmediatePropagation();
@@ -476,9 +470,11 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           clipboardCount={clipboardCount}
           transferBusy={transferBusy}
           fullscreen={fullscreen}
+          drawbarVisible={drawbarVisible}
           settings={settings}
           run={run}
           onToggleSidebar={toggleSidebar}
+          onToggleDrawbar={toggleDrawbar}
           onCopy={copyImages}
           onCopyClipboard={() => void copyImageToClipboard()}
           onPaste={pasteItems}

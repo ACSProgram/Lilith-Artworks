@@ -3,7 +3,6 @@ import {
   ClipboardPaste,
   Copy,
   Download,
-  Expand,
   FlipHorizontal2,
   FlipVertical2,
   Fullscreen,
@@ -14,11 +13,9 @@ import {
   Minimize2,
   PanelLeftClose,
   PanelLeftOpen,
+  PenTool,
   Redo2,
-  RotateCcw,
-  RotateCw,
   Save,
-  Shrink,
   Type,
   Undo2,
   Unlock,
@@ -27,6 +24,7 @@ import {
   ZoomOut,
 } from "lucide-react";
 import type { PinBoardRenderer, PinBoardInteractionState } from "./renderer";
+import { PIN_BOARD_DRAWBAR_SHORTCUT } from "./strokeDrawing";
 import type { PinBoardModuleSettings, PinBoardView } from "./types";
 
 function actionTitle(action: string, shortcut: string): string {
@@ -44,10 +42,13 @@ export interface PinBoardToolbarProps {
   /** 导入/导出/整画布导出进行中：这些入口都要等传输结束。 */
   transferBusy: boolean;
   fullscreen: boolean;
+  /** 标注工具条当前是否显示（与快捷键 T 共用一份状态）。 */
+  drawbarVisible: boolean;
   settings: PinBoardModuleSettings;
   /** 执行一次画板操作并同步交互状态（与渲染器直接改状态的两步合成一步）。 */
   run: (action: () => void) => void;
   onToggleSidebar: () => void;
+  onToggleDrawbar: () => void;
   onCopy: () => void;
   onCopyClipboard: () => void;
   onPaste: () => void;
@@ -70,9 +71,11 @@ export function PinBoardToolbar({
   clipboardCount,
   transferBusy,
   fullscreen,
+  drawbarVisible,
   settings,
   run,
   onToggleSidebar,
+  onToggleDrawbar,
   onCopy,
   onCopyClipboard,
   onPaste,
@@ -119,10 +122,17 @@ export function PinBoardToolbar({
         <span className="pin-board-zoom">{interaction.zoomPercent}%</span>
         <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.zoomIn())} title="放大视图" aria-label="放大视图"><ZoomIn size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.resetViewport())} title="重置视图" aria-label="重置视图"><LocateFixed size={17} /></button>
-        <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.scaleSelected(1 / 1.1))} title="缩小图片" aria-label="缩小图片"><Shrink size={17} /></button>
-        <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.scaleSelected(1.1))} title="放大图片" aria-label="放大图片"><Expand size={17} /></button>
-        <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.rotateSelected(-5))} title="逆时针旋转" aria-label="逆时针旋转"><RotateCcw size={17} /></button>
-        <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.rotateSelected(5))} title="顺时针旋转" aria-label="顺时针旋转"><RotateCw size={17} /></button>
+        <button
+          className={`icon-button${drawbarVisible ? " active" : ""}`}
+          disabled={!renderer || !view || interaction.exporting}
+          onClick={onToggleDrawbar}
+          title={actionTitle(
+            drawbarVisible ? "隐藏标注工具条" : "显示标注工具条",
+            PIN_BOARD_DRAWBAR_SHORTCUT,
+          )}
+          aria-label={drawbarVisible ? "隐藏标注工具条" : "显示标注工具条"}
+          aria-pressed={drawbarVisible}
+        ><PenTool size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.flipSelected(true))} title="水平翻转" aria-label="水平翻转"><FlipHorizontal2 size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.selectedCount === 0 || editingBlocked} onClick={() => run(() => renderer?.flipSelected(false))} title="垂直翻转" aria-label="垂直翻转"><FlipVertical2 size={17} /></button>
         <button className="icon-button" disabled={!renderer || interaction.arrangeableCount < 2 || editingBlocked} onClick={() => run(() => void renderer?.arrangeSelected())} title="阵列排序" aria-label="阵列排序"><LayoutGrid size={17} /></button>

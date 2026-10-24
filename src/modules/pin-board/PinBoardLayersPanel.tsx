@@ -22,6 +22,9 @@ const LAYER_ROWS: { layer: number; label: string; swatch: string }[] = [
  * 显隐是纯视图状态：不改模型、不标记 dirty，因此这里只回调 `onToggle`，
  * 由渲染器决定重绘与选中清理。条目数由调用方按 layer 下标给出；数字带
  * `aria-hidden`，否则四个开关的可访问名会变成「顶层 12」。
+ *
+ * 展开状态是组件本地状态，默认收起：每次启动应用都从只剩图层按钮的形态开始，
+ * 展开后在同一次进程内切画板、切视图都不收起，组件卸载（换仓库或退出）后回到收起。
  */
 export function PinBoardLayersPanel({
   visibility,
@@ -35,7 +38,7 @@ export function PinBoardLayersPanel({
   onToggle: (layer: number, visible: boolean) => void;
   disabled: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   /** 有任一层被隐藏时按钮高亮，否则隐藏了图层却看不出来。 */
   const filtering = visibility.some((visible) => !visible);
 

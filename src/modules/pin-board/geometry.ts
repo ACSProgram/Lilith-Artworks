@@ -276,12 +276,3 @@ export function snapRotationDelta(points: Quad, delta: number): number {
   const snapped = Math.round((base + delta) / ROTATION_SNAP_RADIANS) * ROTATION_SNAP_RADIANS;
   return snapped - base;
 }
-
-export function imagesCenter(images: Pick<PinBoardItem, "points">[]): Point {
-  if (images.length === 0) return [0, 0];
-  const centers = images.map((image) => quadCenter(image.points));
-  return [
-    centers.reduce((sum, point) => sum + point[0], 0) / centers.length,
-    centers.reduce((sum, point) => sum + point[1], 0) / centers.length,
-  ];
-}

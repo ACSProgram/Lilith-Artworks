@@ -64,7 +64,6 @@ import {
   imageDisplayMaxDimension,
   imageSize,
   imagesBounds,
-  imagesCenter,
   intersects,
   pointInQuad,
   quadCenter,
@@ -2121,25 +2120,6 @@ export class PinBoardRenderer {
     this.historyIndex += 1;
     this.restore(entry.after);
     this.afterModelChange(entry.after.map((image) => image.itemId));
-  }
-
-  scaleSelected(factor: number) {
-    const selected = this.selectedImages();
-    if (selected.length === 0) return;
-    if (factor < 1 && selected.some((image) => Math.min(...imageSize(image)) * factor < 0.001)) return;
-    const center = imagesCenter(selected);
-    this.commitMutation((image) => {
-      image.points = scaleQuad(image.points, factor, center);
-    });
-  }
-
-  rotateSelected(degrees: number) {
-    const selected = this.selectedImages();
-    if (selected.length === 0) return;
-    const center = imagesCenter(selected);
-    this.commitMutation((image) => {
-      image.points = rotateQuad(image.points, degrees * Math.PI / 180, center);
-    });
   }
 
   flipSelected(horizontal: boolean) {

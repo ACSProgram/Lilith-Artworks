@@ -355,6 +355,7 @@ export interface PinBoardCanvasStageProps {
   unavailableNotice: string;
   lockIndicatorVisible: boolean;
   layersDisabled: boolean;
+  /** 标注工具条是否显示：由主工具栏按钮与快捷键 `T` 共用的那一份状态决定。 */
   drawbarVisible: boolean;
   strokeStyle: { color: string; width: number };
   strokeWidthText: string;

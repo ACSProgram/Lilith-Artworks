@@ -58,6 +58,16 @@ export const MIN_STROKE_DRAG_CSS_PIXELS = 3;
 const MIN_SAMPLE_DISTANCE = 1e-6;
 
 /**
+ * 标注工具条的显隐快捷键。
+ *
+ * 工具条收起后自身不可见，因此主工具栏另有一个画笔栏按钮与这个键位共用同一份显隐
+ * 状态：隐藏后还能点回来，不必先想起快捷键。常量放在这里而不是 `PinBoardModule`，
+ * 是因为按钮（`PinBoardToolbar`）与按键分发两边都要读它，而模块已经导入工具栏，
+ * 反向导入会绕成循环依赖。
+ */
+export const PIN_BOARD_DRAWBAR_SHORTCUT = "T";
+
+/**
  * 工具的键位、界面名与顺序：快捷键分发与标注工具条共用这一份，提示里的字母因此
  * 不可能与真正生效的键位漂移。
  */
