@@ -1,12 +1,20 @@
 # 当前任务交接
 
-更新时间：2026-10-24
+更新时间：2026-10-25
 
 本文件只记录**当前状况**：当前批次状态、当前基线，以及未完成事项的指针。历史增量（已完成批次、
 已通过的人工验收、被替代的计划）一律在 `archive/`，不在本文件累积；未完成事项只写 `todo.md`。
 规则见文末「文档约束」。
 
 ## 当前批次状态
+
+2026-10-25 的 0.3-beta.1 发布前全量压力测试已完成并提交：九组便宜分组 47/47、`gate_guard`
+3/3、`stress_scale` 5/5、`stress_bench` 10/10（严格门通过并刷新 release 基线）、16K 认证
+大图 5/5、`stress_large` 五档各 10/10（首次含 `manual` 8 GiB）。退役的 `stress_baseline`
+临时恢复做了一次对比复测，归档文档已改为 0.2 → 0.3-beta.1 的对比报告。无产品侧失败；
+基线组首次运行因 v4 → v6 迁移触发的测试侧假设失败，在迁移后重跑通过。报告见
+`docs/user/stress-test-report.md`，批次记录见 `archive/handoff-log-2026-10-25.md`。
+五处版本字段仍是 `0.3.0-alpha.6`，未切版本。
 
 2026-10-24 素材板文字就地编辑的收尾复验尚未执行：工具栏放置模式只留 I 字型光标与按钮点亮态、
 空白处右键「添加文字」直接在右键位置开框、新建成功后不再出现状态栏与进度条提示。验收项在
@@ -43,8 +51,8 @@
   `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`，
   审阅记录已归档到
   `archive/0.4-artwork-database-upgrade-scheduling-and-identification-plan-improvement-recommendations-2026-10-22.md`。
-- 发布前压力测试（含 `manual` 档）与是否打标签仍由维护者单独安排，口径见
-  `docs/guides/release-policy.md`。
+- 发布前压力测试（含 `manual` 档）已于 2026-10-25 完成；是否切版本与打标签仍由维护者单独
+  决定，口径见 `docs/guides/release-policy.md`。
 
 ## 当前基线
 
@@ -58,7 +66,9 @@
   alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的 v5 → v6），高于
   当前版本的仓库由旧程序直接拒绝。
 - 0.3 基线（阶段 0 一次性采集）已归档到
-  `archive/0.3-baseline-2026-10-18.md`；长期回归对照用 `stress_bench`。
+  `archive/0.3-baseline-2026-10-18.md`；该文档现已改为 0.2 → 0.3-beta.1 的对比报告。
+  2026-10-25 的全量压力测试（含 `manual` 8 GiB）全部通过，`tests/perf-baseline.json`
+  的 release 条目已同轮刷新；长期回归对照仍用 `stress_bench`。
 - 运行要求：Windows + WebView2；素材板另需支持 WebGPU 与 BC7 纹理压缩的图形适配器（见
   `README.md` 的「运行环境」）。
 - 平台层：`src-tauri/src/platform/` 是产品代码里平台分支的唯一入口（路径表示、文件管理器、
