@@ -9,6 +9,8 @@ export const PIN_BOARD_TEXT_FONT_FAMILY =
   '"Microsoft YaHei UI", "Segoe UI", sans-serif';
 export const PIN_BOARD_TEXT_LINE_HEIGHT_RATIO = 1.3;
 export const PIN_BOARD_TEXT_MAX_DIMENSION = 8192;
+/** 与 Rust `pin_board::repository::MAX_TEXT_CHARS` 保持一致。 */
+export const PIN_BOARD_TEXT_MAX_CHARS = 5000;
 
 export interface PinBoardTextMetrics {
   lines: string[];

@@ -166,7 +166,9 @@ export function usePinBoardTransfers({
     success: (count: number) => string,
   ): Promise<PinBoardMutationResult | null> => {
     const current = rendererRef.current;
-    if (!current || current.interactionState.locked) return null;
+    if (!current
+      || current.interactionState.locked
+      || current.interactionState.textEditing) return null;
     const sequence = beginLoad();
     if (!await current.save() || !isLoadCurrent(sequence)) return null;
     try {
@@ -257,6 +259,13 @@ export function usePinBoardTransfers({
       setStatus("画板已锁定，无法导入图片");
       return;
     }
+    // 拖入没有经过画布的按下，编辑会话不会自行提交；先提交再导入，与「点击外部
+    // 提交后照常执行这次动作」保持一致。
+    const textError = current.commitTextEdit();
+    if (textError) {
+      setStatus(textError);
+      return;
+    }
     const images = Array.from(files).filter((file) => DROP_IMAGE_PATTERN.test(file.name));
     if (images.length === 0) {
       setStatus("请拖入 PNG、JPEG、WebP、BMP 或 GIF 图片");
@@ -323,7 +332,11 @@ export function usePinBoardTransfers({
     placement: [number, number],
   ) => {
     const current = rendererRef.current;
-    if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
+    if (!current
+      || current.interactionState.locked
+      || current.interactionState.textEditing
+      || selected === null
+      || transferBusyRef.current) return;
     transferBusyRef.current = true;
     transferOperationId.current = null;
     setTransferProgress({ label: "正在添加文字", current: 0, total: 1 });
@@ -369,7 +382,10 @@ export function usePinBoardTransfers({
     if (boardId === null) return;
     strokeQueueRef.current = strokeQueueRef.current.then(async () => {
       const current = rendererRef.current;
-      if (!current || current.currentBoardId !== boardId || current.interactionState.locked) {
+      if (!current
+        || current.currentBoardId !== boardId
+        || current.interactionState.locked
+        || current.interactionState.textEditing) {
         current?.clearPendingStrokePreview();
         return;
       }
@@ -408,7 +424,11 @@ export function usePinBoardTransfers({
 
   const exportImages = useCallback(async () => {
     const current = rendererRef.current;
-    if (!current || current.interactionState.locked || selected === null || transferBusyRef.current) return;
+    if (!current
+      || current.interactionState.locked
+      || current.interactionState.textEditing
+      || selected === null
+      || transferBusyRef.current) return;
     // 只导出位图：文字与笔迹的单条导出已删除，统一由整画布导出覆盖。
     const itemIds = current.exportableImageIds();
     if (itemIds.length === 0) return;
@@ -471,7 +491,10 @@ export function usePinBoardTransfers({
     margin: number;
   }) => {
     const current = rendererRef.current;
-    if (!current || transferBusyRef.current || current.interactionState.locked) return;
+    if (!current
+      || transferBusyRef.current
+      || current.interactionState.locked
+      || current.interactionState.textEditing) return;
     const plan = current.canvasExportPlan(request.scale, request.margin, canvasExportLimit);
     if (!plan) {
       setStatus("画板没有可导出的内容");

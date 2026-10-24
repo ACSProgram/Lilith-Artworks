@@ -104,15 +104,17 @@ export function pinBoardLockIndicatorVisible({ hasView, locked, unavailable }: {
 /**
  * 图层面板的禁用条件。
  *
- * 只有整画布导出期间才置灰：导出渲染的是「点下那一刻的画面」，中途改显隐会让输出与用户
- * 看到的对不上。画板锁定不算——显隐是纯视图状态（不写库、不标 dirty、不进撤销栈），锁定
+ * 整画布导出期间置灰：导出渲染的是「点下那一刻的画面」，中途改显隐会让输出与用户
+ * 看到的对不上。文字就地编辑期间同样置灰：切层属于模型操作，应先提交编辑。
+ * 画板锁定不算——显隐是纯视图状态（不写库、不标 dirty、不进撤销栈），锁定
  * 时改它不会动模型，而「锁住画面只看内容」正是最需要藏掉标注层的场合。
  */
-export function pinBoardLayersPanelDisabled({ hasRenderer, exporting }: {
+export function pinBoardLayersPanelDisabled({ hasRenderer, exporting, textEditing }: {
   hasRenderer: boolean;
   exporting: boolean;
+  textEditing: boolean;
 }): boolean {
-  return !hasRenderer || exporting;
+  return !hasRenderer || exporting || textEditing;
 }
 
 function afterLayoutSettles(): Promise<void> {
@@ -342,6 +344,16 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     const current = renderer;
     fullscreenBusyRef.current = true;
     fullscreenRef.current = next;
+    // 全屏是布局切换：先把文字草稿提交进模型，避免编辑框在布局变化中丢失关联。
+    if (current) {
+      const textError = current.commitTextEdit();
+      if (textError) {
+        fullscreenRef.current = previous;
+        fullscreenBusyRef.current = false;
+        setStatus(textError);
+        return;
+      }
+    }
     current?.finishActiveInteraction();
     current?.beginViewportResize();
     setContextMenu(null);
@@ -537,6 +549,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
           layersDisabled={pinBoardLayersPanelDisabled({
             hasRenderer: renderer !== null,
             exporting: interaction.exporting,
+            textEditing: Boolean(interaction.textEditing),
           })}
           drawbarVisible={drawbarVisible}
           strokeStyle={strokeStyle}

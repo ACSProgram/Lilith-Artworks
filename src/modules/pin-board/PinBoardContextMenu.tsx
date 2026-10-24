@@ -57,6 +57,17 @@ export function PinBoardContextMenu({
 }: PinBoardContextMenuProps) {
   const items: ContextMenuItem[] = request.targetImage
     ? [
+        ...(request.singleTextSelected
+          ? [
+            {
+              key: "edit-text",
+              label: "编辑文字",
+              icon: <Type size={16} />,
+              onClick: () => renderer.beginTextEdit(),
+            },
+            { key: "sep-edit-text", divider: true },
+          ]
+          : []),
         { key: "copy-board", label: "复制画板条目", icon: <Copy size={16} />, onClick: onCopy },
         // 单条导出与系统剪贴板复制只认位图：选中文字或笔迹时两项一起置灰。
         { key: "copy-clipboard", label: "复制图片到剪贴板", icon: <ClipboardCopy size={16} />, disabled: request.selectedCount !== 1 || request.exportableCount === 0, disabledTitle: "只有单个位图条目能复制到系统剪贴板", onClick: onCopyClipboard },

@@ -19,12 +19,11 @@ use super::load_view;
 use super::paths::canonical_item_dds;
 use super::view::{
     current_states, effective_layer, ensure_revision, open_board_context, validate_editable,
-    ItemState, StrokePayload, TextPayload,
+    validate_text_payload, ItemState, StrokePayload, TextPayload,
 };
 use super::{
     EditablePinBoardItem, ImageTransform, PinBoardClipboardItem, PinBoardView, FULL_UV,
-    ITEM_KIND_BITMAP, ITEM_KIND_STROKE, ITEM_KIND_TEXT, MAX_TEXT_CHARS, MAX_TEXT_MEASURE_DIMENSION,
-    TEXT_FONT_FAMILY,
+    ITEM_KIND_BITMAP, ITEM_KIND_STROKE, ITEM_KIND_TEXT, TEXT_FONT_FAMILY,
 };
 use crate::storage;
 
@@ -536,6 +535,7 @@ pub(crate) fn paste_items(
             deleted: false,
             points: source.points,
             uv: source.uv,
+            text: None,
         };
         record_initial_state(
             &transaction,
@@ -627,6 +627,7 @@ pub(crate) fn import_images(
             deleted: false,
             points,
             uv: FULL_UV,
+            text: None,
         };
         record_initial_state(
             &transaction,
@@ -683,6 +684,7 @@ pub(crate) fn import_clipboard_image(
         deleted: false,
         points,
         uv: FULL_UV,
+        text: None,
     };
     record_initial_state(
         &transaction,
@@ -716,28 +718,14 @@ pub(crate) fn create_text(
     center_y: f64,
     expected_revision: &str,
 ) -> Result<(PinBoardView, Vec<i64>), String> {
-    if text.trim().is_empty() {
-        return Err("文字内容不能为空".into());
-    }
-    if text.chars().count() > MAX_TEXT_CHARS {
-        return Err(format!("文字内容不能超过 {MAX_TEXT_CHARS} 个字符"));
-    }
-    if !font_size.is_finite() || font_size <= 0.0 || font_size > 1000.0 {
-        return Err("文字字号无效".into());
-    }
-    let color = normalise_color(color)?;
-    if !matches!(align, "left" | "center" | "right") {
-        return Err("文字对齐方式无效".into());
-    }
-    if !measured_width.is_finite()
-        || !measured_height.is_finite()
-        || measured_width <= 0.0
-        || measured_height <= 0.0
-        || measured_width > MAX_TEXT_MEASURE_DIMENSION
-        || measured_height > MAX_TEXT_MEASURE_DIMENSION
-    {
-        return Err("文字尺寸超出素材板上限".into());
-    }
+    let color = validate_text_payload(
+        text,
+        font_size,
+        color,
+        align,
+        measured_width,
+        measured_height,
+    )?;
     if !center_x.is_finite() || !center_y.is_finite() {
         return Err("文字位置无效".into());
     }
@@ -770,6 +758,7 @@ pub(crate) fn create_text(
         deleted: false,
         points,
         uv: FULL_UV,
+        text: None,
     };
     record_initial_state(
         &transaction,
@@ -783,10 +772,6 @@ pub(crate) fn create_text(
     finish_item_mutation(transaction, board_id, dds::CreatedFiles::default())?;
     let view = load_view(connection, root, board_id)?;
     Ok((view, vec![item_id]))
-}
-
-fn normalise_color(color: &str) -> Result<String, String> {
-    stroke::normalise_hex_color(color, "文字")
 }
 
 /// 一条待写入的笔迹。`create_stroke`（GUI 的单笔创建）与 `create_strokes`（压力测试
@@ -899,6 +884,7 @@ pub(crate) fn create_strokes(
             deleted: false,
             points,
             uv: FULL_UV,
+            text: None,
         };
         record_initial_state(
             &transaction,
@@ -1751,6 +1737,7 @@ mod tests {
             deleted: true,
             points: state.transform.points,
             uv: state.transform.uv,
+            text: None,
         };
         save_board(
             &mut connection,

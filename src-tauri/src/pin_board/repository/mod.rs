@@ -92,6 +92,22 @@ pub(crate) struct EditablePinBoardItem {
     deleted: bool,
     points: [[f64; 2]; 4],
     uv: [[f64; 2]; 4],
+    /// 文字条目的可选载荷。只有文字内容/样式或度量发生变化时才由前端携带；
+    /// 非文字条目带载荷会被拒绝，避免 DTO 形状失去约束。
+    #[serde(default)]
+    text: Option<EditableTextPayload>,
+}
+
+/// 保存时随条目提交的文字载荷。字体族固定由服务端写入，不在保存契约里。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EditableTextPayload {
+    text: String,
+    font_size: f64,
+    color: String,
+    align: String,
+    measured_width: f64,
+    measured_height: f64,
 }
 
 #[derive(Debug, Serialize)]

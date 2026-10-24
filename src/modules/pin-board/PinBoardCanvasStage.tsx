@@ -36,6 +36,7 @@ import type {
 import { textureBudgetsForLevel, type PinBoardTextureBudgets } from "./texturePolicy";
 import { PinBoardLayersPanel } from "./PinBoardLayersPanel";
 import { PinBoardColorPicker } from "./PinBoardColorPicker";
+import { PinBoardTextEditor } from "./PinBoardTextEditor";
 import {
   MAX_STROKE_WIDTH,
   MIN_STROKE_WIDTH,
@@ -452,6 +453,13 @@ export function PinBoardCanvasStage({
         onContextMenu={onContextMenu}
         onStrokeCommit={onStrokeCommit}
       />
+      {renderer && interaction.textEditing && (
+        <PinBoardTextEditor
+          key={interaction.textEditing.sessionId}
+          editing={interaction.textEditing}
+          renderer={renderer}
+        />
+      )}
       {view && !unavailable && (
         <PinBoardLayersPanel
           visibility={interaction.visibleLayers}

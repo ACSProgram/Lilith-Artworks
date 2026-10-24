@@ -15,6 +15,21 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- Pin-board text entries can now be edited in place on the canvas. A second
+  click on an already-selected text, `F2`, or the context menu opens a rotated
+  editor that follows pan and zoom, with a screen-level bar for effective font
+  size, color and alignment. `Ctrl+Enter` or clicking outside commits, `Escape`
+  cancels, `Enter` inserts a newline, and one edit session produces one undo
+  entry. Textures are rebuilt after commit, undo and redo.
+- `save_pin_board` accepts an optional per-text payload (content, font size,
+  color, alignment, measured size) and updates `pin_board_texts` in the same
+  transaction. Text-only changes advance one step and one revision, transform
+  and text changes merge into one save, and non-text items carrying a text
+  payload are rejected. Background board settlement now carries text payloads
+  so switching away from an edited board keeps the committed text.
+
 ### Changed
 
 - Removed the unreferenced reference-inventory validation hooks, the unused
@@ -86,6 +101,12 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
+- Leaving the in-place text editor no longer flashes an empty frame: the
+  renderer rebuilds the text texture synchronously before it drops the editor,
+  and falls back to the queued texture load only when that rebuild fails.
+- The text editor bar now labels the font-size control as "大小" and hides the
+  number input's native step arrows, so font size has one pair of `−` / `+`
+  controls instead of two.
 - Cancelling a publication now compares each repository artifact and
   certification copy with the SHA-256 stored in its record before enqueueing
   cleanup. Files that were replaced or removed are left in place, logged as

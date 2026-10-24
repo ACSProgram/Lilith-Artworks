@@ -85,10 +85,15 @@ export function PinBoardToolbar({
   onSave,
 }: PinBoardToolbarProps) {
   /**
-   * 编辑入口的统一禁用条件：锁定与整画布导出期间都不允许改动画板。导出渲染的是
-   * 「点下那一刻的画面」，中途改动会让输出与用户看到的对不上。
+   * 编辑入口的统一禁用条件：锁定、整画布导出与文字就地编辑期间都不允许改动画板。
+   * 导出渲染的是「点下那一刻的画面」，中途改动会让输出与用户看到的对不上。
    */
-  const editingBlocked = interaction.locked || interaction.exporting;
+  const editingBlocked = interaction.locked || interaction.exporting || Boolean(interaction.textEditing);
+  /**
+   * 保存按钮在文字编辑期间仍然可点：按下会先提交草稿（编辑框外部按下即提交），
+   * 这次点击随后保存刚提交的内容。此时 `dirty` 还是提交前的值，因此不能只看它。
+   */
+  const canSave = interaction.dirty || Boolean(interaction.textEditing);
   return (
     <header className="pin-board-toolbar">
       <button
@@ -107,8 +112,8 @@ export function PinBoardToolbar({
         </span>
       </div>
       <div className="pin-board-actions" aria-label="画板工具">
-        <button className="icon-button" disabled={!renderer || !interaction.canUndo} onClick={() => run(() => renderer?.undo())} title="撤销" aria-label="撤销"><Undo2 size={17} /></button>
-        <button className="icon-button" disabled={!renderer || !interaction.canRedo} onClick={() => run(() => renderer?.redo())} title="恢复" aria-label="恢复"><Redo2 size={17} /></button>
+        <button className="icon-button" disabled={!renderer || !interaction.canUndo || editingBlocked} onClick={() => run(() => renderer?.undo())} title="撤销" aria-label="撤销"><Undo2 size={17} /></button>
+        <button className="icon-button" disabled={!renderer || !interaction.canRedo || editingBlocked} onClick={() => run(() => renderer?.redo())} title="恢复" aria-label="恢复"><Redo2 size={17} /></button>
         <span className="pin-board-divider" />
         <button className="icon-button" disabled={!renderer || interaction.exporting} onClick={() => run(() => renderer?.zoomOut())} title="缩小视图" aria-label="缩小视图"><ZoomOut size={17} /></button>
         <span className="pin-board-zoom">{interaction.zoomPercent}%</span>
@@ -130,7 +135,7 @@ export function PinBoardToolbar({
         <button className="icon-button" disabled={!renderer || interaction.itemCount === 0 || editingBlocked || transferBusy} onClick={onExportCanvas} title="导出画布 PNG" aria-label="导出画布 PNG"><ImageDown size={17} /></button>
         <button className={`icon-button${interaction.locked ? " active" : ""}`} disabled={!renderer || interaction.exporting} onClick={onToggleLock} title={actionTitle(interaction.locked ? "解锁画板" : "锁定画板", settings.lockShortcut)} aria-label={interaction.locked ? "解锁画板" : "锁定画板"}>{interaction.locked ? <Lock size={17} /> : <Unlock size={17} />}</button>
         <button className={`icon-button${fullscreen ? " active" : ""}`} disabled={!renderer} onClick={onToggleFullscreen} title={actionTitle(fullscreen ? "退出全屏" : "全屏显示", settings.fullscreenShortcut)} aria-label={fullscreen ? "退出全屏" : "全屏显示"}>{fullscreen ? <Minimize2 size={17} /> : <Fullscreen size={17} />}</button>
-        <button className="icon-button" disabled={!renderer || !interaction.dirty || interaction.saving} onClick={onSave} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
+        <button className="icon-button" disabled={!renderer || !canSave || interaction.saving} onClick={onSave} title="保存画板" aria-label="保存画板"><Save size={17} /></button>
       </div>
     </header>
   );

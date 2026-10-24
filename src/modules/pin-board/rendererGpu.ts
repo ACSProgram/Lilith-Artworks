@@ -569,6 +569,56 @@ export async function loadTexture(
     throw new Error("纹理读取所属的 GPU 设备已释放");
   }
   const bytes = response instanceof Uint8Array ? response : new Uint8Array(response);
+  let validationScope = false;
+  try {
+    if (typeof gpu.device.pushErrorScope === "function"
+      && typeof gpu.device.popErrorScope === "function") {
+      gpu.device.pushErrorScope("validation");
+      validationScope = true;
+    }
+    const loaded = uploadTexturePayload(gpu, image, bytes);
+    if (validationScope) {
+      const validationError = await gpu.device.popErrorScope();
+      validationScope = false;
+      if (validationError) {
+        destroyTexture(loaded);
+        throw new Error(validationError.message || "WebGPU 纹理校验失败");
+      }
+    }
+    return loaded;
+  } catch (error) {
+    if (validationScope) {
+      try {
+        await gpu.device.popErrorScope();
+      } catch {
+        // Preserve the original texture error when an error scope cannot close.
+      }
+    }
+    throw error;
+  }
+}
+
+/**
+ * 文字纹理的同步重建：编辑提交后要在同一帧换上，不能等排队加载。
+ *
+ * 文字负载由前端同步栅格化，整条上传路径也是同步的；这里跳过异步的错误域校验，
+ * 调用方负责处理抛出的异常（失败时退回旧的排队加载路径）。
+ */
+export function loadTextTexture(
+  gpu: GpuState,
+  image: PinBoardItem,
+  maxDimension: number,
+): LoadedTexture {
+  if (image.kind !== "text") throw new Error("只有文字条目支持同步纹理重建");
+  if (gpu.released) throw new Error("纹理读取所属的 GPU 设备已释放");
+  return uploadTexturePayload(gpu, image, textRgbaPayload(image, maxDimension));
+}
+
+function uploadTexturePayload(
+  gpu: GpuState,
+  image: PinBoardItem,
+  bytes: Uint8Array,
+): LoadedTexture {
   let width: number;
   let height: number;
   let data: Uint8Array;
@@ -619,13 +669,7 @@ export async function loadTexture(
 
   let texture: any = null;
   let geometry: { vertexBuffer: any; outlineBuffer: any } | null = null;
-  let validationScope = false;
   try {
-    if (typeof gpu.device.pushErrorScope === "function"
-      && typeof gpu.device.popErrorScope === "function") {
-      gpu.device.pushErrorScope("validation");
-      validationScope = true;
-    }
     texture = gpu.device.createTexture({
       size: { width: textureWidth, height: textureHeight, depthOrArrayLayers: 1 },
       format,
@@ -645,11 +689,6 @@ export async function loadTexture(
       ],
     });
     geometry = createGeometryBuffers(gpu.device, image, uvScale);
-    if (validationScope) {
-      const validationError = await gpu.device.popErrorScope();
-      validationScope = false;
-      if (validationError) throw new Error(validationError.message || "WebGPU 纹理校验失败");
-    }
     return {
       texture,
       bindGroup,
@@ -660,13 +699,6 @@ export async function loadTexture(
       lastUsed: performance.now(),
     };
   } catch (error) {
-    if (validationScope) {
-      try {
-        await gpu.device.popErrorScope();
-      } catch {
-        // Preserve the original texture error when an error scope cannot close.
-      }
-    }
     geometry?.outlineBuffer.destroy();
     geometry?.vertexBuffer.destroy();
     texture?.destroy();

@@ -339,15 +339,30 @@ function isRetryableSettleError(error: unknown): boolean {
   return message.includes("仓库正在写入") || message.includes("另一个进程写入");
 }
 
-/** 画板保存只需要位置/层级/删除态与两个四边形，标题、字体等字段由后端按条目记录合并。 */
+/**
+ * 画板保存只需要位置/层级/删除态与两个四边形；文字条目的载荷随快照一并带上，
+ * 否则切换画板时正在编辑的文字会停留在旧内容。非文字条目不携带该字段。
+ */
 function editableItems(items: PinBoardItem[]): PinBoardEditableItem[] {
-  return items.map(({ itemId, order, layer, deleted, points, uv }) => ({
-    itemId,
-    order,
-    layer,
-    deleted,
-    points: points.map((point) => [...point]) as PinBoardEditableItem["points"],
-    uv: uv.map((point) => [...point]) as PinBoardEditableItem["uv"],
+  return items.map((item) => ({
+    itemId: item.itemId,
+    order: item.order,
+    layer: item.layer,
+    deleted: item.deleted,
+    points: item.points.map((point) => [...point]) as PinBoardEditableItem["points"],
+    uv: item.uv.map((point) => [...point]) as PinBoardEditableItem["uv"],
+    ...(item.kind === "text"
+      ? {
+        text: {
+          text: item.text,
+          fontSize: item.fontSize,
+          color: item.color,
+          align: item.align,
+          measuredWidth: item.width,
+          measuredHeight: item.height,
+        },
+      }
+      : {}),
   }));
 }
 

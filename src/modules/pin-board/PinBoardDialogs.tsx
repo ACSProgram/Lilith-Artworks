@@ -18,6 +18,7 @@ import {
 } from "./exportPolicy";
 import { pickPinBoardExportDirectory } from "./api";
 import { PinBoardColorPicker } from "./PinBoardColorPicker";
+import { PIN_BOARD_TEXT_MAX_CHARS } from "./textLayout";
 
 /**
  * 素材板本地对话框外壳：backdrop 点击与 Escape 关闭、统一的头部与页脚。
@@ -140,12 +141,12 @@ export function PinBoardTextDialog({
       <label className="pin-board-text-field">
         <span className="pin-board-text-label">
           <span>内容</span>
-          <span className="pin-board-text-count">{text.length} / 5000</span>
+          <span className="pin-board-text-count">{text.length} / {PIN_BOARD_TEXT_MAX_CHARS}</span>
         </span>
         <textarea
           className="pin-board-text-input"
           autoFocus
-          maxLength={5000}
+          maxLength={PIN_BOARD_TEXT_MAX_CHARS}
           rows={5}
           placeholder="输入要添加的文字，支持多行"
           value={text}

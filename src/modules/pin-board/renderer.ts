@@ -21,6 +21,7 @@ import type {
   PinBoardEditableItem,
   PinBoardItem,
   PinBoardStrokeItem,
+  PinBoardTextAlign,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
@@ -112,11 +113,22 @@ import {
 } from "./texturePolicy";
 import { requestedTextTextureDimension } from "./textLayout";
 import {
+  pinBoardTextEditGeometry,
+  pinBoardTextScale,
+  pinBoardTextSignature,
+  resolvePinBoardTextDraft,
+  textDraftFromItem,
+  textQuadAngle,
+  type PinBoardTextDraft,
+  type PinBoardTextScale,
+} from "./textEditing";
+import {
   adjustLiveRenderers,
   clearColor,
   destroyTexture,
   estimatedLoadBytes,
   estimatedResidentBytes,
+  loadTextTexture,
   loadTexture,
   makeGpu,
   outlineData,
@@ -170,7 +182,32 @@ type ImageSnapshot = {
   layer: number;
   points: Quad;
   uv: Quad;
+  /** 文字条目的载荷与度量；位图/笔迹为 undefined。 */
+  text?: {
+    text: string;
+    fontSize: number;
+    color: string;
+    align: PinBoardTextAlign;
+    width: number;
+    height: number;
+  };
 };
+
+/** 就地编辑会话的屏幕状态；React 编辑器据此定位并渲染字体栏。 */
+export interface PinBoardTextEditState {
+  /** 每次进入编辑自增；编辑器用它作为组件 key，草稿不会跨会话串台。 */
+  sessionId: number;
+  itemId: number;
+  draft: PinBoardTextDraft;
+  /** 条目缩放（四边形宽 ÷ 测量宽）。有效字号 = `draft.fontSize × scale`。 */
+  scale: number;
+  centerX: number;
+  centerY: number;
+  /** 屏幕旋转角（CSS 像素、y 向下）。 */
+  angle: number;
+  /** CSS 像素 / 世界单位：随画布缩放与窗口尺寸变化。 */
+  pixelsPerWorldUnit: number;
+}
 
 type HistoryEntry = {
   before: ImageSnapshot[];
@@ -204,6 +241,8 @@ export interface PinBoardInteractionState {
   visibleLayers: PinBoardLayerVisibility;
   /** 整画布导出进行中：期间画板锁定，绘制、图层、切换画板等入口一律禁用。 */
   exporting: boolean;
+  /** 正在就地编辑的文字；null 表示没有编辑会话。 */
+  textEditing: PinBoardTextEditState | null;
 }
 
 /** 未装载画板或没有渲染器时的交互状态：锁定、无选中、工具为选择。 */
@@ -222,6 +261,7 @@ export const DEFAULT_PIN_BOARD_INTERACTION: PinBoardInteractionState = {
   tool: "select",
   visibleLayers: normalizeLayerVisibility(null),
   exporting: false,
+  textEditing: null,
 };
 
 export interface PinBoardContextMenuRequest {
@@ -233,6 +273,8 @@ export interface PinBoardContextMenuRequest {
   exportableCount: number;
   /** 选中里含笔迹：图层菜单据此置灰（笔迹固定在标注层，不能被改层）。 */
   selectionHasStroke: boolean;
+  /** 恰好选中一条文字：右键菜单据此提供“编辑文字”。 */
+  singleTextSelected: boolean;
   targetImage: boolean;
   canEditBoard: boolean;
   canEditSelection: boolean;
@@ -257,6 +299,8 @@ const GPU_RECOVERY_MAX_ATTEMPTS = 2;
 const GPU_RECOVERY_BACKOFF_MS = 600;
 const TRANSFORM_HANDLE_RADIUS = 12;
 const ROTATION_HANDLE_OFFSET = 28;
+/** 第二次点击文字时，按下到抬起的位移超过该值仍按拖动处理。 */
+const TEXT_EDIT_CLICK_TOLERANCE_CSS_PIXELS = 3;
 /** 橡皮环形光标的视觉最小直径（CSS 像素）：再小就看不见了。 */
 const ERASER_RING_MIN_CSS_PIXELS = 4;
 /**
@@ -354,6 +398,27 @@ export class PinBoardRenderer {
   private scaleAnchor: Point = [0, 0];
   private scaleStartDistance = 1;
   private dragBefore: ImageSnapshot[] = [];
+  /** 每条文字上一次成功保存的签名：普通保存只发送签名变化的文字载荷。 */
+  private readonly savedTextSignatures = new Map<number, string>();
+  /** 就地编辑会话；草稿由 React 编辑器推入，渲染器负责模型与提交。 */
+  private textEdit: {
+    sessionId: number;
+    itemId: number;
+    before: ImageSnapshot;
+    draft: PinBoardTextDraft;
+    scale: PinBoardTextScale;
+    center: Point;
+    angle: number;
+  } | null = null;
+  private textEditSessionId = 0;
+  /** 提交后抑制紧随其后的 pointerup 再次进入编辑（点击同一条文字时会发生）。 */
+  private suppressClickEdit = false;
+  /** 本次按下的起点与拖动判定：第二次点击同一文字且没有拖动才进入编辑。 */
+  private pressClient: Point | null = null;
+  private pressMoved = false;
+  private pressWasSelected = false;
+  private pressItemId: number | null = null;
+  private pressSuppressEdit = false;
   private selectionScreenQuad: Quad | null = null;
   /**
    * 纹理未就绪的图片占位层：DOM 节点按 itemId 复用，避免每帧增删；位置随
@@ -662,6 +727,8 @@ export class PinBoardRenderer {
    */
   private detachCurrentBoard(stagePending: boolean) {
     if (!this.loaded) return;
+    // 草稿先同步提交进模型，随快照进入后台结算；无效草稿按取消处理并保留原文。
+    if (!this.settleTextEdit()) this.cancelTextEdit();
     this.finishActiveInteraction();
     this.persistSession();
     // 挂起的自动保存由快照接手：队列会写同一份内容，不必再走一次防抖保存。
@@ -722,6 +789,10 @@ export class PinBoardRenderer {
     this.historyIndex = 0;
     this.images = [];
     this.imageById.clear();
+    this.savedTextSignatures.clear();
+    this.textEdit = null;
+    this.suppressClickEdit = false;
+    this.resetPressState();
     this.selectedIds.clear();
     this.dragMode = null;
     this.dragPointerId = null;
@@ -941,6 +1012,15 @@ export class PinBoardRenderer {
     this.images = (pending?.items ?? view.items).map(cloneImage);
     this.imageById.clear();
     for (const image of this.images) this.imageById.set(image.itemId, image);
+    this.savedTextSignatures.clear();
+    for (const image of this.images) {
+      if (image.kind === "text") {
+        this.savedTextSignatures.set(image.itemId, pinBoardTextSignature(image));
+      }
+    }
+    this.textEdit = null;
+    this.suppressClickEdit = false;
+    this.resetPressState();
     this.revision = resolveBoardRevision(view.boardId, pending?.revision ?? view.revision);
     // 装载到的 revision 是仓库当前事实：记进账本，避免账本里残留的旧值在装载
     // 之后继续压过它（例如上次保存撞了冲突、之后重新打开画板时）。
@@ -1024,6 +1104,7 @@ export class PinBoardRenderer {
    */
   destroy(stagePending = true) {
     if (this.destroyed) return;
+    if (!this.settleTextEdit()) this.cancelTextEdit();
     this.cancelAutosave();
     if (stagePending && this.loaded && !this.finalized) this.stagePendingBoard();
     if (this.loaded) this.persistSession();
@@ -1083,6 +1164,7 @@ export class PinBoardRenderer {
     if (this.active === active) return;
     this.active = active;
     if (!active) {
+      if (!this.settleTextEdit()) this.cancelTextEdit();
       this.finishActiveInteraction();
       this.onContextMenu(null);
       this.generation += 1;
@@ -1110,7 +1192,7 @@ export class PinBoardRenderer {
   }
 
   finishActiveInteraction() {
-    if (this.dragMode) this.finishInteraction();
+    if (this.dragMode) this.finishInteraction(false);
   }
 
   /**
@@ -1122,6 +1204,7 @@ export class PinBoardRenderer {
    */
   setTool(tool: PinBoardTool) {
     if (!this.loaded || this.locked || this.exporting || this.tool === tool) return;
+    if (!this.settleTextEdit()) return;
     this.finishActiveInteraction();
     this.tool = tool;
     this.dragBefore = [];
@@ -1148,6 +1231,13 @@ export class PinBoardRenderer {
     const next = normalizeLayerVisibility(this.visibleLayers);
     if (!Number.isInteger(layer) || layer < 0 || layer >= PIN_BOARD_LAYER_COUNT) return;
     if (next[layer] === visible) return;
+    // 正在编辑的文字不能被藏在看不见的图层里：先提交再隐藏。
+    if (!visible
+      && this.textEdit
+      && this.imageById.get(this.textEdit.itemId)?.layer === layer
+      && !this.settleTextEdit()) {
+      return;
+    }
     next[layer] = visible;
     this.visibleLayers = next;
     if (!visible) {
@@ -1221,6 +1311,26 @@ export class PinBoardRenderer {
       tool: this.tool,
       visibleLayers: normalizeLayerVisibility(this.visibleLayers),
       exporting: this.exporting,
+      textEditing: this.textEditState(),
+    };
+  }
+
+  private textEditState(): PinBoardTextEditState | null {
+    const edit = this.textEdit;
+    if (!edit) return null;
+    const image = this.imageById.get(edit.itemId);
+    if (!image || image.kind !== "text") return null;
+    const geometry = pinBoardTextEditGeometry(
+      image,
+      this.canvas.getBoundingClientRect(),
+      this.viewport,
+    );
+    return {
+      sessionId: edit.sessionId,
+      itemId: edit.itemId,
+      draft: { ...edit.draft },
+      scale: edit.scale.x,
+      ...geometry,
     };
   }
 
@@ -1240,7 +1350,7 @@ export class PinBoardRenderer {
    * 复制路径因此只有一个事实来源。
    */
   copySelection(): PinBoardClipboardItem[] {
-    if (this.locked) return [];
+    if (this.locked || this.textEdit) return [];
     return this.selectedImages()
       .sort((left, right) => left.order - right.order)
       .map((image) => ({
@@ -1264,6 +1374,198 @@ export class PinBoardRenderer {
     return this.selectedImages()
       .filter((image) => image.kind === "bitmap")
       .map((image) => image.itemId);
+  }
+
+  /**
+   * 进入文字就地编辑：只接受恰好一条、当前可见的文字。
+   *
+   * 入口有三个：第二次点击已选中的单条文字、`F2` 与右键菜单。进入时不对模型做任何
+   * 修改，草稿留在编辑会话里；因此编辑期间自动保存不会写出半成品。
+   */
+  beginTextEdit(itemId?: number): boolean {
+    if (!this.loaded || this.locked || this.exporting || this.gpuUnavailable) return false;
+    if (!this.settleTextEdit()) return false;
+    this.finishActiveInteraction();
+    const targetId = itemId ?? (
+      this.selectedIds.size === 1 ? [...this.selectedIds][0] : null
+    );
+    if (targetId === null) return false;
+    const image = this.imageById.get(targetId);
+    if (!image
+      || image.kind !== "text"
+      || image.deleted
+      || !isLayerVisible(this.visibleLayers, image.layer)) {
+      return false;
+    }
+    this.selectedIds.clear();
+    this.selectedIds.add(targetId);
+    this.tool = "select";
+    this.canvas.classList.remove("over-text");
+    const before = this.snapshot([targetId])[0];
+    if (!before) return false;
+    this.textEdit = {
+      sessionId: ++this.textEditSessionId,
+      itemId: targetId,
+      before,
+      draft: textDraftFromItem(image),
+      scale: pinBoardTextScale(image),
+      center: quadCenter(image.points),
+      angle: textQuadAngle(image.points),
+    };
+    this.updateSelectionOverlay();
+    this.draw();
+    this.emitState();
+    return true;
+  }
+
+  /** React 编辑器每次输入/改样式都把草稿推回来；不触发状态广播，避免打字时整页重渲染。 */
+  updateTextEditDraft(draft: PinBoardTextDraft) {
+    if (!this.textEdit) return;
+    this.textEdit.draft = {
+      text: draft.text,
+      fontSize: draft.fontSize,
+      color: draft.color.toLowerCase(),
+      align: draft.align,
+    };
+  }
+
+  /**
+   * 提交当前编辑会话。成功返回 null；失败返回可展示的错误并保留会话与草稿。
+   *
+   * 一次会话只产生一条撤销记录：`before` 是进入编辑时的快照，`after` 是提交后的
+   * 快照，中间每字、每次样式变化都不单独进历史。删到空与没有实际改动都只关闭会话。
+   *
+   * `suppressClickEdit` 由「点击外部提交」传入：同一次按下不应在 pointerup 时又把
+   * 文字重新推进编辑（点同一条文字时会发生）。
+   */
+  commitTextEdit({ suppressClickEdit = false }: { suppressClickEdit?: boolean } = {}): string | null {
+    const edit = this.textEdit;
+    if (!edit) return null;
+    const image = this.imageById.get(edit.itemId);
+    if (!image || image.kind !== "text") {
+      this.cancelTextEdit();
+      return null;
+    }
+    // 删到空再提交按取消处理：已有文字恢复原文，不删除条目。
+    if (edit.draft.text.trim().length === 0) {
+      this.closeTextEdit(suppressClickEdit);
+      return null;
+    }
+    const resolved = resolvePinBoardTextDraft(
+      edit.draft,
+      edit.scale,
+      edit.center,
+      edit.angle,
+    );
+    if (!resolved.ok) return resolved.error;
+    // 没有实际改动时不动模型：旋转文字的四边形是按中心与角度重建的，浮点误差会让
+    // 「进去看看又退出」也留下一条撤销记录和一次保存。
+    if (image.text === edit.draft.text
+      && image.fontSize === resolved.fontSize
+      && image.color === resolved.color
+      && image.align === resolved.align
+      && image.width === resolved.width
+      && image.height === resolved.height) {
+      this.closeTextEdit(suppressClickEdit);
+      return null;
+    }
+    image.text = edit.draft.text;
+    image.fontSize = resolved.fontSize;
+    image.color = resolved.color;
+    image.align = resolved.align;
+    image.width = resolved.width;
+    image.height = resolved.height;
+    image.points = resolved.points;
+    this.textEdit = null;
+    this.suppressClickEdit = suppressClickEdit;
+    this.invalidateTextTexture(edit.itemId);
+    const after = this.snapshot([edit.itemId]);
+    this.pushHistory([edit.before], after);
+    this.afterModelChange([edit.itemId]);
+    return null;
+  }
+
+  cancelTextEdit() {
+    if (!this.textEdit) return;
+    this.closeTextEdit(false);
+  }
+
+  /** 结束会话但不改模型：取消与没有实际改动的提交共用，重新画出文字与选中框。 */
+  private closeTextEdit(suppressClickEdit: boolean) {
+    this.textEdit = null;
+    this.suppressClickEdit = suppressClickEdit;
+    this.updateSelectionOverlay();
+    this.draw();
+    this.emitState();
+  }
+
+  /** 模型操作前统一收口编辑会话；校验失败时阻止后续操作并上报原因。 */
+  private settleTextEdit(): boolean {
+    if (!this.textEdit) return true;
+    const error = this.commitTextEdit();
+    if (error) {
+      this.onError(error);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 文字内容/样式变化后旧纹理必然过期：销毁高清与缩略图，让下一次装载重建。
+   *
+   * 可见条目会先同步建好新纹理再替换旧纹理——提交编辑时编辑框与 GPU 纹理在同一帧
+   * 交接，中间空一帧就会闪出空白。同步重建失败时退回原路径，由排队加载兜底。
+   */
+  private invalidateTextTexture(itemId: number) {
+    const rebuilt = this.rebuildTextTexture(itemId);
+    for (const target of [this.textures, this.previewTextures]) {
+      const loaded = target.get(itemId);
+      if (!loaded || (rebuilt && target === this.textures)) continue;
+      destroyTexture(loaded);
+      target.delete(itemId);
+    }
+    this.textureQualityCaps.delete(itemId);
+    this.failedTextureDimensions.delete(itemId);
+  }
+
+  /** 可见文字的纹理已在本地栅格化，可直接重建并换上；不可见时留给排队加载。 */
+  private rebuildTextTexture(itemId: number): boolean {
+    if (!this.loaded || this.destroyed || this.gpuUnavailable) return false;
+    const image = this.imageById.get(itemId);
+    if (!image || image.kind !== "text" || image.deleted) return false;
+    if (!this.visibleImages.some((visible) => visible.itemId === itemId)) return false;
+    const dimension = this.requestedDimension(image);
+    if (dimension < 1) return false;
+    const reservation = estimatedResidentBytes(image, dimension)
+      + PIN_BOARD_TEXTURE_STAGING_MARGIN_BYTES;
+    if (!this.reserveTextureBytes(itemId, reservation)) return false;
+    try {
+      const loaded = loadTextTexture(this.gpu, image, dimension);
+      const previous = this.textures.get(itemId);
+      this.textures.set(itemId, loaded);
+      if (previous) destroyTexture(previous);
+      this.textureQualityCaps.delete(itemId);
+      this.failedTextureDimensions.delete(itemId);
+      return true;
+    } catch (error) {
+      diagnosticsLog(
+        "warn",
+        `pin-board text texture sync rebuild failed: boardId=${this.boardId}, itemId=${itemId},`
+        + ` dim=${dimension}, error=${errorMessage(error)}`,
+      );
+      return false;
+    } finally {
+      this.textureReservedBytes = Math.max(0, this.textureReservedBytes - reservation);
+    }
+  }
+
+  /** 清掉本次按下的点击判定状态。 */
+  private resetPressState() {
+    this.pressClient = null;
+    this.pressMoved = false;
+    this.pressWasSelected = false;
+    this.pressItemId = null;
+    this.pressSuppressEdit = false;
   }
 
   /**
@@ -1318,6 +1620,7 @@ export class PinBoardRenderer {
     if (!this.loaded || this.exporting || this.destroyed || this.gpuUnavailable) {
       throw new Error("当前画板无法导出");
     }
+    if (!this.settleTextEdit()) throw new Error("文字编辑尚未提交，无法导出");
     const boardId = this.boardId;
     const tiles = canvasExportTiles(plan);
     this.finishActiveInteraction();
@@ -1501,7 +1804,7 @@ export class PinBoardRenderer {
    * 模型状态，所以这里不调整图片顺序、也不标记 dirty。
    */
   selectAll() {
-    if (this.locked) return;
+    if (this.locked || this.textEdit) return;
     this.finishActiveInteraction();
     this.selectedIds.clear();
     for (const image of this.images) {
@@ -1529,7 +1832,7 @@ export class PinBoardRenderer {
 
   deleteSelected() {
     const selected = this.selectedImages();
-    if (this.locked || selected.length === 0) return;
+    if (this.locked || this.textEdit || selected.length === 0) return;
     const itemIds = selected.map((image) => image.itemId);
     const before = this.snapshot(itemIds);
     for (const image of selected) image.deleted = true;
@@ -1574,6 +1877,9 @@ export class PinBoardRenderer {
       const copy = cloneImage(image);
       this.images.push(copy);
       this.imageById.set(copy.itemId, copy);
+      if (copy.kind === "text") {
+        this.savedTextSignatures.set(copy.itemId, pinBoardTextSignature(copy));
+      }
       // 绘制工具下不自动选中新条目：工具模式的指针只走绘制分支，包围框既拖不动、
       // 也挡在下一笔落笔的位置上。只有回到选择工具才让新条目可变换。
       if (this.tool === "select") this.selectedIds.add(copy.itemId);
@@ -1592,7 +1898,8 @@ export class PinBoardRenderer {
 
   toggleLock() {
     if (!this.locked) {
-      this.finishInteraction();
+      if (!this.settleTextEdit()) return;
+      this.finishInteraction(false);
       this.selectedIds.clear();
       this.onContextMenu(null);
     }
@@ -1621,7 +1928,7 @@ export class PinBoardRenderer {
   }
 
   undo() {
-    if (this.locked || this.historyIndex === 0) return;
+    if (this.locked || this.textEdit || this.historyIndex === 0) return;
     const entry = this.history[this.historyIndex - 1];
     this.historyIndex -= 1;
     this.restore(entry.before);
@@ -1629,7 +1936,7 @@ export class PinBoardRenderer {
   }
 
   redo() {
-    if (this.locked || this.historyIndex >= this.history.length) return;
+    if (this.locked || this.textEdit || this.historyIndex >= this.history.length) return;
     const entry = this.history[this.historyIndex];
     this.historyIndex += 1;
     this.restore(entry.after);
@@ -1725,6 +2032,13 @@ export class PinBoardRenderer {
     const boardId = this.boardId;
     const revision = resolveBoardRevision(boardId, this.revision);
     const images = this.editableImages();
+    // 保存成功后才把签名推进到请求时的值：保存期间又改过的文字仍会被判成未保存。
+    const requestSignatures = new Map<number, string>();
+    for (const image of this.images) {
+      if (image.kind === "text") {
+        requestSignatures.set(image.itemId, pinBoardTextSignature(image));
+      }
+    }
     this.saving = true;
     this.emitState();
     const started = performance.now();
@@ -1744,6 +2058,10 @@ export class PinBoardRenderer {
         }
         this.revision = result.revision;
         this.savedStateKey = stateKey;
+        this.savedTextSignatures.clear();
+        for (const [itemId, signature] of requestSignatures) {
+          this.savedTextSignatures.set(itemId, signature);
+        }
         this.dirty = this.stateKey() !== stateKey;
         // 保存期间又有编辑时，恢复自动保存排程。
         if (this.dirty) this.scheduleAutosave();
@@ -1775,6 +2093,7 @@ export class PinBoardRenderer {
     if (!this.loaded) return Promise.resolve(true);
     if (this.finalized) return Promise.resolve(true);
     if (this.finalizePromise) return this.finalizePromise;
+    if (!this.settleTextEdit()) return Promise.resolve(false);
     const boardId = this.boardId;
     diagnosticsLog(
       "info",
@@ -1835,25 +2154,45 @@ export class PinBoardRenderer {
   }
 
   private stateKey(): string {
-    return JSON.stringify(this.images.map(({ itemId, order, layer, deleted, points, uv }) => ({
-      itemId,
-      order,
-      layer,
-      deleted,
-      points,
-      uv,
-    })));
+    return JSON.stringify(this.images.map(({ itemId, order, layer, deleted, points, uv }) => {
+      const image = this.imageById.get(itemId);
+      return {
+        itemId,
+        order,
+        layer,
+        deleted,
+        points,
+        uv,
+        // 文字内容/样式/度量参与脏标记：只改字不动四边形时也必须保存。
+        ...(image?.kind === "text" ? { text: pinBoardTextSignature(image) } : {}),
+      };
+    }));
   }
 
   private editableImages(): PinBoardEditableItem[] {
-    return this.images.map(({ itemId, order, layer, deleted, points, uv }) => ({
-      itemId,
-      order,
-      layer,
-      deleted,
-      points: cloneQuad(points),
-      uv: cloneQuad(uv),
-    }));
+    return this.images.map((image) => {
+      const { itemId, order, layer, deleted, points, uv } = image;
+      const text = image.kind === "text"
+        && pinBoardTextSignature(image) !== this.savedTextSignatures.get(itemId)
+        ? {
+          text: image.text,
+          fontSize: image.fontSize,
+          color: image.color,
+          align: image.align,
+          measuredWidth: image.width,
+          measuredHeight: image.height,
+        }
+        : undefined;
+      return {
+        itemId,
+        order,
+        layer,
+        deleted,
+        points: cloneQuad(points),
+        uv: cloneQuad(uv),
+        ...(text ? { text } : {}),
+      };
+    });
   }
 
   private emitState() {
@@ -1879,6 +2218,17 @@ export class PinBoardRenderer {
   private readonly keyDown = (event: KeyboardEvent) => {
     if (!this.active || this.exporting) return;
     if (!shortcutCanHandle(event)) return;
+    // 编辑会话期间所有画板快捷键停用：Ctrl+Z 留给 textarea 的原生撤销。
+    if (this.textEdit) return;
+    if (event.key === "F2"
+      && !event.ctrlKey
+      && !event.metaKey
+      && !event.altKey
+      && !event.shiftKey) {
+      event.preventDefault();
+      this.beginTextEdit();
+      return;
+    }
     if (event.key === "Delete") {
       event.preventDefault();
       this.finishActiveInteraction();
@@ -1964,7 +2314,27 @@ export class PinBoardRenderer {
   private readonly pointerDown = (event: PointerEvent) => {
     if (event.button !== 0 && event.button !== 1) return;
     if (this.dragMode || this.exporting) return;
+    // 编辑器在 document 捕获阶段已经提交过；这里兜一次并阻止无效草稿继续拖动。
+    // 中键是平移手势，不结束编辑会话。
+    let closedTextEditor = false;
+    if (this.textEdit && event.button !== 1) {
+      const error = this.commitTextEdit();
+      if (error) {
+        this.onError(error);
+        event.preventDefault();
+        return;
+      }
+      // 这次按下已经关掉了编辑框：它不能被当成「再点一次进入编辑」。
+      closedTextEditor = true;
+    }
     this.onContextMenu(null);
+    this.pressClient = [event.clientX, event.clientY];
+    this.pressMoved = false;
+    this.pressWasSelected = false;
+    this.pressItemId = null;
+    this.pressSuppressEdit = this.suppressClickEdit || closedTextEditor;
+    this.suppressClickEdit = false;
+    this.canvas.classList.remove("over-text");
     this.canvas.focus({ preventScroll: true });
     this.pointerX = event.clientX;
     this.pointerY = event.clientY;
@@ -2024,9 +2394,12 @@ export class PinBoardRenderer {
           ? pointInQuad(this.dragWorld, selection)
           : false;
         if (hit && this.selectedIds.has(hit.itemId)) {
+          this.pressWasSelected = true;
+          this.pressItemId = hit.itemId;
           this.dragMode = "images";
           this.dragBefore = this.snapshot([...this.selectedIds]);
         } else if (hit) {
+          this.pressItemId = hit.itemId;
           this.selectedIds.clear();
           this.selectedIds.add(hit.itemId);
           this.bringToFront([hit.itemId]);
@@ -2081,6 +2454,17 @@ export class PinBoardRenderer {
         "over-resize-nesw",
         resizeHandle === 1 || resizeHandle === 3,
       );
+      // 悬停在「已选中的单条文字」上时显示文本光标，提示再点一次可编辑。
+      const hovered = this.cursorWorld ? this.hitImage(this.cursorWorld) : null;
+      this.canvas.classList.toggle(
+        "over-text",
+        !this.locked
+          && !this.textEdit
+          && this.tool === "select"
+          && hovered?.kind === "text"
+          && this.selectedIds.size === 1
+          && this.selectedIds.has(hovered.itemId),
+      );
       return;
     }
     if (this.dragMode === "pan") {
@@ -2107,6 +2491,12 @@ export class PinBoardRenderer {
           this.drawStrokePreview();
         }
       } else if (this.dragMode === "images") {
+        if (!this.pressMoved && this.pressClient) {
+          this.pressMoved = Math.hypot(
+            event.clientX - this.pressClient[0],
+            event.clientY - this.pressClient[1],
+          ) > TEXT_EDIT_CLICK_TOLERANCE_CSS_PIXELS;
+        }
         const deltaX = world[0] - this.dragWorld[0];
         const deltaY = world[1] - this.dragWorld[1];
         for (const snapshot of this.dragBefore) {
@@ -2206,22 +2596,34 @@ export class PinBoardRenderer {
     // 绘制按取消处理（事件已不可信，不该拿半条轨迹建条目）；擦除与 `pointerup` 走
     // 同一条提交路径——擦掉的内容不还原，否则用户会看到「擦掉的东西又回来了」。
     if (this.dragMode === "draw") this.cancelDrawing();
-    else this.finishInteraction();
+    else this.finishInteraction(false);
     event.preventDefault();
   };
 
   /** 指针离开画布：环形光标没有可跟随的位置，直接隐藏。 */
   private readonly pointerLeave = () => {
     this.eraserPointer = null;
+    this.canvas.classList.remove("over-text");
     this.updateEraserRing();
   };
 
-  private finishInteraction() {
+  private finishInteraction(allowTextEdit = true) {
     // 绘制的中断路径（锁定、切画板、失焦）一律按取消处理：没有落库就什么也没发生。
     if (this.dragMode === "draw") {
       this.cancelDrawing();
       return;
     }
+    // 第二次点击同一条已选中的文字、且按下到抬起没有拖动才进入编辑。
+    const editItemId = allowTextEdit
+      && this.dragMode === "images"
+      && !this.pressMoved
+      && !this.pressSuppressEdit
+      && this.pressWasSelected
+      && this.pressItemId !== null
+      && this.selectedIds.size === 1
+      && this.selectedIds.has(this.pressItemId)
+      ? this.pressItemId
+      : null;
     const pointerId = this.dragPointerId;
     if (this.dragMode === "erase") {
       // 一次拖拽 = 一条撤销记录：`before` 是按下时整板可见笔迹的快照。
@@ -2261,7 +2663,9 @@ export class PinBoardRenderer {
       "over-resize-nwse",
       "over-resize-nesw",
     );
+    this.resetPressState();
     this.emitState();
+    if (editItemId !== null) this.beginTextEdit(editItemId);
   }
 
   /**
@@ -2449,6 +2853,10 @@ export class PinBoardRenderer {
       this.onContextMenu(null);
       return;
     }
+    if (this.textEdit && !this.settleTextEdit()) {
+      this.onContextMenu(null);
+      return;
+    }
     const point = screenToWorld(
       event.clientX,
       event.clientY,
@@ -2472,6 +2880,7 @@ export class PinBoardRenderer {
       // 阵列排序与单条导出当前都只认位图，两处口径因此一致；分开写是因为语义不同。
       exportableCount: selected.filter((image) => image.kind === "bitmap").length,
       selectionHasStroke: selected.some((image) => image.kind === "stroke"),
+      singleTextSelected: selected.length === 1 && selected[0].kind === "text",
       targetImage: Boolean(hit && !this.locked),
       canEditBoard: !this.locked,
       canEditSelection: !this.locked && this.selectedIds.size > 0,
@@ -2521,7 +2930,7 @@ export class PinBoardRenderer {
 
   private updateSelectionOverlay() {
     const selected = this.selectedImages();
-    const bounds = this.locked ? null : imagesBounds(selected);
+    const bounds = this.locked || this.textEdit ? null : imagesBounds(selected);
     if (!bounds || selected.length === 0) {
       this.selectionScreenQuad = null;
       this.selectionElement.hidden = true;
@@ -2747,13 +3156,26 @@ export class PinBoardRenderer {
   private snapshot(itemIds: number[]): ImageSnapshot[] {
     return itemIds.flatMap((itemId) => {
       const image = this.imageById.get(itemId);
-      return image ? [{
+      if (!image) return [];
+      return [{
         itemId,
         deleted: image.deleted,
         layer: image.layer,
         points: cloneQuad(image.points),
         uv: cloneQuad(image.uv),
-      }] : [];
+        ...(image.kind === "text"
+          ? {
+            text: {
+              text: image.text,
+              fontSize: image.fontSize,
+              color: image.color,
+              align: image.align,
+              width: image.width,
+              height: image.height,
+            },
+          }
+          : {}),
+      }];
     });
   }
 
@@ -2761,10 +3183,22 @@ export class PinBoardRenderer {
     for (const snapshot of snapshots) {
       const image = this.imageById.get(snapshot.itemId);
       if (!image) continue;
+      const textBefore = image.kind === "text" ? pinBoardTextSignature(image) : "";
       image.deleted = snapshot.deleted;
       image.layer = snapshot.layer;
       image.points = cloneQuad(snapshot.points);
       image.uv = cloneQuad(snapshot.uv);
+      if (image.kind === "text" && snapshot.text) {
+        image.text = snapshot.text.text;
+        image.fontSize = snapshot.text.fontSize;
+        image.color = snapshot.text.color;
+        image.align = snapshot.text.align;
+        image.width = snapshot.text.width;
+        image.height = snapshot.text.height;
+        if (pinBoardTextSignature(image) !== textBefore) {
+          this.invalidateTextTexture(image.itemId);
+        }
+      }
     }
   }
 
@@ -2772,7 +3206,7 @@ export class PinBoardRenderer {
     mutate: (image: PinBoardItem) => void,
     mergeKey?: string,
   ) {
-    if (this.locked || this.selectedIds.size === 0) return;
+    if (this.locked || this.textEdit || this.selectedIds.size === 0) return;
     const itemIds = [...this.selectedIds];
     const before = this.snapshot(itemIds);
     for (const itemId of itemIds) {
@@ -2925,6 +3359,8 @@ export class PinBoardRenderer {
       pass.setPipeline(this.gpu.pipeline);
       pass.setBindGroup(0, this.gpu.viewportBindGroup);
       for (const image of this.visibleImages) {
+        // 正在编辑的文字由 DOM 编辑框代替，不画 GPU 纹理，避免重影。
+        if (this.textEdit?.itemId === image.itemId) continue;
         const loaded = this.textures.get(image.itemId) ?? this.previewTextures.get(image.itemId);
         if (!loaded) continue;
         pass.setBindGroup(1, loaded.bindGroup);
@@ -2944,6 +3380,7 @@ export class PinBoardRenderer {
         pass.setBindGroup(0, this.gpu.viewportBindGroup);
         for (const image of this.visibleImages) {
           if (!this.selectedIds.has(image.itemId)) continue;
+          if (this.textEdit?.itemId === image.itemId) continue;
           if (image.kind === "stroke") {
             const slot = this.strokeOutlineIndex.get(image.itemId);
             if (slot === undefined || !this.strokeOutlineBuffer) continue;
@@ -2989,6 +3426,8 @@ export class PinBoardRenderer {
     for (const image of this.visibleImages) {
       // 笔迹永远不需要纹理，不该出现「正在加载」或「加载失败」占位框。
       if (image.kind === "stroke") continue;
+      // 正在编辑的文字由 DOM 编辑框承载，不铺占位框。
+      if (this.textEdit?.itemId === image.itemId) continue;
       if (this.textures.has(image.itemId) || this.previewTextures.has(image.itemId)) continue;
       pending.set(image.itemId, {
         quad: image.points,
@@ -3102,6 +3541,8 @@ export class PinBoardRenderer {
     const candidates = this.visibleImages.flatMap((image) => {
       // 笔迹没有纹理：进队列会去读 DDS 并失败，最终变成红色失败占位框。
       if (image.kind === "stroke") return [];
+      // 编辑中的文字不重绘纹理；提交后统一失效并排队重建一次。
+      if (this.textEdit?.itemId === image.itemId) return [];
       const center = quadCenter(image.points);
       const [width, height] = imageSize(image);
       const distanceSquared = (center[0] - this.viewport.centerX) ** 2

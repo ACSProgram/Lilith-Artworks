@@ -14,7 +14,7 @@ use super::boards::require_active_board;
 use super::paths::{board_directory, is_item_dds_file};
 use super::{
     EditablePinBoardItem, BOARD_REVISION_CONFLICT, ITEM_KIND_BITMAP, ITEM_KIND_STROKE,
-    ITEM_KIND_TEXT,
+    ITEM_KIND_TEXT, MAX_TEXT_CHARS, MAX_TEXT_MEASURE_DIMENSION,
 };
 use crate::storage;
 
@@ -94,6 +94,43 @@ pub(super) struct TextPayload {
     pub(super) font_size: f64,
     pub(super) color: String,
     pub(super) align: String,
+}
+
+/// 文字载荷的统一校验：新建与保存更新共用同一份口径，返回归一化后的颜色。
+///
+/// 字体族不在调用方的控制范围内：新建时固定写入 `TEXT_FONT_FAMILY`，保存更新
+/// 也不允许改变它。
+pub(super) fn validate_text_payload(
+    text: &str,
+    font_size: f64,
+    color: &str,
+    align: &str,
+    measured_width: f64,
+    measured_height: f64,
+) -> Result<String, String> {
+    if text.trim().is_empty() {
+        return Err("文字内容不能为空".into());
+    }
+    if text.chars().count() > MAX_TEXT_CHARS {
+        return Err(format!("文字内容不能超过 {MAX_TEXT_CHARS} 个字符"));
+    }
+    if !font_size.is_finite() || font_size <= 0.0 || font_size > 1000.0 {
+        return Err("文字字号无效".into());
+    }
+    let color = stroke::normalise_hex_color(color, "文字")?;
+    if !matches!(align, "left" | "center" | "right") {
+        return Err("文字对齐方式无效".into());
+    }
+    if !measured_width.is_finite()
+        || !measured_height.is_finite()
+        || measured_width <= 0.0
+        || measured_height <= 0.0
+        || measured_width > MAX_TEXT_MEASURE_DIMENSION
+        || measured_height > MAX_TEXT_MEASURE_DIMENSION
+    {
+        return Err("文字尺寸超出素材板上限".into());
+    }
+    Ok(color)
 }
 
 #[derive(Debug, Clone)]

@@ -122,6 +122,18 @@ export interface PinBoardEditableItem {
   deleted: boolean;
   points: PinBoardItem["points"];
   uv: PinBoardItem["uv"];
+  /** 文字条目的可选载荷：只在文字签名变化时携带，非文字条目不得携带。 */
+  text?: PinBoardEditableText;
+}
+
+/** 保存时的文字载荷；字体族固定，不随保存提交。 */
+export interface PinBoardEditableText {
+  text: string;
+  fontSize: number;
+  color: string;
+  align: PinBoardTextAlign;
+  measuredWidth: number;
+  measuredHeight: number;
 }
 
 export interface SavePinBoardResult {

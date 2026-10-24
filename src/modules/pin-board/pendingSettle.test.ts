@@ -75,7 +75,7 @@ describe("pin-board pending settle", () => {
     const [boardId, items, revision] = api.savePinBoard.mock.calls[0];
     expect(boardId).toBe(4);
     expect(revision).toBe("r1");
-    // 只提交位置/层级/删除态与两个四边形，标题与字体等字段由后端按条目记录合并。
+    // 位图只提交位置/层级/删除态与两个四边形；文字载荷由下一条用例覆盖。
     expect(items).toEqual([
       {
         itemId: 1,
@@ -90,6 +90,45 @@ describe("pin-board pending settle", () => {
     expect(pendingSettleState().count).toBe(0);
     expect(pendingSettleState().failure).toBeNull();
     expect(resolveBoardRevision(4, "stale")).toBe("r2");
+  });
+
+  it("carries text payloads into the background save", async () => {
+    const text: PinBoardItem = {
+      boardId: 4,
+      itemId: 9,
+      kind: "text",
+      width: 80,
+      height: 30,
+      order: 9,
+      layer: 1,
+      deleted: false,
+      points: [[0, 0], [80, 0], [80, 30], [0, 30]],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      text: "切画板前改的字",
+      fontFamily: "sans-serif",
+      fontSize: 20,
+      color: "#00ff00",
+      align: "center",
+    };
+
+    stageBoardSettle({ boardId: 4, revision: "r1", items: [text] });
+    await settleMicrotasks();
+
+    const items = api.savePinBoard.mock.calls[0][1];
+    expect(items).toEqual([
+      expect.objectContaining({
+        itemId: 9,
+        text: {
+          text: "切画板前改的字",
+          fontSize: 20,
+          color: "#00ff00",
+          align: "center",
+          measuredWidth: 80,
+          measuredHeight: 30,
+        },
+      }),
+    ]);
   });
 
   it("retries a busy write silently instead of reporting it", async () => {

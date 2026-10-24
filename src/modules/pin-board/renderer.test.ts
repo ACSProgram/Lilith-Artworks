@@ -1,14 +1,16 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { viewportBounds, type Viewport } from "./geometry";
 import { PinBoardRenderer } from "./renderer";
 import { pinBoardApi } from "./api";
 import { isAdditiveSelectionModifier, marqueeSelection, sameSelection } from "./selection";
 import {
   pendingSettleState,
+  recordBoardRevision,
   resetPendingSettleForTests,
   resolveBoardRevision,
 } from "./pendingSettle";
-import type { PinBoardItem, PinBoardStrokeItem, PinBoardView } from "./types";
+import type { PinBoardItem, PinBoardStrokeItem, PinBoardTextItem, PinBoardView } from "./types";
+import { pinBoardTextSignature } from "./textEditing";
 import {
   STROKE_TOOL,
   decodeStrokeHeader,
@@ -63,6 +65,17 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     strokeIndexCount: 0,
     // 图层可见性：类字段初始化不会在替身对象上执行，这里补一份「全部显示」。
     visibleLayers: normalizeLayerVisibility(null),
+    // 文字就地编辑的状态：类字段不会在替身对象上初始化。
+    savedTextSignatures: new Map(),
+    textEdit: null,
+    suppressClickEdit: false,
+    pressClient: null,
+    pressMoved: false,
+    pressWasSelected: false,
+    pressItemId: null,
+    pressSuppressEdit: false,
+    marqueeBaseIds: new Set(),
+    dragBefore: [],
     // 橡皮擦的环形光标与擦除状态：同样是类字段初始化，替身要手工补齐。
     eraserRing: { hidden: true, style: {}, remove: vi.fn() },
     eraserPointer: null,
@@ -1804,5 +1817,285 @@ describe("pin-board ink hit dispatch", () => {
 
     expect(renderer.hitImage([50, 50])).toBe(rect);
     expect(renderer.itemIntersectsMarquee(rect, { minX: 20, minY: 20, maxX: 80, maxY: 80 })).toBe(true);
+  });
+});
+
+describe("pin-board text inline editing", () => {
+  const measureContext = {
+    font: "",
+    measureText: (line: string) => ({
+      width: line.length * 10,
+      actualBoundingBoxAscent: 8,
+      actualBoundingBoxDescent: 2,
+    }),
+  };
+
+  function textItem(overrides: Partial<PinBoardTextItem> = {}): PinBoardTextItem {
+    return {
+      kind: "text",
+      boardId: 9,
+      itemId: 7,
+      width: 20,
+      height: 26,
+      order: 0,
+      layer: 1,
+      deleted: false,
+      points: [[0, 0], [40, 0], [40, 52], [0, 52]],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      text: "ab",
+      fontFamily: '"Microsoft YaHei UI", "Segoe UI", sans-serif',
+      fontSize: 20,
+      color: "#112233",
+      align: "center",
+      ...overrides,
+    };
+  }
+
+  function fakeCanvas() {
+    return {
+      classList: { add: vi.fn(), remove: vi.fn(), toggle: vi.fn() },
+      hasPointerCapture: () => false,
+      releasePointerCapture: vi.fn(),
+      focus: vi.fn(),
+      getBoundingClientRect: () => ({ width: 100, height: 100, left: 0, top: 0 }),
+    };
+  }
+
+  function textRenderer(images: PinBoardTextItem[], options: Record<string, unknown> = {}) {
+    return rendererWith({
+      loaded: true,
+      destroyed: false,
+      locked: false,
+      exporting: false,
+      gpuUnavailable: false,
+      active: true,
+      tool: "select",
+      boardId: 9,
+      revision: "r1",
+      images,
+      imageById: new Map(images.map((image) => [image.itemId, image])),
+      selectedIds: new Set(images.map((image) => image.itemId)),
+      savedTextSignatures: new Map(images.map((image) => [image.itemId, pinBoardTextSignature(image)])),
+      history: [],
+      historyIndex: 0,
+      savedStateKey: "",
+      dirty: false,
+      autosaveTimer: null,
+      autosaveEnabled: false,
+      canvas: fakeCanvas(),
+      viewport: { centerX: 0, centerY: 0, height: 100 },
+      cssHeight: 100,
+      defaultWorldUnitsPerCssPixel: 1,
+      textures: new Map(),
+      previewTextures: new Map(),
+      textureQualityCaps: new Map(),
+      failedTextureDimensions: new Map(),
+      refreshViewport: vi.fn(),
+      updateSelectionOverlay: vi.fn(),
+      draw: vi.fn(),
+      emitState: vi.fn(),
+      onError: vi.fn(),
+      scheduleAutosave: vi.fn(),
+      ...options,
+    });
+  }
+
+  beforeEach(() => {
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext")
+      .mockReturnValue(measureContext as unknown as CanvasRenderingContext2D);
+    resetPendingSettleForTests();
+  });
+
+  it("applies a draft, rebuilds the quad and records one undo entry", () => {
+    const image = textItem();
+    const renderer = textRenderer([image]);
+
+    expect(renderer.beginTextEdit(7)).toBe(true);
+    const state = renderer.interactionState.textEditing;
+    expect(state?.draft).toEqual({ text: "ab", fontSize: 20, color: "#112233", align: "center" });
+    expect(state?.scale).toBe(2);
+
+    renderer.updateTextEditDraft({ text: "abcd", fontSize: 24, color: "#AABBCC", align: "left" });
+    expect(renderer.commitTextEdit()).toBeNull();
+
+    expect(image.text).toBe("abcd");
+    expect(image.fontSize).toBe(24);
+    expect(image.color).toBe("#aabbcc");
+    expect(image.align).toBe("left");
+    // 测量宽 = 4 字 × 10，高 = ceil(24 × 1.3)；条目缩放仍是 2 倍。
+    expect(image.width).toBe(40);
+    expect(image.height).toBe(32);
+    expect(Math.hypot(
+      image.points[1][0] - image.points[0][0],
+      image.points[1][1] - image.points[0][1],
+    )).toBeCloseTo(80, 10);
+    const history = (renderer as unknown as { history: { before: unknown[]; after: unknown[] }[] }).history;
+    expect(history).toHaveLength(1);
+    expect(history[0].before[0]).toMatchObject({ itemId: 7, text: expect.objectContaining({ text: "ab" }) });
+    expect(history[0].after[0]).toMatchObject({ itemId: 7, text: expect.objectContaining({ text: "abcd" }) });
+    expect(renderer.interactionState.textEditing).toBeNull();
+  });
+
+  it("cancels an emptied draft instead of deleting the text", () => {
+    const image = textItem();
+    const renderer = textRenderer([image]);
+
+    renderer.beginTextEdit(7);
+    renderer.updateTextEditDraft({ text: "   ", fontSize: 20, color: "#112233", align: "center" });
+    expect(renderer.commitTextEdit()).toBeNull();
+
+    expect(image.text).toBe("ab");
+    expect(renderer.interactionState.textEditing).toBeNull();
+    expect((renderer as unknown as { history: unknown[] }).history).toHaveLength(0);
+  });
+
+  it("closes the session without touching the model when nothing changed", () => {
+    const image = textItem({ points: [[10, 20], [50, 20], [50, 72], [10, 72]] });
+    const renderer = textRenderer([image]);
+
+    expect(renderer.beginTextEdit(7)).toBe(true);
+    expect(renderer.commitTextEdit()).toBeNull();
+
+    // 重建四边形会引入浮点误差：没有实际改动时不该写历史、也不该把条目记成已改。
+    expect(image.points).toEqual([[10, 20], [50, 20], [50, 72], [10, 72]]);
+    expect((renderer as unknown as { history: unknown[] }).history).toHaveLength(0);
+    expect(renderer.interactionState.dirty).toBe(false);
+    expect(renderer.interactionState.textEditing).toBeNull();
+  });
+
+  it("keeps the session and returns an error when the draft is invalid", () => {
+    const image = textItem();
+    const renderer = textRenderer([image]);
+
+    renderer.beginTextEdit(7);
+    renderer.updateTextEditDraft({ text: "x".repeat(820), fontSize: 20, color: "#112233", align: "center" });
+
+    const error = renderer.commitTextEdit();
+    expect(error).toContain("超出素材板上限");
+    expect(renderer.interactionState.textEditing).not.toBeNull();
+    expect(image.text).toBe("ab");
+  });
+
+  it("sends only the text payloads whose signature changed", () => {
+    const first = textItem({ itemId: 1 });
+    const second = textItem({ itemId: 2, text: "cd" });
+    const renderer = textRenderer([first, second]);
+    first.text = "changed";
+
+    const editable = (renderer as unknown as {
+      editableImages: () => { itemId: number; text?: { text: string } }[];
+    }).editableImages();
+
+    expect(editable.find((item) => item.itemId === 1)?.text?.text).toBe("changed");
+    expect(editable.find((item) => item.itemId === 2)?.text).toBeUndefined();
+  });
+
+  it("counts text-only changes in the dirty state key", () => {
+    const image = textItem();
+    const renderer = textRenderer([image]);
+    const stateKey = (renderer as unknown as { stateKey: () => string }).stateKey.bind(renderer);
+    const before = stateKey();
+
+    image.text = "changed";
+
+    expect(stateKey()).not.toBe(before);
+  });
+
+  it("restores text from a snapshot and invalidates its textures", () => {
+    const image = textItem();
+    const loaded = makeLoaded(64, 0);
+    const preview = makeLoaded(16, 0);
+    const textures = new Map([[7, loaded]]);
+    const previewTextures = new Map([[7, preview]]);
+    const textureQualityCaps = new Map([[7, 512]]);
+    const failedTextureDimensions = new Map([[7, 256]]);
+    const renderer = textRenderer([image], {
+      textures,
+      previewTextures,
+      textureQualityCaps,
+      failedTextureDimensions,
+    });
+    const restore = (renderer as unknown as {
+      restore: (snapshots: unknown[]) => void;
+    }).restore.bind(renderer);
+
+    restore([{
+      itemId: 7,
+      deleted: false,
+      layer: 1,
+      points: [[0, 0], [40, 0], [40, 52], [0, 52]],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      text: { text: "undo", fontSize: 20, color: "#112233", align: "center", width: 40, height: 26 },
+    }]);
+
+    expect(image.text).toBe("undo");
+    expect(image.width).toBe(40);
+    expect(textures.size).toBe(0);
+    expect(previewTextures.size).toBe(0);
+    expect(textureQualityCaps.size).toBe(0);
+    expect(failedTextureDimensions.size).toBe(0);
+    expect(loaded.texture.destroy).toHaveBeenCalledTimes(3);
+    expect(preview.texture.destroy).toHaveBeenCalledTimes(3);
+  });
+
+  it("advances saved signatures only to the values present when the save started", async () => {
+    const image = textItem();
+    const renderer = textRenderer([image]);
+    recordBoardRevision(9, "r1");
+    let finishSave!: (value: { saved: boolean; revision: string; nowStep: number }) => void;
+    vi.spyOn(pinBoardApi, "savePinBoard").mockReturnValue(new Promise((resolve) => {
+      finishSave = resolve;
+    }));
+
+    image.text = "first";
+    const saving = renderer.save();
+    // 保存期间又改了一次：请求里带的是 first，落地后不能把这个改动记成已保存。
+    image.text = "second";
+    finishSave({ saved: true, revision: "r2", nowStep: 2 });
+    await saving;
+
+    expect(renderer.interactionState.dirty).toBe(true);
+    const signatures = (renderer as unknown as { savedTextSignatures: Map<number, string> })
+      .savedTextSignatures;
+    expect(signatures.get(7)).toBe(pinBoardTextSignature(textItem({ text: "first" })));
+    expect(signatures.get(7)).not.toBe(pinBoardTextSignature(image));
+  });
+
+  it("enters editing only on a click over the already-selected single text", () => {
+    const beginTextEdit = vi.fn();
+    const renderer = textRenderer([textItem()], {
+      beginTextEdit,
+      updateMarqueeOverlay: vi.fn(),
+      resetEraseState: vi.fn(),
+    });
+    const finish = (press: {
+      moved: boolean;
+      selectedCount: number;
+    }) => {
+      Object.assign(renderer, {
+        dragMode: "images",
+        dragBefore: [],
+        dragPointerId: null,
+        pressMoved: press.moved,
+        pressSuppressEdit: false,
+        pressWasSelected: true,
+        pressItemId: 7,
+        selectedIds: new Set(
+          press.selectedCount > 1 ? [7, 8] : [7],
+        ),
+      });
+      (renderer as unknown as { finishInteraction: (allow?: boolean) => void }).finishInteraction();
+    };
+
+    finish({ moved: false, selectedCount: 1 });
+    expect(beginTextEdit).toHaveBeenCalledWith(7);
+
+    beginTextEdit.mockClear();
+    finish({ moved: true, selectedCount: 1 });
+    expect(beginTextEdit).not.toHaveBeenCalled();
+
+    finish({ moved: false, selectedCount: 2 });
+    expect(beginTextEdit).not.toHaveBeenCalled();
   });
 });

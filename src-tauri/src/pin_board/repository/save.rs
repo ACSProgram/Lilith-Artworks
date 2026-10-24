@@ -13,9 +13,12 @@ use super::boards::bump_revision;
 use super::paths::{is_item_dds_file, relative_item_dds};
 use super::view::{
     current_states, effective_layer, ensure_revision, open_board_context, same_state,
-    validate_editable,
+    validate_editable, validate_text_payload,
 };
-use super::{EditablePinBoardItem, ImageTransform, SavePinBoardResult, ITEM_KIND_BITMAP};
+use super::{
+    EditablePinBoardItem, EditableTextPayload, ImageTransform, SavePinBoardResult,
+    ITEM_KIND_BITMAP, ITEM_KIND_TEXT,
+};
 use crate::{cleanup, storage};
 
 pub(crate) fn save_board(
@@ -43,6 +46,8 @@ pub(crate) fn save_board(
     let stored = current_states(&transaction, board_id, now_step)?;
     let mut kinds = HashMap::with_capacity(stored.len());
     let mut changed = HashSet::new();
+    // 待写入的文字载荷直接借用请求，避免为整段文字再复制一份。
+    let mut text_updates: HashMap<i64, (&EditableTextPayload, String)> = HashMap::new();
     let mut order_changed = false;
     let mut found = 0usize;
     for (item_id, state) in &stored {
@@ -54,6 +59,32 @@ pub(crate) fn save_board(
         validate_editable(editable, state.kind)?;
         if !same_state(state, editable) {
             changed.insert(*item_id);
+        }
+        if let Some(payload) = &editable.text {
+            // 文字载荷只属于文字条目：位图/笔迹带载荷说明调用方误解了契约。
+            let Some(stored_text) = state.text.as_ref().filter(|_| state.kind == ITEM_KIND_TEXT)
+            else {
+                return Err(format!("条目 {item_id} 不是文字条目，不能携带文字载荷"));
+            };
+            let color = validate_text_payload(
+                &payload.text,
+                payload.font_size,
+                &payload.color,
+                &payload.align,
+                payload.measured_width,
+                payload.measured_height,
+            )?;
+            // 只比较归一化后的颜色：前端可能送小写，仓库里是大写。
+            if payload.text != stored_text.text
+                || payload.font_size != stored_text.font_size
+                || color != stored_text.color
+                || payload.align != stored_text.align
+                || payload.measured_width != state.width
+                || payload.measured_height != state.height
+            {
+                changed.insert(*item_id);
+                text_updates.insert(*item_id, (payload, color));
+            }
         }
         order_changed |= state.sort_order != editable.order;
     }
@@ -73,6 +104,30 @@ pub(crate) fn save_board(
     } else {
         now_step.checked_add(1).ok_or("画板历史步骤已达到上限")?
     };
+
+    // 文字载荷与变换写在同一事务里：一次保存只会推进一个 step、一次 revision。
+    for (item_id, (payload, color)) in &text_updates {
+        let updated = transaction
+            .execute(
+                "UPDATE pin_board_texts
+                    SET text = ?1, font_size = ?2, color = ?3, align = ?4,
+                        measured_width = ?5, measured_height = ?6
+                  WHERE item_id = ?7",
+                params![
+                    &payload.text,
+                    payload.font_size,
+                    color,
+                    &payload.align,
+                    payload.measured_width,
+                    payload.measured_height,
+                    item_id
+                ],
+            )
+            .map_err(storage::database_error)?;
+        if updated != 1 {
+            return Err(format!("文字条目 {item_id} 的载荷记录不存在"));
+        }
+    }
 
     // 新步骤会覆盖未来：与 Client 行为一致，写入新步骤后 redo 记录作废。
     for item_id in &changed {
@@ -295,6 +350,7 @@ mod tests {
                 deleted: false,
                 points: item.points,
                 uv: item.uv,
+                text: None,
             })
             .collect::<Vec<_>>();
         let revision = board_revision(&connection, board.board_id);
@@ -339,6 +395,7 @@ mod tests {
             deleted: false,
             points: stroke_item.points,
             uv: stroke_item.uv,
+            text: None,
         }];
         let revision = board_revision(&connection, board.board_id);
         let saved = save_board(
@@ -410,6 +467,7 @@ mod tests {
                 deleted: false,
                 points: item.points,
                 uv: item.uv,
+                text: None,
             }];
             let revision = board_revision(&connection, board.board_id);
             let error =
@@ -455,6 +513,7 @@ mod tests {
             deleted: true,
             points: stroke_item.points,
             uv: stroke_item.uv,
+            text: None,
         }];
         let saved = save_board(&mut connection, &root, board.board_id, &items, &revision).unwrap();
         assert!(saved.saved);
@@ -602,5 +661,366 @@ mod tests {
         assert!(retried.failures.is_empty());
         assert!(!dds_path.exists());
         assert_eq!(retried.pending_count, 0);
+    }
+
+    fn text_payload(
+        text: &str,
+        font_size: f64,
+        color: &str,
+        align: &str,
+        width: f64,
+        height: f64,
+    ) -> EditableTextPayload {
+        EditableTextPayload {
+            text: text.into(),
+            font_size,
+            color: color.into(),
+            align: align.into(),
+            measured_width: width,
+            measured_height: height,
+        }
+    }
+
+    fn editable_from(
+        item: &crate::pin_board::repository::view::PinBoardItem,
+        text: Option<EditableTextPayload>,
+    ) -> EditablePinBoardItem {
+        EditablePinBoardItem {
+            item_id: item.item_id,
+            order: item.order,
+            layer: item.layer,
+            deleted: item.deleted,
+            points: item.points,
+            uv: item.uv,
+            text,
+        }
+    }
+
+    fn text_row(connection: &Connection) -> (String, f64, String, String, f64, f64) {
+        connection
+            .query_row(
+                "SELECT text, font_size, color, align, measured_width, measured_height
+                   FROM pin_board_texts",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn saves_text_payload_and_advances_one_step_and_revision() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "文字板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "原文",
+            20.0,
+            "#00FF00",
+            "center",
+            80.0,
+            30.0,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+        let before_step = view.now_step;
+
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[editable_from(
+                item,
+                Some(text_payload("改后", 26.0, "#a1b2c3", "left", 100.0, 40.0)),
+            )],
+            &revision,
+        )
+        .unwrap();
+        assert!(saved.saved);
+        assert_eq!(saved.now_step, before_step + 1);
+        assert_ne!(saved.revision, revision);
+
+        // 颜色按仓库口径归一化；字号、对齐与度量随文字载荷一起更新。
+        assert_eq!(
+            text_row(&connection),
+            (
+                "改后".into(),
+                26.0,
+                "#A1B2C3".into(),
+                "left".into(),
+                100.0,
+                40.0
+            )
+        );
+        let reloaded = load_view(&connection, &root, board.board_id).unwrap();
+        let text = reloaded
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+        assert_eq!(text.width, 100.0);
+        assert_eq!(text.height, 40.0);
+
+        // 只有文字变化时也写一个 step，保持「保存推进 step、作废 redo」的语义。
+        // 新建文字本身留下 step 0 的删除态默认节点与添加步骤两条记录，再加上这里的一条。
+        let history_steps = scalar_for_board(
+            &connection,
+            "SELECT COUNT(*) FROM pin_board_history WHERE board_id = ?1",
+            board.board_id,
+        );
+        assert_eq!(history_steps, 3);
+    }
+
+    #[test]
+    fn merges_text_and_transform_changes_into_one_step() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "合并板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "原文",
+            20.0,
+            "#00FF00",
+            "center",
+            80.0,
+            30.0,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+        let mut editable = editable_from(
+            item,
+            Some(text_payload("改后", 20.0, "#00FF00", "center", 90.0, 30.0)),
+        );
+        editable.points = [[10.0, 10.0], [100.0, 10.0], [100.0, 40.0], [10.0, 40.0]];
+
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[editable],
+            &revision,
+        )
+        .unwrap();
+        assert!(saved.saved);
+        assert_eq!(saved.now_step, view.now_step + 1);
+        assert_ne!(saved.revision, revision);
+    }
+
+    #[test]
+    fn rejects_text_payloads_on_non_text_items() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "位图板").unwrap();
+        let bitmap_id = insert_live_bitmap(
+            &connection,
+            board.board_id,
+            &root,
+            &artwork_id,
+            0.0,
+            100.0,
+            40.0,
+            20.0,
+        );
+        let view = load_view(&connection, &root, board.board_id).unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == bitmap_id)
+            .unwrap();
+        let revision = board_revision(&connection, board.board_id);
+
+        let error = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[editable_from(
+                item,
+                Some(text_payload(
+                    "不该出现",
+                    20.0,
+                    "#FFFFFF",
+                    "left",
+                    80.0,
+                    20.0,
+                )),
+            )],
+            &revision,
+        )
+        .unwrap_err();
+        assert!(error.contains("不是文字条目"), "{error}");
+    }
+
+    #[test]
+    fn rejects_invalid_text_payloads_and_keeps_the_stored_row() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "校验板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "原文",
+            20.0,
+            "#00FF00",
+            "center",
+            80.0,
+            30.0,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+        let original = text_row(&connection);
+
+        let cases = [
+            text_payload("   ", 20.0, "#00FF00", "center", 80.0, 30.0),
+            text_payload(&"字".repeat(5001), 20.0, "#00FF00", "center", 80.0, 30.0),
+            text_payload("改后", 0.0, "#00FF00", "center", 80.0, 30.0),
+            text_payload("改后", 20.0, "green", "center", 80.0, 30.0),
+            text_payload("改后", 20.0, "#00FF00", "justify", 80.0, 30.0),
+            text_payload("改后", 20.0, "#00FF00", "center", 8193.0, 30.0),
+        ];
+        for payload in cases {
+            let revision = board_revision(&connection, board.board_id);
+            save_board(
+                &mut connection,
+                &root,
+                board.board_id,
+                &[editable_from(item, Some(payload))],
+                &revision,
+            )
+            .unwrap_err();
+            assert_eq!(text_row(&connection), original);
+        }
+    }
+
+    #[test]
+    fn identical_text_payload_does_not_create_a_step() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "同值板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "原文",
+            20.0,
+            "#00FF00",
+            "center",
+            80.0,
+            30.0,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+
+        let revision = board_revision(&connection, board.board_id);
+        let saved = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[editable_from(
+                item,
+                Some(text_payload("原文", 20.0, "#00ff00", "center", 80.0, 30.0)),
+            )],
+            &revision,
+        )
+        .unwrap();
+        assert!(!saved.saved);
+        assert_eq!(saved.revision, revision);
+        assert_eq!(saved.now_step, view.now_step);
+    }
+
+    #[test]
+    fn text_payload_requires_the_current_revision() {
+        let (directory, mut connection) = test_repository();
+        let root = directory.path().join("repository");
+        let artwork_id = create_test_artwork(&connection);
+        let board = create_board(&mut connection, &artwork_id, "冲突板").unwrap();
+        let revision = board_revision(&connection, board.board_id);
+        let (view, text_ids) = create_text(
+            &mut connection,
+            &root,
+            board.board_id,
+            "原文",
+            20.0,
+            "#00FF00",
+            "center",
+            80.0,
+            30.0,
+            0.0,
+            0.0,
+            &revision,
+        )
+        .unwrap();
+        let item = view
+            .items
+            .iter()
+            .find(|item| item.item_id == text_ids[0])
+            .unwrap();
+        let stale = "stale-revision".to_string();
+
+        let error = save_board(
+            &mut connection,
+            &root,
+            board.board_id,
+            &[editable_from(
+                item,
+                Some(text_payload("改后", 20.0, "#00FF00", "center", 80.0, 30.0)),
+            )],
+            &stale,
+        )
+        .unwrap_err();
+        assert!(error.contains("其他窗口"), "{error}");
+        assert_eq!(text_row(&connection).0, "原文");
     }
 }
