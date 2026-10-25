@@ -15,6 +15,8 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+## 0.3.0-beta.1 - 2026-10-25
+
 ### Added
 
 - Pin-board text entries can now be edited in place on the canvas. A second
@@ -23,145 +25,104 @@ entries for the reader; they are not a template every entry has to fill.
   size, color and alignment. `Ctrl+Enter` or clicking outside commits, `Escape`
   cancels, `Enter` inserts a newline, and one edit session produces one undo
   entry. Textures are rebuilt after commit, undo and redo.
+- New pin-board text is placed directly on the canvas: a left click opens the
+  inline editor at that point, and a right click, `Escape` or a second click on
+  the toolbar button cancels placement. The blank-area context menu skips
+  placement and opens the editor at the right-click point. The first commit
+  creates the item through `create_pin_board_text`.
+- Entering an existing text puts the caret at the clicked character boundary
+  (line and alignment aware) instead of always at the end, and text that would
+  render below 10 CSS pixels is auto-zoomed to about 20 pixels for editing
+  without touching the stored font size.
 - `save_pin_board` accepts an optional per-text payload (content, font size,
   color, alignment, measured size) and updates `pin_board_texts` in the same
   transaction. Text-only changes advance one step and one revision, transform
-  and text changes merge into one save, and non-text items carrying a text
-  payload are rejected. Background board settlement now carries text payloads
-  so switching away from an edited board keeps the committed text.
-- New pin-board text is placed directly on the canvas. The toolbar button
-  starts a placement mode with an I-beam cursor: a left click opens the inline
-  editor at that point, and a right click, `Escape` or a second click on the
-  button cancels. The blank-area context menu skips placement and opens the
-  editor at the right-click point. The same editor sets content, effective font
-  size, color and alignment, and the first commit creates the item through
-  `create_pin_board_text`.
-- Entering an existing text now puts the caret at the clicked character
-  boundary (line and alignment aware) instead of always at the end, and text
-  that would render below 10 CSS pixels is auto-zoomed to about 20 pixels for
-  editing without touching the stored font size.
+  and text changes merge into one save, non-text items carrying a text payload
+  are rejected, and background board settlement carries text payloads so
+  switching away from an edited board keeps the committed text.
 
 ### Changed
 
 - The pin-board "add text" dialog is gone; its content, size, color and
-  alignment controls live in the inline editor and its placement is the
-  canvas placement mode. Text styles remembered for the next new item come
-  from the last committed draft (48 / black / centered on first use).
+  alignment controls live in the inline editor and its placement is the canvas
+  placement mode. Styles for the next new item come from the last committed
+  draft (48 / black / centered on first use).
 - The pin-board toolbar no longer carries the selected-image scale and rotate
-  buttons; scaling and rotation stay on the selection handles, and the view
-  zoom controls are unchanged. A pen-tool button now shares the `T` shortcut's
-  state to show or hide the annotation bar, so a hidden bar can be restored
-  without remembering the shortcut. The renderer helpers that only backed the
-  removed buttons are gone with them.
-- The pin-board layers panel now starts collapsed on every application launch
-  and workspace remount. Expansion is kept only for the current process and is
-  lost on exit.
-
-- Removed the unreferenced reference-inventory validation hooks, the unused
-  background runtime entry points, the obsolete `default_panel` setting and
-  stale `allow(dead_code)` suppressions. Settings files that still contain
-  `defaultPanel` keep loading and simply ignore the field.
-- Split the history repository into graph, deletion, verification and
-  scheduling modules, and the backup scheduler into policy, idle-verification
-  and main-loop modules. Existing `history::*` read and graph paths are
-  unchanged; branch-status writes collapse into one `record_branch_failure`
-  entry with an explicit variant per meaning, and the subtree preflight
-  replaces the duplicate validation pass. `create_branch` now writes the branch
-  row and its root checkpoint in one transaction, and subtree deletion
-  validates once before the parent checkpoint is created.
-- Full-repository scrub, branch reverify and idle verification batches now
-  commit node results through one batched writer (128 rows per commit) instead
-  of opening a database connection per node. A cancelled scan keeps committed
-  batches and discards the unfinished one.
-- Split the settings service into model, service, state, window and command
-  modules under `app/settings/`, keeping the existing `app::settings::*`
-  exports. Settings-page maintenance actions now share one busy-check and
-  cleanup template, and the history page and settings dialog are split into
-  preview/selection hooks and per-view/per-page components with unchanged
-  controlled state and interaction contracts.
-- The publication preview dialog no longer calls the authenticity API directly:
-  its high-resolution tile requests now go through the publication controller,
-  which binds the current preview cache token or branch. The unused
-  `.scope-reset` style is gone and the size-estimate response reuses the shared
-  `FileSizeEstimate` type. Tile sources, the debounce and the cache limit are
-  now named in one place, and the loupe's eviction list is no longer called an
-  LRU, since it evicts in insertion order.
-- Split the authenticity backend into publication, rendering, preview, decode,
-  export, estimate and file-operation modules behind the existing command
-  names. Commands are thin adapters again, with preview, export and estimate
-  running through the authenticity use-case. File copying, thumbnail
-  rendering, artifact/certification path layout, image-format mapping and
-  manifest claim checks each have a single implementation, and `publish`
-  returns `PublishResult` directly instead of copying it field by field. The
-  unused `watermarkRegionCount` field is gone from the response and the
-  frontend type. Typed authenticity errors now map to stable command error
-  kinds, while errors that still arrive as strings keep the classification
-  they had.
-- Split the authenticity frontend into a publication view, an identification
-  view, shared record/region/preview components and two controllers.
-  Shared signing storage and PEM normalization moved to
-  `publicationStorage.ts`, and the identification controller now uses the
-  shared request epochs for preview, decode and search. Quality-preview and
-  publication cancellation share one operation state machine, so the
-  "cancelled" notice is reported once whether the task or the cancel request
-  finishes first. Path basenames and error text come from the shared
-  `fileName` and `errorMessage` helpers instead of module-local copies.
-- The quality preview cache now evicts within a session. After each new cache
+  buttons; those stay on the selection handles. A pen-tool button now shares the
+  `T` shortcut's state to show or hide the annotation bar, and the layers panel
+  starts collapsed on every application launch and workspace remount.
+- The quality preview cache now evicts within a session: after each new cache
   pair it keeps the most recent 16 entries, then trims the oldest until the
   cached JPEGs total at most 512 MiB, deleting each JPEG and its metadata
-  together; eviction failures are ignored because the cache is not a
-  correctness path.
-- Removed three response fields with no frontend consumer: the publication
-  result width and height, the decode result's echoed selection region, and the
-  size estimate's source byte count. The preview image's source size is
-  separate and unchanged.
+  together. Eviction failures are ignored because the cache is not a correctness
+  path.
+- Removed four response fields with no frontend consumer: the publication
+  result width and height, the decode result's echoed selection region, the
+  size estimate's source byte count, and the unused `watermarkRegionCount`. The
+  preview image's source size is separate and unchanged. Also removed the
+  unreferenced reference-inventory validation hooks, unused background runtime
+  entry points, the obsolete `default_panel` setting and stale `allow(dead_code)`
+  suppressions; settings files that still contain `defaultPanel` keep loading and
+  ignore the field.
 - The history overview node thumbnail popover now waits for the pointer to
-  settle before it appears (300 ms on the first node) and stays open while
-  the pointer moves between nodes; once open, switching takes effect
-  immediately. Thumbnails are decoded off-screen, sized to their aspect
-  ratio within 280×216, cross-fades over 100 ms, and the overlay ignores
-  pointer events except for its refresh button, so brushing across the
-  graph no longer flashes a thumbnail. Scrolling, Escape, clicking
-  elsewhere or leaving all cards for 500 ms closes it.
+  settle before it appears (300 ms on the first node) and stays open while the
+  pointer moves between nodes. Thumbnails decode off-screen within 280×216 and
+  cross-fade over 100 ms, so brushing across the graph no longer flashes a
+  thumbnail; scrolling, `Escape`, clicking elsewhere or leaving all cards for
+  500 ms closes it.
+- Internal restructuring behind unchanged command names and contracts: the
+  history repository is split into graph, deletion, verification and scheduling
+  modules and the backup scheduler into policy, idle-verification and main-loop
+  modules, with `create_branch` now writing the branch row and its root
+  checkpoint in one transaction and subtree deletion validating once before the
+  parent checkpoint is created; the settings service is split under
+  `app/settings/`; the authenticity backend is split with one implementation
+  each of file copying, thumbnail rendering, path layout, image-format mapping
+  and manifest claim checks; and the authenticity frontend is split into a
+  publication view, an identification view, shared record/region/preview
+  components and two controllers. Scrub,
+  reverify and idle-verification batches commit node results through one batched
+  writer (128 rows per commit) instead of one connection per node, and a
+  cancelled scan keeps committed batches and discards the unfinished one. Typed
+  authenticity errors map to stable command error kinds while errors still
+  arriving as strings keep their classification, and quality-preview and
+  publication cancellation share one operation state machine, so the cancelled
+  notice is reported once whether the task or the cancel request finishes first.
 - The RustSec audit ignore list now includes `RUSTSEC-2026-0387`
-  (`crypto-bigint 0.5.5`). The advisory is a timing side channel in
-  constant-time arithmetic, reached through c2pa's ECDSA stack; there is no
-  fixed 0.5 release, and c2pa 0.91.x still pins the same stack. The
-  rationale is beside both workflow ignore lists and tracked in
-  `docs/planning/todo.md`.
+  (`crypto-bigint 0.5.5`): a timing side channel in constant-time arithmetic
+  reached through c2pa's ECDSA stack, with no fixed 0.5 release while c2pa 0.91.x
+  pins the same stack. The rationale sits beside both workflow ignore lists and
+  is tracked in `docs/planning/todo.md`.
 
 ### Fixed
 
 - Leaving the in-place text editor no longer flashes an empty frame: the
   renderer rebuilds the text texture synchronously before it drops the editor,
   and falls back to the queued texture load only when that rebuild fails.
-- The text editor bar now labels the font-size control as "大小" and hides the
-  number input's native step arrows, so font size has one pair of `−` / `+`
-  controls instead of two.
+- The text editor bar labels the font-size control as "大小" and hides the number
+  input's native step arrows, so font size has one pair of `−` / `+` controls.
 - Cancelling a publication now compares each repository artifact and
   certification copy with the SHA-256 stored in its record before enqueueing
   cleanup. Files that were replaced or removed are left in place, logged as
-  `[cleanup] retained`, and fall to the garbage scan instead of being deleted
-  or stuck in the cleanup queue. The cancellation itself still succeeds.
+  `[cleanup] retained`, and fall to the garbage scan instead of being deleted or
+  stuck in the cleanup queue. The cancellation itself still succeeds.
 - Authenticity identification no longer decodes the whole image when the
   TrustMark models are unavailable; it reads the C2PA manifest only. Region
-  decoding takes ownership of the decoded image instead of cloning it, and
-  model digests are hashed through a streaming read rather than one allocation
-  of roughly 62 MB per model.
-- The settings "备份" page now shows the last repository backup as soon as the
-  dialog opens, including directly after a restart, instead of only after
-  visiting the "空间" page. The empty state no longer claims the result is not
-  kept across restarts and reads "尚无备份记录".
-- Authenticity model digesting no longer allocates its 1 MiB read buffer on
-  the stack. The Windows headless entry has a 1 MiB main-thread stack, so
-  `enter-publication` overflowed before the first progress stage and took
-  down the G3–G6 authenticity stress scenarios. The buffer is now heap
-  allocated.
-- Windows CI's nine cheap stress groups now run under `shell: bash`, so the
-  first failing group stops the step instead of being masked by the last
-  group's exit code. The release workflow's multi-command steps use the same
-  shell, and the release-draft step checks `$LASTEXITCODE` after generating
-  notes so a PowerShell native-command failure cannot be masked by `gh`.
+  decoding takes ownership of the decoded image instead of cloning it, and model
+  digests are hashed through a streaming read rather than one allocation of
+  roughly 62 MB per model.
+- The settings "备份" page shows the last repository backup as soon as the dialog
+  opens, including directly after a restart, instead of only after visiting the
+  "空间" page. The empty state reads "尚无备份记录".
+- Authenticity model digesting no longer allocates its 1 MiB read buffer on the
+  stack. The Windows headless entry has a 1 MiB main-thread stack, so
+  `enter-publication` overflowed before the first progress stage and took down
+  the G3–G6 authenticity stress scenarios; the buffer is heap allocated now.
+- Windows CI's nine cheap stress groups run under `shell: bash`, so the first
+  failing group stops the step instead of being masked by the last group's exit
+  code. The release workflow's multi-command steps use the same shell, and the
+  release-draft step checks `$LASTEXITCODE` so a native-command failure cannot be
+  masked by `gh`.
 
 ## 0.3.0-alpha.6 - 2026-10-21
 
@@ -246,7 +207,7 @@ entries for the reader; they are not a template every entry has to fill.
   is gone, `exportableCount` counts bitmaps only, and the export and
   system-clipboard actions are disabled together when the selection has no
   bitmap.
-- The 2026-10-21 test audit (`docs/planning/test-audit-2026-10-21.md`) lands in
+- The 2026-10-21 test audit (`docs/planning/archive/test-audit-2026-10-21.md`) lands in
   two batches. The one-off `stress_baseline` group and the 0.2.0-era debug
   profile are deleted, with long-term regression left to `stress_bench`; the
   strict performance gate now states a direction per key (latency `<=`,

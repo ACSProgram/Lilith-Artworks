@@ -8,67 +8,42 @@
 
 ## 当前批次状态
 
-2026-10-25 的 0.3-beta.1 发布前全量压力测试已完成并提交：九组便宜分组 47/47、`gate_guard`
-3/3、`stress_scale` 5/5、`stress_bench` 10/10（严格门通过并刷新 release 基线）、16K 认证
-大图 5/5、`stress_large` 五档各 10/10（首次含 `manual` 8 GiB）。退役的 `stress_baseline`
-临时恢复做了一次对比复测，归档文档已改为 0.2 → 0.3-beta.1 的对比报告。无产品侧失败；
-基线组首次运行因 v4 → v6 迁移触发的测试侧假设失败，在迁移后重跑通过。报告见
-`docs/user/stress-test-report.md`，批次记录见 `archive/handoff-log-2026-10-25.md`。
-五处版本字段仍是 `0.3.0-alpha.6`，未切版本。
+2026-10-25 已完成 `0.3.0-beta.1` 的切分与收尾。切版本本身：`CHANGELOG.md` 的 `Unreleased` 落为
+`## 0.3.0-beta.1 - 2026-10-25`，五处版本字段、许可清单、`README.md` 与 `verify-metadata.mjs` 的
+版本→schema 登记表（`beta.1 → 6`）同轮同步，`verify-metadata` 通过；切版本不触发任何门槛。
+同日完成 0.3 线的发布前全量压力测试（含 `manual` 8 GiB 档，五档各 10/10，无产品侧失败）与表层
+文档收尾：`todo.md` 精简为待验收与待补强两段，`docs/README.md` 的归档索引改回当前事实，根
+`README.md` 按当前功能与状态重写。记录见 `archive/handoff-log-2026-10-25.md` 第 1–11 节，实测
+数据见 `docs/user/stress-test-report.md`，与 0.2 的对比见
+`archive/0.3-baseline-2026-10-18.md` 第 7 节。
 
-2026-10-24 素材板文字就地编辑的收尾复验尚未执行：工具栏放置模式只留 I 字型光标与按钮点亮态、
-空白处右键「添加文字」直接在右键位置开框、新建成功后不再出现状态栏与进度条提示。验收项在
-`todo.md`，复验通过后补记到 `archive/handoff-log-2026-10-22.md`。加粗/斜体/下划线仍按计划
-延期到下一次 schema 升级。
-
-2026-10-22 0.3 收尾与认证整改第七批（已提交，计划已归档）：
-
-- 取消发布在登记待清理项前按记录中的 SHA-256 核对仓库成品与认证副本；内容已变化的文件
-  不删除、不进清理队列，保留路径写一条 `[cleanup] retained` 日志，交给设置页「空间」页的
-  垃圾文件扫描发现。取消发布本身仍然成功。
-- 质量预览缓存增加会话内上限：每次写入新缓存后保留最近 16 份，JPEG 总量超过 512 MiB 时继续
-  从最旧的删，`.jpg` 与同名 `.json` 成对删除，淘汰失败静默忽略。
-- 删除发布结果宽高、识别结果解码区域与估算响应源字节数三个无消费方字段；界面「原图」大小
-  来自预览响应，不受影响。
-- `docs/modules/authenticity.md`、`CHANGELOG.md` 的 `Unreleased` 与归档索引已同步；七批的
-  逐批记录随计划归档到 `archive/0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md`
-  第 14 节。
-
-第三批（历史页视图、精简与悬停、设置六页的保存/取消/滚动）、第六批（发布/识别页、取消时序、
-局部图与放大镜、只读记录、拖放导入）与第七批（取消发布保留被替换文件、预览缓存目录体积）
-只做了自动验证与现有组件测试，标注为**待人工验收**，验收项在 `todo.md`。
+0.3 的实现与文档已收口，人工验收正在逐项进行：已通过的项逐条记入
+`archive/handoff-log-2026-10-25.md` 第 10 节并从 `todo.md` 删除；未通过或未执行的项继续留在
+`todo.md`。
 
 ## 下一步
 
-- 维护者复验素材板文字就地编辑的三个收尾改动：工具栏放置模式只留光标与按钮态（无底部提示
-  条）、右键「添加文字」直接在右键位置开框、新建成功后没有状态栏与进度条提示。验收项见
-  `todo.md`。
-- 人工验收第三、六批的界面行为与第七批的两条文件行为确认项；验收项见 `todo.md`。
-- 验收通过后补记到 `archive/handoff-log-2026-10-22.md` 并从 `todo.md` 删除。
-- 0.4 的草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成
-  第二轮修订：按审阅意见加入投影 outbox、升级维护租约/批次标识/自检窗口、调度范围收窄，
-  并定下三档并发档位（低 1 / 中 2 / 高 4），清掉全部待决策项，待维护者批准；见
-  `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`，
-  审阅记录已归档到
-  `archive/0.4-artwork-database-upgrade-scheduling-and-identification-plan-improvement-recommendations-2026-10-22.md`。
-- 发布前压力测试（含 `manual` 档）已于 2026-10-25 完成；是否切版本与打标签仍由维护者单独
-  决定，口径见 `docs/guides/release-policy.md`。
+- 继续逐项人工验收 `todo.md` 中其余待验收项（界面行为、桌面集成、迁移与文件清理确认）。
+- 0.4 草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成第二轮
+  修订，清掉全部待决策项，待维护者批准；见
+  `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
+- 是否打 `v0.3.0-beta.1` 标签、以及发布产物（NSIS、SBOM、签名披露）由维护者单独决定，口径见
+  `docs/guides/release-policy.md`。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 已切 `0.3.0-alpha.6`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
+- 版本：`dev` 已切 `0.3.0-beta.1`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
   schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
   `docs/guides/release-policy.md` 单独决定。
-- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地；alpha6
-  沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 alpha1 与
-  alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的 v5 → v6），高于
-  当前版本的仓库由旧程序直接拒绝。
-- 0.3 基线（阶段 0 一次性采集）已归档到
-  `archive/0.3-baseline-2026-10-18.md`；该文档现已改为 0.2 → 0.3-beta.1 的对比报告。
-  2026-10-25 的全量压力测试（含 `manual` 8 GiB）全部通过，`tests/perf-baseline.json`
-  的 release 条目已同轮刷新；长期回归对照仍用 `stress_bench`。
+- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地；alpha6 与
+  beta.1 沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 的
+  alpha1 与 alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的
+  v5 → v6），高于当前版本的仓库由旧程序直接拒绝。
+- 0.3 基线（阶段 0 一次性采集）已归档到 `archive/0.3-baseline-2026-10-18.md`；该文档现为
+  0.2 → 0.3.0-beta.1 的对比报告。长期回归对照用 `stress_bench`，其 release 条目已随
+  2026-10-25 的全量压力测试同轮刷新。
 - 运行要求：Windows + WebView2；素材板另需支持 WebGPU 与 BC7 纹理压缩的图形适配器（见
   `README.md` 的「运行环境」）。
 - 平台层：`src-tauri/src/platform/` 是产品代码里平台分支的唯一入口（路径表示、文件管理器、

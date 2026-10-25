@@ -30,9 +30,10 @@ Install locked frontend dependencies with `npm ci`. Run the app with
   repositories rather than user data.
 - Update the owning module document when a command, DTO, schema, cleanup rule,
   or user workflow changes.
-- Record unfinished work and manual acceptance results only in
-  `docs/planning/todo.md` and `docs/planning/current-handoff.md`; completed or
-  superseded plans move to `docs/planning/archive/`.
+- Record unfinished work in `docs/planning/todo.md` and the current batch state
+  in `docs/planning/current-handoff.md`. Manual acceptance results go into the
+  current batch's section under `docs/planning/archive/` and are removed from
+  `todo.md`; completed or superseded plans also move to `docs/planning/archive/`.
 - Do not commit signing keys, certificates, application state, generated build
   output, or model files without confirming their redistribution terms.
 

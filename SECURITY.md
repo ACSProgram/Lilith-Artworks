@@ -2,9 +2,9 @@
 
 ## Supported versions
 
-Security fixes are made for the newest stable release and the current
-development line. Release candidates published before the first stable release
-of the 0.2 line (`0.2.0`) are not covered; upgrade to `0.2.0` or newer.
+Security fixes are made for the newest stable release (`0.2.0`) and the current
+development line (`0.3.x`). Anything older is not covered; upgrade to `0.2.0`
+or newer.
 
 ## Reporting a vulnerability
 

@@ -497,4 +497,4 @@ SQLite:
   它不写仓库、不碰 GPU，只能回答 CPU 侧成本；帧率要在真实适配器上手工看（见
   `docs/guides/validation.md` 的压力测试分层）。
 - `cargo test pin_board --lib`：DDS 尺寸/预览/负载边界、纹理缓存淘汰与跨仓库键隔离、画板 CRUD/回收站/排序（含永久删除只接受回收站画板）、文字与笔迹条目（BLOB 边界、标注层强制、位图/文字占标注层被拒、批量二进制打包、坏几何报错）、保存文字载荷（内容/字号/颜色/对齐/度量更新、文字-only 推进 step 与 revision、变换+文字合并一次保存、非文字载荷被拒、非法载荷与 revision 冲突）、画板内粘贴（三类条目混合、保持相对位置、一次事务一次 revision、源画板在回收站/源条目已删除/kind 不一致/数量超限）、整画布导出的流式 PNG（尺寸与像素、多块拼一条行带、乱序/越界/字节数不符拒绝、缺行拒绝、取消删除临时文件、仓库边界拒绝、重名不覆盖、文件名清洗、强杀残留清理）、图片传输的取消（导入取消整笔回滚且不留 DDS、导出取消不写文件、取消信号复位）与 RGBA 导出（临时目录 SQLite），不依赖 Tauri 运行时；schema 迁移测试在 `library::schema::migration_tests` 下（`cargo test --lib` 全量会一并跑到）；
-- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果先记录在 `docs/planning/current-handoff.md`，通过并归档后移入 `docs/planning/archive/`。
+- 完整编译与 GUI 手工验收（导入/导出、大图、缓存、回收站、灾备恢复后画板可用、以及无可用 WebGPU 适配器的环境下显示常驻不可用说明）由维护者执行，结果记入 `docs/planning/archive/` 下当日批次的验收小节并从 `docs/planning/todo.md` 删除。

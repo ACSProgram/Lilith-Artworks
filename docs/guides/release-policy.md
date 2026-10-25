@@ -9,9 +9,9 @@
 - 版本号**滞后**于工作：`package.json`、`package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/Cargo.lock` 和 `src-tauri/tauri.conf.json` 五处版本字段始终等于最近一次切版本时的值，日常改动不改动它们。
 - `CHANGELOG.md` 顶部维护唯一的 `## Unreleased` 暂存段：当前版本落定之后的全部改动都记入该段，不写回已带日期的版本小节。带日期的小节一经建立即冻结。
 - 维护者决定切版本时的固定动作：把 `## Unreleased` 改名为 `## X.Y.Z - 日期`，并在顶部重新留出空的 `## Unreleased` 暂存段；同步上述五处版本字段；重跑 `npm run legal` 更新许可清单中的版本字样；同步 `README.md` 与 `docs/planning/` 中的版本引用；以 `node tools/release/verify-metadata.mjs` 验证一致性。
-- **版本与 schema 的对应关系**由 `tools/release/verify-metadata.mjs` 中的显式版本→schema 登记表维护：切版本必须在同一提交为新版本登记映射，脚本拒绝未登记或与源码 `SCHEMA_VERSION` 不一致的组合。0.2.x 与 0.3 的 alpha1 / alpha2 对应 repository schema v4；v4 → v5 迁移由 0.3 alpha3 落地（alpha3 / alpha4 映射到 v5）；v5 → v6 迁移由 0.3 alpha5 落地（素材板笔迹与备份检查元数据三列，alpha6 沿用 v6），因此 0.3 有两次迁移。schema 升级先于切版本落库时，登记表里旧版本的映射会让 `verify-metadata` 失败——这是预期信号：切到新版本并登记映射后才算一致。
+- **版本与 schema 的对应关系**由 `tools/release/verify-metadata.mjs` 中的显式版本→schema 登记表维护：切版本必须在同一提交为新版本登记映射，脚本拒绝未登记或与源码 `SCHEMA_VERSION` 不一致的组合。0.2.x 与 0.3 的 alpha1 / alpha2 对应 repository schema v4；v4 → v5 迁移由 0.3 alpha3 落地（alpha3 / alpha4 映射到 v5）；v5 → v6 迁移由 0.3 alpha5 落地（素材板笔迹与备份检查元数据三列，alpha6 与 beta.1 沿用 v6），因此 0.3 有两次迁移。schema 升级先于切版本落库时，登记表里旧版本的映射会让 `verify-metadata` 失败——这是预期信号：切到新版本并登记映射后才算一致。
 - 切版本不等于发布，也不触发任何门槛；是否打标签由维护者单独决定。一旦打上候选或正式标签，该版本即公开，必须通过「自动门槛」与「人工门槛」的全部项目。
-- 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.4`、`0.2.0-rc.3`、当前的 `0.3.0-alpha.6`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
+- 有版本号但未打标签的版本是**过渡版本**（如 `0.2.0-alpha.1`、`0.2.0-alpha.4`、`0.2.0-rc.3`、当前的 `0.3.0-beta.1`）：它在 `CHANGELOG.md` 中占有带日期的小节，但不是公开发布，不作为交付版本。
 - 已发布的标签、安装包和版本身份不可复用或替换。标签之后的任何代码、schema、应用标识或签名声明变化都必须切到新版本并打新标签。
 - 源码仓库可公开不等于安装包可正式发布。每个二进制产物必须能追溯到唯一、干净且不可变的标签。
 
@@ -54,7 +54,7 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 
 依赖更新、Tauri 权限、schema、迁移、清理队列、路径校验、C2PA 或 TrustMark 变更必须单独说明风险和针对性测试。Actions、Node、Rust 工具链和 release workflow 应固定到受支持且可复现的版本；发布测试使用锁文件。
 
-自动化压力测试（`src-tauri/tests/`；九组便宜的分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench` 仍在发布前手动运行；其中 `stress_large` 的 `manual` 档（8 GiB）**只在正式发布前跑一次**，开发阶段与候选版本切分都不跑，需先把磁盘预算调到 40 GiB；0.3-beta.1 的发布前轮次已于 2026-10-25 跑完该档并通过）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、8 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复、`.clip` 容器感知分块与 v1/v2 混存仓库的端到端恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`。
+自动化压力测试（`src-tauri/tests/`；九组便宜的分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench` 仍在发布前手动运行；其中 `stress_large` 的 `manual` 档（8 GiB）**只在正式发布前跑一次**，开发阶段与候选版本切分都不跑，需先把磁盘预算调到 40 GiB；`0.3.0-beta.1` 的发布前轮次已于 2026-10-25 跑完该档并通过）接管了人工门槛中「使用正式支持上限附近的图片与工作文件验证内存、取消、退出和错误恢复」里可程序判定的部分：取消边界、跨进程强杀与事务中途崩溃、8 GiB 工作文件端到端、16K 大图发布内存、规模与参数边界、画板 DDS 完整性与损坏文件的检测与恢复、`.clip` 容器感知分块与 v1/v2 混存仓库的端到端恢复。界面视觉、交互手感与桌面集成仍由人工门槛覆盖。**断电持久性不做自动化验证**——测试用 `Child::kill()` 终止进程，不触及操作系统与磁盘的缓存、也不保证目录项落盘，该保证由操作系统、磁盘与 SQLite `synchronous = FULL` 声明承担。运行方式与实测见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`。
 
 ## 人工门槛
 
@@ -72,8 +72,9 @@ CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry�
 - 用普通用户账户验证安装包、主程序和时间戳签名，并确认法律文件可从安装目录或 About/Legal 页面取得；
 - 验收环境需具备支持 WebGPU 与 BC7 纹理压缩的图形适配器（近年核显通常即可；虚拟机需开启 3D 加速并装好显卡驱动），因为素材板依赖它。没有可用适配器的环境（如未开启 3D 加速的虚拟机、部分远程桌面）仍可完成清单其余项目，但素材板只会显示一条常驻的不可用说明，该模块的验收必须另找具备可用适配器的环境补做。
 
-人工结果先写入 `docs/planning/current-handoff.md`；该批次通过并归档后，其记录从该文件清出、移入
-`docs/planning/archive/`，使交接文件只保留未解决事项。未经人工验收的构建只能标记为内部测试包。
+人工结果直接记入 `docs/planning/archive/` 下当日批次的验收小节（当前为
+`handoff-log-2026-10-25.md` 第 10 节），同时从 `docs/planning/todo.md` 删除对应待验收项；
+`current-handoff.md` 只保留当前批次状态。未经人工验收的构建只能标记为内部测试包。
 
 ## 产物与发布
 
