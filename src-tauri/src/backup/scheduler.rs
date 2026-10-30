@@ -51,7 +51,7 @@ pub(crate) fn run(state: BackupState, app: AppHandle, events: SharedEventSink) {
             break;
         }
         let app_state = app.state::<AppState>().inner().clone();
-        // 托盘"暂停所有自动备份"同时暂停空闲完整性检查：用户意图是"别动仓库"。
+        // 托盘取消勾选"自动备份"时同时暂停空闲完整性检查：用户意图是"别动仓库"。
         let paused = app.state::<AppState>().automatic_backups_paused();
         if paused {
             state.set_automatic_scheduling(false);
@@ -1597,7 +1597,7 @@ mod tests {
             },
         );
         assert!(consumed.blocked);
-        // 暂停所有自动备份。
+        // 自动备份处于暂停状态。
         let paused = select_idle_verify(
             true,
             None,

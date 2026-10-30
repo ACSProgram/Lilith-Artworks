@@ -20,14 +20,11 @@ mod repository_lock;
 mod storage;
 mod storage_overview;
 
-use std::{
-    fs::File,
-    path::{Path, PathBuf},
-};
+use std::path::{Path, PathBuf};
 
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem},
+    menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager, WindowEvent,
 };
@@ -47,35 +44,36 @@ struct RuntimeIcons {
     tray: Image<'static>,
 }
 
+const TRAY_MENU_ID_SHOW: &str = "show";
+/// 正向语义的标识：这一项表达「自动备份是否在运行」，不是「是否已暂停」。
+/// 持久化字段仍叫 `pause_automatic_backups`，两者不要互相推断。
+const TRAY_MENU_ID_AUTOMATIC_BACKUPS: &str = "automatic-backups";
+const TRAY_MENU_ID_QUIT: &str = "quit";
+
 struct TrayMenuState {
-    pause_automatic: MenuItem<tauri::Wry>,
+    automatic_backups: CheckMenuItem<tauri::Wry>,
 }
 
-fn automatic_backup_menu_text(paused: bool) -> &'static str {
-    if paused {
-        "继续所有自动备份"
-    } else {
-        "暂停所有自动备份"
-    }
-}
-
+/// 把持久化的暂停状态同步到托盘的勾选项：勾选表示自动备份正在运行。
+///
+/// 无托盘的环境（无头入口）没有注册 `TrayMenuState`，此处静默跳过。
 pub(crate) fn refresh_tray_backup_menu(app: &AppHandle) -> Result<(), String> {
-    if let Some(menu) = app.try_state::<TrayMenuState>() {
-        let paused = app.state::<app::AppState>().automatic_backups_paused();
-        menu.pause_automatic
-            .set_text(automatic_backup_menu_text(paused))
-            .map_err(|error| format!("无法更新托盘备份菜单：{error}"))?;
-    }
-    Ok(())
+    let Some(menu) = app.try_state::<TrayMenuState>() else {
+        return Ok(());
+    };
+    let paused = app.state::<app::AppState>().automatic_backups_paused();
+    menu.automatic_backups
+        .set_checked(!paused)
+        .map_err(|error| format!("无法更新托盘备份菜单：{error}"))
 }
 
+/// 读取随包的 `icon.ico`：窗口图标用整份文件，托盘图标按当前显示缩放挑最接近目标
+/// 尺寸的正方形帧，不把挑选留给系统去拉伸邻近尺寸。
 fn load_runtime_icons(icon_path: &Path, tray_target_size: u32) -> Result<RuntimeIcons, String> {
-    let window =
-        Image::from_path(icon_path).map_err(|error| format!("无法读取应用图标：{error}"))?;
-    let icon_dir = ico::IconDir::read(
-        File::open(icon_path).map_err(|error| format!("无法打开应用图标：{error}"))?,
-    )
-    .map_err(|error| format!("无法解析应用图标：{error}"))?;
+    let bytes = std::fs::read(icon_path).map_err(|error| format!("无法读取应用图标：{error}"))?;
+    let window = Image::from_bytes(&bytes).map_err(|error| format!("无法解码应用图标：{error}"))?;
+    let icon_dir = ico::IconDir::read(std::io::Cursor::new(&bytes))
+        .map_err(|error| format!("无法解析应用图标：{error}"))?;
     let entry = icon_dir
         .entries()
         .iter()
@@ -247,42 +245,54 @@ async fn confirm_app_shutdown(app: tauri::AppHandle) -> Result<(), String> {
 }
 
 fn build_tray(application: &tauri::App, runtime_icon: Option<Image<'static>>) -> tauri::Result<()> {
+    // 托盘图标本身已经说明这是哪个程序，再写一遍名字只是噪音；这一项做的是把
+    // 已存在的窗口调回前台，所以用「显示窗口」而不是「打开」。
     let show = MenuItem::with_id(
         application,
-        "show",
-        "打开 Lilith Artworks",
+        TRAY_MENU_ID_SHOW,
+        "显示窗口",
         true,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(application, "quit", "退出", true, None::<&str>)?;
-    let pause = MenuItem::with_id(
+    let quit = MenuItem::with_id(application, TRAY_MENU_ID_QUIT, "退出", true, None::<&str>)?;
+    // 用勾选表达状态，不写「暂停 / 继续」两套动词文案：文案恒为「自动备份」，
+    // 勾上表示正在运行，取消勾选表示暂停。读状态只需读勾选值，不必解析句子。
+    let automatic_backups = CheckMenuItem::with_id(
         application,
-        "pause-automatic",
-        automatic_backup_menu_text(
-            application
-                .state::<app::AppState>()
-                .automatic_backups_paused(),
-        ),
+        TRAY_MENU_ID_AUTOMATIC_BACKUPS,
+        "自动备份",
         true,
+        !application
+            .state::<app::AppState>()
+            .automatic_backups_paused(),
         None::<&str>,
     )?;
-    let menu = Menu::with_items(application, &[&show, &pause, &quit])?;
+    // 分隔线把日常切换和「退出」分开：误点前两项的代价是切换一次状态，误点退出
+    // 会关掉程序，两者不该贴在一起。
+    let separator = PredefinedMenuItem::separator(application)?;
+    let menu = Menu::with_items(application, &[&show, &automatic_backups, &separator, &quit])?;
     application.manage(TrayMenuState {
-        pause_automatic: pause.clone(),
+        automatic_backups: automatic_backups.clone(),
     });
     let mut builder = TrayIconBuilder::with_id("main")
         .tooltip("Lilith Artworks")
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
-            "show" => show_main_window(app),
-            "pause-automatic" => {
+            TRAY_MENU_ID_SHOW => show_main_window(app),
+            TRAY_MENU_ID_AUTOMATIC_BACKUPS => {
                 let paused = app.state::<app::AppState>().automatic_backups_paused();
                 if let Err(error) = app::settings::set_automatic_backups_paused(app, !paused) {
                     log::error!("failed to update automatic backup pause state: {error}");
+                    // 写入失败时持久化状态没变，但勾选项点击时已经自行翻转了勾选，
+                    // 这里把它拉回真实状态，免得菜单显示一个没落盘的值。成功路径
+                    // 由 `set_automatic_backups_paused` 内部刷新菜单。
+                    if let Err(error) = refresh_tray_backup_menu(app) {
+                        log::error!("failed to resync tray backup menu: {error}");
+                    }
                 }
             }
-            "quit" => {
+            TRAY_MENU_ID_QUIT => {
                 let _ = app::capture_window_settings(app);
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -423,7 +433,18 @@ pub fn run() {
                 .ok_or("程序目录无效")?
                 .join("resources")
                 .join("icon.ico");
-            let runtime_icon = load_runtime_icons(&icon_path, tray_target_size(application)).ok();
+            // 图标缺失或损坏不该拦住启动：退回二进制里编译期嵌入的默认图标，
+            // 但要留下告警，否则界面会在无人察觉的情况下换一个图标。
+            let runtime_icon = match load_runtime_icons(&icon_path, tray_target_size(application)) {
+                Ok(icons) => Some(icons),
+                Err(error) => {
+                    log::warn!(
+                        "应用图标加载失败，改用二进制内嵌的默认图标：path={}, error={error}",
+                        icon_path.display()
+                    );
+                    None
+                }
+            };
             if let (Some(window), Some(icons)) = (
                 application.get_webview_window("main"),
                 runtime_icon.as_ref(),

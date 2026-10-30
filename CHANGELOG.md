@@ -15,6 +15,20 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- The tray menu is trimmed to `显示窗口` / `自动备份` / `退出`, with a separator
+  before quitting. The window entry is relabelled from `打开 Lilith Artworks`
+  to `显示窗口`, which is what it does: it brings the existing window back to
+  the foreground. The backup entry is now a check item: the label no longer
+  swaps between pause and resume wording, and the check mark reports whether
+  automatic backups are running. Clicking it still writes the same persisted
+  setting, which continues to pause the idle integrity check as well.
+- The application icon is redrawn: the ghost is now white on a violet-to-rose
+  rounded tile instead of a light grey ghost on transparency, and the icon set
+  carries 10 frames (16 through 256) instead of 6, so tray icon lookup at 125%
+  and 150% display scaling no longer has to stretch a neighbouring frame.
+
 ## 0.3.0-beta.1 - 2026-10-25
 
 ### Added
