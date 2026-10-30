@@ -30,6 +30,17 @@
 .segmented-control { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
 .segmented-control button { min-height: 26px; padding: 0 9px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 11px; cursor: pointer; }
 .segmented-control button.active { color: inherit; background: var(--surface); box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
+/* 页头二级菜单：与发布页的「更多发布操作」同一形态，破坏性操作收在折叠菜单里，
+   点开条目后再走滑动确认，避免在页头直接摆一颗红色按钮。 */
+.history-more-menu { position: relative; }
+.history-more-menu > summary { display: grid; place-items: center; list-style: none; cursor: pointer; }
+.history-more-menu > summary::-webkit-details-marker { display: none; }
+.history-more-menu[open] > summary { color: var(--accent); background: var(--surface-subtle); }
+.history-more-menu > div { position: absolute; z-index: 20; top: calc(100% + 6px); right: 0; width: 220px; padding: 5px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface); box-shadow: 0 12px 30px rgb(0 0 0 / 18%); }
+.history-more-menu button { display: flex; align-items: center; gap: 7px; width: 100%; min-height: 32px; padding: 0 9px; border: 0; border-radius: 4px; color: var(--text); background: transparent; font-size: 12px; text-align: left; cursor: pointer; }
+.history-more-menu button:hover { background: var(--surface-subtle); }
+.history-more-menu button.danger { color: var(--danger); }
+.history-more-menu button:disabled { opacity: .45; cursor: default; }
 
 .operation-progress {
   display: grid;

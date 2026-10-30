@@ -12,7 +12,7 @@
 - 分支链、节点唯一归属和可精简资格：`src/modules/history/historyModel.ts`。
 - DTO 和 Tauri 命令名：`src/modules/history/types.ts`、`src/modules/history/api.ts`。
 - 创建分支、分支设置和分支删除的 Tauri 应用编排：`src-tauri/src/app/workflows.rs`；History 领域命令只保留历史读取和节点重命名。
-- SQLite 历史图与分支：`src-tauri/src/history/repository.rs`（分支 CRUD、提交事务、链元数据、存储路径、缩略图与精简）、`deletion_repository.rs`（删除子树与分支）、`verification_repository.rs`（节点校验状态与批量写入）、`schedule_repository.rs`（调度候选、失败/跳过与通知）；不要为此加载 ChunkFile。
+- SQLite 历史图与分支：`src-tauri/src/history/repository.rs`（分支 CRUD、提交事务、链元数据、存储路径、缩略图与精简）、`deletion_repository.rs`（删除子树、删除分支与重置作品历史）、`verification_repository.rs`（节点校验状态与批量写入）、`schedule_repository.rs`（调度候选、失败/跳过与通知）；不要为此加载 ChunkFile。
 - snapshot/delta、恢复、检查点和精简：`src-tauri/src/backup/restore.rs`、`commands.rs`；只有块格式问题才进入 `chunk_file/`。
 - `.clip`/`.psd` 容器探测与结构单元定位：`src-tauri/src/format/container.rs`；v2 容器感知分块与节点缩略图共用这一份解析，不要在备份或认证模块里另写。仅缩略图才需要的格式（`.sai2`、ZIP 容器、TGA 这类无魔数位图）在 `src-tauri/src/preview/` 内自行探测，不进 `format/container.rs`。
 - 节点缩略图抽取：`src-tauri/src/preview/`；只读传入的文件、按格式分派（提交时是工作文件，手动刷新时是 backup 物化到 `temp/` 的节点内容），失败只跳过预览，不改变提交或历史结果。
@@ -212,6 +212,8 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 「删除分支」与「删除节点与后续历史」同为不可逆操作，两者的确认弹窗只有一道，其最终动作都由共享滑动确认控件承担；需要两道确认的只有上面精简里含重要节点的那种情况。
 
+「重置作品历史」是作品级的不可逆操作，把整个作品回到刚创建时的样子：所有分支、所有历史节点与其仓库文件全部清除，只重建一条标题为「主分支」、不设置工作文件的空分支。作品名、作品树位置、描述与素材板都留在原处——`pin_board_*` 与画板 DDS 挂在 `artwork_id` 上，与历史表无关，因此素材板不受影响，用户的原始工作文件也不在仓库里、不会被删。**任一分支存在最终成品或认证记录时整体拒绝**：`enter_branch_publication` 在用户选完成品的那一刻就写入 `final_artifacts`，所以「进入发布但还没签名」也算已发布，必须先到发布页「取消发布并删除本地数据」。事务内先删 `history_nodes`（级联带走边），再删 `branches`——顺序不可换，`history_nodes.created_on_branch_id` 是 `ON DELETE RESTRICT`——随后插入新的空分支并同步 bump `artworks` 与 `library_nodes` 的 `updated_ms`；文件候选在删除前收集、删除后按引用清单复查并入队（原因 `artwork_history_reset`），提交成功后单遍重放，清理失败只留队列可重试。旧分支的标题、发布配置与调度状态都不保留；重建的空分支按当前全局默认检查方式写入快速检查开关，其余备份状态回到初始值。快速检查在 `head_history_id` 为空时本来就退回全量，所以重新挂上工作文件后第一次备份会正常建立新基线。入口收在历史页头「更多历史操作」二级菜单里，没有任何可重置内容（没有节点、只有一条分支且没有工作文件）时菜单不出现；与「删除节点」一致走两道确认：先普通确认说清将丢失的数量与后果，再滑动确认（点开条目 → 继续 → 拖动到底）才真正执行，页头不直接摆红色按钮。
+
 检查点的建立与取消都需要二次确认并占用统一备份运行锁。建立时逐层报告回溯进度；取消普通检查点时，节点恢复使用唯一子节点到该节点的反向 delta——提交路径不再为检查点父节点预写它，所以这里按需重建（旧仓库已有增量时直接沿用），重建成功后把边换成真实路径、清掉 `snapshot_path`，并把 UI 的当前存储路径/大小统计切回该 delta；被释放的 snapshot 与换边后不再被引用的旧增量都在同一事务内复查引用后入队 `pending_file_cleanup`（原因 `history_checkpoint_release` / `history_checkpoint_delta_replaced`），由提交成功后单遍重放删除。分支 head、分支起点、分叉点和已进入发布状态的节点是强制检查点，不能取消。
 
 全局设置和分支设置使用开关表达自动备份状态。托盘菜单用勾选项表达同一状态：文案恒为「自动备份」，勾上表示自动备份正在运行，取消勾选表示暂停（列表为「显示窗口」/「自动备份」/分隔线/「退出」）；分支设置自动保存并显示未保存、保存中、已保存和保存失败状态。分支设置的自动备份开关下方提供“快速检查”开关，直接决定该分支自动备份是否使用快速检查，分支状态行按它显示检查方式；新建 Artwork 与新建分支按全局默认检查方式写入初始值。未选择工作文件或自动备份关闭时置灰。历史页顶部只保留一份工作文件路径，在当前分支名称下以较大字号显示，并通过紧邻的文件修改按钮重新选择；同一行还提供“打开所在文件夹”按钮（在系统文件管理器中定位工作文件，Windows 上会选中该文件）和“清除工作文件路径”按钮，后者把路径写回空字符串。`update_artwork_branch` 在同一事务内更新路径与其它分支设置，路径继续复用普通文件、绝对路径、仓库外和同 Artwork 分支唯一校验，选择取消或保存失败时保留旧路径。未选择工作文件时自动备份开关置灰、间隔输入禁用，保存结果始终是关闭；此时"修改工作文件"图标按钮替换为醒目的"选择文件"主按钮。设置草稿逐字段合并服务端更新，开关写入携带用户读取到的持久化基线；过期请求可以继续保存名称或间隔，但不能重新启用已由调度器自动关闭的备份。自动备份因连续失败被关闭后，作品库左侧持续显示警告，只有“知道了”或手动重新启用才清除通知。
@@ -243,6 +245,7 @@ set_history_checkpoint
 compact_history_node
 delete_history_subtree
 delete_artwork_branch
+reset_artwork_history
 scrub_repository_integrity
 create_repository_backup
 list_pending_file_cleanup

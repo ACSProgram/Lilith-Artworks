@@ -223,6 +223,30 @@ pub(crate) fn delete_branch(
     })
 }
 
+/// 把整个作品重置回刚创建时的样子：所有分支与历史节点清除，只留一条没有工作文件
+/// 的空分支；作品名、作品树位置、描述与素材板保持不动。
+///
+/// 已发布内容一律先拒绝，由用户在发布页「取消发布并删除本地数据」后再来。
+pub(crate) fn reset_artwork_history(
+    context: &CommandContext,
+    artwork_id: &str,
+) -> Result<history::ArtworkHistory, CommandError> {
+    let quick_default = context.app_state().automatic_backup_quick_default();
+    let result = context.run_write_scoped(None, |session| {
+        let root = session.root();
+        context.report_progress("正在清空作品历史", 0, 2);
+        let cleanup_ids = history::reset_artwork_history(root, artwork_id, quick_default)
+            .map_err(CommandError::from)?;
+        // 与分支删除一致：文件清理失败只留队列可重试，不改变重置本身的成功语义。
+        context.report_progress("正在清理历史文件", 1, 2);
+        cleanup::replay(root, &cleanup_ids);
+        context.report_progress("作品历史已重置", 2, 2);
+        history::list(root, artwork_id).map_err(CommandError::from)
+    });
+    context.backup_state().wake_scheduler();
+    result
+}
+
 /// 手动重查分支：前台立即按链校验整条分支，而不是只清错误等空闲调度。
 ///
 /// 低频率的自动节奏下，手动入口必须即时；head、检查点与分支起点各自作为起点，

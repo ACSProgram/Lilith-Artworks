@@ -1,6 +1,6 @@
 import {
   Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
-  ListCollapse, Pencil, Play, Trash2, X,
+  ListCollapse, MoreVertical, Pencil, Play, RotateCcw, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
@@ -45,9 +45,9 @@ function loadMindmapNodeWidth(): number {
 export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0, onSelectBranch, onHistoryChanged, onError }: HistoryModuleProps) {
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
-    restoreNode, compactNodes, deleteBranch, reverifyBranch, deleteSubtree, setCheckpoint,
-    forkBranch, renameNode, readNodeFormat, readNodeThumbnail, refreshNodeThumbnail,
-    cancelOperation,
+    restoreNode, compactNodes, deleteBranch, resetArtworkHistory, reverifyBranch, deleteSubtree,
+    setCheckpoint, forkBranch, renameNode, readNodeFormat, readNodeThumbnail,
+    refreshNodeThumbnail, cancelOperation,
   } = useHistoryController({ artworkId, refreshVersion, onHistoryChanged, onError });
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
   const [commitNote, setCommitNote] = useState("");
@@ -201,6 +201,20 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       await runCompact(orderedCompactSelection());
     } else if (request.kind === "delete-branch") {
       await deleteBranch(request.branch.id);
+    } else if (request.kind === "reset-artwork") {
+      // 第一道只做普通确认；真正执行前再进那道滑动确认，与「删除节点」的两道确认一致。
+      setConfirmRequest({
+        kind: "reset-artwork-final",
+        branchCount: request.branchCount,
+        nodeCount: request.nodeCount,
+      });
+      return;
+    } else if (request.kind === "reset-artwork-final") {
+      if (await resetArtworkHistory()) {
+        // 旧节点已经不存在：清掉选中态与精简选择，避免界面继续指向已删的行。
+        setSelectedNodeId(null);
+        exitCompactMode();
+      }
     } else if (request.kind === "delete-nodes") {
       await deleteSubtree(request.node.id, request.branch.id);
     } else {
@@ -290,6 +304,10 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const childBranches = actionNode
     ? history.branches.filter((branch) => branch.createdFromHistoryId === actionNode.id)
     : [];
+  // 没有历史、也没有第二个分支或工作文件时不给入口：重置只会重建一条空分支。
+  const canResetArtwork = history.nodes.length > 0
+    || history.branches.length > 1
+    || history.branches.some((branch) => branch.sourcePath.trim());
 
   return <div className={`history-workspace${compactMode ? " compacting" : ""}`}>
     <header className="history-header">
@@ -307,6 +325,17 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         }}>
           {history.branches.map((branch) => <option key={branch.id} value={branch.id}>{branch.title}</option>)}
         </select>
+        {canResetArtwork && <details className="history-more-menu">
+          <summary className="icon-button" title="更多历史操作"><MoreVertical size={17} /></summary>
+          <div><button className="danger" type="button" disabled={busy || runtime.busy} onClick={(event) => {
+            (event.currentTarget.closest("details") as HTMLDetailsElement).open = false;
+            setConfirmRequest({
+              kind: "reset-artwork",
+              branchCount: history.branches.length,
+              nodeCount: history.nodes.length,
+            });
+          }}><RotateCcw size={15} />重置作品历史</button></div>
+        </details>}
       </div>
     </header>
 

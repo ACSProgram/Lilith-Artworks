@@ -170,6 +170,20 @@ pub(crate) async fn delete_artwork_branch(
 }
 
 #[tauri::command]
+pub(crate) async fn reset_artwork_history(
+    artwork_id: String,
+    coordinator: State<'_, OperationCoordinator>,
+) -> Result<history::ArtworkHistory, String> {
+    let coordinator = coordinator.inner().clone();
+    coordinator
+        .spawn(OperationDomain::History, move |context| {
+            usecases::history::reset_artwork_history(context, &artwork_id)
+        })
+        .await
+        .map_err(String::from)
+}
+
+#[tauri::command]
 pub(crate) async fn enter_branch_publication(
     request: EnterPublicationRequest,
     coordinator: State<'_, OperationCoordinator>,

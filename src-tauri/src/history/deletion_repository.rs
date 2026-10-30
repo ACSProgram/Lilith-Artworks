@@ -1,4 +1,4 @@
-//! 破坏性历史操作：删除子树与删除分支。
+//! 破坏性历史操作：删除子树、删除分支与重置整个作品的历史。
 //!
 //! 所有从图上移除节点的写入都集中在这里，事务内完成引用复查并把已无引用的
 //! snapshot/delta 入队 `pending_file_cleanup`；本模块不读取 ChunkFile，也不
@@ -453,6 +453,146 @@ pub(crate) fn delete_branch(root: &Path, branch_id: &str) -> Result<BranchDeleti
     })
 }
 
+/// 重置后新建的那条空分支的标题，与新建 Artwork 对话框的默认值一致。
+const RESET_BRANCH_TITLE: &str = "主分支";
+
+/// 把整个作品重置回刚创建时的样子：所有分支、所有历史节点与其仓库文件全部清除，
+/// 只留下一条空分支，且该分支不设置工作文件。
+///
+/// 语义与「删除作品再新建一个」的区别只在保留了什么：作品名、作品树位置、描述与
+/// 素材板都留在原处，因此素材板的 DDS 与画板历史不受影响（它们挂在 `artwork_id`
+/// 上，与历史表无关）。
+///
+/// 已发布内容一律拒绝：`enter_branch_publication` 在用户选完成品的那一刻就写入
+/// `final_artifacts`，所以「进入发布但还没签名」也算已发布，必须先取消发布。
+///
+/// 返回已入队的清理 id，由调用方在提交成功后重放。
+pub(crate) fn reset_artwork_history(
+    root: &Path,
+    artwork_id: &str,
+    backup_quick_enabled: bool,
+) -> Result<Vec<String>, String> {
+    let mut connection = storage::open(root)?;
+    let transaction = connection.transaction().map_err(storage::database_error)?;
+    let artwork_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM library_nodes
+                            WHERE id = ?1 AND kind = 'artwork' AND trashed_ms IS NULL)",
+            [artwork_id],
+            |row| row.get(0),
+        )
+        .map_err(storage::database_error)?;
+    if !artwork_exists {
+        return Err("找不到 Artwork".into());
+    }
+    let published: Option<String> = transaction
+        .query_row(
+            "SELECT branch.title FROM final_artifacts artifact
+             JOIN branches branch ON branch.id = artifact.branch_id
+             WHERE branch.artwork_id = ?1 LIMIT 1",
+            [artwork_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    if let Some(title) = published {
+        return Err(format!(
+            "无法重置历史：分支“{title}”已有最终成品，请先在发布页取消发布并删除本地数据"
+        ));
+    }
+    // 认证记录经最终成品级联，正常情况下不会单独存在；显式复查是为了让异常数据
+    // 得到可读的拒绝，而不是让 `history_nodes` 的 RESTRICT 外键以一个裸错误中止。
+    let recorded: Option<String> = transaction
+        .query_row(
+            "SELECT branch.title FROM certification_records record
+             JOIN branches branch ON branch.id = record.branch_id
+             WHERE branch.artwork_id = ?1 LIMIT 1",
+            [artwork_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage::database_error)?;
+    if let Some(title) = recorded {
+        return Err(format!(
+            "无法重置历史：分支“{title}”还有认证记录，请先在发布页取消发布并删除本地数据"
+        ));
+    }
+
+    let mut paths = HashSet::new();
+    let mut statement = transaction
+        .prepare(
+            "SELECT snapshot_path FROM history_nodes
+               WHERE artwork_id = ?1 AND snapshot_path IS NOT NULL AND TRIM(snapshot_path) <> ''
+             UNION ALL
+             SELECT delta_path FROM history_nodes
+               WHERE artwork_id = ?1 AND delta_path IS NOT NULL AND TRIM(delta_path) <> ''
+             UNION ALL
+             SELECT edge.delta_path FROM history_edges edge
+               JOIN history_nodes child ON child.id = edge.child_history_id
+               WHERE child.artwork_id = ?1 AND TRIM(edge.delta_path) <> ''",
+        )
+        .map_err(storage::database_error)?;
+    for path in statement
+        .query_map([artwork_id], |row| row.get::<_, String>(0))
+        .map_err(storage::database_error)?
+    {
+        paths.insert(path.map_err(storage::database_error)?);
+    }
+    drop(statement);
+
+    // 顺序不可换：`history_nodes.created_on_branch_id` 是 ON DELETE RESTRICT，
+    // 先删分支会被外键挡下。节点删除会级联带走边，分支的 head / 分叉起点由
+    // 外键置空后再整行删除。
+    transaction
+        .execute(
+            "DELETE FROM history_nodes WHERE artwork_id = ?1",
+            [artwork_id],
+        )
+        .map_err(storage::database_error)?;
+    transaction
+        .execute("DELETE FROM branches WHERE artwork_id = ?1", [artwork_id])
+        .map_err(storage::database_error)?;
+    let branch_id = storage::new_id();
+    let now = storage::now_ms()?;
+    transaction
+        .execute(
+            "INSERT INTO branches
+             (id, artwork_id, title, source_path, source_path_key, backup_quick_enabled,
+              created_ms, updated_ms)
+             VALUES (?1, ?2, ?3, '', '', ?4, ?5, ?5)",
+            params![
+                branch_id,
+                artwork_id,
+                RESET_BRANCH_TITLE,
+                i64::from(backup_quick_enabled),
+                now
+            ],
+        )
+        .map_err(storage::database_error)?;
+    // 作品与作品树的「最后更新」要跟着动，否则列表顺序与时间仍显示重置之前。
+    transaction
+        .execute(
+            "UPDATE artworks SET updated_ms = ?2 WHERE id = ?1",
+            params![artwork_id, now],
+        )
+        .map_err(storage::database_error)?;
+    transaction
+        .execute(
+            "UPDATE library_nodes SET updated_ms = ?2 WHERE id = ?1",
+            params![artwork_id, now],
+        )
+        .map_err(storage::database_error)?;
+    // 入队必须在删除之后：引用清单以事务内可见的图为准，先入队会把每条路径都
+    // 当成仍被引用而全部跳过。
+    let cleanup_ids = cleanup::enqueue_released_repository_files(
+        &transaction,
+        &paths.into_iter().collect::<Vec<_>>(),
+        "artwork_history_reset",
+    )?;
+    transaction.commit().map_err(storage::database_error)?;
+    Ok(cleanup_ids)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, io::Write};
@@ -550,6 +690,93 @@ mod tests {
         let report = crate::cleanup::run(&root, &deletion.cleanup_ids).unwrap();
         assert!(report.failures.is_empty());
         assert_eq!(report.pending_count, 0);
+    }
+
+    #[test]
+    fn artwork_reset_clears_every_branch_and_keeps_one_empty_branch() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        // 先从 root 分叉再让主线继续提交：root 因此是检查点，提交不会把它的
+        // snapshot 提前入队，重置时的清理队列只包含这次重置释放的文件。
+        let fork_branch = create_branch(
+            &fixture.root,
+            &fixture.artwork_id,
+            "root",
+            "Fork",
+            &fixture.fork_source,
+            false,
+        )
+        .unwrap();
+        fixture.commit_node(&fixture.main_branch_id, "head", Some("root"), 2);
+        fixture.commit_node(&fork_branch, "fork-head", Some("root"), 3);
+
+        let cleanup_ids = reset_artwork_history(&fixture.root, &fixture.artwork_id, false).unwrap();
+
+        let connection = storage::open(&fixture.root).unwrap();
+        let counts: (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM branches WHERE artwork_id = ?1),
+                        (SELECT COUNT(*) FROM history_nodes WHERE artwork_id = ?1)",
+                [&fixture.artwork_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 0));
+        let branch: (String, String, Option<String>, Option<String>) = connection
+            .query_row(
+                "SELECT title, source_path, head_history_id, created_from_history_id
+                 FROM branches WHERE artwork_id = ?1",
+                [&fixture.artwork_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(branch.0, "主分支");
+        assert_eq!(branch.1, "");
+        assert_eq!(branch.2, None);
+        assert_eq!(branch.3, None);
+        // 作品与作品树节点留在原处：重置只动历史。
+        let node_title: String = connection
+            .query_row(
+                "SELECT title FROM library_nodes WHERE id = ?1",
+                [&fixture.artwork_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(node_title, "Artwork");
+        drop(connection);
+
+        let queued = queued_paths(&fixture.root);
+        assert!(queued.iter().any(|path| path == "artworks/root.snapshot"));
+        assert!(queued
+            .iter()
+            .any(|path| path == "artworks/fork-head-to-root.delta"));
+        let report = crate::cleanup::run(&fixture.root, &cleanup_ids).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.pending_count, 0);
+    }
+
+    #[test]
+    fn artwork_reset_refuses_published_artwork() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        storage::open(&fixture.root)
+            .unwrap()
+            .execute(
+                "INSERT INTO final_artifacts
+                 (id, branch_id, history_id, source_path, source_sha256, media_type, byte_size, created_ms)
+                 VALUES ('artifact', ?1, 'root', 'artworks/final.jpg', ?2, 'image/jpeg', 1, 2)",
+                params![fixture.main_branch_id, "A".repeat(64)],
+            )
+            .unwrap();
+
+        let error = reset_artwork_history(&fixture.root, &fixture.artwork_id, false).unwrap_err();
+
+        assert!(error.contains("最终成品"), "{error}");
+        let nodes: i64 = storage::open(&fixture.root)
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM history_nodes", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(nodes, 1);
     }
 
     #[test]

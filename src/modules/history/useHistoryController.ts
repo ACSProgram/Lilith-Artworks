@@ -411,6 +411,11 @@ export function useHistoryController({
       replaceHistory(await historyApi.deleteBranch(branchId));
     }), [replaceHistory, runOperation]);
 
+  const resetArtworkHistory = useCallback(() =>
+    runOperation("reset-artwork", "正在重置作品历史", async () => {
+      replaceHistory(await historyApi.resetArtworkHistory(artworkId));
+    }), [artworkId, replaceHistory, runOperation]);
+
   const deleteSubtree = useCallback((historyId: string, branchId: string) =>
     runOperation("delete", "正在删除节点与后续历史", async () => {
       await historyApi.deleteSubtree(historyId, branchId);
@@ -464,6 +469,7 @@ export function useHistoryController({
     restoreNode,
     compactNodes,
     deleteBranch,
+    resetArtworkHistory,
     reverifyBranch,
     deleteSubtree,
     setCheckpoint,

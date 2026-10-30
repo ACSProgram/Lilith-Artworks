@@ -15,6 +15,19 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- Artwork history can be reset to the state a freshly created artwork has:
+  one empty branch with no working file. The reset removes every branch and
+  history node together with its repository snapshots and deltas, while the
+  artwork title, its position in the library tree, its description and the pin
+  board stay untouched. The action sits in the history page header's overflow
+  menu and asks twice: a first confirmation states how much is about to be
+  lost, and only dragging the slider in a second dialog performs the reset.
+  A branch that already has a final artifact or a certification record blocks
+  the reset: entering publication writes the artifact immediately, so the
+  publication must be cancelled first.
+
 ### Changed
 
 - The tray menu is trimmed to `显示窗口` / `自动备份` / `退出`, with a separator

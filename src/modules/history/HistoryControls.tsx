@@ -1,7 +1,7 @@
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import {
   AlertTriangle, Ban, Check, ChevronDown, CircleHelp, Copy, Eraser, FileOutput, FilePenLine,
-  FolderOpen, GitBranch, GitFork, LoaderCircle, Timer, Trash2, X,
+  FolderOpen, GitBranch, GitFork, LoaderCircle, RotateCcw, Timer, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
@@ -430,6 +430,8 @@ export function EditNodeDialog({
 export type ConfirmRequest =
   | { kind: "delete-nodes"; node: HistoryNode; branch: ArtworkBranch; descendantCount: number }
   | { kind: "delete-branch"; node: HistoryNode; branch: ArtworkBranch }
+  | { kind: "reset-artwork"; branchCount: number; nodeCount: number }
+  | { kind: "reset-artwork-final"; branchCount: number; nodeCount: number }
   | { kind: "compact"; selectedCount: number }
   | {
     kind: "compact-warning";
@@ -475,6 +477,28 @@ function confirmCopy(request: ConfirmRequest): ConfirmView {
     description: "这个分支独有的历史链与 Chunk 文件将被永久删除；被其他分支共享的祖先节点会保留。",
     detail: "如分支已经发布成品，必须先移除成品。",
     action: "拖动到底删除分支",
+  };
+  if (request.kind === "reset-artwork") return {
+    danger: true,
+    icon: <RotateCcw size={20} />,
+    eyebrow: "不可撤销",
+    title: "重置作品历史",
+    subject: `${request.branchCount} 条分支 · ${request.nodeCount} 个历史节点`,
+    description: "该作品会回到刚创建时的样子：所有分支与历史版本、仓库内保存的快照和增量全部删除，只留一条不设工作文件的空分支。你的工作文件本身不会被删除。",
+    detail: "素材板、作品名与在作品树中的位置保持不变。如任一分支已进入发布或已有成品，要在发布页取消发布后才能重置。",
+    action: "继续",
+  };
+  if (request.kind === "reset-artwork-final") return {
+    danger: true,
+    emphasis: true,
+    slideToConfirm: true,
+    icon: <AlertTriangle size={20} />,
+    eyebrow: "请再次确认",
+    title: "重置后无法恢复",
+    subject: `${request.branchCount} 条分支 · ${request.nodeCount} 个历史节点将被永久删除`,
+    description: "历史版本在仓库里只有这一份，删除后不能撤销；工作文件里的内容不会被改动，但之前提交过的每个版本都再也找不回来。",
+    detail: "最后一步不可点击确认：把滑块向右拖到底才会重置。",
+    action: "拖动到底重置历史",
   };
   if (request.kind === "delete-nodes") return {
     danger: true,

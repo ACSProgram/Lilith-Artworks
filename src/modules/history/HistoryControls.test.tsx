@@ -74,6 +74,36 @@ describe("ConfirmDialog views", () => {
     expect(onConfirm).toHaveBeenCalledTimes(1);
   });
 
+  it("puts the whole-artwork reset behind a click and then the slide control", () => {
+    const onConfirm = vi.fn();
+    const view = render(<ConfirmDialog
+      request={{ kind: "reset-artwork", branchCount: 2, nodeCount: 7 }}
+      busy={false}
+      onClose={vi.fn()}
+      onConfirm={onConfirm}
+    />);
+
+    // 第一道是普通确认：只说规模与后果，本身不执行删除。
+    expect(screen.getByText("2 条分支 · 7 个历史节点")).toBeTruthy();
+    expect(screen.queryByRole("slider")).toBeNull();
+    expect(screen.getByRole("button", { name: "继续" })).toBeTruthy();
+
+    view.rerender(<ConfirmDialog
+      request={{ kind: "reset-artwork-final", branchCount: 2, nodeCount: 7 }}
+      busy={false}
+      onClose={vi.fn()}
+      onConfirm={onConfirm}
+    />);
+
+    // 第二道不给可点击的确认按钮：必须把滑块拖到底。
+    expect(screen.getByText("2 条分支 · 7 个历史节点将被永久删除")).toBeTruthy();
+    expect(screen.getByRole("slider", { name: "拖动到底重置历史" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /重置/ })).toBeNull();
+
+    dragSlideToEnd("拖动到底重置历史");
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the compact selection on a click confirmation", () => {
     render(<ConfirmDialog
       request={{ kind: "compact", selectedCount: 2 }}

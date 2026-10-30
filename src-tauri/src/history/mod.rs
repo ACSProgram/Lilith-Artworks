@@ -12,7 +12,7 @@ pub(crate) mod test_support;
 pub(crate) use commands::*;
 pub(crate) use contracts::HistoryReferenceInventory;
 pub(crate) use deletion_repository::{
-    delete_branch, delete_subtree_prechecked, preflight_subtree_deletion,
+    delete_branch, delete_subtree_prechecked, preflight_subtree_deletion, reset_artwork_history,
 };
 pub(crate) use model::{
     classify_verify_failure, ArtworkBranch, ArtworkHistory, BackupDisableNoticeTarget,

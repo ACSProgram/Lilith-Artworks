@@ -56,6 +56,7 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         crate::app::workflows::update_artwork_branch,
         crate::history::rename_history_node,
         crate::app::workflows::delete_artwork_branch,
+        crate::app::workflows::reset_artwork_history,
         crate::backup::run_branch_backup,
         crate::backup::restore_history_node,
         crate::backup::compact_history_node,

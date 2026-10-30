@@ -128,6 +128,7 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     restoreNode: vi.fn(),
     compactNodes: vi.fn(),
     deleteBranch: vi.fn(),
+    resetArtworkHistory: vi.fn(),
     reverifyBranch: vi.fn(),
     deleteSubtree: vi.fn(),
     setCheckpoint: vi.fn(),
@@ -261,6 +262,33 @@ describe("HistoryModule overview interactions", () => {
     view.rerender(historyModule());
 
     expect(screen.getByText("0 个已选")).toBeTruthy();
+  });
+
+  it("resets the whole artwork only after the menu, a click and the slide", async () => {
+    const resetArtworkHistory = vi.fn().mockResolvedValue(true);
+    controller.useHistoryController.mockReturnValue(controllerReturn({ resetArtworkHistory }));
+
+    render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    fireEvent.click(screen.getByTitle("更多历史操作"));
+    fireEvent.click(screen.getByRole("button", { name: "重置作品历史" }));
+
+    // 破坏性入口先收在二级菜单里；弹窗第一道只是普通确认，点「继续」也不会执行。
+    expect(screen.getByRole("heading", { name: "重置作品历史" })).toBeTruthy();
+    expect(screen.queryByRole("slider", { name: "拖动到底重置历史" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "继续" }));
+    expect(resetArtworkHistory).not.toHaveBeenCalled();
+
+    // 第二道必须把滑块拖到底。
+    expect(screen.getByText("2 条分支 · 4 个历史节点将被永久删除")).toBeTruthy();
+    dragSlideToEnd("拖动到底重置历史");
+    await waitFor(() => expect(resetArtworkHistory).toHaveBeenCalledTimes(1));
   });
 
   it("runs the confirmation dialog's cancel against the operation while it is busy", async () => {

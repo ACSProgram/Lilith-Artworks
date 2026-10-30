@@ -37,6 +37,8 @@ export const historyApi = {
   reverifyBranch: (branchId: string) =>
     invokeCommand<ArtworkHistory>("reverify_branch_history", { branchId }),
   deleteBranch: (branchId: string) => invokeCommand<ArtworkHistory>("delete_artwork_branch", { branchId }),
+  resetArtworkHistory: (artworkId: string) =>
+    invokeCommand<ArtworkHistory>("reset_artwork_history", { artworkId }),
   runtime: () => invokeCommand<BackupRuntimeStatus>("get_backup_runtime_status"),
   cancel: () => invokeCommand<boolean>("cancel_backup_operation"),
 };
