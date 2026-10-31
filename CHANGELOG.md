@@ -40,7 +40,11 @@ entries for the reader; they are not a template every entry has to fill.
 - The application icon is redrawn: the ghost is now white on a violet-to-rose
   rounded tile instead of a light grey ghost on transparency, and the icon set
   carries 10 frames (16 through 256) instead of 6, so tray icon lookup at 125%
-  and 150% display scaling no longer has to stretch a neighbouring frame.
+  and 150% display scaling no longer has to stretch a neighbouring frame. The
+  tile carries the palette and brush silhouettes behind the ghost, and the
+  ghost is narrower so those props stay readable at small frame sizes. The
+  NSIS installer and uninstaller are pointed at the same file, so setup and
+  uninstall stop falling back to the stock NSIS icon.
 
 ## 0.3.0-beta.1 - 2026-10-25
 
