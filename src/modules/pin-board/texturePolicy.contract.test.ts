@@ -10,7 +10,7 @@ import {
  *  因此用 cwd 拼接原生源文件路径。 */
 function nativeSource(): string {
   return readFileSync(
-    join(process.cwd(), "src-tauri", "src", "pin_board", "dds.rs"),
+    join(process.cwd(), "src-tauri", "src", "pin_board", "dds", "mod.rs"),
     "utf8",
   );
 }

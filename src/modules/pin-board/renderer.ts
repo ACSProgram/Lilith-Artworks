@@ -3,7 +3,9 @@
  *
  * 这里只管「这一帧画什么」和「用户正在改什么」：设备、管线与纹理上传在 `rendererGpu.ts`，
  * 绘制预览的 DOM 叠加层在 `strokePreview.ts`，整画布导出的离屏目标、回读与导出笔迹缓冲在
- * `rendererExport.ts`，笔迹的几何构建与缓冲打包在 `strokeRender.ts`。
+ * `rendererExport.ts`，笔迹的几何构建与缓冲打包在 `strokeRender.ts`。无状态的转换各有归属：
+ * 快照/脏标记/常规保存载荷在 `boardSnapshot.ts`，撤销栈在 `historyStack.ts`，屏幕笔迹几何与
+ * 缓冲在 `strokeLayer.ts`，纹理淘汰顺序在 `textureEviction.ts`。
  */
 
 import { errorMessage } from "../../shared/errors";
@@ -21,12 +23,21 @@ import type {
   PinBoardEditableItem,
   PinBoardItem,
   PinBoardStrokeItem,
-  PinBoardTextAlign,
   PinBoardView,
   SavePinBoardResult,
 } from "./types";
-import { parseStrokeBatch, type PinBoardStrokeGeometry } from "./strokeGeometry";
-import { editableItemFields, editableTextPayload } from "./savePayload";
+import {
+  boardStateKey,
+  cloneBoardItem as cloneImage,
+  cloneQuad,
+  editableBoardImages,
+  restoreSnapshots,
+  snapshotImages,
+  type ImageSnapshot,
+} from "./boardSnapshot";
+import { HistoryStack } from "./historyStack";
+import { textureEvictionOrder } from "./textureEviction";
+import { StrokeLayer } from "./strokeLayer";
 import {
   DEFAULT_STROKE_COLOR,
   DEFAULT_STROKE_WIDTH,
@@ -44,20 +55,12 @@ import {
 } from "./strokeDrawing";
 import {
   STROKE_HIT_TOLERANCE_CSS_PIXELS,
-  buildStrokeWorldOutlines,
   strokeHitBounds,
   strokeHitByCircle,
   strokeHitBySweep,
   strokeIntersectsBounds,
-  strokeOutlineSignature,
-  type StrokeWorldOutline,
 } from "./strokeHit";
-import {
-  STROKE_OUTLINE_VERTICES,
-  buildStrokeBatch,
-  buildStrokeOutlines,
-  type StrokeBatch,
-} from "./strokeRender";
+import { STROKE_OUTLINE_VERTICES } from "./strokeRender";
 import {
   DEFAULT_VIEWPORT,
   fitViewportToBounds,
@@ -179,23 +182,6 @@ type TextureLoadCandidate = {
   isPreview?: boolean;
 };
 
-type ImageSnapshot = {
-  itemId: number;
-  deleted: boolean;
-  layer: number;
-  points: Quad;
-  uv: Quad;
-  /** 文字条目的载荷与度量；位图/笔迹为 undefined。 */
-  text?: {
-    text: string;
-    fontSize: number;
-    color: string;
-    align: PinBoardTextAlign;
-    width: number;
-    height: number;
-  };
-};
-
 /** 就地编辑会话的屏幕状态；React 编辑器据此定位并渲染字体栏。 */
 export interface PinBoardTextEditState {
   /** 每次进入编辑自增；编辑器用它作为组件 key，草稿不会跨会话串台。 */
@@ -216,13 +202,6 @@ export interface PinBoardTextEditState {
   /** CSS 像素 / 世界单位：随画布缩放与窗口尺寸变化。 */
   pixelsPerWorldUnit: number;
 }
-
-type HistoryEntry = {
-  before: ImageSnapshot[];
-  after: ImageSnapshot[];
-  mergeKey?: string;
-  timestamp: number;
-};
 
 export interface PinBoardInteractionState {
   /** 画板内未删除的条目数，覆盖全部 kind（位图 / 文字 / 笔迹）。 */
@@ -297,8 +276,6 @@ const MIN_VIEWPORT_HEIGHT = 20;
 const MAX_VIEWPORT_HEIGHT = 10_000_000;
 /** 画布小于该 CSS 尺寸时不做打开适配，等布局稳定后由 `resize` 补做。 */
 const VIEWPORT_FIT_MIN_CANVAS_CSS_PIXELS = 32;
-const HISTORY_LIMIT = 100;
-const HISTORY_MERGE_MS = 350;
 /** 模型变化后静默该时长即自动保存；期间再次变化会重新计时。 */
 const AUTOSAVE_DELAY_MS = 1500;
 /**
@@ -317,12 +294,6 @@ const TEXT_EDIT_READABLE_MIN_CSS_PIXELS = 10;
 const TEXT_EDIT_READABLE_TARGET_CSS_PIXELS = 20;
 /** 橡皮环形光标的视觉最小直径（CSS 像素）：再小就看不见了。 */
 const ERASER_RING_MIN_CSS_PIXELS = 4;
-/**
- * 笔迹缓冲的超扫边距（视口宽高的比例）：四周各扩这么多，平移在这个范围内既不改
- * 可见集合、也不改缓冲签名，因此拖动画布不重建；逐段裁剪用同一个框，边距内平移
- * 也不会露出被裁掉的段。
- */
-const STROKE_OVERSCAN_RATIO = 0.5;
 
 /** 指针拖拽的进行中状态；`draw` 是绘制工具下的那一支，`erase` 是橡皮。 */
 type DragMode = "pan" | "images" | "marquee" | "rotate" | "scale" | "draw" | "erase";
@@ -336,14 +307,6 @@ const DRAG_CURSOR_CLASS: Record<DragMode, string> = {
   draw: "drawing",
   erase: "erasing",
 };
-
-function cloneQuad(quad: Quad): Quad {
-  return quad.map((point) => [...point] as Point) as Quad;
-}
-
-function cloneImage(image: PinBoardItem): PinBoardItem {
-  return { ...image, points: cloneQuad(image.points), uv: cloneQuad(image.uv) };
-}
 
 export class PinBoardRenderer {
   private boardId = 0;
@@ -366,9 +329,8 @@ export class PinBoardRenderer {
   private readonly selectedIds = new Set<number>();
   private readonly resizeObserver: ResizeObserver;
   private readonly themeObserver: MutationObserver;
-  private readonly history: HistoryEntry[] = [];
+  private readonly historyStack = new HistoryStack();
   private visibleImages: PinBoardItem[] = [];
-  private historyIndex = 0;
   private savedStateKey = "";
   private revision = "";
   private cssHeight = 0;
@@ -452,25 +414,8 @@ export class PinBoardRenderer {
    */
   private readonly placeholderNodes = new Map<number, HTMLElement>();
   private drawErrorReported = false;
-  /** 当前画板的笔迹几何，按 itemId 索引；几何只走二进制通道，不进条目 DTO。 */
-  private readonly strokeGeometries = new Map<number, PinBoardStrokeGeometry>();
-  /** 笔迹缓冲的失效计数：几何或变换变化时递增，签名随之变化并触发重建。 */
-  private strokeVersion = 0;
-  /** 上次构建笔迹缓冲时的「可见笔迹 + 缩放」签名，避免平移时逐帧重建。 */
-  private strokeSignature = "";
-  /**
-   * 当前笔迹缓冲是按哪个「视口 + 超扫边距」框构建的。视口一旦走出它，被逐段
-   * 裁掉的段就可能露出来；即使可见条目没变也必须重建。
-   */
-  private strokeBuiltBounds: Bounds | null = null;
-  /** 笔迹读取的代次：切画板或重复读取时丢弃旧结果。 */
-  private strokeLoadToken = 0;
-  private strokeVertexBuffer: any = null;
-  private strokeIndexBuffer: any = null;
-  private strokeIndexCount = 0;
-  /** 可见笔迹的选中描边，按 `strokeOutlineIndex` 给出的槽位连续排布。 */
-  private strokeOutlineBuffer: any = null;
-  private readonly strokeOutlineIndex = new Map<number, number>();
+  /** 整板笔迹几何、世界折线缓存与屏幕用的 GPU 缓冲。 */
+  private readonly strokes = new StrokeLayer();
   /** 当前工具：绘制或擦除工具下指针按下独占该次拖拽，不触发选中/框选。 */
   private tool: PinBoardTool = "select";
   /**
@@ -491,11 +436,6 @@ export class PinBoardRenderer {
   private readonly eraserRing: HTMLElement;
   /** 指针最后一次落在画布上的位置（CSS 像素，相对画布左上角）；离开画布即清空。 */
   private eraserPointer: Point | null = null;
-  /** 世界折线缓存：键是条目 id，签名见 `strokeOutlineSignature`。 */
-  private readonly strokeOutlineCache = new Map<
-    number,
-    { signature: string; outlines: StrokeWorldOutline[] }
-  >();
   /** 本轮擦除已经删掉的条目：同一笔不重复处理，也用于判断「这轮有没有改动」。 */
   private readonly eraseHitIds = new Set<number>();
   /**
@@ -634,8 +574,7 @@ export class PinBoardRenderer {
       this.failedTextureDimensions.clear();
       this.textureQualityCaps.clear();
       // 笔迹缓冲也属于旧设备：清空后由 refreshViewport 按当前画板重建。
-      this.destroyStrokeBuffers();
-      this.strokeSignature = "";
+      this.strokes.dropBuffers();
 
       const next = await makeGpu(this.canvas);
       if (this.destroyed) {
@@ -809,12 +748,12 @@ export class PinBoardRenderer {
     // 绘制草稿属于画板：换画板、卸载与销毁都不该留下半笔。
     this.draft = null;
     this.clearStrokePreview();
-    this.releaseStrokeResources();
+    this.strokes.release();
+    this.resetEraseState();
     this.exportDrawItems = [];
     this.releaseExportStrokeBuffers();
     this.visibleImages = [];
-    this.history.length = 0;
-    this.historyIndex = 0;
+    this.historyStack.clear();
     this.images = [];
     this.imageById.clear();
     this.savedTextSignatures.clear();
@@ -832,61 +771,21 @@ export class PinBoardRenderer {
   }
 
   /**
-   * 释放笔迹几何与 GPU 缓冲。读取代次递增，使在途的 `read_pin_board_strokes`
-   * 返回后按代次被丢弃——它读的是上一块画板的几何。
-   */
-  private releaseStrokeResources() {
-    this.strokeLoadToken += 1;
-    this.strokeGeometries.clear();
-    this.strokeVersion += 1;
-    this.destroyStrokeBuffers();
-    this.strokeSignature = "";
-    this.strokeOutlineCache.clear();
-    this.resetEraseState();
-  }
-
-  private destroyStrokeBuffers() {
-    this.strokeVertexBuffer?.destroy();
-    this.strokeIndexBuffer?.destroy();
-    this.strokeOutlineBuffer?.destroy();
-    this.strokeVertexBuffer = null;
-    this.strokeIndexBuffer = null;
-    this.strokeOutlineBuffer = null;
-    this.strokeIndexCount = 0;
-    this.strokeOutlineIndex.clear();
-    this.strokeBuiltBounds = null;
-  }
-
-  /**
-   * 读取整板笔迹几何（`read_pin_board_strokes` 的二进制载荷），一次解析成
-   * `Map<itemId, StrokeGeometry>`，随后重建笔迹缓冲。
+   * 读取整板笔迹几何（`read_pin_board_strokes` 的二进制载荷），随后重建笔迹缓冲。
    *
    * 与画板装载解耦：`loadBoard` 保持同步，笔迹在 IPC 回来后就地补画，因此切换画板
    * 不会为了几 KB 几何数据多等一次往返。
    */
   private async loadStrokes(boardId: number) {
-    const token = ++this.strokeLoadToken;
-    try {
-      const response = await pinBoardApi.readPinBoardStrokes(boardId);
-      const bytes = response instanceof Uint8Array ? response : new Uint8Array(response as ArrayBuffer);
-      const strokes = parseStrokeBatch(bytes);
-      if (this.destroyed || this.boardId !== boardId || token !== this.strokeLoadToken) return;
-      this.strokeGeometries.clear();
-      for (const [itemId, geometry] of strokes) this.strokeGeometries.set(itemId, geometry);
-      this.strokeVersion += 1;
-      this.strokeSignature = "";
-      diagnosticsLog(
-        "info",
-        `pin-board strokes loaded: boardId=${boardId}, strokes=${strokes.size}, bytes=${bytes.byteLength}`,
-      );
-      this.refreshViewport(0);
-      // 新笔迹已经进缓冲：等落库的预览到这一步才撤，中途不会闪空白。
-      this.clearPendingStrokePreview();
-    } catch (error) {
-      if (this.destroyed || this.boardId !== boardId || token !== this.strokeLoadToken) return;
-      diagnosticsLog("warn", `pin-board strokes failed: boardId=${boardId}, error=${errorMessage(error)}`);
-      this.onError(`笔迹读取失败：${errorMessage(error)}`);
-    }
+    const loaded = await this.strokes.load(
+      boardId,
+      () => !this.destroyed && this.boardId === boardId,
+      (message) => this.onError(message),
+    );
+    if (!loaded) return;
+    this.refreshViewport(0);
+    // 新笔迹已经进缓冲：等落库的预览到这一步才撤，中途不会闪空白。
+    this.clearPendingStrokePreview();
   }
 
   /** 设备像素 / 世界单位：抗锯齿羽化与笔迹 LOD 都按它换算。 */
@@ -924,113 +823,18 @@ export class PinBoardRenderer {
     ring.style.top = `${pointer[1]}px`;
   }
 
-  /** 笔迹缓冲的收集范围：视口四周各扩 `STROKE_OVERSCAN_RATIO`。 */
-  private strokeCullBounds(viewport: Bounds): Bounds {
-    const marginX = (viewport.maxX - viewport.minX) * STROKE_OVERSCAN_RATIO;
-    const marginY = (viewport.maxY - viewport.minY) * STROKE_OVERSCAN_RATIO;
-    return {
-      minX: viewport.minX - marginX,
-      minY: viewport.minY - marginY,
-      maxX: viewport.maxX + marginX,
-      maxY: viewport.maxY + marginY,
-    };
-  }
-
-  /**
-   * 按「可见笔迹 + 缩放」重建笔迹缓冲。
-   *
-   * 签名不变**且**视口仍在缓冲的收集框内时跳过：平移只改视口位置、不改集合与
-   * 缩放，因此拖动画布不会逐帧重建整板笔迹。集合按扩过超扫边距的视口取，逐段
-   * 裁剪也用同一个框，所以在框内平移既不改签名、也不会露出被裁掉的段；视口走出
-   * 那个框就重建一次。只比较条目集合不够——一条横跨整个画板的笔迹在两种视口下
-   * 都算可见，但缓冲里不一定有远处那段。
-   */
   private syncStrokeBuffers() {
-    const hasCanvas = this.canvas.width > 0 && this.canvas.height > 0;
-    const viewport = hasCanvas
-      ? viewportBounds(this.viewport, this.canvas.width, this.canvas.height)
-      : null;
-    const cullBounds = viewport ? this.strokeCullBounds(viewport) : null;
-    const strokes = this.images.filter((image): image is PinBoardStrokeItem => (
-      image.kind === "stroke"
-      && this.isDrawable(image)
-      && (cullBounds === null || intersects(imageBounds(image), cullBounds))
-    ));
-    const pixelsPerWorldUnit = this.devicePixelsPerWorldUnit();
-    const signature = [
-      this.strokeVersion,
-      Math.round(pixelsPerWorldUnit * 100),
-      strokes.map((stroke) => stroke.itemId).join(","),
-    ].join("|");
-    const builtBounds = this.strokeBuiltBounds;
-    const covered = viewport !== null && builtBounds != null
-      && viewport.minX >= builtBounds.minX
-      && viewport.maxY <= builtBounds.maxY
-      && viewport.maxX <= builtBounds.maxX
-      && viewport.minY >= builtBounds.minY;
-    if (signature === this.strokeSignature && (cullBounds === null || covered)) return;
-    this.strokeSignature = signature;
-    const entries = strokes.flatMap((item) => {
-      const geometry = this.strokeGeometries.get(item.itemId);
-      return geometry ? [{ item, geometry }] : [];
+    this.strokes.sync({
+      boardId: this.boardId,
+      images: this.images,
+      isDrawable: (image) => this.isDrawable(image),
+      viewport: this.viewport,
+      canvasWidth: this.canvas.width,
+      canvasHeight: this.canvas.height,
+      pixelsPerWorldUnit: this.devicePixelsPerWorldUnit(),
+      gpu: this.gpu,
+      onError: (message) => this.onError(message),
     });
-    const batch = buildStrokeBatch(entries, {
-      pixelsPerWorldUnit,
-      ...(cullBounds ? { cullBounds } : {}),
-    });
-    const uploaded = this.uploadStrokeBatch(batch, buildStrokeOutlines(strokes));
-    // 上传失败时不做「已覆盖」标记：下一帧还会重试，而不是永远跳过。
-    this.strokeBuiltBounds = uploaded ? cullBounds : null;
-  }
-
-  /** 返回是否已可复用（空缓冲也算成功）。失败时由调用方保留重试机会。 */
-  private uploadStrokeBatch(
-    batch: StrokeBatch,
-    outlines: { vertices: Float32Array; index: Map<number, number> },
-  ): boolean {
-    this.destroyStrokeBuffers();
-    if (batch.indices.length === 0) return true;
-    try {
-      const device = this.gpu.device;
-      // 先挂到字段上再写数据：中途失败时 `destroyStrokeBuffers` 仍能释放已创建的缓冲。
-      const vertexBuffer = device.createBuffer({
-        size: batch.vertices.byteLength,
-        usage: 0x20 | 0x08,
-        mappedAtCreation: true,
-      });
-      this.strokeVertexBuffer = vertexBuffer;
-      new Float32Array(vertexBuffer.getMappedRange()).set(batch.vertices);
-      vertexBuffer.unmap();
-      const indexBuffer = device.createBuffer({
-        size: batch.indices.byteLength,
-        usage: 0x10 | 0x08,
-        mappedAtCreation: true,
-      });
-      this.strokeIndexBuffer = indexBuffer;
-      new Uint32Array(indexBuffer.getMappedRange()).set(batch.indices);
-      indexBuffer.unmap();
-      this.strokeIndexCount = batch.indices.length;
-      for (const [itemId, slot] of outlines.index) this.strokeOutlineIndex.set(itemId, slot);
-      if (outlines.vertices.length > 0) {
-        const outlineBuffer = device.createBuffer({
-          size: outlines.vertices.byteLength,
-          usage: 0x20 | 0x08,
-          mappedAtCreation: true,
-        });
-        this.strokeOutlineBuffer = outlineBuffer;
-        new Float32Array(outlineBuffer.getMappedRange()).set(outlines.vertices);
-        outlineBuffer.unmap();
-      }
-      return true;
-    } catch (error) {
-      this.destroyStrokeBuffers();
-      diagnosticsLog(
-        "warn",
-        `pin-board stroke buffer failed: boardId=${this.boardId}, error=${errorMessage(error)}`,
-      );
-      this.onError(`笔迹缓冲创建失败：${errorMessage(error)}`);
-      return false;
-    }
   }
 
   private activateBoard(view: PinBoardView, session: PinBoardViewSession | null) {
@@ -1073,7 +877,8 @@ export class PinBoardRenderer {
     this.visibleLayers = normalizeLayerVisibility(session?.visibleLayers);
     // 笔迹几何随画板重新读取：`releaseBoardResources` 已释放旧缓冲，这里再兜一次，
     // 保证直接 `activateBoard`（未经 detach）时也不会画出上一块画板的笔迹。
-    this.releaseStrokeResources();
+    this.strokes.release();
+    this.resetEraseState();
     if (session) {
       this.viewport.centerX = session.centerX;
       this.viewport.centerY = session.centerY;
@@ -1158,12 +963,11 @@ export class PinBoardRenderer {
     this.canvas.removeEventListener("wheel", this.wheel);
     this.canvas.removeEventListener("contextmenu", this.contextMenu);
     this.eraserRing.remove();
-    this.strokeOutlineCache.clear();
     this.resetEraseState();
     this.clearPlaceholderOverlay();
     this.draft = null;
     this.clearStrokePreview();
-    this.releaseStrokeResources();
+    this.strokes.release();
     this.exporting = false;
     this.exportDrawItems = [];
     this.releaseExportStrokeBuffers();
@@ -1331,8 +1135,8 @@ export class PinBoardRenderer {
       // 单条导出与系统剪贴板复制只认位图：文字与笔迹的入口一律置灰。
       exportableCount: selected.filter((image) => image.kind === "bitmap").length,
       layerCounts: this.layerCounts(),
-      canUndo: !this.locked && this.historyIndex > 0,
-      canRedo: !this.locked && this.historyIndex < this.history.length,
+      canUndo: !this.locked && this.historyStack.canUndo,
+      canRedo: !this.locked && this.historyStack.canRedo,
       dirty: this.dirty,
       saving: this.saving,
       locked: this.locked,
@@ -1931,7 +1735,7 @@ export class PinBoardRenderer {
 
   /**
    * 按导出区域单独构建笔迹缓冲：收集框是整个导出区域，逐段裁剪在 `buildStrokeBatch`
-   * 里完成；屏幕那份（`strokeVertexBuffer` / `strokeIndexCount`）一个字段都不动。
+   * 里完成；屏幕那份缓冲一个字段都不动。
    */
   private prepareExportStrokeBuffers(plan: CanvasExportPlan): void {
     this.releaseExportStrokeBuffers();
@@ -1939,7 +1743,7 @@ export class PinBoardRenderer {
       this.exportStrokeBuffers = buildExportStrokeBuffers(
         this.gpu.device,
         this.exportDrawItems,
-        this.strokeGeometries,
+        this.strokes.geometryMap,
         plan,
       );
     } catch (error) {
@@ -2108,17 +1912,17 @@ export class PinBoardRenderer {
   }
 
   undo() {
-    if (this.locked || this.textEdit || this.historyIndex === 0) return;
-    const entry = this.history[this.historyIndex - 1];
-    this.historyIndex -= 1;
+    if (this.locked || this.textEdit) return;
+    const entry = this.historyStack.undo();
+    if (!entry) return;
     this.restore(entry.before);
     this.afterModelChange(entry.before.map((image) => image.itemId));
   }
 
   redo() {
-    if (this.locked || this.textEdit || this.historyIndex >= this.history.length) return;
-    const entry = this.history[this.historyIndex];
-    this.historyIndex += 1;
+    if (this.locked || this.textEdit) return;
+    const entry = this.historyStack.redo();
+    if (!entry) return;
     this.restore(entry.after);
     this.afterModelChange(entry.after.map((image) => image.itemId));
   }
@@ -2315,32 +2119,11 @@ export class PinBoardRenderer {
   }
 
   private stateKey(): string {
-    return JSON.stringify(this.images.map(({ itemId, order, layer, deleted, points, uv }) => {
-      const image = this.imageById.get(itemId);
-      return {
-        itemId,
-        order,
-        layer,
-        deleted,
-        points,
-        uv,
-        // 文字内容/样式/度量参与脏标记：只改字不动四边形时也必须保存。
-        ...(image?.kind === "text" ? { text: pinBoardTextSignature(image) } : {}),
-      };
-    }));
+    return boardStateKey(this.images);
   }
 
   private editableImages(): PinBoardEditableItem[] {
-    return this.images.map((image) => {
-      const text = image.kind === "text"
-        && pinBoardTextSignature(image) !== this.savedTextSignatures.get(image.itemId)
-        ? editableTextPayload(image)
-        : undefined;
-      return {
-        ...editableItemFields(image),
-        ...(text ? { text } : {}),
-      };
-    });
+    return editableBoardImages(this.images, this.savedTextSignatures);
   }
 
   private emitState() {
@@ -2907,10 +2690,10 @@ export class PinBoardRenderer {
     const erased: number[] = [];
     for (const stroke of this.eraseCandidates) {
       if (this.eraseHitIds.has(stroke.itemId)) continue;
-      const geometry = this.strokeGeometries.get(stroke.itemId);
+      const geometry = this.strokes.geometry(stroke.itemId);
       if (!geometry) continue;
       if (!intersects(strokeHitBounds(stroke, radius), sweep)) continue;
-      if (!strokeHitBySweep(this.strokeOutlines(stroke, geometry), path, radius)) continue;
+      if (!strokeHitBySweep(this.strokes.outlines(stroke, geometry), path, radius)) continue;
       stroke.deleted = true;
       this.eraseHitIds.add(stroke.itemId);
       erased.push(stroke.itemId);
@@ -2918,19 +2701,6 @@ export class PinBoardRenderer {
     // 只在新命中时重建整板缓冲：每个指针事件都重算一次会把大画板拖垮。
     if (erased.length > 0) this.afterLiveChange(erased);
     return erased;
-  }
-
-  /** 条目几何的世界折线（带缓存）；键含几何版本与变换签名，任一变化即失效。 */
-  private strokeOutlines(
-    item: PinBoardStrokeItem,
-    geometry: PinBoardStrokeGeometry,
-  ): StrokeWorldOutline[] {
-    const signature = strokeOutlineSignature(item, this.strokeVersion);
-    const cached = this.strokeOutlineCache.get(item.itemId);
-    if (cached && cached.signature === signature) return cached.outlines;
-    const outlines = buildStrokeWorldOutlines(item, geometry);
-    this.strokeOutlineCache.set(item.itemId, { signature, outlines });
-    return outlines;
   }
 
   /**
@@ -3297,13 +3067,13 @@ export class PinBoardRenderer {
       const bounds = strokeHitBounds(image, tolerance);
       if (point[0] < bounds.minX || point[0] > bounds.maxX
         || point[1] < bounds.minY || point[1] > bounds.maxY) continue;
-      const geometry = this.strokeGeometries.get(image.itemId);
+      const geometry = this.strokes.geometry(image.itemId);
       // 几何还没读回来（刚打开画板）时退回包围框：宁可选中，也不要「点了没反应」。
       if (!geometry) {
         if (pointInQuad(point, image.points)) return image;
         continue;
       }
-      if (strokeHitByCircle(this.strokeOutlines(image, geometry), point, tolerance)) return image;
+      if (strokeHitByCircle(this.strokes.outlines(image, geometry), point, tolerance)) return image;
     }
     return null;
   }
@@ -3323,9 +3093,9 @@ export class PinBoardRenderer {
       || padded.maxY < bounds.minY || padded.minY > bounds.maxY) return false;
     if (bounds.minX <= padded.minX && bounds.maxX >= padded.maxX
       && bounds.minY <= padded.minY && bounds.maxY >= padded.maxY) return true;
-    const geometry = this.strokeGeometries.get(image.itemId);
+    const geometry = this.strokes.geometry(image.itemId);
     if (!geometry) return quadIntersectsBounds(image.points, bounds);
-    return strokeIntersectsBounds(this.strokeOutlines(image, geometry), bounds, tolerance);
+    return strokeIntersectsBounds(this.strokes.outlines(image, geometry), bounds, tolerance);
   }
 
   /**
@@ -3337,51 +3107,12 @@ export class PinBoardRenderer {
   }
 
   private snapshot(itemIds: number[]): ImageSnapshot[] {
-    return itemIds.flatMap((itemId) => {
-      const image = this.imageById.get(itemId);
-      if (!image) return [];
-      return [{
-        itemId,
-        deleted: image.deleted,
-        layer: image.layer,
-        points: cloneQuad(image.points),
-        uv: cloneQuad(image.uv),
-        ...(image.kind === "text"
-          ? {
-            text: {
-              text: image.text,
-              fontSize: image.fontSize,
-              color: image.color,
-              align: image.align,
-              width: image.width,
-              height: image.height,
-            },
-          }
-          : {}),
-      }];
-    });
+    return snapshotImages(this.imageById, itemIds);
   }
 
   private restore(snapshots: ImageSnapshot[]) {
-    for (const snapshot of snapshots) {
-      const image = this.imageById.get(snapshot.itemId);
-      if (!image) continue;
-      const textBefore = image.kind === "text" ? pinBoardTextSignature(image) : "";
-      image.deleted = snapshot.deleted;
-      image.layer = snapshot.layer;
-      image.points = cloneQuad(snapshot.points);
-      image.uv = cloneQuad(snapshot.uv);
-      if (image.kind === "text" && snapshot.text) {
-        image.text = snapshot.text.text;
-        image.fontSize = snapshot.text.fontSize;
-        image.color = snapshot.text.color;
-        image.align = snapshot.text.align;
-        image.width = snapshot.text.width;
-        image.height = snapshot.text.height;
-        if (pinBoardTextSignature(image) !== textBefore) {
-          this.invalidateTextTexture(image.itemId);
-        }
-      }
+    for (const itemId of restoreSnapshots(this.imageById, snapshots)) {
+      this.invalidateTextTexture(itemId);
     }
   }
 
@@ -3402,21 +3133,7 @@ export class PinBoardRenderer {
   }
 
   private pushHistory(before: ImageSnapshot[], after: ImageSnapshot[], mergeKey?: string) {
-    if (JSON.stringify(before) === JSON.stringify(after)) return;
-    const timestamp = performance.now();
-    const previous = this.history[this.historyIndex - 1];
-    if (mergeKey
-      && this.historyIndex === this.history.length
-      && previous?.mergeKey === mergeKey
-      && timestamp - previous.timestamp <= HISTORY_MERGE_MS) {
-      previous.after = after;
-      previous.timestamp = timestamp;
-      return;
-    }
-    this.history.splice(this.historyIndex);
-    this.history.push({ before, after, mergeKey, timestamp });
-    if (this.history.length > HISTORY_LIMIT) this.history.shift();
-    this.historyIndex = this.history.length;
+    this.historyStack.push(before, after, mergeKey);
   }
 
   private afterLiveChange(itemIds: number[]) {
@@ -3483,7 +3200,7 @@ export class PinBoardRenderer {
       );
       this.gpu.device.queue.writeBuffer(loaded.outlineBuffer, 0, outlineData(image));
     }
-    if (strokeMoved) this.strokeSignature = "";
+    if (strokeMoved) this.strokes.invalidateTransforms();
   }
 
   private refreshViewport(loadDelay: number) {
@@ -3551,12 +3268,13 @@ export class PinBoardRenderer {
         pass.draw(6);
       }
       // 第二趟：笔迹固定在最上层，整板合并成一次 indexed draw，不与图片交错。
-      if (this.strokeIndexCount > 0 && this.strokeVertexBuffer && this.strokeIndexBuffer) {
+      const strokeBatch = this.strokes.batch;
+      if (strokeBatch) {
         pass.setPipeline(this.gpu.strokePipeline);
         pass.setBindGroup(0, this.gpu.viewportBindGroup);
-        pass.setVertexBuffer(0, this.strokeVertexBuffer);
-        pass.setIndexBuffer(this.strokeIndexBuffer, "uint32");
-        pass.drawIndexed(this.strokeIndexCount);
+        pass.setVertexBuffer(0, strokeBatch.vertexBuffer);
+        pass.setIndexBuffer(strokeBatch.indexBuffer, "uint32");
+        pass.drawIndexed(strokeBatch.indexCount);
       }
       if (this.selectedIds.size > 0) {
         pass.setPipeline(this.gpu.outlinePipeline);
@@ -3565,9 +3283,10 @@ export class PinBoardRenderer {
           if (!this.selectedIds.has(image.itemId)) continue;
           if (this.textEdit?.itemId === image.itemId) continue;
           if (image.kind === "stroke") {
-            const slot = this.strokeOutlineIndex.get(image.itemId);
-            if (slot === undefined || !this.strokeOutlineBuffer) continue;
-            pass.setVertexBuffer(0, this.strokeOutlineBuffer);
+            const slot = this.strokes.outlineSlot(image.itemId);
+            const outlineBuffer = this.strokes.selectionOutlineBuffer;
+            if (slot === undefined || !outlineBuffer) continue;
+            pass.setVertexBuffer(0, outlineBuffer);
             pass.draw(STROKE_OUTLINE_VERTICES, 1, slot * STROKE_OUTLINE_VERTICES);
             continue;
           }
@@ -3905,22 +3624,13 @@ export class PinBoardRenderer {
     let total = [...target.values()].reduce((sum, loaded) => sum + loaded.byteSize, 0);
     if (total + additionalBytes <= budget) return;
     const visible = new Set(this.visibleImages.map((image) => image.itemId));
-    const protectedIds = this.exportProtectedIds;
-    const candidates = [...target.entries()]
-      .filter(([itemId]) => itemId !== protectedImageId && !protectedIds?.has(itemId))
-      .sort((left, right) => {
-        const visibilityOrder = Number(visible.has(left[0])) - Number(visible.has(right[0]));
-        if (visibilityOrder !== 0) return visibilityOrder;
-        // 高清淘汰优先选择已有缩略图兜底的图片，避免淘汰后画面空白闪烁；
-        // 缩略图淘汰时本项恒相等（previewTextures 自身就是兜底），退化为 LRU。
-        const leftCovered = Number(isPreview || this.previewTextures.has(left[0]));
-        const rightCovered = Number(isPreview || this.previewTextures.has(right[0]));
-        if (leftCovered !== rightCovered) return rightCovered - leftCovered;
-        // 大图（纹理字节多）重新解码成本高、等待久，优先淘汰小图：小图重载
-        // 快且有缩略图兜底，大图尽量保留，避免「划走再划回」反复等大图。
-        if (left[1].byteSize !== right[1].byteSize) return left[1].byteSize - right[1].byteSize;
-        return left[1].lastUsed - right[1].lastUsed;
-      });
+    const candidates = textureEvictionOrder(target, {
+      protectedItemId: protectedImageId,
+      visibleIds: visible,
+      exportProtectedIds: this.exportProtectedIds,
+      isPreview,
+      hasPreview: (itemId) => this.previewTextures.has(itemId),
+    });
     for (const [itemId, loaded] of candidates) {
       destroyTexture(loaded);
       target.delete(itemId);

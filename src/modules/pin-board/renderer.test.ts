@@ -23,6 +23,8 @@ import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
   textureBudgetsForLevel,
 } from "./texturePolicy";
+import { HistoryStack } from "./historyStack";
+import { StrokeLayer } from "./strokeLayer";
 
 const LOW_TEXTURE_BUDGETS = textureBudgetsForLevel("low");
 
@@ -49,6 +51,12 @@ function makeLoaded(byteSize: number, lastUsed: number): TestLoadedTexture {
   };
 }
 
+function seededStrokeLayer(geometries: PinBoardStrokeGeometry[]): StrokeLayer {
+  const layer = new StrokeLayer();
+  layer.replaceGeometries(new Map(geometries.map((geometry) => [geometry.itemId, geometry])));
+  return layer;
+}
+
 function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
   const renderer = Object.create(PinBoardRenderer.prototype) as PinBoardRenderer;
   Object.assign(renderer, {
@@ -56,13 +64,8 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     previewTextures: new Map(),
     failedTextureDimensions: new Map(),
     visibleImages: [],
-    // 笔迹相关状态：真实实例由类字段初始化，替身对象要手工补齐。
-    strokeGeometries: new Map(),
-    strokeOutlineIndex: new Map(),
-    strokeVersion: 0,
-    strokeSignature: "",
-    strokeLoadToken: 0,
-    strokeIndexCount: 0,
+    // 笔迹图层：真实实例由类字段初始化，替身对象要手工补齐。
+    strokes: new StrokeLayer(),
     // 图层可见性：类字段初始化不会在替身对象上执行，这里补一份「全部显示」。
     visibleLayers: normalizeLayerVisibility(null),
     // 文字就地编辑的状态：类字段不会在替身对象上初始化。
@@ -83,7 +86,6 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     // 橡皮擦的环形光标与擦除状态：同样是类字段初始化，替身要手工补齐。
     eraserRing: { hidden: true, style: {}, remove: vi.fn() },
     eraserPointer: null,
-    strokeOutlineCache: new Map(),
     eraseHitIds: new Set(),
     eraseFrom: null,
     eraseCandidates: [],
@@ -91,6 +93,7 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     // 基准预算取低档：预算相关的断言依赖这些值。
     textureBudgetBytes: LOW_TEXTURE_BUDGETS.residentBytes,
     previewTextureBudgetBytes: LOW_TEXTURE_BUDGETS.previewBytes,
+    historyStack: new HistoryStack(),
     ...options,
   });
   return renderer;
@@ -528,11 +531,7 @@ describe("pin-board stroke rendering", () => {
     };
     const renderer = rendererWith({
       images: [strokeItem()],
-      strokeGeometries: new Map([[5, strokeGeometry()]]),
-      strokeVersion: 0,
-      strokeSignature: "",
-      strokeOutlineIndex: new Map(),
-      strokeIndexCount: 0,
+      strokes: seededStrokeLayer([strokeGeometry()]),
       gpu: { device },
       viewport: { centerX: 50, centerY: 50, height: 100 },
       canvas: { width: 100, height: 100 },
@@ -549,7 +548,7 @@ describe("pin-board stroke rendering", () => {
 
     // 顶点 + 索引 + 选中描边三个缓冲。
     expect(created).toHaveLength(3);
-    expect((renderer as unknown as { strokeIndexCount: number }).strokeIndexCount).toBe(6);
+    expect((renderer as unknown as { strokes: StrokeLayer }).strokes.batch?.indexCount).toBe(6);
 
     syncStrokeBuffers();
     // 可见集合与缩放都没变：不重建。
@@ -568,7 +567,7 @@ describe("pin-board stroke rendering", () => {
     (renderer as unknown as { viewport: { centerX: number } }).viewport.centerX = 10_000;
     syncStrokeBuffers();
     expect(created).toHaveLength(6);
-    expect((renderer as unknown as { strokeIndexCount: number }).strokeIndexCount).toBe(0);
+    expect((renderer as unknown as { strokes: StrokeLayer }).strokes.batch).toBeNull();
   });
 
   it("rebuilds after panning out of the over-scan box even when the item set is unchanged", () => {
@@ -591,8 +590,7 @@ describe("pin-board stroke rendering", () => {
     } as unknown as PinBoardItem;
     const renderer = rendererWith({
       images: [wide],
-      strokeGeometries: new Map([[5, { ...strokeGeometry(), width: 2000 }]]),
-      strokeOutlineIndex: new Map(),
+      strokes: seededStrokeLayer([{ ...strokeGeometry(), width: 2000 }]),
       gpu: { device },
       viewport: { centerX: 50, centerY: 50, height: 100 },
       canvas: { width: 100, height: 100 },
@@ -631,11 +629,10 @@ describe("pin-board stroke rendering", () => {
     };
     const renderer = rendererWith({
       images: [near, far],
-      strokeGeometries: new Map([
-        [5, strokeGeometry()],
-        [9, { ...strokeGeometry(), itemId: 9 }],
+      strokes: seededStrokeLayer([
+        strokeGeometry(),
+        { ...strokeGeometry(), itemId: 9 },
       ]),
-      strokeOutlineIndex: new Map(),
       gpu: { device },
       viewport: { centerX: 50, centerY: 50, height: 100 },
       canvas: { width: 100, height: 100 },
@@ -647,10 +644,10 @@ describe("pin-board stroke rendering", () => {
 
     (renderer as unknown as { syncStrokeBuffers: () => void }).syncStrokeBuffers();
 
-    const slots = (renderer as unknown as { strokeOutlineIndex: Map<number, number> }).strokeOutlineIndex;
-    expect(slots.has(5)).toBe(true);
+    const strokes = (renderer as unknown as { strokes: StrokeLayer }).strokes;
+    expect(strokes.outlineSlot(5)).toBeDefined();
     // 一万单位之外的那条不参与构建：既省缓冲，也不会被逐段裁剪后的空图元拖慢。
-    expect(slots.has(9)).toBe(false);
+    expect(strokes.outlineSlot(9)).toBeUndefined();
   });
 });
 
@@ -1395,8 +1392,6 @@ describe("pin-board drawing interaction", () => {
       selectedIds: new Set<number>(),
       dragBefore: [],
       marqueeBaseIds: new Set<number>(),
-      history: [],
-      historyIndex: 0,
       canvas: fakeCanvas(),
       viewport: { centerX: 0, centerY: 0, height: 100 },
       cssHeight: 100,
@@ -1603,17 +1598,15 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
       dragPointerId: 1,
       dragBefore: [],
       marqueeBaseIds: new Set<number>(),
-      history: [],
-      historyIndex: 0,
       dirty: false,
       saving: false,
       strokeWidthValue: ERASER_STROKE_WIDTH,
       defaultWorldUnitsPerCssPixel: 1,
       worldUnitsPerCssPixel: () => 1,
-      strokeGeometries: new Map(
+      strokes: seededStrokeLayer(
         images
-          .filter((image) => image.kind === "stroke")
-          .map((image) => [image.itemId, lineGeometry(image.itemId)]),
+          .filter((image): image is PinBoardStrokeItem => image.kind === "stroke")
+          .map((image) => lineGeometry(image.itemId)),
       ),
       canvas: {
         classList: { add: vi.fn(), remove: vi.fn() },
@@ -1644,10 +1637,12 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
     eraseHitIds: Set<number>;
     dirty: boolean;
     locked: boolean;
-    history: {
-      before: { itemId: number; deleted: boolean }[];
-      after: { itemId: number; deleted: boolean }[];
-    }[];
+    historyStack: {
+      items: readonly {
+        before: { itemId: number; deleted: boolean }[];
+        after: { itemId: number; deleted: boolean }[];
+      }[];
+    };
   };
 
   it("erases every stroke under one drag and commits a single history entry", () => {
@@ -1664,9 +1659,9 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
     expect(renderer.eraseAt([250, 50])).toEqual([12]);
     renderer.finishInteraction();
 
-    expect(renderer.history).toHaveLength(1);
-    expect(renderer.history[0].before.map((snapshot) => snapshot.deleted)).toEqual([false, false]);
-    expect(renderer.history[0].after.map((snapshot) => snapshot.deleted)).toEqual([true, true]);
+    expect(renderer.historyStack.items).toHaveLength(1);
+    expect(renderer.historyStack.items[0].before.map((snapshot) => snapshot.deleted)).toEqual([false, false]);
+    expect(renderer.historyStack.items[0].after.map((snapshot) => snapshot.deleted)).toEqual([true, true]);
     expect(renderer.dirty).toBe(true);
     expect(renderer.eraseHitIds.size).toBe(0);
   });
@@ -1683,8 +1678,8 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
     expect(renderer.eraseAt([100, 50])).toEqual([11]);
     renderer.finishInteraction();
 
-    expect(renderer.history).toHaveLength(1);
-    expect(renderer.history[0].after.map((snapshot) => snapshot.deleted)).toEqual([true]);
+    expect(renderer.historyStack.items).toHaveLength(1);
+    expect(renderer.historyStack.items[0].after.map((snapshot) => snapshot.deleted)).toEqual([true]);
   });
 
   it("does not erase when the swept path misses the ink", () => {
@@ -1697,7 +1692,7 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
     renderer.finishInteraction();
 
     expect(stroke.deleted).toBe(false);
-    expect(renderer.history).toHaveLength(0);
+    expect(renderer.historyStack.items).toHaveLength(0);
   });
 
   it("keeps the board untouched when the click hits no ink", () => {
@@ -1710,7 +1705,7 @@ describe("pin-board eraser, clipboard payload and layer counts", () => {
 
     renderer.finishInteraction();
 
-    expect(renderer.history).toHaveLength(0);
+    expect(renderer.historyStack.items).toHaveLength(0);
     expect(renderer.dirty).toBe(false);
     expect(renderer.dragMode).toBeNull();
   });
@@ -1794,7 +1789,7 @@ describe("pin-board ink hit dispatch", () => {
       images,
       imageById: new Map(images.map((image) => [image.itemId, image])),
       visibleImages: images,
-      strokeGeometries: new Map(geometries.map((geometry) => [geometry.itemId, geometry])),
+      strokes: seededStrokeLayer(geometries),
       viewport: { centerX: 50, centerY: 50, height: 100 },
       cssHeight: 100,
     }) as unknown as {
@@ -1881,8 +1876,6 @@ describe("pin-board text inline editing", () => {
       imageById: new Map(images.map((image) => [image.itemId, image])),
       selectedIds: new Set(images.map((image) => image.itemId)),
       savedTextSignatures: new Map(images.map((image) => [image.itemId, pinBoardTextSignature(image)])),
-      history: [],
-      historyIndex: 0,
       savedStateKey: "",
       dirty: false,
       autosaveTimer: null,
@@ -1934,7 +1927,9 @@ describe("pin-board text inline editing", () => {
       image.points[1][0] - image.points[0][0],
       image.points[1][1] - image.points[0][1],
     )).toBeCloseTo(80, 10);
-    const history = (renderer as unknown as { history: { before: unknown[]; after: unknown[] }[] }).history;
+    const history = (renderer as unknown as {
+      historyStack: { items: readonly { before: unknown[]; after: unknown[] }[] };
+    }).historyStack.items;
     expect(history).toHaveLength(1);
     expect(history[0].before[0]).toMatchObject({ itemId: 7, text: expect.objectContaining({ text: "ab" }) });
     expect(history[0].after[0]).toMatchObject({ itemId: 7, text: expect.objectContaining({ text: "abcd" }) });
@@ -1951,7 +1946,9 @@ describe("pin-board text inline editing", () => {
 
     expect(image.text).toBe("ab");
     expect(renderer.interactionState.textEditing).toBeNull();
-    expect((renderer as unknown as { history: unknown[] }).history).toHaveLength(0);
+    expect((renderer as unknown as {
+      historyStack: { items: unknown[] };
+    }).historyStack.items).toHaveLength(0);
   });
 
   it("closes the session without touching the model when nothing changed", () => {
@@ -1963,7 +1960,9 @@ describe("pin-board text inline editing", () => {
 
     // 重建四边形会引入浮点误差：没有实际改动时不该写历史、也不该把条目记成已改。
     expect(image.points).toEqual([[10, 20], [50, 20], [50, 72], [10, 72]]);
-    expect((renderer as unknown as { history: unknown[] }).history).toHaveLength(0);
+    expect((renderer as unknown as {
+      historyStack: { items: unknown[] };
+    }).historyStack.items).toHaveLength(0);
     expect(renderer.interactionState.dirty).toBe(false);
     expect(renderer.interactionState.textEditing).toBeNull();
   });

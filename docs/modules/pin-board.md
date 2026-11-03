@@ -7,7 +7,7 @@
 - 画板列表与选择、保存与生命周期参与者：`usePinBoardController.ts`；导入（选择器/剪贴板/拖入）、导出、整画布导出、新建文字与笔迹落库队列：`usePinBoardTransfers.ts`
 - 后台结算队列与其展示状态：`pendingSettle.ts`、`usePendingSettle.ts`；两条保存路径共用的字段克隆与文字载荷构造：`savePayload.ts`
 - 侧栏拖放排序的纯函数（插到目标行前/后、无变化时返回 null）：`boardOrder.ts`
-- WebGPU/Canvas 渲染与编辑状态：`renderer.ts`；设备/管线/纹理上传与 DDS·RGBA 负载校验 `rendererGpu.ts`；绘制预览层 `strokePreview.ts`；整画布导出的目标纹理、行带回读与导出笔迹缓冲 `rendererExport.ts`
+- WebGPU/Canvas 渲染与编辑状态：`renderer.ts`（画板装载、指针/文字编辑状态机、绘制与保存结算）；不可变快照、脏标记与常规保存载荷 `boardSnapshot.ts`；撤销/重做栈 `historyStack.ts`；整板笔迹几何、世界折线缓存与屏幕缓冲 `strokeLayer.ts`；纹理淘汰顺序 `textureEviction.ts`；设备/管线/纹理上传与 DDS·RGBA 负载校验 `rendererGpu.ts`；绘制预览层 `strokePreview.ts`；整画布导出的目标纹理、行带回读与导出笔迹缓冲 `rendererExport.ts`
 - 纹理请求尺寸与两级缓存预算：`texturePolicy.ts`
 - 纯几何：`geometry.ts`
 - 选择判定（加选修饰键、框选命中）：`selection.ts`；笔迹的墨迹命中见 `strokeHit.ts`
@@ -22,7 +22,7 @@
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
 - 整画布导出的原生侧（会话表、行带校验、PNG 流式写盘、临时文件与原子改名）：`src-tauri/src/pin_board/canvas_export.rs`
-- 笔迹渲染的几何与缓冲构建（局部坐标、SDF 图元、LOD 抽稀、顶点布局）：`strokeRender.ts`，着色器与管线在 `rendererGpu.ts`
+- 笔迹渲染的几何与缓冲构建（局部坐标、SDF 图元、LOD 抽稀、顶点布局）：`strokeRender.ts`，着色器与管线在 `rendererGpu.ts`；屏幕用的整板缓冲生命周期在 `strokeLayer.ts`
 - 绘制交互的纯状态（工具枚举与快捷键、Shift 约束、草稿到包围盒/几何的编码）：`strokeDrawing.ts`；几何 BLOB 的编码与解析同住 `strokeGeometry.ts`
 - 标注工具的键位、界面名与显示顺序：`strokeDrawing.ts` 的 `PIN_BOARD_TOOL_META`，快捷键分发与标注工具条共用这一份
 - 整画布导出的口径（默认倍率、建议上限与硬上限、行带/分块布局的纯函数）：`exportPolicy.ts`
@@ -44,7 +44,7 @@
 
 整仓灾备按仓库目录递归复制全部普通文件，`artworks/<artwork-id>/boards/**/*.dds` 因此已在副本与 `manifest.json` 逐文件 SHA-256 清单之内，恢复后的仓库可直接打开并读取画板；文字与笔迹条目没有实体文件，随数据库一起进入备份。设置页的"仓库完整性"扫描已覆盖位图 DDS 的双向检查：逐条 `pin_board_bitmaps` 记录校验 DDS 存在、路径归属（`<item-id>.dds`）、DDS/DX10/BC7 头、声明尺寸与记录一致、数据长度与 BC7 解码，并统计无记录的孤儿 DDS；文字与笔迹条目没有 DDS，不进入这项检查。`pin_board_bitmaps` 无摘要列，故不比对 SHA-256。孤儿 DDS 同时进入 `cleanup::scan_unreferenced` 的报告与确认清理流程。只报告不自动修复。
 
-前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为控制器与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存状态、错误状态并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者，传输类样板（busy/进度/取消、导入导出、文字与笔迹队列）在 `usePinBoardTransfers.ts`；`PinBoardModule.tsx` 只做页面编排与快捷键，视图拆到 `PinBoardToolbar.tsx`、`PinBoardSidebar.tsx`、`PinBoardCanvasStage.tsx`、`PinBoardDialogs.tsx`、`PinBoardContextMenu.tsx`，`PinBoardRenderer` 只处理 GPU、画板装载与绘制（GPU 与导出的底层分别在 `rendererGpu.ts`、`rendererExport.ts`，绘制预览在 `strokePreview.ts`）。导入/导出的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。添加文字是一次瞬时命令、没有原生进度事件，因此不占传输进度条；成功后不写状态栏，失败原因同时写状态栏并回传给编辑框。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
+前端渲染器通过 revision 做保存冲突保护，纹理由 Rust 校验并按所需尺寸读取。前端分为控制器与纯渲染器两层：`usePinBoardController.ts` 持有画板列表与选择、保存状态、错误状态并注册 `preparePinBoardRuntimeChange` 使用的生命周期参与者，传输类样板（busy/进度/取消、导入导出、文字与笔迹队列）在 `usePinBoardTransfers.ts`；`PinBoardModule.tsx` 只做页面编排与快捷键，视图拆到 `PinBoardToolbar.tsx`、`PinBoardSidebar.tsx`、`PinBoardCanvasStage.tsx`、`PinBoardDialogs.tsx`、`PinBoardContextMenu.tsx`。`PinBoardRenderer` 仍持有画板装载、指针与文字编辑互斥状态、绘制与保存结算；无状态的快照/脏标记/保存载荷在 `boardSnapshot.ts`，撤销栈在 `historyStack.ts`，笔迹几何与屏幕缓冲在 `strokeLayer.ts`，纹理淘汰顺序在 `textureEviction.ts`，GPU 与导出的底层分别在 `rendererGpu.ts`、`rendererExport.ts`，绘制预览在 `strokePreview.ts`。导入/导出的进度经 `CommandContext` 广播 `AppEvent.operationProgress`（`domain = pinBoard`），不再使用 `Channel`；`Channel` 只保留给需要传输大块载荷的通道。添加文字是一次瞬时命令、没有原生进度事件，因此不占传输进度条；成功后不写状态栏，失败原因同时写状态栏并回传给编辑框。控制器统一使用共享 `useRequestEpoch` 做画板/作品切换的读取代次；不允许进代次的画板列表写回（新建、重命名、回收站、排序）在回填前比对作品 id，因此旧作品或旧画板的异步结果不会覆盖当前画板。设置契约 `PinBoardModuleSettings` 与其它边界类型一起放在 `types.ts`，控制器不再反向导入组件模块。
 
 模块入口位于 Artwork 工作区的一个标签页，**保持挂载**：切换工作区视图只暂停全局键盘交互与在途纹理任务，不释放 GPU 资源；重新激活后从当前视口继续补载。该标签页沿用 Client 的 keep-alive 语义，非活跃时只切换可见性（`visibility`）而不是用 `display:none`，使画布始终保有布局尺寸，渲染器首次创建即可按最小包围框完成视图适配（否则会在零尺寸画布上初始化并写入退化会话，重进时图片过小且跳过适配）。
 
@@ -466,7 +466,7 @@ SQLite:
 
 交互层（renderer、几何、纹理策略、会话、快捷键、画布交互）原样迁移，未重写。要点：
 
-- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `pin_board/dds/`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；Rust 结果缓存的键是「仓库根 + 画板 + 条目 + 请求长边」——切换仓库后画板与条目 id 会从头复用，键里少了仓库就会把上一个仓库的解码结果交给本仓库的条目；
+- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts`、`textureEviction.ts` 与 `pin_board/dds/`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；Rust 结果缓存的键是「仓库根 + 画板 + 条目 + 请求长边」——切换仓库后画板与条目 id 会从头复用，键里少了仓库就会把上一个仓库的解码结果交给本仓库的条目；
 - 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录（对应 DDS 的删除走 `pending_file_cleanup` 提交后重放，见上节）；
 - 编辑自动保存：设置页「自动保存」开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。
 - 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。
@@ -490,7 +490,7 @@ SQLite:
 
 ## 快速验证
 
-- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、文字就地编辑的有效字号换算/屏幕几何/草稿校验/文字签名/单会话一条撤销/纹理失效/只发送变化载荷/文字快照恢复/放置模式开框与取消/右键落点直接开框/新建文字载荷/点击位置落成光标/小字号自动放大、笔迹几何解析与批量载荷边界、笔迹缓冲构建与 LOD 抽稀/局部坐标映射/四种形状与箭头/逐段裁剪/接缝共用顶点与图元外扩含半个线宽、绘制工具状态机与 Shift 约束/包围盒编码/误点取消/超限抽稀/落库请求/画笔光标类名、橡皮与选择的墨迹命中几何（自由笔压感半径/镜像 uv/四种形状描边/箭头头部/包围盒预筛/缓存签名/扫掠擦除能命中两次采样之间的笔迹/框住空心形状不选中/细线最小容差/斜穿框选/几何未读回时退回包围框）与擦除状态机（一次拖拽一条撤销/空点不改状态/位图与隐藏层不参与）、复制载荷只记来源、图层计数口径、线宽滑条映射与往返一致/粗线端行程、采样管道的抽稀/向心插值/尖角/等距重采样/压感/taper/点数上限、开发期自检入口、图层可见性归一化与隐藏层取消选中/全选与包围盒排除/笔迹只在笔迹内部提前、图层面板的默认收起与展开收起、四个开关与每层条目数、主工具栏画笔栏按钮的点亮态与置灰、取色器十六进制/HSV 换算、整画布导出的默认倍率（1x 与建议上限取小、边距计入最长边）、手动倍率优先（超建议上限只标记不收敛）、硬上限收敛（含取整后不越像素上限）、行带与分块布局（含块顺序与最后一块余量）、导出通道的块循环与取消（含去行尾 padding）、导出计划排除删除/隐藏/缺失条目、导出期间工具切换不生效、controller 生命周期注册与进度事件（含可取消标记随事件保留）），不启动 Tauri；
+- `npm run test:pin-board`：素材板及其边界的确定性测试（几何、阵列、旋转吸附、加选框选、全选、会话隔离、快捷键、拖放排序、renderer 保活、不可变快照与保存载荷、撤销栈的合并/上限、纹理淘汰顺序、笔迹图层的几何缓存与缓冲生命周期、两级缓存、纹理尺寸/内存策略、前后端上限契约、文字度量/栅格化、文字就地编辑的有效字号换算/屏幕几何/草稿校验/文字签名/单会话一条撤销/纹理失效/只发送变化载荷/文字快照恢复/放置模式开框与取消/右键落点直接开框/新建文字载荷/点击位置落成光标/小字号自动放大、笔迹几何解析与批量载荷边界、笔迹缓冲构建与 LOD 抽稀/局部坐标映射/四种形状与箭头/逐段裁剪/接缝共用顶点与图元外扩含半个线宽、绘制工具状态机与 Shift 约束/包围盒编码/误点取消/超限抽稀/落库请求/画笔光标类名、橡皮与选择的墨迹命中几何（自由笔压感半径/镜像 uv/四种形状描边/箭头头部/包围盒预筛/缓存签名/扫掠擦除能命中两次采样之间的笔迹/框住空心形状不选中/细线最小容差/斜穿框选/几何未读回时退回包围框）与擦除状态机（一次拖拽一条撤销/空点不改状态/位图与隐藏层不参与）、复制载荷只记来源、图层计数口径、线宽滑条映射与往返一致/粗线端行程、采样管道的抽稀/向心插值/尖角/等距重采样/压感/taper/点数上限、开发期自检入口、图层可见性归一化与隐藏层取消选中/全选与包围盒排除/笔迹只在笔迹内部提前、图层面板的默认收起与展开收起、四个开关与每层条目数、主工具栏画笔栏按钮的点亮态与置灰、取色器十六进制/HSV 换算、整画布导出的默认倍率（1x 与建议上限取小、边距计入最长边）、手动倍率优先（超建议上限只标记不收敛）、硬上限收敛（含取整后不越像素上限）、行带与分块布局（含块顺序与最后一块余量）、导出通道的块循环与取消（含去行尾 padding）、导出计划排除删除/隐藏/缺失条目、导出期间工具切换不生效、controller 生命周期注册与进度事件（含可取消标记随事件保留）），不启动 Tauri；
 - **开发期自检入口**：`npm run dev` 下打开素材板，在 DevTools 控制台运行
   `__lilithPinBoardStrokeProbe({ strokes: 500, pointsPerStroke: 300 })`，会合成 N 笔数据并依次量
   「采样管道」「草稿 + 编码」「整板缓冲构建」的耗时，结果打 `console.table` 并返回同一份对象。

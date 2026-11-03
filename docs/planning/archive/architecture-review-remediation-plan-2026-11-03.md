@@ -1,10 +1,12 @@
 # 架构审查整改计划（2026-11-03）
 
-状态：**执行中**。B1、B2、B3、B4 已实施并通过自动化验证（B2 的菜单项与 B4 的仓储流程仍待
-维护者手工验收）；B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
+状态：**已实施并归档（2026-11-03）**。B1–B5 均已实施并通过自动化验证；B2 的菜单项、B4 的
+仓储流程与 B5 的画板流程仍需维护者手工复验，余项登记在 `../todo.md` 的「人工验收（剩余）」。
+本文件自此为历史记录，不再作为执行依据；有效契约以 `docs/architecture/`、`docs/modules/` 与
+`docs/guides/` 为准。
 
 2026-11-03 二次修订：已对照 Codex 复核意见调整范围与验收方式，并把工作项合并为 **5 个批次**。
-复核原文归档为 `archive/architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
+复核原文归档为同目录的 `architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
 部分采纳的结论见第 2 节。整改依据仍是 2026-11-03 的全量只读架构审查；审查未运行构建与
 测试，也未修改代码。
 
@@ -119,7 +121,7 @@
 - `docs/planning/archive/README.md`：补 `handoff-log-2026-10-09.md` 索引；核对索引与实际
   归档文件一一对应。
 - `docs/modules/history-and-backup.md`：删除 C9/C10“只有断言、没有实测记录”的已完成验收
-  残留；该结论已在 `archive/handoff-log-2026-10-25.md` 记录。
+  残留；该结论已在同目录的 `handoff-log-2026-10-25.md` 记录。
 - `docs/modules/pin-board.md`：`cleanup::scrub_board_dds` 改为
   `pin_board::scrub::scrub_board_dds`；补充 `create.rs` 也导出 `read_strokes`。
 - `docs/guides/release-policy.md`：CI 忽略清单补 `RUSTSEC-2026-0429`，与两个 workflow 对齐。
@@ -583,7 +585,7 @@
 - 删除空目录 `src-tauri/examples/`；其余仓库卫生项逐项确认。
 - 复核 `README.md`、`CONTRIBUTING.md`、`SECURITY.md` 与 `package.json`、`Cargo.toml` 一致。
 - `docs/planning/current-handoff.md` 与 `todo.md` 只保留当前状态与未完成事项；已完成的
-  工作项按项目规范移入 `archive/` 并更新索引。
+  工作项按项目规范移入本归档目录并更新索引。
 - `CHANGELOG.md` 按实际行为归类：纯重构不写成“新增功能”；有意行为修正单独说明。
 
 #### B5 验收
@@ -591,6 +593,76 @@
 - `npm run test:pin-board`、`npx tsc --noEmit`、`cargo test --lib` 通过。
 - 画板手工验收通过；文档链接可解析、归档索引无缺失；未决项都有归属。
 - 五处版本字段未变；没有新依赖；没有提交。
+
+#### B5 实施记录（2026-11-03）
+
+**B5.1 状态所有权**
+
+拆分前先把渲染器持有的状态按生命周期与变更理由列清；拆分后仍留在 `PinBoardRenderer` 的
+状态都有同一原因：它们与指针、视口或保存编排同帧变化。
+
+| 状态 | 所有者 | 说明 |
+| --- | --- | --- |
+| GPU 设备、管线、视口 uniform、设备丢失重建 | `renderer.ts` + `rendererGpu.ts` | 每个渲染器生命周期只创建一次；丢失后限流重建，期间暂停绘制与加载。 |
+| 纹理表、预算、在途预留、失败记录、质量上限 | `renderer.ts` | 淘汰顺序移到 `textureEviction.ts`；读取、绘制、导出共用同一组表。 |
+| 纹理淘汰顺序 | `textureEviction.ts` | 纯函数：受保护条目过滤后按「不可见 → 有缩略图 → 小图 → 最久未用」排序。 |
+| 画板装载/卸载、revision 账本、脏标记、保存与结算 | `renderer.ts` | 与 `pendingSettle` 队列、自动保存排程和状态广播同一条时序。 |
+| 不可变条目快照、脏状态串、常规保存载荷 | `boardSnapshot.ts` | 纯数据转换；切换快照的全量文字载荷仍由 `pendingSettle.ts` 自己构造。 |
+| 撤销/重做条目、合并窗口与上限 | `historyStack.ts` | 只保存快照对与游标，模型恢复仍由渲染器完成。 |
+| 笔迹几何、世界折线缓存、屏幕 GPU 缓冲 | `strokeLayer.ts` | 读取代次、超扫收集框与缓冲签名归这一层；整画布导出的独立缓冲仍在 `rendererExport.ts`。 |
+| 文字编辑会话、默认样式、按下判定 | `renderer.ts` | 与指针、选中、编辑框浮层互斥，拆出会传递宽泛可变状态。 |
+| 指针状态机、变换手柄、框选 | `renderer.ts` | 计划明确不拆；与浮层、文字编辑同一组互斥状态。 |
+| 整画布导出进行态 | `renderer.ts` + `rendererExport.ts` | 导出会暂停交互并复用纹理、文字编辑与笔迹几何，属于渲染器的一种模式。 |
+| 选中框/框选/占位层/绘制预览 DOM | `renderer.ts` + `strokePreview.ts` | 与 `draw + refreshViewport` 同帧更新，计划明确不拆。 |
+| 保存/退出结算的队列交接 | `pendingSettle.ts` | 已在 B2 拆分，渲染器只调用暂存、取回与 revision 账本。 |
+
+**B5.2 拆分候选（逐个决定）**
+
+- `boardSnapshot`：**拆分**为 `boardSnapshot.ts`。快照、恢复、脏状态串与常规保存载荷都是
+  纯数据转换，可直接单测；文字纹理失效由恢复函数返回「签名变化的条目 id」交给调用方。
+- `historyStack`：**拆分**为 `historyStack.ts`。撤销条目、游标、合并窗口与上限自成一体，
+  用注入时钟即可测试合并边界，不需要渲染器的条目或 GPU。
+- `strokeLayer`：**拆分**为 `strokeLayer.ts`。整板几何、世界折线缓存、超扫收集框、
+  屏幕顶点/索引/选中描边缓冲与读取代次合并为一个边界；屏幕绘制通过 `batch` 与
+  `outlineSlot` 取值，导出缓冲仍由 `rendererExport.ts` 独立构建。
+- `textureCache`：**部分拆分**为 `textureEviction.ts`。只把「先淘汰谁」的排序策略抽出并
+  直接测试；两张纹理表、预算、在途预留与加载循环仍留在渲染器，因为读取、绘制、导出与
+  设备重建都直接读写同一组表，拆出存储层会要求暴露映射表或增加一层访问器。
+- `textEditController`：**不拆**。编辑会话与指针按下、选中、编辑框浮层互斥，提交路径同时
+  触发快照、历史、脏标记与纹理重建；边界需要传递渲染器的大部分可变状态。
+- `boardIO`：**不拆**。保存与结算编排 revision 账本、脏标记、自动保存、状态广播与
+  `pendingSettle` 交接，单独拆出只会得到一层转发；现有行为测试已覆盖保存/结算时序。
+- `canvasExportRunner`：**不拆**。导出是渲染器的一种模式：暂停交互、复用纹理表与文字编辑、
+  构建独立笔迹缓冲、结束后恢复自动保存；没有不传递宽泛状态的独立接缝。
+- `interactionController`：**不拆**。计划明确不拆指针、浮层与文字编辑的互斥状态。
+
+**B5.3 收尾审计与仓库卫生**
+
+- `src-tauri/gen/schemas/`：保留并继续跟踪。受跟踪文件为 `acl-manifests.json`、
+  `capabilities.json`、`desktop-schema.json`、`windows-schema.json`；`capabilities/default.json`
+  的 `$schema` 直接引用 `../gen/schemas/desktop-schema.json`，这些文件由 Tauri CLI 在处理
+  capabilities 时的 `tauri dev` / `tauri build` 生成。没有依据「可能自动生成」而忽略或删除。
+- 删除空目录 `src-tauri/examples/`（未被 Git 跟踪，删除不影响构建）。
+- `README.md`、`CONTRIBUTING.md`、`SECURITY.md` 与 `package.json`、`src-tauri/Cargo.toml`
+  核对一致：版本同为 `0.3.0-beta.1`，Node 24 / 稳定 Rust / `npm run tauri -- dev` 与
+  `cargo fmt --check --manifest-path src-tauri/Cargo.toml` 等命令仍准确，无需改动。
+- 修正 B3 拆分后遗漏的契约测试路径：`texturePolicy.contract.test.ts` 读取
+  `pin_board/dds.rs` 改为 `pin_board/dds/mod.rs`。
+- `docs/planning/current-handoff.md` 与 `todo.md` 只保留当前状态；B5 的画板手工验收列入
+  `todo.md`，本文件追加实施记录，不另建重复的收尾清单。
+- `CHANGELOG.md`：在 `Unreleased` 的 Changed 下记一条内部结构变化，明确没有用户可见行为
+  变化；不写成新增功能。
+
+**验证与偏差**
+
+- `npx tsc --noEmit` 通过；`npm run test:pin-board` 30 个文件、312 项通过；`npm test` 全量
+  62 个文件、528 项通过。
+- `cargo fmt --check` 通过；`cargo test --lib` 447 项通过、1 项忽略。
+- 只改前端渲染器内部与测试；命令名、DTO 字段、仓库 schema、锁语义与五处版本字段未变；
+  没有新增依赖；未提交 Git。
+- 偏差：`textureCache` 只拆出淘汰策略，缓存存储仍随渲染器（理由见上）；`strokeLayer`
+  拆出后屏幕绘制/命中/擦除都经该层，整画布导出的独立缓冲没有搬入，避免把导出时序带进
+  屏幕层。
 
 ## 5. 每批次证据与退出条件
 

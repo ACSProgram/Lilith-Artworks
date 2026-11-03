@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { pinBoardApi } from "./api";
 import { normalizeLayerVisibility } from "./layers";
 import { PinBoardRenderer } from "./renderer";
+import { HistoryStack } from "./historyStack";
+import { StrokeLayer } from "./strokeLayer";
 import type { PinBoardItem } from "./types";
 
 /**
@@ -26,8 +28,7 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     visibleImages: [],
     visibleLayers: normalizeLayerVisibility(null),
     selectedIds: new Set(),
-    history: [],
-    historyIndex: 0,
+    historyStack: new HistoryStack(),
     locked: false,
     saving: false,
     dirty: false,
@@ -35,12 +36,7 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     viewport: { centerX: 0, centerY: 0, height: 1000 },
     cssHeight: 500,
     defaultWorldUnitsPerCssPixel: 1,
-    strokeGeometries: new Map(),
-    strokeOutlineIndex: new Map(),
-    strokeVersion: 0,
-    strokeSignature: "",
-    strokeLoadToken: 0,
-    strokeIndexCount: 0,
+    strokes: new StrokeLayer(),
     textureReservedBytes: 0,
     textureBudgetBytes: 256 * 1024 * 1024,
     exportDrawItems: [],

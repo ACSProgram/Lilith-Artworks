@@ -93,6 +93,15 @@ entries for the reader; they are not a template every entry has to fill.
   single-transaction implementations, and new rollback tests inject a failure in
   the middle of each transaction to prove that library, history, authenticity and
   cleanup rows are committed or rolled back together.
+- Internal front-end structure with no user-visible change: the pin-board
+  renderer's immutable snapshots and save payloads, undo/redo stack, stroke
+  geometry and screen buffers, and texture eviction order now live in
+  `boardSnapshot.ts`, `historyStack.ts`, `strokeLayer.ts` and
+  `textureEviction.ts`. The renderer keeps board loading, pointer and text-edit
+  state, drawing, and save/settlement orchestration; command names, DTO fields,
+  saved payloads and the two separate save contracts are unchanged. Tests for the
+  new boundaries are direct, and the stale texture-policy contract path was
+  pointed at `pin_board/dds/mod.rs`.
 - The library tree menu, the library's `新建` menu and the history node menu now
   all use the shared `ContextMenu` instead of three hand-written copies. They
   close on Escape, an outside click, any scroll and window resizing, stay inside
