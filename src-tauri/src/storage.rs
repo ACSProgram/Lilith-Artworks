@@ -1,12 +1,10 @@
 use std::{
     fs::File,
-    io::Read,
     path::{Component, Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use rusqlite::{Connection, OpenFlags};
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::platform::path::{
@@ -158,18 +156,8 @@ pub(crate) fn verify_file_sha256(
 ) -> Result<(), String> {
     validate_sha256(expected_sha256)?;
     let mut file = File::open(path).map_err(|error| format!("无法读取{label}：{error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("无法校验{label}：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = hex::encode_upper(hasher.finalize());
+    let actual = crate::digest::sha256_reader_without_cancel(&mut file)
+        .map_err(|error| format!("无法校验{label}：{error}"))?;
     if actual.eq_ignore_ascii_case(expected_sha256) {
         Ok(())
     } else {

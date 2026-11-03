@@ -1,22 +1,18 @@
 //! 认证领域的 Tauri 命令适配器。
 //!
-//! 这里只保留参数与路径授权校验、读取命令的薄适配和错误转换；发布、导出、估算与
-//! 质量预览的业务体在 use-case 与领域模块中。跨领域命令（进入/取消发布、删除记录）
-//! 在 `app/workflows.rs`。
+//! 这里只保留参数校验、文件选择器授权与错误转换；发布状态、记录搜索、各类预览以及
+//! 发布、导出、估算的业务体都在 `app/usecases/authenticity.rs` 与领域模块中。跨领域
+//! 命令（进入/取消发布、删除记录）在 `app/workflows.rs`。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
 use tauri::State;
 use tauri_plugin_fs::FsExt;
 
 use crate::{
-    app::{
-        command_runtime::{CommandError, OperationDomain},
-        usecases, OperationCoordinator,
-    },
+    app::{command_runtime::OperationDomain, usecases, OperationCoordinator},
     platform::path::display_path,
-    storage,
 };
 
 use super::{
@@ -26,7 +22,7 @@ use super::{
         ExportCertificationRecordRequest, FileSizeEstimate, PreviewImage, PreviewTileRequest,
         PreviewTileSource, PublicationPreview, PublicationPreviewRequest, StageImportRequest,
     },
-    preview, publication_repository, rendition, repository,
+    rendition,
     state::AuthenticityState,
 };
 
@@ -36,15 +32,11 @@ pub(crate) async fn get_branch_publication(
     coordinator: State<'_, OperationCoordinator>,
     authenticity_state: State<'_, AuthenticityState>,
 ) -> Result<BranchPublication, String> {
-    let models_ready = authenticity_state.model_files_ready();
-    let model_info = authenticity_state.model_info();
+    let state = authenticity_state.inner().clone();
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("get_branch_publication", |session| {
-                repository::get_publication(session.root(), &branch_id, models_ready, model_info)
-                    .map_err(CommandError::from)
-            })
+            usecases::authenticity::publication(context, &state, branch_id)
         })
         .await
         .map_err(String::from)
@@ -87,9 +79,7 @@ pub(crate) async fn search_certification_records(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("search_certification_records", |session| {
-                repository::search_records(session.root(), &query).map_err(CommandError::from)
-            })
+            usecases::authenticity::search_records(context, query)
         })
         .await
         .map_err(String::from)
@@ -105,11 +95,7 @@ pub(crate) async fn preview_authenticity_image(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("preview_authenticity_image", |session| {
-                let source = external_image_path(session.root(), &path, "预览图片")
-                    .map_err(CommandError::from)?;
-                preview::make_preview(source).map_err(CommandError::from)
-            })
+            usecases::authenticity::preview_external_image(context, path)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -164,13 +150,7 @@ pub(crate) async fn preview_branch_artifact(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("preview_branch_artifact", |session| {
-                let source =
-                    publication_repository::publication_target(session.root(), branch_id.trim())
-                        .map_err(CommandError::from)?
-                        .artifact_path;
-                preview::make_preview(PathBuf::from(source)).map_err(CommandError::from)
-            })
+            usecases::authenticity::preview_branch_artifact(context, branch_id)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -232,9 +212,7 @@ pub(crate) async fn preview_authenticity_tile(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("preview_authenticity_tile", |session| {
-                preview::preview_tile(session.root(), &request).map_err(CommandError::from)
-            })
+            usecases::authenticity::preview_tile(context, request)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -248,11 +226,7 @@ pub(crate) async fn preview_certification_record(
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Authenticity, move |context| {
-            context.run_read("preview_certification_record", |session| {
-                let source = repository::record_source_path(session.root(), record_id.trim())
-                    .map_err(CommandError::from)?;
-                preview::make_preview(source).map_err(CommandError::from)
-            })
+            usecases::authenticity::preview_certification_record(context, record_id)
         })
         .await
         .map_err(|error| AuthenticityError::Task(error.message))
@@ -292,19 +266,6 @@ pub(crate) async fn estimate_authenticity_output_size(
         .map_err(|error| AuthenticityError::Task(error.message))
 }
 
-fn external_image_path(root: &Path, value: &str, label: &str) -> AuthenticityResult<PathBuf> {
-    let path = PathBuf::from(value.trim());
-    if !path.is_file() {
-        return Err(AuthenticityError::InvalidInput(format!(
-            "{label}不存在或不是普通文件"
-        )));
-    }
-    let canonical = path.canonicalize()?;
-    storage::ensure_outside_repository(root, &canonical, label)
-        .map_err(AuthenticityError::InvalidInput)?;
-    Ok(canonical)
-}
-
 /// 路径授权来源。
 ///
 /// GUI 侧的实现是 Tauri 的 filesystem scope（`window.fs_scope()`）——它由原生文件
@@ -326,6 +287,8 @@ pub(crate) fn ensure_dialog_authorized(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// 显式授权的作用域替身：只有被列出的路径才算已授权，用于验证外部源局部

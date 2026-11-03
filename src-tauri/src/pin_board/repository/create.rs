@@ -2,12 +2,12 @@
 //!
 //! 三类条目共用 [`begin_item_mutation`] 预留步骤与 id、[`record_initial_state`] 写
 //! 初始历史、[`finish_item_mutation`] 收尾（推进 revision → 提交 → 让已写出的 DDS
-//! 生效）。载荷按 kind 分派到各自的子表，落位统一走 `arrange::imported_points`。
+//! 生效）。载荷按 kind 分派到各自的子表，落位统一走 `arrange::imported_points`；
+//! 粘贴源的解析与整组落位在 `clipboard.rs`，本文件只负责写入事务。
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 
 use super::super::arrange::{imported_points, MAX_GAP_RATIO};
 use super::super::contracts::{MAX_BOARD_ITEMS, MAX_CLIPBOARD_IMAGE_BYTES, MAX_IMPORT_FILES};
@@ -15,11 +15,10 @@ use super::super::dds;
 use super::super::stroke;
 use super::super::transfer::TRANSFER_CANCELLED;
 use super::boards::{bump_revision, discard_future_history, require_active_board};
+use super::clipboard::{resolve_clipboard_sources, translate_to_placement, ClipboardPayload};
 use super::load_view;
-use super::paths::canonical_item_dds;
 use super::view::{
-    current_states, effective_layer, ensure_revision, open_board_context, validate_editable,
-    validate_text_payload, ItemState, StrokePayload, TextPayload,
+    effective_layer, ensure_revision, open_board_context, validate_editable, validate_text_payload,
 };
 use super::{
     EditablePinBoardItem, ImageTransform, PinBoardClipboardItem, PinBoardView, FULL_UV,
@@ -254,198 +253,9 @@ fn finalize_bitmap_row(
     Ok(())
 }
 
-fn source_dds_path(
-    connection: &Connection,
-    root: &Path,
-    board_id: i64,
-    item_id: i64,
-) -> Result<PathBuf, String> {
-    let context = open_board_context(connection, root, board_id)?;
-    let file_path: Option<String> = connection
-        .query_row(
-            "SELECT b.file_path
-               FROM pin_board_items i
-               JOIN pin_board_bitmaps b ON b.item_id = i.id
-              WHERE i.id = ?1 AND i.board_id = ?2 AND i.kind = 0",
-            params![item_id, board_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(storage::database_error)?;
-    let file_path = file_path.ok_or("源图片不是位图条目")?;
-    canonical_item_dds(root, &context.directory, item_id, &file_path, "源 DDS 图片")
-}
-
 /// 阵列间距比例校验：上限与设置项、排列命令共用 `arrange::MAX_GAP_RATIO`。
 fn arrange_gap_ratio_is_valid(ratio: f64) -> bool {
     ratio.is_finite() && (0.0..=MAX_GAP_RATIO).contains(&ratio)
-}
-
-/// 一条已解析的粘贴源：三类条目共用「变换 + 载荷」形状，写入时按 `kind` 分派。
-enum ClipboardPayload {
-    Bitmap {
-        dds_bytes: Vec<u8>,
-        width: u32,
-        height: u32,
-    },
-    Text {
-        payload: TextPayload,
-        measured_width: f64,
-        measured_height: f64,
-    },
-    Stroke {
-        payload: StrokePayload,
-        width: f64,
-        height: f64,
-        geometry: Vec<u8>,
-    },
-}
-
-struct ClipboardSource {
-    kind: i64,
-    layer: u8,
-    points: [[f64; 2]; 4],
-    uv: [[f64; 2]; 4],
-    payload: ClipboardPayload,
-}
-
-fn clipboard_item_kind(kind: &str) -> Result<i64, String> {
-    match kind {
-        "bitmap" => Ok(ITEM_KIND_BITMAP),
-        "text" => Ok(ITEM_KIND_TEXT),
-        "stroke" => Ok(ITEM_KIND_STROKE),
-        other => Err(format!("未知的粘贴条目类型：{other}")),
-    }
-}
-
-/// 解析全部粘贴源。任何一条不合法都直接失败——粘贴要么整组成功，要么一条也不写。
-///
-/// 源条目一律读**当前步骤**的真实状态：前端的复制记录只是「哪一条」，不带尺寸与
-/// 变换；这样即使画板在复制后被其他窗口改过，粘进来的也是仓库里的事实。
-fn resolve_clipboard_sources(
-    connection: &Connection,
-    root: &Path,
-    items: &[PinBoardClipboardItem],
-) -> Result<Vec<ClipboardSource>, String> {
-    // 每个源画板只读一次上下文与状态：同一块画板里多选粘贴是常见情形。
-    let mut boards: HashMap<i64, HashMap<i64, ItemState>> = HashMap::new();
-    for item in items {
-        if boards.contains_key(&item.source_board_id) {
-            continue;
-        }
-        // 源画板不存在或已在回收站时在这里拒绝。
-        let context = open_board_context(connection, root, item.source_board_id)?;
-        let states = current_states(connection, item.source_board_id, context.now_step)?
-            .into_iter()
-            .collect::<HashMap<_, _>>();
-        boards.insert(item.source_board_id, states);
-    }
-
-    let mut sources = Vec::with_capacity(items.len());
-    for item in items {
-        let expected_kind = clipboard_item_kind(&item.kind)?;
-        let state = boards
-            .get(&item.source_board_id)
-            .and_then(|states| states.get(&item.source_item_id))
-            .ok_or_else(|| format!("源条目 {} 不存在", item.source_item_id))?;
-        if state.deleted {
-            return Err(format!("源条目 {} 已删除", item.source_item_id));
-        }
-        if state.kind != expected_kind {
-            return Err(format!(
-                "源条目 {} 的类型与复制记录不一致",
-                item.source_item_id
-            ));
-        }
-        let payload = match state.kind {
-            ITEM_KIND_BITMAP => {
-                let source =
-                    source_dds_path(connection, root, item.source_board_id, item.source_item_id)?;
-                let bytes = dds::read_limited(&source, dds::MAX_DDS_BYTES, "源 DDS 图片")?;
-                let (dds_bytes, width, height) = dds::prepare_dds_import(&bytes)?;
-                if dds::checked_pixel_count(width, height)
-                    .map_or(true, |pixels| pixels > dds::MAX_DDS_SOURCE_PIXELS)
-                {
-                    return Err("粘贴图片像素数超过限制".into());
-                }
-                ClipboardPayload::Bitmap {
-                    dds_bytes,
-                    width,
-                    height,
-                }
-            }
-            ITEM_KIND_TEXT => ClipboardPayload::Text {
-                payload: state
-                    .text
-                    .clone()
-                    .ok_or_else(|| format!("文字条目 {} 缺少载荷", item.source_item_id))?,
-                measured_width: state.width,
-                measured_height: state.height,
-            },
-            ITEM_KIND_STROKE => {
-                let payload = state
-                    .stroke
-                    .clone()
-                    .ok_or_else(|| format!("笔迹条目 {} 缺少载荷", item.source_item_id))?;
-                let geometry: Option<Vec<u8>> = connection
-                    .query_row(
-                        "SELECT geometry FROM pin_board_strokes WHERE item_id = ?1",
-                        [item.source_item_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                    .map_err(storage::database_error)?;
-                let geometry = geometry
-                    .ok_or_else(|| format!("笔迹条目 {} 缺少几何数据", item.source_item_id))?;
-                stroke::validate_geometry(&geometry).map_err(|error| {
-                    format!("笔迹条目 {} 的几何无效：{error}", item.source_item_id)
-                })?;
-                ClipboardPayload::Stroke {
-                    payload,
-                    width: state.width,
-                    height: state.height,
-                    geometry,
-                }
-            }
-            other => return Err(format!("未知画板条目类型：{other}")),
-        };
-        sources.push(ClipboardSource {
-            kind: state.kind,
-            layer: state.layer,
-            points: state.transform.points,
-            uv: state.transform.uv,
-            payload,
-        });
-    }
-    Ok(sources)
-}
-
-/// 把整组粘贴源平移，使外框中心落在放置点上。
-///
-/// **保持相对位置**而不是围绕放置点重排：复制粘贴的首要预期是「再来一份、相互位置
-/// 不变」；混合选择（图片 + 文字标注）若重排，会打散用户摆好的对齐关系。
-fn translate_to_placement(sources: &mut [ClipboardSource], center_x: f64, center_y: f64) {
-    if sources.is_empty() {
-        return;
-    }
-    let (mut min_x, mut min_y) = (f64::INFINITY, f64::INFINITY);
-    let (mut max_x, mut max_y) = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-    for source in sources.iter() {
-        for [x, y] in source.points {
-            min_x = min_x.min(x);
-            min_y = min_y.min(y);
-            max_x = max_x.max(x);
-            max_y = max_y.max(y);
-        }
-    }
-    if !min_x.is_finite() || !min_y.is_finite() || !max_x.is_finite() || !max_y.is_finite() {
-        return;
-    }
-    let delta_x = center_x - (min_x + max_x) / 2.0;
-    let delta_y = center_y - (min_y + max_y) / 2.0;
-    for source in sources.iter_mut() {
-        source.points = source.points.map(|[x, y]| [x + delta_x, y + delta_y]);
-    }
 }
 
 /// 画板内粘贴：位图、文字与笔迹走**一条命令、一次事务、一次 revision**。

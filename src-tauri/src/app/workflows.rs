@@ -12,26 +12,10 @@ use crate::{
     backup, history, library,
 };
 
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RepositoryScrubReport {
-    pub(crate) history_nodes: u64,
-    pub(crate) final_artifacts: u64,
-    pub(crate) certification_records: u64,
-    /// 检查的画板位图记录数；文字条目没有实体文件，不计入。
-    pub(crate) pin_board_bitmaps: u64,
-    /// 记录存在但 DDS 缺失。
-    pub(crate) pin_board_missing_dds: u64,
-    /// DDS 存在但校验失败（路径归属、头、尺寸、长度或解码）。
-    pub(crate) pin_board_corrupt_dds: u64,
-    /// 磁盘上存在但无记录的孤儿 DDS。
-    pub(crate) pin_board_orphan_dds: u64,
-}
-
 #[tauri::command]
 pub(crate) async fn scrub_repository_integrity(
     coordinator: State<'_, OperationCoordinator>,
-) -> Result<RepositoryScrubReport, String> {
+) -> Result<usecases::backup::RepositoryScrubReport, String> {
     let coordinator = coordinator.inner().clone();
     coordinator
         .spawn(OperationDomain::Maintenance, |context| {

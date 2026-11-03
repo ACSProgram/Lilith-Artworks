@@ -12,7 +12,6 @@ use crate::{
 pub(crate) fn repository_status(
     context: &CommandContext,
 ) -> Result<RepositoryStatus, CommandError> {
-    let app_state = context.app_state();
     let Some(root) = context.repository_path()? else {
         return Ok(RepositoryStatus {
             configured: false,
@@ -23,7 +22,11 @@ pub(crate) fn repository_status(
         });
     };
     let database = library::database_path(&root);
-    match app_state.ready_repository_path() {
+    // 就绪校验会打开/检查数据库，放到共享读租约里执行；未就绪仍返回状态对象，
+    // 只是把错误放进 `error`，命令本身不失败。
+    match context.run_read("repository_status", |session| {
+        Ok(session.root().to_path_buf())
+    }) {
         Ok(ready_root) => Ok(RepositoryStatus {
             configured: true,
             ready: true,
@@ -36,7 +39,7 @@ pub(crate) fn repository_status(
             ready: false,
             root_path: root.to_string_lossy().into_owned(),
             database_path: database.to_string_lossy().into_owned(),
-            error: Some(error),
+            error: Some(error.message),
         }),
     }
 }

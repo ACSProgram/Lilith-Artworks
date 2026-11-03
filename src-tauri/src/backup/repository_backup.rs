@@ -1,18 +1,18 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
 };
 
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::{
     cancel::CancelToken,
     contracts::{BackupVerificationMode, RepositoryIntegrityProvider},
+    digest,
     platform::path::display_path,
     repository_lock, storage,
 };
@@ -22,9 +22,6 @@ const BACKUP_FORMAT_VERSION: u32 = 2;
 const MANIFEST_NAME: &str = "manifest.json";
 const REPOSITORY_DIRECTORY: &str = "repository";
 const COPY_BUFFER_SIZE: usize = 256 * 1024;
-/// 发布前抽样复核的采样宽度：首、尾各 64 KiB。复制阶段仍计算完整摘要并写入
-/// manifest；采样只决定发布前重读多少字节。
-const SAMPLE_BYTES: u64 = 64 * 1024;
 /// 未发布暂存目录的命名：`<STAGING_PREFIX><32 位十六进制 backup_id><STAGING_SUFFIX>`。
 /// 前缀 + 后缀 + 定长十六进制 id 足够特异，顶层扫描的误删风险仅限于同名碰撞。
 const STAGING_PREFIX: &str = ".lilith-artworks-";
@@ -100,7 +97,7 @@ impl FileDigests {
     /// 重新完整读取一个文件（只用于副本校验会改写的数据库主文件）。
     fn compute(path: &Path, cancel: &CancelToken) -> Result<Self, String> {
         let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
-        let mut accumulator = DigestAccumulator::new();
+        let mut accumulator = digest::SamplingDigest::new();
         let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
         let mut bytes = 0_u64;
         loop {
@@ -114,58 +111,12 @@ impl FileDigests {
             accumulator.update(&buffer[..read]);
             bytes = bytes.saturating_add(read as u64);
         }
-        Ok(accumulator.finish(bytes))
-    }
-}
-
-/// 一次顺序读取同时累计完整 SHA-256 与首尾各 64 KiB 的抽样输入。
-struct DigestAccumulator {
-    full: Sha256,
-    head: Vec<u8>,
-    tail: Vec<u8>,
-}
-
-impl DigestAccumulator {
-    fn new() -> Self {
-        Self {
-            full: Sha256::new(),
-            head: Vec::with_capacity(SAMPLE_BYTES as usize),
-            tail: Vec::with_capacity(SAMPLE_BYTES as usize * 2),
-        }
-    }
-
-    fn update(&mut self, bytes: &[u8]) {
-        self.full.update(bytes);
-        if self.head.len() < SAMPLE_BYTES as usize {
-            let take = (SAMPLE_BYTES as usize - self.head.len()).min(bytes.len());
-            self.head.extend_from_slice(&bytes[..take]);
-        }
-        self.tail.extend_from_slice(bytes);
-        if self.tail.len() > SAMPLE_BYTES as usize * 2 {
-            let excess = self.tail.len() - SAMPLE_BYTES as usize;
-            self.tail.drain(..excess);
-        }
-    }
-
-    fn finish(mut self, bytes: u64) -> FileDigests {
-        // 不超过一个采样宽度的文件整份作为采样；更大的文件取首 64 KiB 与尾
-        // 64 KiB（两者允许重叠），只用于发布前快速复核。
-        let tail_len = if bytes > SAMPLE_BYTES {
-            SAMPLE_BYTES as usize
-        } else {
-            0
-        };
-        if self.tail.len() > tail_len {
-            self.tail.drain(..self.tail.len() - tail_len);
-        }
-        let mut sample = Sha256::new();
-        sample.update(&self.head);
-        sample.update(&self.tail);
-        FileDigests {
+        let (sha256, sample_sha256) = accumulator.finish(bytes);
+        Ok(FileDigests {
             bytes,
-            sha256: hex::encode_upper(self.full.finalize()),
-            sample_sha256: hex::encode_upper(sample.finalize()),
-        }
+            sha256,
+            sample_sha256,
+        })
     }
 }
 
@@ -602,7 +553,7 @@ fn copy_file_stable(
         .open(target)
         .map_err(|error| format!("无法创建备份文件：{error}"))?;
     let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
-    let mut digests = DigestAccumulator::new();
+    let mut digests = digest::SamplingDigest::new();
     let mut copied = 0_u64;
     loop {
         ensure_not_cancelled(cancel)?;
@@ -631,7 +582,12 @@ fn copy_file_stable(
     {
         return Err("仓库文件在备份期间发生变化，本次操作已取消".into());
     }
-    Ok(digests.finish(copied))
+    let (sha256, sample_sha256) = digests.finish(copied);
+    Ok(FileDigests {
+        bytes: copied,
+        sha256,
+        sample_sha256,
+    })
 }
 
 fn remove_database_sidecars(root: &Path) -> Result<(), String> {
@@ -647,22 +603,13 @@ fn remove_database_sidecars(root: &Path) -> Result<(), String> {
 
 fn sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = vec![0_u8; COPY_BUFFER_SIZE];
-    loop {
-        ensure_not_cancelled(cancel)?;
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("无法校验备份文件：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode_upper(hasher.finalize()))
+    digest::sha256_reader(&mut file, || cancel.is_cancelled()).map_err(|error| match error {
+        digest::DigestError::Io(error) => format!("无法校验备份文件：{error}"),
+        digest::DigestError::Cancelled => "备份操作已取消".into(),
+    })
 }
 
-/// 只重读首尾各 64 KiB 的抽样摘要，口径与复制阶段的 `DigestAccumulator` 一致。
+/// 只重读首尾各 64 KiB 的抽样摘要，口径与复制阶段的 [`digest::SamplingDigest`] 一致。
 fn sample_sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, String> {
     ensure_not_cancelled(cancel)?;
     let bytes = path
@@ -670,22 +617,10 @@ fn sample_sha256_file(path: &Path, cancel: &CancelToken) -> Result<String, Strin
         .map_err(|error| format!("无法读取备份文件属性：{error}"))?
         .len();
     let mut file = File::open(path).map_err(|error| format!("无法读取备份文件：{error}"))?;
-    let head_len = bytes.min(SAMPLE_BYTES) as usize;
-    let mut head = vec![0_u8; head_len];
-    file.read_exact(&mut head)
+    let (head, tail) = digest::read_sample(&mut file, bytes)
         .map_err(|error| format!("无法校验备份文件：{error}"))?;
-    let mut hasher = Sha256::new();
-    hasher.update(&head);
-    if bytes > SAMPLE_BYTES {
-        ensure_not_cancelled(cancel)?;
-        file.seek(SeekFrom::Start(bytes - SAMPLE_BYTES))
-            .map_err(|error| format!("无法校验备份文件：{error}"))?;
-        let mut tail = vec![0_u8; SAMPLE_BYTES as usize];
-        file.read_exact(&mut tail)
-            .map_err(|error| format!("无法校验备份文件：{error}"))?;
-        hasher.update(&tail);
-    }
-    Ok(hex::encode_upper(hasher.finalize()))
+    ensure_not_cancelled(cancel)?;
+    Ok(digest::sample_sha256(&head, &tail))
 }
 
 fn write_manifest(bundle: &Path, manifest: &RepositoryBackupManifest) -> Result<(), String> {
@@ -1062,7 +997,9 @@ mod tests {
         let entry = manifest
             .files
             .iter()
-            .find(|file| file.bytes > SAMPLE_BYTES * 2 && file.path != storage::DATABASE_NAME)
+            .find(|file| {
+                file.bytes > digest::SAMPLE_BYTES * 2 && file.path != storage::DATABASE_NAME
+            })
             .expect("快照文件应大于两个采样宽度");
         let path = storage::resolve_path(&bundle.join(REPOSITORY_DIRECTORY), &entry.path).unwrap();
 

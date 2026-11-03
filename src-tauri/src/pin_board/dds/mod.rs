@@ -1,21 +1,21 @@
-//! 素材板 DDS/BC7 图像处理与纹理读取缓存。
+//! 素材板 DDS/BC7 图像处理、纹理读取缓存与原子落盘。
 //!
 //! 图像格式逻辑自 Lilith Client 素材板模块原样迁移：导入归一化、DDS 头校验、
-//! BC7 解码预览与纹理结果缓存。存储路径与数据库访问由 `repository/`
-//! 与 `mod.rs` 负责。
+//! BC7 解码预览与纹理结果缓存。存储路径与数据库访问由 `pin_board/repository/`
+//! 与 `pin_board/mod.rs` 负责。
+//!
+//! 按变化原因拆成子模块：`cache` 管进程内纹理结果缓存与预算，`file` 管临时文件
+//! 与失败回滚；编解码与校验留在本模块。
 
-use std::{
-    collections::HashMap,
-    fs,
-    io::{Cursor, Write},
-    path::{Path, PathBuf},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Mutex, OnceLock,
-    },
+use std::{fs, io::Cursor, path::Path};
+
+mod cache;
+mod file;
+
+pub(crate) use cache::{
+    texture_cache_budget_bytes, texture_cache_get, texture_cache_store, TextureCacheKey,
 };
-
-use tempfile::NamedTempFile;
+pub(crate) use file::{persist_dds_file, CreatedFiles};
 
 pub(crate) const MAX_DDS_BYTES: u64 = 256 * 1024 * 1024;
 pub(crate) const MAX_TEXTURE_DIMENSION: u32 = 8192;
@@ -28,110 +28,6 @@ pub(crate) const DDS_DX10_HEADER_BYTES: usize = 148;
 pub(crate) const MAX_IMAGE_PIXELS: u64 = 64_000_000;
 pub(crate) const MAX_RGBA_PREVIEW_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const RGBA_BYTES_PER_PIXEL: u64 = 4;
-/// 纹理读取结果 LRU 缓存预算。大图（上亿像素）每次请求都要重新解码全部
-/// BC7 块，成本与目标尺寸几乎无关；缓存按 (仓库根, 画板, 条目, 请求长边) 保存
-/// 解码结果，滑动回来或重复请求同一尺寸时直接复用，避免反复等待。
-/// 预算由配置的缓存等级决定，默认中等（128 MiB）。
-pub(crate) const TEXTURE_CACHE_DEFAULT_BUDGET_BYTES: u64 = 128 * 1024 * 1024;
-
-/// 素材板纹理缓存等级对应的 Rust 解码结果缓存预算（前端 GPU 缓存等级见
-/// `texturePolicy.ts` 的 `textureBudgetsForLevel`）。低 64 / 中 128 / 高 256 MiB。
-pub(crate) fn texture_cache_budget_bytes(level: &str) -> u64 {
-    match level {
-        "low" => 64 * 1024 * 1024,
-        "high" => 256 * 1024 * 1024,
-        _ => TEXTURE_CACHE_DEFAULT_BUDGET_BYTES,
-    }
-}
-
-pub(crate) struct TextureCacheEntry {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) last_used: u64,
-}
-
-/// 纹理结果缓存的键。仓库根参与键——切换仓库后画板与条目 id 会从头复用，只按
-/// (画板, 条目, 请求长边) 命中会把上一个仓库的解码结果当成本仓库的。字段各自具名，
-/// 调用处因此不会把画板 id 与条目 id 写反；根路径按 `PathBuf` 原样比较，不做
-/// 有损字符串转换。
-#[derive(Clone, PartialEq, Eq, Hash)]
-pub(crate) struct TextureCacheKey {
-    root: PathBuf,
-    board_id: i64,
-    item_id: i64,
-    max_dimension: u32,
-}
-
-impl TextureCacheKey {
-    pub(crate) fn new(root: &Path, board_id: i64, item_id: i64, max_dimension: u32) -> Self {
-        Self {
-            root: root.to_path_buf(),
-            board_id,
-            item_id,
-            max_dimension,
-        }
-    }
-}
-
-static TEXTURE_CACHE: OnceLock<Mutex<HashMap<TextureCacheKey, TextureCacheEntry>>> =
-    OnceLock::new();
-static TEXTURE_CACHE_CLOCK: AtomicU64 = AtomicU64::new(1);
-
-fn texture_cache_tick() -> u64 {
-    TEXTURE_CACHE_CLOCK.fetch_add(1, Ordering::Relaxed)
-}
-
-pub(crate) fn texture_cache_get(key: &TextureCacheKey) -> Option<Vec<u8>> {
-    let cache = TEXTURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    match cache.get_mut(key) {
-        Some(entry) => {
-            entry.last_used = texture_cache_tick();
-            Some(entry.bytes.clone())
-        }
-        None => None,
-    }
-}
-
-pub(crate) fn texture_cache_store(key: TextureCacheKey, bytes: Vec<u8>, budget_bytes: u64) {
-    let cache = TEXTURE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    cache.insert(
-        key,
-        TextureCacheEntry {
-            bytes,
-            last_used: texture_cache_tick(),
-        },
-    );
-    texture_cache_evict(&mut cache, budget_bytes);
-}
-
-fn texture_cache_evict(cache: &mut HashMap<TextureCacheKey, TextureCacheEntry>, budget_bytes: u64) {
-    let total: u64 = cache.values().map(|entry| entry.bytes.len() as u64).sum();
-    if total <= budget_bytes {
-        return;
-    }
-    // 预算超限时按最久未使用逐个淘汰（条目数受预算约束，线性扫描可接受）。
-    while cache.len() > 1 {
-        let total: u64 = cache.values().map(|entry| entry.bytes.len() as u64).sum();
-        if total <= budget_bytes {
-            break;
-        }
-        let victim = cache
-            .iter()
-            .min_by_key(|(_, entry)| entry.last_used)
-            .map(|(key, _)| key.clone());
-        match victim {
-            Some(key) => {
-                cache.remove(&key);
-            }
-            None => break,
-        }
-    }
-}
 
 pub(crate) fn read_limited(path: &Path, limit: u64, kind: &str) -> Result<Vec<u8>, String> {
     let metadata = fs::metadata(path).map_err(|error| format!("无法读取{kind}信息：{error}"))?;
@@ -514,149 +410,11 @@ pub(crate) fn prepare_dds_import(bytes: &[u8]) -> Result<(Vec<u8>, u32, u32), St
     Ok((encode_bc7_dds(&image)?, width, height))
 }
 
-#[derive(Default)]
-pub(crate) struct CreatedFiles {
-    paths: Vec<std::path::PathBuf>,
-    committed: bool,
-}
-
-impl CreatedFiles {
-    pub(crate) fn push(&mut self, path: std::path::PathBuf) {
-        self.paths.push(path);
-    }
-
-    pub(crate) fn commit(&mut self) {
-        self.committed = true;
-    }
-}
-
-impl Drop for CreatedFiles {
-    fn drop(&mut self) {
-        if self.committed {
-            return;
-        }
-        for path in &self.paths {
-            let _ = fs::remove_file(path);
-        }
-    }
-}
-
-pub(crate) fn persist_dds_file(destination: &Path, bytes: &[u8], kind: &str) -> Result<(), String> {
-    let parent = destination.parent().ok_or("DDS 保存路径无效")?;
-    // 画板目录可能缺失（例如仓库数据迁移后目录未随行），先补建再落临时文件，
-    // 否则 NamedTempFile 会因父目录不存在（os error 3）直接失败。
-    fs::create_dir_all(parent).map_err(|error| format!("无法创建画板图片目录：{error}"))?;
-    let mut temporary = NamedTempFile::new_in(parent)
-        .map_err(|error| format!("无法创建{kind}临时文件：{error}"))?;
-    temporary
-        .write_all(bytes)
-        .map_err(|error| format!("无法写入{kind}：{error}"))?;
-    temporary
-        .as_file()
-        .sync_all()
-        .map_err(|error| format!("无法同步{kind}：{error}"))?;
-    temporary
-        .persist(destination)
-        .map_err(|error| format!("无法保存{kind}：{}", error.error))?;
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     use crate::fuzz_support::{mutated, mutated_header, random_bytes};
-
-    fn cache_key(root: &str, board_id: i64, item_id: i64, max_dimension: u32) -> TextureCacheKey {
-        TextureCacheKey::new(Path::new(root), board_id, item_id, max_dimension)
-    }
-
-    #[test]
-    fn evicts_oldest_texture_cache_entries_first() {
-        let mut cache: HashMap<TextureCacheKey, TextureCacheEntry> = HashMap::new();
-        let mut tick = 0u64;
-        let mut insert =
-            |key: TextureCacheKey,
-             bytes: usize,
-             budget_bytes: u64,
-             cache: &mut HashMap<TextureCacheKey, TextureCacheEntry>| {
-                tick += 1;
-                cache.insert(
-                    key,
-                    TextureCacheEntry {
-                        bytes: vec![0; bytes],
-                        last_used: tick,
-                    },
-                );
-                texture_cache_evict(cache, budget_bytes);
-            };
-
-        let budget = 96 * 1024 * 1024;
-        insert(
-            cache_key("root-a", 1, 1, 256),
-            40 * 1024 * 1024,
-            budget,
-            &mut cache,
-        );
-        insert(
-            cache_key("root-a", 1, 2, 256),
-            40 * 1024 * 1024,
-            budget,
-            &mut cache,
-        );
-        insert(
-            cache_key("root-a", 1, 3, 256),
-            40 * 1024 * 1024,
-            budget,
-            &mut cache,
-        );
-
-        // 120 MiB 超过 96 MiB 预算：淘汰最久未使用的一条（40 MiB）后回到预算内。
-        assert!(cache.contains_key(&cache_key("root-a", 1, 3, 256)));
-        assert!(cache.contains_key(&cache_key("root-a", 1, 2, 256)));
-        assert!(!cache.contains_key(&cache_key("root-a", 1, 1, 256)));
-    }
-
-    #[test]
-    fn texture_cache_round_trips_payloads() {
-        texture_cache_store(
-            cache_key("root-a", 7, 3, 256),
-            vec![1, 2, 3, 4],
-            96 * 1024 * 1024,
-        );
-        assert_eq!(
-            texture_cache_get(&cache_key("root-a", 7, 3, 256)),
-            Some(vec![1, 2, 3, 4])
-        );
-        assert_eq!(texture_cache_get(&cache_key("root-a", 7, 4, 256)), None);
-    }
-
-    #[test]
-    fn texture_cache_separates_repository_roots() {
-        // 切仓库后画板与条目 id 会复用：同一 (board, item, dim) 在另一个仓库必须
-        // 不命中，否则会读到上一个仓库的解码结果。
-        texture_cache_store(
-            cache_key("root-a", 7, 3, 256),
-            vec![1, 2, 3, 4],
-            96 * 1024 * 1024,
-        );
-        assert_eq!(texture_cache_get(&cache_key("root-b", 7, 3, 256)), None);
-        assert_eq!(
-            texture_cache_get(&cache_key("root-a", 7, 3, 256)),
-            Some(vec![1, 2, 3, 4])
-        );
-    }
-
-    #[test]
-    fn texture_cache_budget_follows_cache_level() {
-        assert_eq!(texture_cache_budget_bytes("low"), 64 * 1024 * 1024);
-        assert_eq!(texture_cache_budget_bytes("medium"), 128 * 1024 * 1024);
-        assert_eq!(texture_cache_budget_bytes("high"), 256 * 1024 * 1024);
-        assert_eq!(
-            texture_cache_budget_bytes(""),
-            TEXTURE_CACHE_DEFAULT_BUDGET_BYTES
-        );
-    }
 
     #[test]
     fn reads_bc7_dds_dimensions() {
@@ -728,16 +486,6 @@ mod tests {
         assert_eq!(u32::from_le_bytes(preview[4..8].try_into().unwrap()), 4);
         assert_eq!(u32::from_le_bytes(preview[8..12].try_into().unwrap()), 4);
         assert_eq!(preview.len(), 12 + 4 * 4 * 4);
-    }
-
-    #[test]
-    fn persists_dds_file_into_a_missing_board_directory() {
-        let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("boards").join("2").join("image.dds");
-
-        persist_dds_file(&destination, b"dds-bytes", "剪贴板 DDS 图片").unwrap();
-
-        assert_eq!(fs::read(&destination).unwrap(), b"dds-bytes");
     }
 
     /// 构造一个合法的 BC7 DDS：`edge × edge`、确定性内容。

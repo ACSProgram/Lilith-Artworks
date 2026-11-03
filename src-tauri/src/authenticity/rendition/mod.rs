@@ -3,53 +3,30 @@
 //! 质量预览与签名发布共用这里的缓存令牌、缓存校验和渲染步骤；两者的差异（预览
 //! 需要额外缩略图、发布需要裁剪声明字段）留在各自入口，不在本模块里分叉。
 //! 本模块不读写数据库，也不负责 C2PA 签名。
+//!
+//! 按变化原因拆成子模块：`cache` 管会话目录、缓存校验与淘汰，`render` 管渲染与
+//! JPEG 编码；配置归一化与图片工具留在本模块。
 
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::{Path, PathBuf},
-    sync::OnceLock,
-    time::{Instant, SystemTime},
-};
+use std::{path::Path, time::Instant};
 
-use image::{codecs::jpeg::JpegEncoder, DynamicImage, GenericImageView, Rgb, RgbImage};
-use serde::{Deserialize, Serialize};
+use image::{DynamicImage, GenericImageView, Rgb, RgbImage};
 use sha2::{Digest, Sha256};
-use tempfile::NamedTempFile;
-
-use crate::storage;
 
 use super::{
     error::{AuthenticityError, AuthenticityResult},
-    file_ops::sha256_file_cancelable,
     image_resource,
     model::CertificationConfig,
     publication_repository::BranchPublicationTarget,
     state::{AuthenticityOperation, AuthenticityState},
     trustmark,
 };
+use cache::load_cached_rendition;
 
-static PREVIEW_CACHE_SESSION: OnceLock<String> = OnceLock::new();
+mod cache;
+mod render;
 
-/// 会话内预览缓存的份数上限。
-///
-/// 每换一次参数（JPEG 质量、背景色、水印强度、框选区域、水印 ID）就留下一份全尺寸
-/// JPEG 与一份元数据；常见调参会有十几次迭代，16 份足够来回比较几组参数，又不会
-/// 让一次会话堆出几十份预览。当前正在使用的那份总是最新的，因此天然落在保留区间。
-const PREVIEW_CACHE_MAX_ENTRIES: usize = 16;
-
-/// 会话内预览缓存的 JPEG 总字节上限（512 MiB）。
-///
-/// 普通画布单份缓存只有几 MB，份数上限通常先生效；这个上限兜住超大画布连续调参
-/// 的情况（16K 成品单份就可能上百 MB）。超限时继续从最旧的删，直到不超或只剩一份。
-/// 同名元数据 JSON 只有几百字节，不计入这里统计的总量。
-const PREVIEW_CACHE_MAX_BYTES: u64 = 512 * 1024 * 1024;
-
-/// 当前进程的预览缓存会话 id；本进程尚未写过任何质量预览缓存时为 `None`。
-/// 仓库临时目录清扫用它保留仍属于本进程的会话目录。
-pub(crate) fn preview_session_id() -> Option<&'static str> {
-    PREVIEW_CACHE_SESSION.get().map(String::as_str)
-}
+pub(crate) use cache::{cache_paths, preview_session_id, CachedRendition, RenditionCacheMetadata};
+pub(crate) use render::render_cached_rendition;
 
 /// 回填分支标识，并按选区决定是否启用 TrustMark。
 ///
@@ -143,218 +120,6 @@ pub(crate) fn rendition_cache_token(
         "watermarkId": watermark_id,
     }))?;
     Ok(hex::encode_upper(Sha256::digest(payload)))
-}
-
-fn preview_cache_directory(root: &Path) -> AuthenticityResult<PathBuf> {
-    let session = PREVIEW_CACHE_SESSION.get_or_init(storage::new_id);
-    let directory = root
-        .join("temp")
-        .join(format!("authenticity-preview-{session}"));
-    fs::create_dir_all(&directory)?;
-    Ok(directory)
-}
-
-pub(crate) fn cache_paths(root: &Path, token: &str) -> AuthenticityResult<(PathBuf, PathBuf)> {
-    let directory = preview_cache_directory(root)?;
-    Ok((
-        directory.join(format!("{token}.jpg")),
-        directory.join(format!("{token}.json")),
-    ))
-}
-
-#[derive(Deserialize, Serialize)]
-pub(crate) struct RenditionCacheMetadata {
-    pub(crate) token: String,
-    pub(crate) source_sha256: String,
-    pub(crate) jpeg_sha256: String,
-    pub(crate) watermark_id: Option<String>,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) output_bytes: u64,
-}
-
-pub(crate) struct CachedRendition {
-    pub(crate) path: PathBuf,
-    pub(crate) width: u32,
-    pub(crate) height: u32,
-    pub(crate) output_bytes: u64,
-    pub(crate) cache_hit: bool,
-    pub(crate) render_ms: u64,
-    pub(crate) encode_ms: u64,
-}
-
-fn load_cached_rendition(
-    root: &Path,
-    operation: &AuthenticityOperation,
-    token: &str,
-    source_sha256: &str,
-    watermark_id: Option<&str>,
-) -> AuthenticityResult<Option<CachedRendition>> {
-    let (jpeg_path, metadata_path) = cache_paths(root, token)?;
-    if !jpeg_path.is_file() || !metadata_path.is_file() {
-        return Ok(None);
-    }
-    let loaded = (|| -> AuthenticityResult<CachedRendition> {
-        ensure_not_cancelled(operation)?;
-        let metadata: RenditionCacheMetadata =
-            serde_json::from_reader(File::open(&metadata_path)?)?;
-        if metadata.token != token
-            || !metadata.source_sha256.eq_ignore_ascii_case(source_sha256)
-            || metadata.watermark_id.as_deref() != watermark_id
-            || metadata.output_bytes != fs::metadata(&jpeg_path)?.len()
-            || !sha256_file_cancelable(&jpeg_path, operation)?
-                .eq_ignore_ascii_case(&metadata.jpeg_sha256)
-        {
-            return Err(AuthenticityError::Task("发布预览缓存校验失败".into()));
-        }
-        let dimensions = image::ImageReader::open(&jpeg_path)?
-            .with_guessed_format()?
-            .into_dimensions()?;
-        if dimensions != (metadata.width, metadata.height) {
-            return Err(AuthenticityError::Task("发布预览缓存尺寸不匹配".into()));
-        }
-        Ok(CachedRendition {
-            path: jpeg_path.clone(),
-            width: metadata.width,
-            height: metadata.height,
-            output_bytes: metadata.output_bytes,
-            cache_hit: true,
-            render_ms: 0,
-            encode_ms: 0,
-        })
-    })();
-    match loaded {
-        Ok(cached) => Ok(Some(cached)),
-        Err(_) => {
-            let _ = fs::remove_file(jpeg_path);
-            let _ = fs::remove_file(metadata_path);
-            Ok(None)
-        }
-    }
-}
-
-pub(crate) fn render_cached_rendition(
-    root: &Path,
-    state: &AuthenticityState,
-    operation: &AuthenticityOperation,
-    source: DynamicImage,
-    config: &CertificationConfig,
-    watermark_id: Option<&str>,
-    token: &str,
-    source_sha256: &str,
-) -> AuthenticityResult<CachedRendition> {
-    ensure_not_cancelled(operation)?;
-    let (width, height) = source.dimensions();
-    let render_started = Instant::now();
-    let background = parse_background(&config.background_color)?;
-    let flattened = flatten_to_rgb(&source, background);
-    drop(source);
-    ensure_not_cancelled(operation)?;
-    let rendition = if let Some(identifier) = watermark_id {
-        trustmark::encode_regions(
-            state,
-            flattened,
-            identifier,
-            config.watermark_strength,
-            &config.additional_regions,
-        )?
-    } else {
-        flattened
-    };
-    auth_checkpoint(operation, "认证编码")?;
-    let render_ms = elapsed_ms(render_started);
-    let encode_started = Instant::now();
-    let (jpeg_path, metadata_path) = cache_paths(root, token)?;
-    let directory = jpeg_path
-        .parent()
-        .ok_or_else(|| AuthenticityError::Task("发布预览缓存目录无效".into()))?;
-    let mut encoded = NamedTempFile::new_in(directory)?;
-    JpegEncoder::new_with_quality(encoded.as_file_mut(), config.jpeg_quality)
-        .encode_image(&rendition)?;
-    drop(rendition);
-    ensure_not_cancelled(operation)?;
-    encoded.as_file_mut().flush()?;
-    encoded.as_file().sync_all()?;
-    let output_bytes = encoded.as_file().metadata()?.len();
-    let jpeg_sha256 = sha256_file_cancelable(encoded.path(), operation)?;
-    ensure_not_cancelled(operation)?;
-    replace_cache_file(encoded, &jpeg_path)?;
-    let metadata = RenditionCacheMetadata {
-        token: token.to_owned(),
-        source_sha256: source_sha256.to_owned(),
-        jpeg_sha256,
-        watermark_id: watermark_id.map(str::to_owned),
-        width,
-        height,
-        output_bytes,
-    };
-    let mut metadata_temp = NamedTempFile::new_in(directory)?;
-    serde_json::to_writer(metadata_temp.as_file_mut(), &metadata)?;
-    metadata_temp.as_file_mut().flush()?;
-    metadata_temp.as_file().sync_all()?;
-    replace_cache_file(metadata_temp, &metadata_path)?;
-    prune_preview_cache(directory);
-    Ok(CachedRendition {
-        path: jpeg_path,
-        width,
-        height,
-        output_bytes,
-        cache_hit: false,
-        render_ms,
-        encode_ms: elapsed_ms(encode_started),
-    })
-}
-
-fn replace_cache_file(temp: NamedTempFile, destination: &Path) -> AuthenticityResult<()> {
-    if destination.exists() {
-        fs::remove_file(destination)?;
-    }
-    temp.persist(destination)
-        .map_err(|error| AuthenticityError::Io(error.error))?;
-    Ok(())
-}
-
-/// 会话内缓存淘汰：按 JPEG 修改时间从旧到新，先删到只剩最近
-/// [`PREVIEW_CACHE_MAX_ENTRIES`] 份，再在 JPEG 总字节超过 [`PREVIEW_CACHE_MAX_BYTES`]
-/// 时继续删最旧的，直到不超或只剩一份。
-///
-/// 每次写入新的缓存对之后调用。删除成功与否都不影响预览与发布结果——缓存不是
-/// 正确性路径，失败静默忽略，最多让目录多留几份等下次淘汰或会话结束清扫。
-fn prune_preview_cache(directory: &Path) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
-    let mut cached = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("jpg") {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
-        cached.push((modified, metadata.len(), path));
-    }
-    let mut jpeg_bytes: u64 = cached.iter().map(|(_, bytes, _)| *bytes).sum();
-    if cached.len() <= PREVIEW_CACHE_MAX_ENTRIES && jpeg_bytes <= PREVIEW_CACHE_MAX_BYTES {
-        return;
-    }
-    cached.sort_by_key(|(modified, _, _)| *modified);
-    let mut remaining = cached.len();
-    for (_, bytes, jpeg_path) in cached {
-        // 至少留一份：正在使用的那份总是最新，走到这里只会剩下最旧的一份。
-        if remaining <= 1 {
-            break;
-        }
-        if remaining <= PREVIEW_CACHE_MAX_ENTRIES && jpeg_bytes <= PREVIEW_CACHE_MAX_BYTES {
-            break;
-        }
-        let _ = fs::remove_file(&jpeg_path);
-        let _ = fs::remove_file(jpeg_path.with_extension("json"));
-        jpeg_bytes = jpeg_bytes.saturating_sub(bytes);
-        remaining -= 1;
-    }
 }
 
 pub(crate) fn elapsed_ms(started: Instant) -> u64 {
@@ -570,36 +335,6 @@ mod tests {
             initial,
             rendition_cache_token(&source_sha256, &config, Some(&"0".repeat(40))).unwrap()
         );
-    }
-
-    #[test]
-    fn preview_cache_pruning_keeps_the_latest_entries_and_removes_metadata_pairs() {
-        let directory = tempfile::tempdir().unwrap();
-        let cache = directory.path().join("authenticity-preview-test");
-        fs::create_dir(&cache).unwrap();
-        for index in 0..20 {
-            let jpeg = cache.join(format!("{index:02}.jpg"));
-            let metadata = cache.join(format!("{index:02}.json"));
-            fs::write(&jpeg, b"jpeg").unwrap();
-            fs::write(&metadata, b"{}").unwrap();
-            let stamp = filetime::FileTime::from_unix_time(1_700_000_000 + index, 0);
-            filetime::set_file_mtime(&jpeg, stamp).unwrap();
-        }
-
-        prune_preview_cache(&cache);
-
-        let mut names: Vec<String> = fs::read_dir(&cache)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        names.sort();
-        let mut expected: Vec<String> = (4..20)
-            .flat_map(|index| [format!("{index:02}.jpg"), format!("{index:02}.json")])
-            .collect();
-        expected.sort();
-        // 最旧的 4 份及其元数据成对删除，最近 16 份原样保留。
-        assert_eq!(names, expected);
     }
 
     fn target(source_sha256: &str) -> BranchPublicationTarget {

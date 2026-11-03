@@ -15,9 +15,9 @@
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - 文字布局与栅格化（显示纹理与就地编辑共用度量；内容与尺寸上限常量也在这里）：`textLayout.ts`
 - 内置取色器：`PinBoardColorPicker.tsx`
-- Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程与 `read_strokes`（整板笔迹二进制载荷），`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
+- Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程与 `read_strokes`（整板笔迹二进制载荷），`clipboard.rs` 负责把复制记录解析成当前步骤的粘贴源并按外框中心落位，`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
 - 条目与导入上限（`MAX_BOARD_ITEMS`、`MAX_IMPORT_FILES`、`MAX_CLIPBOARD_IMAGE_BYTES`）：`src-tauri/src/pin_board/contracts.rs`
-- DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
+- DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds/`（`mod.rs` 编解码与校验，`cache.rs` 进程内纹理结果缓存，`file.rs` 原子落盘与失败回滚）
 - 阵列排序（统一高度、阅读序、断行、落位）与导入/粘贴的落位数学：`src-tauri/src/pin_board/arrange.rs`
 - 画板 DDS 双向完整性扫描：`src-tauri/src/pin_board/scrub.rs`
 - 笔迹几何契约（BLOB 布局、校验、批量二进制打包）：`src-tauri/src/pin_board/stroke.rs`，前端解析在 `strokeGeometry.ts`
@@ -466,7 +466,7 @@ SQLite:
 
 交互层（renderer、几何、纹理策略、会话、快捷键、画布交互）原样迁移，未重写。要点：
 
-- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `dds.rs`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；Rust 结果缓存的键是「仓库根 + 画板 + 条目 + 请求长边」——切换仓库后画板与条目 id 会从头复用，键里少了仓库就会把上一个仓库的解码结果交给本仓库的条目；
+- 纹理两级缓存与淘汰策略、8192 纹理上限契约、BC7 解码预览见 `texturePolicy.ts` 与 `pin_board/dds/`；缓存预算由设置的 `textureCacheLevel` 决定（Rust 结果缓存低 64 / 中 128 / 高 256 MiB，叠加前端 GPU 常驻缓存后总量约 256 / 512 / 1024 MiB，设置页按总量标注，与 Client 一致）；Rust 结果缓存的键是「仓库根 + 画板 + 条目 + 请求长边」——切换仓库后画板与条目 id 会从头复用，键里少了仓库就会把上一个仓库的解码结果交给本仓库的条目；
 - 图片状态沿用 step 模型：新增图片先有 step 0 的删除态默认节点，添加/变换/删除作为新步骤写入；普通保存追加当前历史节点并作废 redo，`finalize_pin_board` 截断未来步骤、清除仍为删除状态的图片记录（对应 DDS 的删除走 `pending_file_cleanup` 提交后重放，见上节）；
 - 编辑自动保存：设置页「自动保存」开关（默认关闭）开启后，模型变化（拖放结束、缩放、旋转、图层/顺序调整、删除、撤销/重做）后静默 1.5 秒即自动 `save_pin_board`，期间再次变化会重新计时，关闭开关会取消挂起的保存；`Ctrl+S`、页面隐藏（`visibilitychange`/`pagehide`）与渲染器销毁结算不受该开关影响，始终立即保存。
 - 结算边界：应用层在会释放仓库或换掉画布的边界先结算当前画板，避免最后一次编辑落在已经释放的仓库上；切换作品/画板时旧画板的改动只需交给后台队列（见上节），不阻塞切换。真正退出时原生端先发 `app_shutdown_requested`，前端在设置页「关闭时保存」开关（默认开启）开启时经 `preparePinBoardRuntimeChange`（`lifecycle.ts`）结算当前画板并 `flushPendingSettle` 清空后台队列，无论成败都调用 `confirm_app_shutdown` 确认，webview 挂起或崩溃时由原生端 15 秒兜底强退；切换仓库时在 `saveSettings` 之前同样先 `await preparePinBoardRuntimeChange()`，当前画板结算失败或后台队列没清空都中止切换并保留旧仓库。生命周期细节见 `docs/architecture/overview.md`。

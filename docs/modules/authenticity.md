@@ -8,15 +8,15 @@
 - 发布状态、预览、发布、导出与删除：`usePublicationController.ts`；识别预览、解码与记录搜索：`useIdentificationController.ts`；两者共用的活动任务取消状态机：`useAuthenticityOperation.ts`；共享签名配置与 PEM 规范化：`publicationStorage.ts`。
 - 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由上述两个 controller 消费。
 - 发布编排、签名后清单核对与失败回滚：`src-tauri/src/authenticity/publish.rs`；最终成品固化：`src-tauri/src/authenticity/artifact.rs`（`store_final_artifact`）。
-- 渲染与预览：`src-tauri/src/authenticity/rendition.rs`（配置归一化、缓存令牌、合成/编码）与 `src-tauri/src/authenticity/preview/`（`quality.rs` 质量预览、`tile.rs` 高清局部、`thumbnail.rs` 固定尺寸缩略图）。
-- 识别：`src-tauri/src/authenticity/decode.rs`（C2PA 回读、TrustMark 区域解码与候选合并）；导出与大小估算：`export.rs`、`estimate.rs`；复制、不覆盖发布与摘要：`file_ops.rs`。
+- 渲染与预览：`src-tauri/src/authenticity/rendition/`（`mod.rs` 配置归一化、缓存令牌与图片工具，`cache.rs` 会话缓存与淘汰，`render.rs` 合成、编码与缓存写入）与 `src-tauri/src/authenticity/preview/`（`quality.rs` 质量预览、`tile.rs` 高清局部、`thumbnail.rs` 固定尺寸缩略图）。
+- 识别：`src-tauri/src/authenticity/decode.rs`（C2PA 回读、TrustMark 区域解码与候选合并）；导出与大小估算：`export.rs`、`estimate.rs`；复制与不覆盖发布：`file_ops.rs`；整文件 SHA-256 与首尾采样统一在 `src-tauri/src/digest.rs`，由认证、备份、清理与模型校验共用（`sha256_reader` 带取消检查，`sha256_reader_without_cancel` 供没有取消通道的调用方使用）。
 - C2PA 和 TrustMark 实现：`src-tauri/src/authenticity/c2pa.rs`、`trustmark.rs`。
 - 成品、配置、导出记录和全库匹配：`src-tauri/src/authenticity/repository.rs`；成品/发布/路径布局：`publication_repository.rs`。
 - 强制发布检查点和共享运行锁：`src-tauri/src/app/usecases/authenticity.rs` 调用公开
   `backup::ensure_checkpoint` 后进入认证服务；跨领域的进入/取消/发布命令适配器在
-  `src-tauri/src/app/workflows.rs`，单领域的预览、导出、估算与识别经由
+  `src-tauri/src/app/workflows.rs`，单领域的发布状态、记录搜索、预览、导出、估算与识别经由
   `app/usecases/authenticity.rs`，`authenticity/commands.rs` 只保留参数与路径授权校验、
-  读取命令的薄适配和错误转换；认证模块不导入 backup 或读取 `chunk_file/`。
+  命令调度和错误转换；认证模块不导入 backup 或读取 `chunk_file/`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 

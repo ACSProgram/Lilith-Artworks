@@ -19,6 +19,7 @@ src/shared/              无领域语义的 UI、Tauri 调用和格式化工具
 src-tauri/src/app/                     配置、窗口和应用生命周期
 src-tauri/src/app/command_runtime/     CommandContext、typed error、AppEvent v1 与 OperationCoordinator
 src-tauri/src/cancel.rs               跨模块 CancelToken（命令运行时与 ChunkFile I/O 共用）
+src-tauri/src/digest.rs               跨模块整文件 SHA-256 与首尾 64 KiB 采样（认证、备份、清理与模型校验共用）
 src-tauri/src/app/usecases/            GUI 与 headless 共享的业务入口
 src-tauri/src/app/workflows.rs         跨领域 Tauri 命令适配器
 src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领域分组）

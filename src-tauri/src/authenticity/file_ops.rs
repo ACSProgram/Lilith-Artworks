@@ -54,19 +54,10 @@ pub(crate) fn sha256_file_with_check(
     cancelled: impl Fn() -> bool,
 ) -> AuthenticityResult<String> {
     let mut file = File::open(path)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        if cancelled() {
-            return Err(AuthenticityError::Task("认证任务已取消".into()));
-        }
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode_upper(hasher.finalize()))
+    crate::digest::sha256_reader(&mut file, cancelled).map_err(|error| match error {
+        crate::digest::DigestError::Io(error) => AuthenticityError::Io(error),
+        crate::digest::DigestError::Cancelled => AuthenticityError::Task("认证任务已取消".into()),
+    })
 }
 
 /// 同目录临时文件 + `sync_all` + `persist_noclobber`，目标已存在时拒绝。

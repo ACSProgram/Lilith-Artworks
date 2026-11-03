@@ -12,5 +12,7 @@ mod window;
 
 pub(crate) use commands::{prepare_repository, set_automatic_backups_paused};
 pub(crate) use model::{load_settings, validate_settings, AppSettings, CURRENT_SETTINGS_VERSION};
-pub(crate) use state::{snapshot, AppState, SettingsSnapshot};
+pub(crate) use state::{
+    repository_counts, snapshot, snapshot_without_repository, AppState, SettingsSnapshot,
+};
 pub(crate) use window::{capture_window_settings, restore_window_settings};

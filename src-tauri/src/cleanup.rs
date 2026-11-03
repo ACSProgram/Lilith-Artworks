@@ -1,13 +1,11 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File},
-    io::Read,
     path::{Path, PathBuf},
 };
 
 use rusqlite::{params, Connection, Transaction};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::{
     cancel::CancelToken,
@@ -906,18 +904,8 @@ fn remove_external_file(path: &str, expected_sha256: Option<&str>) -> Result<(),
 
 fn sha256_file(path: &Path) -> Result<String, String> {
     let mut file = File::open(path).map_err(|error| format!("无法读取待清理文件：{error}"))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| format!("无法读取待清理文件：{error}"))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Ok(hex::encode_upper(hasher.finalize()))
+    crate::digest::sha256_reader_without_cancel(&mut file)
+        .map_err(|error| format!("无法读取待清理文件：{error}"))
 }
 
 fn pending_count_with_connection(connection: &rusqlite::Connection) -> Result<usize, String> {

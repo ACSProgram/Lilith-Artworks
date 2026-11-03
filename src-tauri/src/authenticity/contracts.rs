@@ -100,8 +100,7 @@ mod tests {
 
     use super::*;
     use crate::authenticity::test_support::{initialize_publication, insert_final_artifact};
-
-    const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    use crate::digest::ZERO_SHA256;
 
     /// 造三个文件：被成品记录引用的副本、没有任何记录引用的成品副本、孤儿认证副本。
     /// 返回 `(作品目录, 被引用, 孤儿成品, 孤儿认证副本)`。

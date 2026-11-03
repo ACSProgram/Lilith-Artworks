@@ -1,14 +1,101 @@
+use std::path::{Path, PathBuf};
+
 use crate::{
     app::command_runtime::{CommandContext, CommandError},
     authenticity::{
-        self, AuthenticityState, BranchPublication, DecodeRequest, DecodeResult,
-        EnterPublicationRequest, EstimateRequest, ExportCertificationRecordRequest,
-        FileSizeEstimate, PublicationPreview, PublicationPreviewRequest, PublishBranchRequest,
-        PublishResult,
+        self, AuthenticityState, BranchPublication, CertificationRecord, DecodeRequest,
+        DecodeResult, EnterPublicationRequest, EstimateRequest, ExportCertificationRecordRequest,
+        FileSizeEstimate, PreviewImage, PreviewTileRequest, PublicationPreview,
+        PublicationPreviewRequest, PublishBranchRequest, PublishResult,
     },
     backup, cleanup,
     platform::path::display_path,
+    storage,
 };
+
+pub(crate) fn publication(
+    context: &CommandContext,
+    state: &AuthenticityState,
+    branch_id: String,
+) -> Result<BranchPublication, CommandError> {
+    let models_ready = state.model_files_ready();
+    let model_info = state.model_info();
+    context.run_read("get_branch_publication", |session| {
+        authenticity::get_publication(session.root(), &branch_id, models_ready, model_info)
+            .map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn search_records(
+    context: &CommandContext,
+    query: String,
+) -> Result<Vec<CertificationRecord>, CommandError> {
+    context.run_read("search_certification_records", |session| {
+        authenticity::search_records(session.root(), &query).map_err(CommandError::from)
+    })
+}
+
+/// 预览仓库外的图片：文件必须存在，且规范化后不得落在仓库内（仓库内的图只走成品
+/// 与记录预览，避免预览绕过受管文件口径）。
+pub(crate) fn preview_external_image(
+    context: &CommandContext,
+    path: String,
+) -> Result<PreviewImage, CommandError> {
+    context.run_read("preview_authenticity_image", |session| {
+        let source =
+            external_image_path(session.root(), &path, "预览图片").map_err(CommandError::from)?;
+        authenticity::make_preview(source).map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn preview_branch_artifact(
+    context: &CommandContext,
+    branch_id: String,
+) -> Result<PreviewImage, CommandError> {
+    context.run_read("preview_branch_artifact", |session| {
+        let source = authenticity::publication_target(session.root(), branch_id.trim())
+            .map_err(CommandError::from)?
+            .artifact_path;
+        authenticity::make_preview(PathBuf::from(source)).map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn preview_tile(
+    context: &CommandContext,
+    request: PreviewTileRequest,
+) -> Result<PreviewImage, CommandError> {
+    context.run_read("preview_authenticity_tile", |session| {
+        authenticity::preview_tile(session.root(), &request).map_err(CommandError::from)
+    })
+}
+
+pub(crate) fn preview_certification_record(
+    context: &CommandContext,
+    record_id: String,
+) -> Result<PreviewImage, CommandError> {
+    context.run_read("preview_certification_record", |session| {
+        let source = authenticity::record_source_path(session.root(), record_id.trim())
+            .map_err(CommandError::from)?;
+        authenticity::make_preview(source).map_err(CommandError::from)
+    })
+}
+
+fn external_image_path(
+    root: &Path,
+    value: &str,
+    label: &str,
+) -> Result<PathBuf, authenticity::AuthenticityError> {
+    let path = PathBuf::from(value.trim());
+    if !path.is_file() {
+        return Err(authenticity::AuthenticityError::InvalidInput(format!(
+            "{label}不存在或不是普通文件"
+        )));
+    }
+    let canonical = path.canonicalize()?;
+    storage::ensure_outside_repository(root, &canonical, label)
+        .map_err(authenticity::AuthenticityError::InvalidInput)?;
+    Ok(canonical)
+}
 
 pub(crate) fn enter_publication(
     context: &CommandContext,

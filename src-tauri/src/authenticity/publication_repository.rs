@@ -263,8 +263,7 @@ mod tests {
 
     use super::*;
     use crate::authenticity::test_support::initialize_publication;
-
-    const ZERO_SHA256: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    use crate::digest::ZERO_SHA256;
 
     fn artifact<'a>(source_path: &'a str) -> NewFinalArtifact<'a> {
         NewFinalArtifact {

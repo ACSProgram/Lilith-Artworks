@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 
 mod bitmap_io;
 mod boards;
+mod clipboard;
 mod create;
 mod paths;
 mod save;

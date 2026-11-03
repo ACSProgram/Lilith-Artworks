@@ -2,7 +2,7 @@ use std::{
     collections::HashMap,
     fs,
     fs::File,
-    io::{Read, Seek, SeekFrom, Write},
+    io::{Seek, Write},
     path::Path,
     sync::{Mutex, OnceLock},
     time::{Instant, SystemTime, UNIX_EPOCH},
@@ -25,11 +25,10 @@ use super::{
 };
 
 const MAX_TITLE_CHARS: usize = 160;
-/// 快速检查指纹的版本与首尾采样大小。版本号随算法演进；旧基线（历史上直接
-/// 保存的 mtime，或版本 1 要求亚秒精度的指纹）与当前值取值域不同，因此自然
-/// 退回一次全量并重写基线。
+/// 快速检查指纹的版本。版本号随算法演进；旧基线（历史上直接保存的 mtime，或版本 1
+/// 要求亚秒精度的指纹）与当前值取值域不同，因此自然退回一次全量并重写基线。首尾
+/// 采样的宽度由 `crate::digest::SAMPLE_BYTES` 决定。
 const SOURCE_FINGERPRINT_VERSION: u8 = 2;
-const SOURCE_FINGERPRINT_SAMPLE_BYTES: u64 = 64 * 1024;
 
 /// 提交失败的原因。`pub(crate)` 而不是 `pub(super)`：无头入口同样要区分
 /// 「取消」与「失败」，因此这个类型必须对它可见。
@@ -84,15 +83,9 @@ fn source_fingerprint(path: &Path, metadata: &fs::Metadata) -> Option<i64> {
     hasher.update(duration.as_secs().to_le_bytes());
     hasher.update(duration.subsec_nanos().to_le_bytes());
 
-    let mut sample = vec![0_u8; usize::try_from(size.min(SOURCE_FINGERPRINT_SAMPLE_BYTES)).ok()?];
-    file.read_exact(&mut sample).ok()?;
-    hasher.update(&sample);
-    if size > SOURCE_FINGERPRINT_SAMPLE_BYTES {
-        file.seek(SeekFrom::Start(size - SOURCE_FINGERPRINT_SAMPLE_BYTES))
-            .ok()?;
-        file.read_exact(&mut sample).ok()?;
-        hasher.update(&sample);
-    }
+    let (head, tail) = crate::digest::read_sample(&mut file, size).ok()?;
+    hasher.update(&head);
+    hasher.update(&tail);
     let digest = hasher.finalize();
     // 取摘要前 8 字节并把最高位清零，才能存进 `last_source_modified_ms` 的整数列。
     let digest_prefix = u64::from_le_bytes(digest[..8].try_into().expect("8-byte prefix"));

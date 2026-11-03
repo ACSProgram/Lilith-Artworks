@@ -1,8 +1,8 @@
 use crate::app::{
     command_runtime::{CommandContext, CommandError},
     settings::{
-        prepare_repository, snapshot, validate_settings, AppSettings, SettingsSnapshot,
-        CURRENT_SETTINGS_VERSION,
+        prepare_repository, repository_counts, snapshot, snapshot_without_repository,
+        validate_settings, AppSettings, SettingsSnapshot, CURRENT_SETTINGS_VERSION,
     },
 };
 
@@ -72,11 +72,19 @@ pub(crate) fn save(
 }
 
 /// 设置快照读取：保持 0.2 的宽松语义——仓库不可读只让自动备份计数为空，
-/// 不阻断设置读取。
+/// 不阻断设置读取。仓库派生的计数在共享读租约内读取，避免与仓库切换并发。
 pub(crate) fn snapshot_for_command(
     context: &CommandContext,
 ) -> Result<SettingsSnapshot, CommandError> {
-    snapshot(context.app_state()).map_err(CommandError::from)
+    let mut snapshot =
+        snapshot_without_repository(context.app_state()).map_err(CommandError::from)?;
+    if let Ok((file_count, pending)) = context.run_read("settings_snapshot", |session| {
+        Ok(repository_counts(session.root()))
+    }) {
+        snapshot.automatic_backup_file_count = file_count;
+        snapshot.idle_integrity_pending_count = pending;
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 # 架构审查整改计划（2026-11-03）
 
-状态：**执行中**。B1、B2 已实施并通过自动化验证（B2 的菜单项仍待维护者手工验收）；
-B3–B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
+状态：**执行中**。B1、B2、B3 已实施并通过自动化验证（B2 的菜单项仍待维护者手工验收）；
+B4、B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
 
 2026-11-03 二次修订：已对照 Codex 复核意见调整范围与验收方式，并把工作项合并为 **5 个批次**。
 复核原文归档为 `archive/architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
@@ -367,6 +367,98 @@ B3–B5 未开始。本文件定义整改范围、顺序与验收口径，实施
 - 每个拆分候选有依赖/状态所有权与消费者证据；未拆项记录理由。
 - 命令行为、错误文案、取消语义与事件不变；文档入口同步。
 - 若本批超过约 3k，按“算法/候选 → 生产拆分 → 应用层”三个里程碑分别验收，不新增批次。
+
+#### B3 实施记录（2026-11-03）
+
+**B3.1 摘要收敛**
+
+- 新增 `src-tauri/src/digest.rs`：整文件 SHA-256 流式读取（`sha256_reader`，另有不带取消
+  通道的 `sha256_reader_without_cancel`，让本来就没有取消语义的调用点不必各写一个永不发生
+  的 `Cancelled` 分支）、首尾各 64 KiB 采样读取（`read_sample` / `sample_sha256`）、边复制
+  边累计完整摘要与采样的 `SamplingDigest`，以及测试用的 `ZERO_SHA256`。只放纯算法，文件
+  打开、取消检查与错误文案仍由调用方决定。
+- 收敛调用点：`storage::verify_file_sha256`、`cleanup::sha256_file`、
+  `authenticity::file_ops::sha256_file_with_check`、`authenticity::state::file_sha256`、
+  `backup::repository_backup` 的完整摘要与抽样复核、`backup::worker::source_fingerprint`
+  的首尾采样。`repository_backup` 的 `DigestAccumulator` 移入 `SamplingDigest`；采样宽度
+  常量统一为 `digest::SAMPLE_BYTES`。`authenticity::contracts` 与
+  `publication_repository` 测试中的 `ZERO_SHA256` 改为引用同一常量。
+- 相同输入产生相同摘要与采样；错误映射与取消文案未变。`sha256_reader` 仍在每次读取前检查
+  取消；`sample_sha256_file` 改由一次 `read_sample` 完成首尾两次读取，取消检查因此落在读前
+  与读后各一次，少了原来「首尾之间」的那一次——最多 128 KiB，取消延迟没有可测差别。
+  `digest.rs` 增加一条单测，比较“流式累计的采样”与“重新读取首尾的采样”一致。
+
+**B3.2 文件、路径与连接候选（全部保留，未提取）**
+
+- **sidecar 清理**：`library::remove_sqlite_sidecars` 只处理 `-wal` / `-shm`，用于数据库
+  迁移与重命名，NotFound 静默，错误带完整 sidecar 路径；`backup::remove_database_sidecars`
+  处理 `-wal` / `-shm` / `-journal`，只用于备份副本且先判断存在，错误文案是“备份数据库
+  临时文件”。文件集合、错误上下文与调用边界都不同，保留两份。
+- **不覆盖发布**：`worker::publish_temp` 用调用方标签拼错误；`restore.rs` 的三处
+  `persist_noclobber`（输出、delta、检查点）各自带路径上下文；认证侧已有
+  `copy_noclobber` / `StagedCopy`。临时文件同步与不覆盖语义一致，但错误类型、标签与
+  所有权分散在三个模块，提取只能省一行 `map_err`，不值得新增跨模块 helper。
+- **连接闭包**：`storage::open` 有 191 个调用点，连接的可变性、事务边界、慢日志标签与
+  闭包返回值各不相同；`with_connection` 只会增加一层闭包间接，不能消除真实分叉，保留
+  `open + map_err` 现状。
+- **路径唯一化**：`bitmap_io::unique_export_path` 的基名固定为 `<item-id>`，扩展名固定
+  `.png`；`canvas_export::unique_target` 先清洗任意文件名再拼 `.png`。`-2` / `-3` 循环
+  相同，但输入语义不同，且只有 2 处相似实现，低于提取门槛，保留各自实现。
+
+**B3.3 生产文件拆分（逐候选）**
+
+- `pin_board/repository/create.rs` → `clipboard.rs`：粘贴源解析（复制记录 → 当前步骤的
+  条目状态、DDS/文字/笔迹载荷）与整组落位移出；写入事务、revision 推进与 `read_strokes`
+  仍在 `create.rs`。消费者只有 `paste_items`，经 `pub(super)` 共享，未扩大 `pub(crate)`
+  可见性；粘贴相关测试仍覆盖原入口，断言未改。变化原因：读侧解析与写侧事务分离。
+- `pin_board/dds.rs` → `dds/{mod,cache,file}.rs`：进程内 LRU 纹理缓存、预算与淘汰移入
+  `cache.rs`；`CreatedFiles` 回滚与 `persist_dds_file` 原子落盘移入 `file.rs`；编解码、
+  尺寸/头校验留在 `mod.rs`。外部仍经 `pin_board::dds::*` 访问，`bitmap_io` 与
+  `usecases::pin_board` 的调用点不变；缓存与落盘测试随生产代码迁移。
+- `storage_overview.rs` → `storage_overview/{mod,disk}.rs`：数据库记录口径、类型与
+  `tests.rs` 留在 `mod.rs`；比对计划、目录遍历、分类聚合与 `scan_disk` 移入 `disk.rs`。
+  `tests.rs` 只调用公开的 `overview` / `scan_disk`，未搬家；共享的 `normalize_path_key`
+  改为 `pub(super)`。变化原因：记录口径与磁盘口径独立演进。
+- `authenticity/rendition.rs` → `rendition/{mod,cache,render}.rs`：会话目录、缓存元数据、
+  校验与淘汰移入 `cache.rs`；透明背景合成、TrustMark 嵌入、JPEG 编码与缓存写入移入
+  `render.rs`；配置归一化、缓存令牌与图片工具留在 `mod.rs`。`preview/tile.rs`、
+  `publish.rs` 经原 `rendition::*` 路径访问，公开集合未扩大；缓存淘汰测试随 `cache.rs`
+  迁移。
+- `cleanup.rs`：**不拆**。队列入队、执行/重放、未引用扫描、删除边界与 temp 清扫共用同一
+  事务、引用表与删除确认逻辑；内联测试跨主题直接使用 `enqueue_*`、`run`、`sha256_file`、
+  `safe_repository_path` 等内部入口。拆分会要求把跨主题测试整体重排或扩大大量
+  `pub(super)`，超过“拆分候选”的收益门槛，保留单文件并登记为不拆。
+
+**B3.4 应用层收口**
+
+- `authenticity/commands.rs` 不再直接调用 `repository::*` / `preview::*` /
+  `publication_repository::*`：发布状态、记录搜索、外部图片预览、分支成品预览、局部图与
+  记录预览全部经 `app/usecases/authenticity.rs`；适配器只保留 DTO 解析、文件选择器授权与
+  错误映射。`external_image_path` 的仓库边界检查随预览进入 use-case。
+- `RepositoryScrubReport` 从 `app/workflows.rs` 移到 `app/usecases/backup.rs`，命令适配器
+  直接返回 use-case 类型，消除 use-case 对适配器的反向依赖；序列化字段未变。
+- 设置快照的仓库派生计数改在 `context.run_read("settings_snapshot")` 内读取；仓库状态
+  命令的就绪校验改在 `context.run_read("repository_status")` 内执行，未就绪仍返回
+  `ready: false` 与错误文案，命令本身不失败。设置保存仍在仓库切换写租约内直接取快照。
+- GUI/headless 成对 `cfg` 变体：实际代码中没有 `cfg(not(feature = "headless"))` 分支；
+  仅有的 `cfg(feature = "headless")` 入口（`create_artwork`、`create_strokes`、
+  分支创建等）是无头命令的额外入口，复用同一领域实现，不需要合并，也没有引入运行时分派。
+- 错误形态与取消通道：`CommandError` 映射、`cancelled_or`、`AuthenticityError::Task` 与
+  认证活动任务锁的文案均未改变；没有发现能统一且不改变用户文案的入口，保留现状。
+
+**验证与偏差**
+
+- `cargo fmt --check` 通过；`cargo test --lib` 445 项通过、1 项忽略；`cargo check --lib`
+  与 `cargo check --lib --features headless` 通过；未改前端、命令名、DTO 字段、schema 与
+  版本号；未提交 Git。
+- 偏差：`storage_overview` 拆分新增一处 `pub(super) normalize_path_key`，仅为两个子模块
+  共享纯路径规范化；`cleanup.rs` 按上述证据登记为不拆。除这两个记录外，其余候选均完成
+  拆分且未扩大 `pub(crate)` 可见性。
+- 收尾复核：无取消通道的三个调用点改用 `digest::sha256_reader_without_cancel`，删掉两处
+  `unreachable!` 分支（保留在 `digest.rs` 内部一处）；`dds::cache` 的默认预算常量与条目
+  类型收紧为私有（未跨模块使用），淘汰循环去掉重复的总量计算；`dds/mod.rs` 与
+  `create.rs` 的模块文档补上拆分后的实际分工，并恢复被拆分误删的
+  `arrange_gap_ratio_is_valid` 文档注释；`worker.rs` 的指纹注释不再声称常量里带采样宽度。
 
 ### B4 `[拆分]` `library` / `history` 仓储拆分与跨域 SQL 登记
 

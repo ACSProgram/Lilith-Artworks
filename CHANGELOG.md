@@ -75,6 +75,15 @@ entries for the reader; they are not a template every entry has to fill.
   one definition in `pin-board/types.ts`, the history branch settings receive
   the reveal-folder action from the app layer instead of importing `app/api`,
   and unreferenced exports plus the stale texture-budget constants are gone.
+- Internal Rust consolidation with no user-visible change: whole-file SHA-256
+  and head/tail sampling live in `src-tauri/src/digest.rs` and are shared by
+  the authenticity, backup, cleanup and model checks. Authenticity commands
+  route repository and preview reads through the shared use-case, the scrub
+  report type moved next to that use-case, settings-snapshot counts and the
+  repository status check read under the repository read lease, and the pin
+  board clipboard, DDS cache/file, storage-overview disk scan and rendition
+  cache/render responsibilities each have their own module. Command names,
+  DTO fields, error text and cancellation semantics are unchanged.
 - The library tree menu, the library's `新建` menu and the history node menu now
   all use the shared `ContextMenu` instead of three hand-written copies. They
   close on Escape, an outside click, any scroll and window resizing, stay inside

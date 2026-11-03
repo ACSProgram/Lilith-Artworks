@@ -228,9 +228,27 @@ pub(crate) fn set_checkpoint(
     })
 }
 
+/// 仓库完整性扫描的报告。GUI 与无头入口共用的口径由 use-case 定义，命令适配器只
+/// 序列化返回。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RepositoryScrubReport {
+    pub(crate) history_nodes: u64,
+    pub(crate) final_artifacts: u64,
+    pub(crate) certification_records: u64,
+    /// 检查的画板位图记录数；文字条目没有实体文件，不计入。
+    pub(crate) pin_board_bitmaps: u64,
+    /// 记录存在但 DDS 缺失。
+    pub(crate) pin_board_missing_dds: u64,
+    /// DDS 存在但校验失败（路径归属、头、尺寸、长度或解码）。
+    pub(crate) pin_board_corrupt_dds: u64,
+    /// 磁盘上存在但无记录的孤儿 DDS。
+    pub(crate) pin_board_orphan_dds: u64,
+}
+
 pub(crate) fn scrub_repository(
     context: &CommandContext,
-) -> Result<crate::app::workflows::RepositoryScrubReport, CommandError> {
+) -> Result<RepositoryScrubReport, CommandError> {
     // 扫描现在顺带刷新节点级校验状态，因此按前台写命令取得跨进程 owner lock：
     // 只读命令不得变成写者的原则不再适用于这个入口。
     context.run_foreground(None, |session| {
@@ -254,7 +272,7 @@ pub(crate) fn scrub_repository(
             |current, total| context.report_progress("正在检查画板图片", current, total),
         )
         .map_err(CommandError::from)?;
-        Ok(crate::app::workflows::RepositoryScrubReport {
+        Ok(RepositoryScrubReport {
             history_nodes,
             final_artifacts: controlled.0,
             certification_records: controlled.1,

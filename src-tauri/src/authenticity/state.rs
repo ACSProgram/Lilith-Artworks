@@ -6,7 +6,6 @@ use std::{
     },
 };
 
-use sha2::Digest;
 use trustmark::{Trustmark, Variant, Version};
 
 use super::error::{AuthenticityError, AuthenticityResult};
@@ -196,20 +195,8 @@ fn inspect_models(models_dir: &Path) -> ModelStatus {
 }
 
 fn file_sha256(path: &std::path::Path) -> Option<String> {
-    use std::io::Read;
-
-    let mut file = std::fs::File::open(path).ok()?;
-    let mut hasher = sha2::Sha256::new();
-    // Windows 的主线程栈只有 1 MiB，1 MiB 的栈缓冲会让发布入口直接栈溢出。
-    let mut buffer = vec![0_u8; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer).ok()?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    Some(hex::encode_upper(hasher.finalize()))
+    let file = std::fs::File::open(path).ok()?;
+    crate::digest::sha256_reader_without_cancel(file).ok()
 }
 
 #[cfg(test)]

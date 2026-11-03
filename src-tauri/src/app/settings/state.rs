@@ -406,16 +406,9 @@ pub(crate) struct SettingsSnapshot {
     pub(crate) idle_integrity_pending_count: Option<usize>,
 }
 
-pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
-    // 两个计数共用一次仓库就绪校验：`ready_repository_path` 每次都做一遍轻量
-    // format/version 检查，同一份快照里没必要跑两遍。
-    let repository = state.ready_repository_path().ok();
-    let automatic_backup_file_count = repository
-        .as_deref()
-        .and_then(|root| crate::history::count_scheduled_files(root).ok());
-    let idle_integrity_pending_count = repository
-        .as_deref()
-        .and_then(|root| crate::history::count_pending_verify_nodes(root).ok());
+/// 只读取设置文件与进程状态，不触碰仓库；仓库派生的两个计数留空，由调用方在
+/// 仓库读租约内补齐。
+pub(crate) fn snapshot_without_repository(state: &AppState) -> Result<SettingsSnapshot, String> {
     Ok(SettingsSnapshot {
         settings: state.settings.read().map_err(|_| "设置状态已损坏")?,
         settings_path: state.settings_path().to_string_lossy().into_owned(),
@@ -425,9 +418,33 @@ pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
             .read()
             .map_err(|_| "设置警告状态已损坏")?
             .clone(),
-        automatic_backup_file_count,
-        idle_integrity_pending_count,
+        automatic_backup_file_count: None,
+        idle_integrity_pending_count: None,
     })
+}
+
+/// 在已确定的仓库路径上读取两个派生计数；单项失败只让该项为空。
+pub(crate) fn repository_counts(root: &Path) -> (Option<usize>, Option<usize>) {
+    (
+        crate::history::count_scheduled_files(root).ok(),
+        crate::history::count_pending_verify_nodes(root).ok(),
+    )
+}
+
+/// 完整设置快照：在 [`snapshot_without_repository`] 之上补齐仓库派生的两个计数。
+///
+/// 只给已在仓库切换写租约内的设置保存使用——那里不能再取一次读租约；命令层的设置
+/// 读取走 `usecases::settings::snapshot_for_command` 的读租约路径。
+pub(crate) fn snapshot(state: &AppState) -> Result<SettingsSnapshot, String> {
+    let mut snapshot = snapshot_without_repository(state)?;
+    // 两个计数共用一次仓库就绪校验：`ready_repository_path` 每次都做一遍轻量
+    // format/version 检查，同一份快照里没必要跑两遍。
+    if let Ok(root) = state.ready_repository_path() {
+        let (file_count, pending) = repository_counts(&root);
+        snapshot.automatic_backup_file_count = file_count;
+        snapshot.idle_integrity_pending_count = pending;
+    }
+    Ok(snapshot)
 }
 
 #[cfg(test)]
