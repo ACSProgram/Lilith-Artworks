@@ -143,10 +143,10 @@ describe("BranchSettings", () => {
   it("merges a server-side automatic disable into an unrelated user draft", async () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    const view = render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+    const view = render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} />);
 
     fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Draft title" } });
-    view.rerender(<BranchSettings branch={branch(false)} disabled={false} onSave={onSave} />);
+    view.rerender(<BranchSettings branch={branch(false)} disabled={false} saveLocked={false} onSave={onSave} />);
 
     expect((screen.getByLabelText("名称") as HTMLInputElement).value).toBe("Draft title");
     expect((screen.getByRole("checkbox", { name: "自动备份" }) as HTMLInputElement).checked).toBe(false);
@@ -168,7 +168,7 @@ describe("BranchSettings", () => {
   it("saves the quick-check toggle and reveals the working file folder", async () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+    render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} />);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "快速检查" }));
     fireEvent.click(screen.getByTitle("打开所在文件夹"));
@@ -188,7 +188,7 @@ describe("BranchSettings", () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockRejectedValue(new Error("invalid path"));
     dialog.open.mockResolvedValue("C:\\work\\replacement.psd");
-    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+    render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} />);
 
     await act(async () => { fireEvent.click(screen.getByTitle("修改工作文件")); await Promise.resolve(); });
     await act(async () => {
@@ -204,12 +204,41 @@ describe("BranchSettings", () => {
       .toBe("C:\\work\\artwork.psd");
   });
 
+  it("holds a branch draft until the write lock is released", async () => {
+    vi.useFakeTimers();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const settings = (saveLocked: boolean) => <BranchSettings
+      branch={branch(true)}
+      disabled={false}
+      saveLocked={saveLocked}
+      onSave={onSave}
+    />;
+    const view = render(settings(true));
+
+    fireEvent.change(screen.getByLabelText("名称"), { target: { value: "Later" } });
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+    });
+    expect(onSave).not.toHaveBeenCalled();
+    expect(screen.getByText("未保存")).toBeTruthy();
+
+    view.rerender(settings(false));
+    await act(async () => {
+      vi.advanceTimersByTime(650);
+      await Promise.resolve();
+    });
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ title: "Later" }));
+  });
+
   it("keeps automatic backup greyed out and closed without a working file", async () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<BranchSettings
       branch={{ ...branch(true), sourcePath: "" }}
       disabled={false}
+      saveLocked={false}
       onSave={onSave}
     />);
 
@@ -233,7 +262,7 @@ describe("BranchSettings", () => {
   it("clears the persisted working file path and closes automatic backup", async () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<BranchSettings branch={branch(true)} disabled={false} onSave={onSave} />);
+    render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} />);
 
     fireEvent.click(screen.getByTitle("清除工作文件路径"));
     expect(screen.getByLabelText("工作文件").textContent).toBe("未选择工作文件");

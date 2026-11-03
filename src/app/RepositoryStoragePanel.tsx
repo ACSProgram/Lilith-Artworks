@@ -53,6 +53,8 @@ interface RepositoryStoragePanelProps {
   error: string | null;
   scanning: boolean;
   cancelPending: boolean;
+  busy: boolean;
+  busyLabel: string | null;
   runtime: BackupRuntimeStatus | null;
   onRefresh: () => void;
   onScan: () => void;
@@ -67,6 +69,8 @@ export function RepositoryStoragePanel({
   error,
   scanning,
   cancelPending,
+  busy,
+  busyLabel,
   runtime,
   onRefresh,
   onScan,
@@ -157,13 +161,30 @@ export function RepositoryStoragePanel({
         <div className="storage-toolbar-copy">
           <strong>仓储空间</strong>
           <small>只读统计；数据库记录与仓库目录的磁盘实际分开呈现，不做静默合并。</small>
+          {busy && (
+            <small className="storage-busy-note" role="status">
+              当前任务：{busyLabel ?? "已有备份操作正在运行"}
+            </small>
+          )}
         </div>
         <div className="storage-toolbar-actions">
-          <button className="secondary-button" type="button" onClick={onRefresh} disabled={loading || scanning}>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onRefresh}
+            disabled={busy || loading || scanning}
+            title={busy ? "当前有长任务正在运行" : undefined}
+          >
             {loading ? <LoaderCircle className="spin" aria-hidden="true" size={15} /> : <RefreshCw aria-hidden="true" size={15} />}
             刷新
           </button>
-          <button className="secondary-button" type="button" onClick={onScan} disabled={scanning || loading}>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={onScan}
+            disabled={busy || scanning || loading}
+            title={busy ? "当前有长任务正在运行" : undefined}
+          >
             {scanning ? <LoaderCircle className="spin" aria-hidden="true" size={15} /> : <ScanLine aria-hidden="true" size={15} />}
             {scan ? "重新扫描磁盘" : "扫描磁盘占用"}
           </button>

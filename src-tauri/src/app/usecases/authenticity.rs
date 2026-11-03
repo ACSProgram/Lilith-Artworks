@@ -27,7 +27,7 @@ pub(crate) fn enter_publication(
             context.cancel(),
             context.chunk_write_options(),
         )
-        .map_err(CommandError::from)?;
+        .map_err(|error| context.cancelled_or("进入发布已取消", error))?;
         context.report_progress("正在保存最终成品", 1, 2);
         authenticity::store_final_artifact(
             session.root(),

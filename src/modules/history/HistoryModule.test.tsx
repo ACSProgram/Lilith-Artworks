@@ -331,6 +331,97 @@ describe("HistoryModule overview interactions", () => {
     expect(cancelOperation).toHaveBeenCalledTimes(1);
   });
 
+  it("puts the operation progress on its own row under the title", () => {
+    const running: BackupRuntimeStatus = {
+      ...idleRuntime,
+      busy: true,
+      taskKind: "userOperation",
+      progressLabel: "正在检查历史文件",
+      progressCurrent: 1,
+      progressTotal: 2,
+    };
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      runtime: running,
+      visibleRuntime: running,
+    }));
+
+    const { container } = render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />);
+
+    const progress = container.querySelector(".operation-progress");
+    expect(progress).toBeTruthy();
+    expect(progress!.parentElement?.classList.contains("history-header")).toBe(true);
+    expect(progress!.closest(".history-header-actions")).toBeNull();
+    expect(screen.getByRole("heading", { name: "Artwork" })).toBeTruthy();
+  });
+
+  it("keeps drafts editable while a background task holds the write lock", () => {
+    const background: BackupRuntimeStatus = { ...idleRuntime, busy: true, taskKind: "automaticBackup" };
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      runtime: background,
+      visibleRuntime: background,
+    }));
+
+    const historyModule = () => <HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />;
+    const view = render(historyModule());
+
+    const branchName = screen.getByLabelText("名称") as HTMLInputElement;
+    const commitNote = document.querySelector<HTMLInputElement>("#commit-note")!;
+    expect(branchName.disabled).toBe(false);
+    expect(commitNote.disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "提交" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "精简当前分支" }) as HTMLButtonElement).disabled).toBe(true);
+
+    const ownOperation: BackupRuntimeStatus = { ...idleRuntime, busy: true, taskKind: "userOperation" };
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      runtime: ownOperation,
+      visibleRuntime: ownOperation,
+    }));
+    view.rerender(historyModule());
+
+    expect((screen.getByLabelText("名称") as HTMLInputElement).disabled).toBe(true);
+    expect(document.querySelector<HTMLInputElement>("#commit-note")!.disabled).toBe(true);
+  });
+
+  it("keeps the compact delete locked while a background task runs", () => {
+    const historyModule = () => <HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />;
+    controller.useHistoryController.mockReturnValue(controllerReturn({ history: automaticHistory }));
+
+    const view = render(historyModule());
+    fireEvent.click(screen.getByRole("button", { name: "精简当前分支" }));
+    const autoCard = screen.getAllByText("自动备份")
+      .find((element) => element.closest(".history-node-card"));
+    fireEvent.click(autoCard!.closest("button")!);
+    expect((screen.getByRole("button", { name: "删除节点" }) as HTMLButtonElement).disabled).toBe(false);
+
+    const background: BackupRuntimeStatus = { ...idleRuntime, busy: true, taskKind: "automaticBackup" };
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      history: automaticHistory,
+      runtime: background,
+      visibleRuntime: background,
+    }));
+    view.rerender(historyModule());
+
+    expect((screen.getByRole("button", { name: "删除节点" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
   it("re-queues a failed chain verification from the branch status row", () => {
     const reverifyBranch = vi.fn();
     const failedBranch = {

@@ -169,10 +169,14 @@ export function BranchScheduleStatus({
 export function BranchSettings({
   branch,
   disabled,
+  saveLocked,
   onSave,
 }: {
   branch: ArtworkBranch;
+  /** 只锁草稿输入：本页自己的操作进行时为真。 */
   disabled: boolean;
+  /** 锁写回：后台任务占用运行锁时为真，草稿保留并显示「未保存」。 */
+  saveLocked: boolean;
   onSave: (request: UpdateBranchBackupRequest) => Promise<void>;
 }) {
   const [title, setTitle] = useState(branch.title);
@@ -239,11 +243,14 @@ export function BranchSettings({
     || sourcePath !== branch.sourcePath;
 
   useEffect(() => {
-    if (!dirty || !valid || disabled) {
-      if (!dirty) setSaveState("saved");
+    if (!dirty) {
+      setSaveState("saved");
       return;
     }
+    if (!valid) return;
     setSaveState("dirty");
+    // 运行锁被后台任务占着时不提交：saveLocked 变回 false 后 effect 会重新计时。
+    if (disabled || saveLocked) return;
     const version = ++requestVersion.current;
     const timer = window.setTimeout(() => {
       setSaveState("saving");
@@ -263,7 +270,7 @@ export function BranchSettings({
       });
     }, 650);
     return () => window.clearTimeout(timer);
-  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, quick, sourcePath, title, valid]);
+  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, quick, saveLocked, sourcePath, title, valid]);
 
   const pathActionsDisabled = disabled || branch.finalArtifactLocked;
   const chooseSource = async () => {

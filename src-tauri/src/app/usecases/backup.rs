@@ -100,7 +100,7 @@ pub(crate) fn restore(
             context.cancel(),
             |label, current, total| context.report_progress(label, current, total),
         )
-        .map_err(CommandError::from)
+        .map_err(|error| context.cancelled_or("恢复已取消", error))
     })
 }
 
@@ -144,7 +144,7 @@ pub(crate) fn delete_subtree(
                 context.chunk_write_options(),
                 |label, current, total| context.report_progress(label, current, total),
             )
-            .map_err(CommandError::from)?;
+            .map_err(|error| context.cancelled_or("删除操作已取消", error))?;
             context.report_progress("正在删除历史节点", 1, 1);
         }
         let deletion =
@@ -175,7 +175,7 @@ pub(crate) fn set_checkpoint(
                 context.chunk_write_options(),
                 |label, current, total| context.report_progress(label, current, total),
             )
-            .map_err(CommandError::from);
+            .map_err(|error| context.cancelled_or("检查点生成已取消", error));
         }
         // 取消检查点：提交路径不再为检查点父节点写反向增量，所以这里先在事务外
         // 按需重建（子边已持有增量的旧仓库直接沿用），再在一个事务里换掉 snapshot。
@@ -196,7 +196,7 @@ pub(crate) fn set_checkpoint(
                     context.chunk_write_options(),
                     |label, current, total| context.report_progress(label, current, total),
                 )
-                .map_err(CommandError::from)?,
+                .map_err(|error| context.cancelled_or("检查点操作已取消", error))?,
             );
         }
         // 取消检查点释放的 snapshot 已在事务内入队，提交成功后单遍重放。
@@ -497,6 +497,127 @@ mod tests {
             6,
             "被取消的提交不得清零连续快速命中计数"
         );
+    }
+
+    /// 造一个「可取消的检查点」：首节点设为检查点，再来一次提交让 head 持有
+    /// 快照，检查点子边因此没有反向增量，取消时必然走重建路径。
+    fn checkpoint_awaiting_release(root: &Path, source: &Path, branch_id: &str) -> String {
+        let first = worker::run_backup(
+            root,
+            branch_id,
+            "first",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        let checkpoint_id = first.history_id.unwrap();
+        backup::restore::ensure_checkpoint(
+            root,
+            &checkpoint_id,
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        fs::File::create(source)
+            .unwrap()
+            .write_all(b"content v2")
+            .unwrap();
+        worker::run_backup(
+            root,
+            branch_id,
+            "second",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap();
+        checkpoint_id
+    }
+
+    /// 用户在重建检查点增量时取消：错误必须是中性的取消文案，不能把取消说成
+    /// 「备份文件无法读取」。节点仍保持检查点状态，没有写出半成品增量。
+    #[test]
+    fn cancelled_checkpoint_release_reports_a_cancelled_operation() {
+        let (directory, root, source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "checkpoint-cancel");
+        let checkpoint_id = checkpoint_awaiting_release(&root, &source, &branch_id);
+
+        let token = CancelToken::standalone();
+        token.cancel();
+        let result = coordinator.execute_with(OperationDomain::Backup, token, |context| {
+            set_checkpoint(context, &checkpoint_id, false)
+        });
+        let error = result.expect_err("已取消的检查点释放必须失败");
+        assert_eq!(error.kind, CommandErrorKind::Cancelled);
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(error.message, "检查点操作已取消");
+        assert!(!error.message.contains("无法读取"));
+        assert!(
+            history::load_node(&root, &checkpoint_id)
+                .unwrap()
+                .snapshot_path
+                .is_some(),
+            "取消的检查点释放不得改动节点记录"
+        );
+    }
+
+    /// 真正的链损坏仍原样上报为读失败：只有取消才换成中性文案。
+    #[test]
+    fn damaged_checkpoint_snapshot_still_reports_a_read_failure() {
+        let (directory, root, source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "checkpoint-damaged");
+        let checkpoint_id = checkpoint_awaiting_release(&root, &source, &branch_id);
+        let snapshot = history::load_node(&root, &checkpoint_id)
+            .unwrap()
+            .snapshot_path
+            .expect("检查点应持有 snapshot");
+        let snapshot_path = storage::resolve_path(&root, &snapshot).unwrap();
+        fs::write(&snapshot_path, b"").unwrap();
+
+        let result = coordinator.execute(OperationDomain::Backup, |context| {
+            set_checkpoint(context, &checkpoint_id, false)
+        });
+        let error = result.expect_err("快照损坏时不能释放检查点");
+        assert_eq!(error.kind, CommandErrorKind::Io, "{}", error.message);
+        assert!(
+            error.message.contains("无法读取"),
+            "真正的读失败应保留原文：{}",
+            error.message
+        );
+        assert_ne!(error.message, "检查点操作已取消");
+    }
+
+    /// 用户在恢复过程中取消：错误必须是中性的取消文案，不能把取消说成读失败，
+    /// 也不能留下半成品输出。
+    #[test]
+    fn cancelled_restore_reports_a_cancelled_operation() {
+        let (directory, root, _source, branch_id) = fixture();
+        let coordinator = coordinator_for(&root, directory.path(), "restore-cancel");
+        let history_id = worker::run_backup(
+            &root,
+            &branch_id,
+            "first",
+            "manual",
+            &CancelToken::standalone(),
+            ChunkWriteOptions::V1,
+        )
+        .unwrap()
+        .history_id
+        .unwrap();
+        let output = directory.path().join("restored.bin");
+        let output = output.to_string_lossy().into_owned();
+
+        let token = CancelToken::standalone();
+        token.cancel();
+        let result = coordinator.execute_with(OperationDomain::Backup, token, |context| {
+            restore(context, &history_id, &output)
+        });
+        let error = result.expect_err("已取消的恢复必须失败");
+        assert_eq!(error.kind, CommandErrorKind::Cancelled);
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(error.message, "恢复已取消");
+        assert!(!Path::new(&output).exists(), "取消的恢复不得留下输出文件");
     }
 
     /// 直接调用 `worker::run_backup`（不经 use-case）**不得**触碰该计数：

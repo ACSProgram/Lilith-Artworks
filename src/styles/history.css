@@ -10,18 +10,19 @@
 
 .history-workspace.compacting { grid-template-rows: auto auto auto auto minmax(0, 1fr); }
 
+/* 标题与操作区占第一行，进度条单独占第二行：进度条不再和标题抢宽度。 */
 .history-header {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 20px;
+  gap: 0 20px;
   min-height: 60px;
   padding: 9px 20px;
   border-bottom: 1px solid var(--border);
   background: var(--surface);
 }
 
-.history-title { flex: 1 1 auto; min-width: 0; }
+.history-title { min-width: 0; }
 .history-title span { text-transform: uppercase; }
 .history-header span { color: var(--muted); font-size: 10px; }
 .history-header h1 { margin: 3px 0 0; overflow: hidden; font-size: 19px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
@@ -44,10 +45,13 @@
 
 .operation-progress {
   display: grid;
-  grid-template: auto 5px / minmax(180px, 300px) 28px;
+  grid-column: 1 / -1;
+  grid-template: auto 5px / minmax(0, 1fr) 28px;
   align-items: center;
   gap: 5px 8px;
-  min-width: min(330px, 34vw);
+  width: 100%;
+  min-width: 0;
+  margin-top: 9px;
   padding: 7px 8px 7px 10px;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   border-radius: 6px;
@@ -409,14 +413,14 @@
 @media (max-width: 1180px) {
   .history-header { align-items: flex-start; }
   .history-header-actions { flex-wrap: wrap; }
-  .operation-progress { order: 3; width: 100%; min-width: 100%; }
   .branch-band { grid-template-columns: 1fr; }
   .branch-status-actions { grid-column: auto; flex-direction: row; justify-content: flex-start; padding-left: 29px; }
 }
 
 @media (max-width: 900px) {
-  .history-header { align-items: stretch; flex-direction: column; gap: 10px; }
+  .history-header { grid-template-columns: minmax(0, 1fr); align-items: stretch; gap: 10px 0; }
   .history-header-actions { justify-content: space-between; width: 100%; }
+  .operation-progress { grid-column: 1; margin-top: 0; }
   .history-header-actions select { flex: 1 1 180px; width: auto; min-width: 0; }
   .history-toolbar { align-items: stretch; flex-direction: column; }
   .history-toolbar > .secondary-button { align-self: flex-end; }

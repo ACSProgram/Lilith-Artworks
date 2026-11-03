@@ -402,6 +402,7 @@ button { color: inherit; }
 .storage-toolbar-copy strong, .storage-toolbar-copy small { display: block; }
 .storage-toolbar-copy strong { font-size: 13px; }
 .storage-toolbar-copy small { margin-top: 4px; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.storage-toolbar-copy .storage-busy-note { color: var(--accent); }
 .storage-toolbar-actions { display: flex; flex: none; gap: 8px; }
 .storage-scan-note { display: block; padding: 8px 20px 0; color: var(--muted); font-size: 10px; }
 .storage-mode-control { margin: 12px 20px 0; }

@@ -139,3 +139,147 @@ zstd 0.14.3 / zstd-safe 8.2.0 / zstd-sys 2.1.2。四个调用点（`delta.rs` �
   损坏路径。
 - `stress_format` / `stress_damage`：按 `docs/guides/validation.md` 只在发布前由维护者发起。
 - 人工一步：替换副本 → 取消发布 → 等过 30 分钟宽限期 → 空间页扫描能看到它 → 确认清理后文件消失。
+
+## 8. 同日晚间的一次性 UI 验收（2026-11-03）
+
+无头探针跑完后，用真实仓库 `F:\LilithData\Artworks` 的完整副本
+（`F:\LilithArtworks-UIAcceptance-2026-11-03\repository`）做了一次 GUI 验收。设置为临时指向副本、
+暂停自动备份、关闭托盘驻留；结束时恢复原设置。真实仓库在前后各做一次清单比对（433 个数据文件、
+6,444,668,474 字节、DB SHA-256 `13F1463…ABAB6`），结束时输出
+`OK: real repository data is unchanged.`。副本内写入测试分组「UI测试」与三个夹具作品；结束后
+副本、脚本、设置与样本全部删除，截图与日志证据保留在
+`F:\LilithArtworks-UIAcceptance-evidence-2026-11-03`（不进仓库）。
+
+### 8.1 逐项结果
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 设置页长任务 busy 拒绝与成功提示 | 部分通过：备份、垃圾扫描按钮禁用；磁盘扫描点击后提示「已有备份操作正在运行」；完整性检查 51.4 s 成功结束（日志 `domain=maintenance outcome=succeeded`）；失败提示未制造 | `07-busy.png`、`07b-busy-prompt.png`、`log-operations-final` |
+| 只读记录 | 通过（删除除外）：页头「发布记录 · 只读」「记录已锁定」，字段只读，C2PA 报告可展开，TrustMark 已嵌入；再次导出文件 SHA-256 与记录成品一致；「删除本记录」入口存在但未点击 | `02-record.png`、`evidence\re-export.jpg` |
+| 取消发布保留副本 → 宽限 → 扫描 → 清理 | 通过：替换副本后发布页提示 SHA-256 不匹配但仍可取消；取消后 DB 记录为 0、两文件保留、待清理队列为空；扫描正好列出 2 个候选（`最终成品副本未被引用` / `认证副本未被引用`）；清理后两文件消失、DB 仍为 0；日志有两条 `[cleanup] retained` | `10-cancel-unpublished.png`、`10-retained-scan.png`、`10b-retained-clean.png`、`retained-after-cancel.json`、`retained-after-clean.json` |
+| `.sai2` 缩略图 | 通过：正常样本显示画布预览；256 B 截断样本显示「无可用预览」+ 刷新 | `03a-sai2.png`、`03b-sai2-broken.png` |
+| `.procreate` 缩略图 | 通过（合成 ZIP）：`QuickLook/Thumbnail.png` 显示；缺条目显示「无可用预览」+ 刷新 | `03c-procreate.png`、`03d-procreate-missing.png` |
+| `.tga` 缩略图 | 通过：正常样本显示预览与节点信息；改扩展名后「节点信息」栏整块没有预览区 | `03e-tga.png`、`03f-tga-renamed.png` |
+| 检查点取消后的统计 | 通过：取消后节点仍 `is_checkpoint=0`、`snapshot_path=null`、保留 delta；UI 切片回增量；但取消时弹出误导性错误（见 8.2） | `08-checkpoint-cancel.png`、DB `history_nodes` |
+| 长任务期间切换作品 | 通过：完整性检查进行中从子路切到伊蕾娜、OC 设定 Erica，作品树、标题、分支与历史节点同步切换；标题在进度条旁被截断（见 8.2） | `07c-switch-yileina.png` |
+| 未保存画板切换作品 | 部分通过：无错误、切回后内容保留（构图 41 条，DB 文本 `切换保存测试` 存在）；未捕捉到「正在后台保存 1 块画板的改动」提示瞬间 | `05-board-switch.png` |
+| 只读画板 | 未复现：给画板 DDS 加 `+R` 后文字编辑仍能写入数据库，因为文字只改 DB 行、不写画板文件；需要只读仓库/数据库或 ACL 才能复现 | `board-readonly.ps1` 日志 |
+| 退出结算 | 部分通过：关窗后 `saveOnExit=true`、`pin-board finalize start/done`、`shutdown settlement finished: outcome=ok`；重启后画板 43 条、文本 `退出结算测试` 仍在；没有 todo 期望的 `pin-board settle flush finished … remaining=0` 行 | `log-pin-board-settle-exit`（0 行）、`11-relaunch.png`、DB `pin_board_texts` |
+| 历史重置 | 通过：空作品没有溢出菜单；已发布作品滑到底后被拒绝并提示先取消发布，12 个节点不变；普通作品 OC 设定 Erica 两次确认 + 滑条后变为 0 节点 / 1 空分支，作品名与树位置不变 | `09a-reset-hidden.png`、`09b-reset-rejected.png`、`09c-reset-done.png` |
+| 文字放置模式 | 通过（取消路径部分）：工具栏按钮点亮、画布落点开框、`Escape` 取消且不新增条目；右键与再次点击按钮取消未单独实测 | `04-text-placement.png` |
+| 右键添加文字 | 通过：右键菜单位置直接开框，输入「右键文字」后提交，条目 38 → 39 | `04b-text-created.png` |
+| 新建文字后的状态栏/进度条 | 通过：放置模式与右键两条路径提交后都只出现选中框，没有状态栏或传输进度条 | `04b-text-created.png` |
+
+### 8.2 本轮发现的产品问题
+
+1. **检查点取消被误报为数据损坏**（P2）：点击「取消操作」后，前端弹红色「操作提示」：
+   「历史节点 `fc288bb4-…` 的备份文件（恢复链 delta）无法读取：操作已取消」。日志同样是
+   `outcome=cancelled` 但 error 文案为「无法读取」；看起来像备份损坏，而不是用户主动取消。
+2. **长任务进度条挤压作品标题**（P3）：完整性检查运行时，进度条占据内容区顶部，标题被截断为
+   「伊...」「OC设...」，`ARTWORK 历史` 换行。
+3. **设置页长任务 busy 状态不一致**（P3）：「创建备份」「开始扫描」直接禁用，
+   「扫描磁盘占用」仍可点击，点击后才弹 busy 提示。
+4. **退出结算日志缺口**（P3）：退出时有 `pin-board finalize` 与 `shutdown settlement finished`，
+   但没有 `pin-board settle flush finished`；内容本身没有丢失。
+
+### 8.3 未覆盖与限制
+
+- 只读记录的删除行为未执行，避免破坏取消发布验收所需的记录；由单测与后续手工覆盖。
+- 真实 `.procreate` 文件本机没有样本，仍只有合成 ZIP。
+- `#1` 精简模式、`#3` 取消提示时序、`#5` 识别页真实拖放、`#7` 预览缓存 512 MiB、`#8–#11`
+  错误边界与热更新、`#16–#17` 自动备份让位与同进程写者排队，本轮按计划不执行，仍留在
+  `todo.md`。
+- 缩略图是否「明显放大」、提示条位置等视觉判断由维护者复核截图。
+
+
+## 9. 同日晚间第二轮 UI 验收（2026-11-03）
+
+首轮验收后，维护者要求继续把 `todo.md` 中剩余的人工项尽量跑完。第二轮仍使用真实仓库
+`F:\LilithData\Artworks` 的完整副本（`F:\LilithArtworks-UIAcceptance-2026-11-03-B`），设置为临时
+指向副本、结束时恢复；真实仓库前后清单一致（435 个文件、6,444,701,242 字节、DB SHA-256
+`13F1463…ABAB6`）。测试副本与脚本已删除，日志、最终数据库摘要与预览缓存统计保留在
+`F:\LilithArtworks-UIAcceptance-evidence-2026-11-03\round2\`（不进仓库）。本轮没有改产品代码，
+也没有提交。
+
+### 9.1 逐项结果
+
+| 项 | 结果 | 证据 |
+| --- | --- | --- |
+| 质量预览的正常完成与取消提示 | 通过：正常完成后只打开「导出预览」，没有取消提示；生成中点击「取消」后提示「质量预览已取消。」 | `round2/Lilith Artworks_2026-11-03_05-14-01.log`、`round2-summary.json` |
+| 签名中取消发布 | 通过：在「正在写入 C2PA；时间戳服务最长等待 30 秒」阶段点「取消签名」，提示「签名发布已取消。」；`certification_records` 仍为 0，目标文件未生成 | 同上 |
+| 预览缓存的会话内上限 | 通过：连续切换 JPEG 质量 81–96、TrustMark 强度 0.95/1.05 与背景色，做 20 余次预览后只剩 16 个 JPG + 16 个 JSON，共 64,756,798 字节，低于 512 MiB；最后一次预览在 100% 缩放下高清细节与框选放大镜正常 | `round2-summary.json` 的 `preview_dirs` |
+| 只读记录的删除 | 通过：确认「删除发布记录」后记录行归零、仓库内认证 JPG 副本删除、待清理队列为 0；`F:\Artworks\…\发布\发布版.jpg` 这个首次导出文件仍在 | `round2-summary.json`、DB `certification_records` |
+| 精简模式两段确认与批级取消 | 通过：选 3 个中间节点（2 个主动提交、3 个自定义名称）后先出现「已选择 3 个中间节点」，再出现「其中包含重要节点」与「共 3 个节点，含 2 个主动提交节点、3 个已改名节点」；滑块拖到底后 12 → 9 个节点，图结构与 `verify_error` 正常。另选 3 个节点执行后立即取消，提示「精简已取消，剩余 3 个节点未被删除。」，节点数保持 9 | `round2-summary.json` 的 `history_nodes` |
+| 文字放置的两种取消 | 通过：点亮「添加文字」后右键画布取消；再次点击同一按钮取消；两次按钮都恢复为未激活态 | 操作截图未留存，日志与按钮状态一致 |
+| 识别页四种格式导入 | 部分通过：PNG、JPEG、WebP、TIFF 均经「选择待识别图片」导入并解码（1024² 与 5000²）；没有完成资源管理器到识别页的真实拖放（窗口并排操作会扰动资源管理器），大图识别完成过快，未观察到识别与搜索两个 busy 同时出现 | 同上 |
+| 自动备份启动时机 | 部分通过：画板保存完成于 13:17:48，10 秒内没有调度动作；13:18:27 与 13:18:38 才出现 Erica、子路的 `backup quick-unchanged`。当前打开分支的自动备份与后台运行中再次操作的让位没有单独复现 | `round2/Lilith Artworks_2026-11-03_05-14-01.log` |
+| 同进程写者排队 | 部分通过：多次画板保存全部 `outcome=succeeded`，没有出现「仓库正在被另一个进程写入」或 `same_process=true`；但没有与自动备份真正重叠 | 同上 |
+| 未保存画板切换提示 | 未捕捉：切换作品时应用回到版本历史，页头没有出现「正在后台保存…」；切回后条目数仍为 38 | 同上 |
+| 只读仓库下的画板写回失败 | 未复现：整仓库 ACL 拒绝写后应用直接报「无法读取作品仓库内容：拒绝访问。(os error 5)」；只拒绝数据库文件写入后报「作品数据库操作失败：unable to open database file」（SQLite 无法以只读方式打开 WAL 数据库）；只拒绝画板目录写入时条目移动仍能保存到数据库。没有进入「N 块画板的改动还没写进仓库」+「重试」分支 | 同上 |
+| 退出结算 | 按修正后的口径通过：关闭窗口（`closeToTray=false`）后日志有 `pin-board finalize start/done`、`shutdown settlement finished: outcome=ok` 与 `confirm_app_shutdown sent`；`pin-board settle flush finished` 因队列为空提前返回，不再视为缺口 | `round2/Lilith Artworks.log` |
+
+### 9.2 观察与限制
+
+- 本轮没有发现新的已确认产品问题。首轮登记的检查点取消误报、长任务进度条挤压标题、设置页
+  busy 状态不一致仍留在 `todo.md`；退出结算日志项已按「finalize/settlement 为准」从待办移除。
+- 只读仓库的 ACL 组合会让应用在更早的仓库校验/数据库打开阶段失败，因此无法覆盖画板写回失败的
+  界面分支。要覆盖它，需要一种数据库仍可打开、但保存时写入失败的条件（例如真实磁盘写满）。
+- 识别页的真实拖放与两个 busy 的并发窗口仍未覆盖；本轮只证明了四种格式的选择导入与解码。
+- 自动备份只观察到其它分支的 `quick-unchanged`，当前打开分支的备份没有出现在日志里；可能与该
+  分支的源文件正被画板/预览占用有关，需要维护者在更长静默窗口中复核。
+- 真实 `.procreate` 仍未验证（本机没有样本）；错误边界与热更新需要开发模式临时改代码，本轮未做。
+- 预览缓存目录里仍留有 2026-10-25 的旧会话目录（约 949 KB）。它不影响 512 MiB 会话上限，是否
+  属于清扫时机问题需要另行确认，本轮未登记为产品问题。
+
+### 9.3 清理核对
+
+- 应用已退出，`%APPDATA%\com.lilith.artworks\settings.json` 已恢复为 `F:\LilithData\Artworks`、
+  `pauseAutomaticBackups=false`。
+- 真实仓库前后清单一致；测试副本、脚本与临时证书副本全部删除。
+- 证据目录新增 `round2\`，包含运行日志、`round2-summary.json`（历史节点、发布记录、待清理队列、
+  预览缓存、画板 revision 与条目数）。
+
+## 10. 0.3 收尾 UI 修正批次（按 `0.3-final-ui-fixes-plan-2026-11-03.md` 执行）
+
+A–D 四项已实施并通过自动验证；界面效果仍待维护者按计划中的窗口宽度手工确认。
+
+- **A 检查点取消文案**：`CommandContext` 新增 `cancelled_or`，只在
+  `context.is_cancelled()` 为真时把底层链错误换成中性取消文案。调用点覆盖
+  `set_checkpoint` 的启用与取消路径（`检查点生成已取消` / `检查点操作已取消`）、
+  `delete_subtree`（`删除操作已取消`）、`create_branch_at_checkpoint`
+  （`创建分支已取消`）、`enter_publication`（`进入发布已取消`），复核时补上同一误报类的
+  `restore`（`恢复已取消`）与 `refresh_thumbnail`（`缩略图刷新已取消`）；真实读失败仍由
+  `from_legacy` 原样分类。新增应用层用例：预取消令牌释放检查点时错误为
+  `Cancelled` / `cancelled` / 中性文案且节点记录不变；把检查点 snapshot 截空后仍
+  返回「无法读取」并被归为 `Io`；预取消令牌恢复历史节点时返回「恢复已取消」且不留输出文件。
+- **B 历史页头布局**：进度条移出 `.history-header-actions`，成为 `<header>` 内
+  跨两列的独立行；`.history-header` 改为两列网格，`.operation-progress` 用
+  `minmax(0, 1fr) 28px` 占满整行。删除 1180 px 断点里失效的 `order: 3`；
+  900 px 以下标题、操作区、进度条各占一行。新增断言：运行时进度条是 header 的
+  直接子元素，不在操作区内。
+- **C 空间页 busy 一致**：`RepositoryStoragePanel` 接收 `busy` 与 `busyLabel`，
+  「刷新」与「扫描磁盘占用」统一为 `disabled={busy || loading || scanning}`，
+  busy 时按钮 title 说明原因，工具栏状态行显示 `当前任务：…`。
+  `App.repositorySwitch.test.tsx` 新增用例：完整性检查挂起时扫描按钮禁用且状态行
+  出现，检查结束后恢复可点。
+- **D 历史页按控件分级禁用**：`writeLocked = busy || runtime.busy` 用于提交、精简、
+  检查点、删除、重置与缩略图重提；`draftLocked = busy`（或另一前台用户操作）
+  只锁分支设置与提交备注。`BranchSettings` 新增 `saveLocked`，后台任务占用运行锁
+  时草稿保持「未保存」，锁释放后防抖写回。新增 HistoryModule 的 draft/write 分离
+  与精简删除锁用例，以及 HistoryControls 的延迟写回用例。
+
+验证：`cargo fmt --check`、`cargo test --lib`（444 通过、1 忽略）、
+`npx tsc --noEmit`、`npm test`（56 文件 / 507 项全绿）。
+
+## 11. 收尾复核与提交（2026-11-03）
+
+- A 复核时把同一误报类的 `restore` 与 `refresh_thumbnail` 纳入 `cancelled_or`，并新增
+  预取消恢复用例（断言 `Cancelled` / `cancelled` /「恢复已取消」，且不留下输出文件）；
+  `cargo test --lib` 由 443 增至 444。
+- 整理暂存代码：`App.repositorySwitch.test.tsx` 的 busy 用例改用 `RepositoryScrubReport`
+  类型，并修正相邻用例的换行；CHANGELOG 改掉把旧禁用行为说反的句子。
+- 同步文档：`docs/modules/history-and-backup.md` 补上空间页 busy 禁用、历史页分级禁用与
+  新增的取消文案映射；`current-handoff.md` 与 `todo.md` 只保留当前状态和剩余验收项，
+  已完成的验收与批次经过归入本文件 §7–§11。
+- 验证结果：`cargo fmt --check`、`cargo test --lib`（444 通过、1 忽略）、
+  `npx tsc --noEmit`、`npm test`（56 文件 / 507 项全绿）。本批次已提交到 `dev`。

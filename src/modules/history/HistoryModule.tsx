@@ -63,6 +63,12 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
   const nodeElements = useRef(new Map<string, HTMLButtonElement>());
   const contextPlacement = useMenuPlacement(context);
 
+  // 写操作要和后台任务共用运行锁，因此沿用 runtime.busy；草稿输入只在本页自己的
+  // 或另一个前台用户操作进行时锁住，后台自动备份与空闲校验期间可以继续编辑，
+  // 写回等锁释放后再发生。
+  const writeLocked = busy || runtime.busy;
+  const draftLocked = busy || (runtime.busy && runtime.taskKind === "userOperation");
+
   const selectedBranch = history?.branches.find((branch) => branch.id === selectedBranchId) ?? null;
   const selectedNode = history?.nodes.find((node) => node.id === selectedNodeId) ?? null;
   const branchLine = useMemo(() => selectedBranch && history
@@ -313,7 +319,6 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     <header className="history-header">
       <div className="history-title"><span>Artwork 历史</span><h1>{history.artworkTitle}</h1></div>
       <div className="history-header-actions">
-        {visibleRuntime.busy && <OperationProgress runtime={visibleRuntime} onCancel={cancelOperation} />}
         <div className="segmented-control" aria-label="历史视图">
           <button className={view === "overview" ? "active" : ""} onClick={() => { setView("overview"); exitCompactMode(); }}>总览</button>
           <button className={view === "branch" ? "active" : ""} onClick={() => setView("branch")}>当前分支</button>
@@ -327,7 +332,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         </select>
         {canResetArtwork && <details className="history-more-menu">
           <summary className="icon-button" title="更多历史操作"><MoreVertical size={17} /></summary>
-          <div><button className="danger" type="button" disabled={busy || runtime.busy} onClick={(event) => {
+          <div><button className="danger" type="button" disabled={writeLocked} onClick={(event) => {
             (event.currentTarget.closest("details") as HTMLDetailsElement).open = false;
             setConfirmRequest({
               kind: "reset-artwork",
@@ -337,13 +342,14 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
           }}><RotateCcw size={15} />重置作品历史</button></div>
         </details>}
       </div>
+      {visibleRuntime.busy && <OperationProgress runtime={visibleRuntime} onCancel={cancelOperation} />}
     </header>
 
     {selectedBranch && <section className="branch-band">
-      <BranchSettings branch={selectedBranch} disabled={busy || runtime.busy} onSave={saveBranch} />
+      <BranchSettings branch={selectedBranch} disabled={draftLocked} saveLocked={writeLocked} onSave={saveBranch} />
       <div className="branch-status-actions">
         <BranchScheduleStatus branch={selectedBranch} onReverify={reverifyBranch} />
-        {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={busy || runtime.busy} onClick={() => {
+        {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={writeLocked} onClick={() => {
           const origin = history.nodes.find((node) => node.id === selectedBranch.createdFromHistoryId);
           if (origin) setConfirmRequest({ kind: "delete-branch", node: origin, branch: selectedBranch });
         }}><Trash2 size={15} />删除分支</button>}
@@ -354,19 +360,19 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       <div className="commit-block">
         <label htmlFor="commit-note">主动提交</label>
         <div className="commit-control">
-          <input id="commit-note" value={commitNote} maxLength={500} placeholder="添加本次提交备注（可选）" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || busy || runtime.busy} onChange={(event) => setCommitNote(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void commit(); }} />
-          <button className="primary-button" type="button" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || busy || runtime.busy} onClick={() => void commit()}>{visibleRuntime.busy && visibleRuntime.activeBranchId === selectedBranch?.id ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}提交</button>
+          <input id="commit-note" value={commitNote} maxLength={500} placeholder="添加本次提交备注（可选）" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || draftLocked} onChange={(event) => setCommitNote(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void commit(); }} />
+          <button className="primary-button" type="button" disabled={!selectedBranch || !selectedBranch.sourcePath || selectedBranch.finalArtifactLocked || writeLocked} onClick={() => void commit()}>{visibleRuntime.busy && visibleRuntime.activeBranchId === selectedBranch?.id ? <LoaderCircle className="spin" size={16} /> : <Play size={16} />}提交</button>
         </div>
         {selectedBranch && !selectedBranch.sourcePath && <span className="commit-feedback muted" role="status">该分支未选择工作文件，自动备份与主动提交不可用。</span>}
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
       </div>
-      {!compactMode && <button className="secondary-button" type="button" disabled={busy || runtime.busy || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={startCompactMode}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
+      {!compactMode && <button className="secondary-button" type="button" disabled={writeLocked || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={startCompactMode}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
     </section>
 
     {compactMode && <div className="compact-mode-bar">
       <ListCollapse aria-hidden="true" size={16} /><div><strong>精简 {selectedBranch?.title}</strong><span>选择当前分支上的普通中间节点</span></div>
       <strong className="compact-count">{compactSelection.size} 个已选</strong>
-      <button className="danger-button" type="button" disabled={!compactSelection.size || busy || runtime.busy} onClick={() => {
+      <button className="danger-button" type="button" disabled={!compactSelection.size || writeLocked} onClick={() => {
         setConfirmRequest({ kind: "compact", selectedCount: compactSelection.size });
       }}><Trash2 size={15} />删除节点</button>
       <button className="text-button" type="button" onClick={exitCompactMode}>退出</button>
@@ -394,7 +400,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
         selectedNode={selectedNode}
         nodeFormat={nodeFormat}
         nodeThumbnail={nodeThumbnail}
-        disabled={busy || runtime.busy}
+        disabled={writeLocked}
         onRefreshThumbnail={refreshThumbnail}
       />
     </div>
@@ -404,7 +410,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
       title={hoverNode.title}
       preview={hover.value}
       refreshing={hoverRefreshingNodeId === hover.nodeId}
-      disabled={busy || runtime.busy}
+      disabled={writeLocked}
       onRefresh={() => refreshThumbnail(hoverNode)}
       onEnter={cancelHoverClose}
       onLeave={scheduleHoverClose}
@@ -435,7 +441,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     }} />}
     {confirmRequest && <ConfirmDialog
       request={confirmRequest}
-      busy={busy || runtime.busy}
+      busy={writeLocked}
       // 只有本弹窗自己的操作真的在跑时才提供「取消操作」：runtime.busy 也可能来自
       // 后台自动备份或空闲校验，那不是这个操作。
       onCancelOperation={busy ? () => void cancelOperation() : undefined}

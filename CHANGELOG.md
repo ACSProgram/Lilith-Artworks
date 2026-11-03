@@ -30,6 +30,21 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- The operation progress bar in the history header now spans its own row under
+  the title and actions instead of sharing the first row, so a long artwork
+  title is no longer truncated while an integrity check runs. Below 900 px the
+  title, actions and progress each take a row.
+- The space page disables `刷新` and `扫描磁盘占用` while any long task holds the
+  settings busy state, matching the busy gating already used by the other
+  space-page entries, and names the running task under the toolbar
+  (`当前任务：…`). The scan button no longer needs a click to surface the
+  "已有备份操作正在运行" rejection.
+- History drafts stay editable while a background automatic backup or idle
+  verification runs. The branch name, commit note and branch settings accept
+  input during those tasks, and a pending branch-settings save is held as
+  `未保存` until the write lock is free; write actions (submit, compact,
+  checkpoint, delete, reset and thumbnail refresh) stay locked for the whole
+  task.
 - The tray menu is trimmed to `显示窗口` / `自动备份` / `退出`, with a separator
   before quitting. The window entry is relabelled from `打开 Lilith Artworks`
   to `显示窗口`, which is what it does: it brings the existing window back to
@@ -58,6 +73,14 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Fixed
 
+- Cancelling a checkpoint no longer reports the backup files as unreadable.
+  When the reverse-delta rebuild behind a cancellation fails because the user
+  had already cancelled, the command returns the neutral `检查点操作已取消`
+  instead of the legacy `…的备份文件（恢复链 delta）无法读取：操作已取消`
+  message. The same neutral mapping covers enabling a checkpoint, subtree
+  deletion, branch creation, entering publication, restoring a node and
+  refreshing a node thumbnail; genuine read failures keep their original
+  message and classification.
 - Cancelling a publication no longer strands repository copies where nothing
   can find them. When the final artifact or a certification copy had been
   replaced on disk, the command deliberately keeps the file and drops its

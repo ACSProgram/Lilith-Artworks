@@ -767,6 +767,19 @@ impl CommandContext {
         self.cancel.is_cancelled()
     }
 
+    /// 取消已请求时把底层错误换成中性文案，否则保持原有的字符串分类。
+    ///
+    /// 底层链解析会把「取消」混进通用的读失败文案里（例如「备份文件无法读取：
+    /// 操作已取消」），界面只显示 message，看起来就像仓库损坏。这里只替换文案与
+    /// 分类；操作日志的 `outcome` 仍由运行时按 `Cancelled` 记录。
+    pub(crate) fn cancelled_or(&self, message: &str, error: impl Into<String>) -> CommandError {
+        if self.is_cancelled() {
+            CommandError::cancelled(message)
+        } else {
+            CommandError::from_legacy(error)
+        }
+    }
+
     /// The shared cancellation token for long I/O. Stage 4 chunk-file APIs take
     /// this token directly so every read/write step observes the same source.
     pub(crate) fn cancel(&self) -> &CancelToken {

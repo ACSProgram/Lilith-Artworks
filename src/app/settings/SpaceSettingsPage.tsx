@@ -50,6 +50,8 @@ export function SpaceSettingsPage({
       error={storageOverviewError}
       scanning={settingsOperation === "storage-scan"}
       cancelPending={cancelPending}
+      busy={settingsBusy}
+      busyLabel={visibleSettingsRuntime?.progressLabel ?? null}
       runtime={visibleSettingsRuntime}
       onRefresh={() => void refreshStorageOverview()}
       onScan={() => void scanStorageDisk()}

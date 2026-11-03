@@ -77,7 +77,7 @@ pub(crate) fn refresh_thumbnail(
             context.cancel(),
             |label, current, total| context.report_progress(label, current, total),
         )
-        .map_err(CommandError::from)?;
+        .map_err(|error| context.cancelled_or("缩略图刷新已取消", error))?;
         let Some(thumbnail) = thumbnail else {
             log::info!("history thumbnail refresh produced no preview: history_id={history_id}");
             return Ok(None);
@@ -125,7 +125,7 @@ fn create_branch_at_checkpoint(
         context.cancel(),
         context.chunk_write_options(),
     )
-    .map_err(CommandError::from)?;
+    .map_err(|error| context.cancelled_or("创建分支已取消", error))?;
     history::create_branch(
         session.root(),
         artwork_id,

@@ -4,6 +4,7 @@ import packageInfo from "../../package.json";
 import { dragSlideToEnd } from "../shared/slideToConfirmTesting";
 import type {
   RepositoryBackupRun,
+  RepositoryScrubReport,
   RepositoryStorageDiskScan,
   RepositoryStorageOverview,
   SettingsSnapshot,
@@ -635,7 +636,47 @@ describe("App repository switching", () => {
     expect(screen.getAllByText("2.50 KiB").length).toBeGreaterThan(0);
   });
 
-  it("shows release identity and opens the bundled legal directory", async () => {    const repositoryPath = "C:\\repositories\\A";
+  it("disables the disk scan and names the running task while another long task runs", async () => {
+    const repositoryPath = "C:\\repositories\\A";
+    appApi.getSettings.mockResolvedValue(settings(repositoryPath));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryPath,
+      databasePath: `${repositoryPath}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository artwork", "C:\\work\\A.psd"));
+    const scrub = deferred<RepositoryScrubReport>();
+    appApi.scrubRepositoryIntegrity.mockReturnValue(scrub.promise);
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.click(await screen.findByRole("button", { name: "开始检查" }));
+    fireEvent.click(await screen.findByRole("button", { name: "空间" }));
+
+    const scanButton = await screen.findByRole("button", { name: /扫描磁盘占用/ });
+    await waitFor(() => expect((scanButton as HTMLButtonElement).disabled).toBe(true));
+    expect(screen.getByText(/当前任务：/)).toBeTruthy();
+
+    await act(async () => {
+      scrub.resolve({
+        historyNodes: 3,
+        finalArtifacts: 1,
+        certificationRecords: 2,
+        pinBoardBitmaps: 5,
+        pinBoardMissingDds: 0,
+        pinBoardCorruptDds: 0,
+        pinBoardOrphanDds: 0,
+      });
+    });
+    await waitFor(() => expect((scanButton as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("shows release identity and opens the bundled legal directory", async () => {
+    const repositoryPath = "C:\\repositories\\A";
     appApi.getSettings.mockResolvedValue(settings(repositoryPath));
     appApi.getRepositoryStatus.mockResolvedValue({
       configured: true,
