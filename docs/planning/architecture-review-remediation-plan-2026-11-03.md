@@ -1,7 +1,7 @@
 # 架构审查整改计划（2026-11-03）
 
-状态：**执行中**。B1、B2、B3 已实施并通过自动化验证（B2 的菜单项仍待维护者手工验收）；
-B4、B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
+状态：**执行中**。B1、B2、B3、B4 已实施并通过自动化验证（B2 的菜单项与 B4 的仓储流程仍待
+维护者手工验收）；B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
 
 2026-11-03 二次修订：已对照 Codex 复核意见调整范围与验收方式，并把工作项合并为 **5 个批次**。
 复核原文归档为 `archive/architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
@@ -486,6 +486,63 @@ B4、B5 未开始。本文件定义整改范围、顺序与验收口径，实施
   恢复的手工流程由维护者复验。
 - 不改变 schema、迁移顺序、锁语义与命令名；例外有登记，不允许既保留 SQL 又没有说明。
 - 若某个仓储拆分后需要扩大可见性或引入事务层级接口才能成立，回退并记录“不拆”。
+
+#### B4 实施记录（2026-11-03）
+
+**拆分（逐候选）**
+
+- 证据：三个文件的消费者都只经各自的 `mod.rs` re-export（`library/mod.rs`、`history/mod.rs`），
+  没有外部模块直接导入 `repository::`；测试接缝分别是 `library::repository::test_support::Fixture`
+  与 `history::test_support::HistoryFixture` 加真实 schema。三处都至少有 2 个独立变更理由：
+  Library 为「发现/初始化」「树语义」「回收站语义」，schema 为「表与版本」「迁移」「校验」，
+  History 为「分支设置」「图事务/检查点」「存储元数据与预览」。
+- `library/repository.rs` → `library/repository/{mod,discovery,tree,trash}.rs`：数据库定位、初始化
+  与备用库改名移入 `discovery.rs`；树读取/搜索/新建/重命名/移动与同级顺序移入 `tree.rs`；
+  软删除、恢复、永久删除与清空移入 `trash.rs`。`repository/mod.rs` 只保留模块声明、重导出与
+  共享 `open`；`library/mod.rs` 与所有调用方的路径不变。树与回收站共用的
+  `load_parent_map` / `ensure_nodes_exist` / `top_level_selection` / `sibling_ids` /
+  `update_sibling_positions` / `normalize_siblings` / `validate_node_ids` 收紧为 `pub(super)`，
+  未扩大 `pub(crate)`。测试随生产代码迁移到三个子模块，共用夹具放在 `#[cfg(test)]`
+  `test_support.rs`。
+- `library/schema.rs` → `library/schema/{mod,migrate,validate}.rs`：版本/格式常量、DDL 片段与
+  `create` 留在 `mod.rs`；`migrate`、`migrate_v4_to_v5` / `migrate_v5_to_v6` 连同迁移测试移入
+  `migrate.rs`；完整性、外键、实体、路径、摘要与轻量版本校验移入 `validate.rs`。迁移 SQL、
+  版本号与校验顺序未改。
+- `history/repository.rs` → `history/repository/{mod,branches,graph,storage}.rs`：分支列表/
+  创建/设置与读取移入 `branches.rs`；节点读取、提交、物化链、检查点与精简移入 `graph.rs`；
+  缩略图、snapshot 登记、存储元数据推导与作品目录移入 `storage.rs`。`history/mod.rs` 的
+  re-export 集合保持不变，`deletion_repository` / `verification_repository` /
+  `schedule_repository` 与 `backup` / `app` 的调用路径不变。测试随所在函数迁移。
+- 三个文件都没有引入新的事务层级接口或 `pub(super)` 之外的可见性扩大。
+
+**跨域 SQL 登记与回滚测试**
+
+- 保留现有单事务实现：Library 永久删除/清空与 History 重置各自打开连接并创建事务，usecase
+  仍只传 root。表清单、同事务理由、维护操作与防部分提交的测试登记在
+  `docs/modules/library.md` 的「回收站」与 `docs/modules/history-and-backup.md` 的「历史操作」。
+- 新增 `permanent_deletion_rolls_back_when_a_cross_domain_delete_fails`：在删除 `final_artifacts`
+  时注入失败，断言回收站根、分支 `head_history_id`、成品、认证记录与 `pending_file_cleanup`
+  全部回滚。
+- 新增 `artwork_reset_rolls_back_when_the_cross_domain_timestamp_update_fails`：在更新
+  `library_nodes.updated_ms` 时注入失败，断言原分支与历史节点仍在、清理队列为空。
+- 没有为「消除跨域 SQL」新增设计；`deletion_repository` 与 `trash` 仍各自拥有同事务实现。
+
+**验证与偏差**
+
+- `cargo fmt --check` 通过；`cargo check --lib` 与 `cargo check --lib --features headless`
+  通过；`cargo test --lib` 447 项通过、1 项忽略（原 445 项 + 2 项回滚测试）。
+- 未改前端、命令名、DTO 字段、schema、迁移顺序、锁语义与版本号；未提交 Git。
+- 可见性：`library/schema` 的 `migrate` / `validate*` 在子模块内标为
+  `pub(in crate::library)`——重导出到 `library` 需要比 `pub(super)` 更宽，`pub(crate)`
+  又超出需要——`schema/mod.rs` 仍以 `pub(super)` re-export，外部只能经 `library::schema`
+  访问；`history/repository/mod.rs` 重新导出全部原入口，未暴露新的 `pub(crate)` 符号。
+- 提交前复审又收了几处：`library/repository/trash.rs` 模块注释里的回滚测试名笔误、
+  作品树查询中从未读取的 `artworks.description` 列与其 `LEFT JOIN`、`discovery` 里只转发
+  `storage::configure` 的包装函数、测试里重复的 `super::super::tree::` 全路径，以及
+  `library/model.rs` 中为绕过未使用字段告警而写的临时元组（改为按构建配置放行的
+  `cfg_attr`）。文档侧同步了 `schema.rs` / `repository.rs` 拆分后的过期路径。
+- B4 的仓储流程（仓库创建、回收站、永久删除、分支提交、历史删除/精简、恢复）仍待维护者
+  手工复验，已登记到 `todo.md`。
 
 ### B5 `[拆分]` + `[文档]` 素材板 `renderer.ts` 拆分与收尾审计
 

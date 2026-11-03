@@ -781,6 +781,54 @@ mod tests {
         assert_eq!(nodes, 1);
     }
 
+    /// 重置同时改写 `history_nodes`、`branches`、`library_nodes`、`artworks` 与
+    /// `pending_file_cleanup`；后续语句失败时整笔事务必须回滚，不能留下
+    /// 「历史已删、分支还在」或「旧分支已删、新分支未建」的半重置状态。
+    #[test]
+    fn artwork_reset_rolls_back_when_the_cross_domain_timestamp_update_fails() {
+        let fixture = HistoryFixture::new();
+        fixture.commit_node(&fixture.main_branch_id, "root", None, 1);
+        storage::open(&fixture.root)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_library_timestamp
+                 BEFORE UPDATE ON library_nodes
+                 BEGIN SELECT RAISE(ABORT, 'injected cross-domain failure'); END;",
+            )
+            .unwrap();
+
+        let error = reset_artwork_history(&fixture.root, &fixture.artwork_id, false).unwrap_err();
+        assert!(error.contains("数据库操作失败"), "{error}");
+
+        let connection = storage::open(&fixture.root).unwrap();
+        let counts: (i64, i64) = connection
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM branches WHERE artwork_id = ?1),
+                        (SELECT COUNT(*) FROM history_nodes WHERE artwork_id = ?1)",
+                [&fixture.artwork_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(counts, (1, 1), "失败的重置必须保留原分支与历史节点");
+        let title: String = connection
+            .query_row(
+                "SELECT title FROM branches WHERE id = ?1",
+                [&fixture.main_branch_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(title, "Main");
+        let queued: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pending_file_cleanup
+                 WHERE reason = 'artwork_history_reset'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(queued, 0, "失败的语句之前不得留下已入队的清理条目");
+    }
+
     #[test]
     fn subtree_preflight_rejects_published_history() {
         let fixture = HistoryFixture::new();

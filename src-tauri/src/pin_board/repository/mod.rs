@@ -1,6 +1,6 @@
 //! 素材板 SQLite 持久化与画板文件布局。
 //!
-//! 存储布局（schema v6 起，见 `library/schema.rs`）：
+//! 存储布局（schema v6 起，见 `library/schema/mod.rs`）：
 //! - `pin_boards`：按 Artwork 平铺一层画板，`deleted_at` 为回收站软删除；
 //! - `pin_board_items`：与 kind 无关的公共条目（0 位图 / 1 文字 / 2 笔迹）；
 //! - `pin_board_bitmaps`：位图载荷，DDS 实体存于

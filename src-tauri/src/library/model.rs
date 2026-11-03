@@ -88,6 +88,9 @@ pub(crate) struct MoveLibraryNodesRequest {
     pub(crate) index: u32,
 }
 
+/// 创建 Artwork 的结果。两个 id 只有无头入口与测试会读：GUI 的创建命令只回新
+/// 的整棵树，因此在无头与测试之外不读取字段，这里按需放行未使用告警。
+#[cfg_attr(not(any(test, feature = "headless")), allow(dead_code))]
 #[derive(Debug, Clone)]
 pub(crate) struct CreatedArtwork {
     pub(crate) artwork_id: String,

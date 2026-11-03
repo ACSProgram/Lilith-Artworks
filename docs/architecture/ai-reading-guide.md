@@ -46,10 +46,10 @@
 - 认证发布检查点由 `src-tauri/src/app/usecases/authenticity.rs` 调用公开的
   `backup::ensure_checkpoint` 建立；`authenticity` 模块本身不导入 backup、不读取 `chunk_file/`。
 - 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经
-  `repository.rs`，节点校验状态经 `verification_repository.rs`，调度候选与分支状态经
-  `schedule_repository.rs`。
+  `history/repository/`（`branches.rs` 分支读写、`graph.rs` 提交与链、`storage.rs` 存储元数据与缩略图），
+  节点校验状态经 `verification_repository.rs`，调度候选与分支状态经 `schedule_repository.rs`。
 - 发布状态与 `final_artifacts` 绑定经 `src-tauri/src/authenticity/publication_repository.rs` 进入；
-  认证配置与记录查询经 `repository.rs`。
+  认证配置与记录查询经 `authenticity/repository.rs`。
 
 ## 变更规则
 

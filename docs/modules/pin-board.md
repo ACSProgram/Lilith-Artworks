@@ -31,8 +31,8 @@
 - 自由笔采样（去重、RDP 抽稀、尖角拆段、向心 Catmull-Rom、弧长重采样、压感平滑与 taper）：`strokeSampling.ts`
 - 开发期自检入口（合成笔迹的采样/编码/缓冲耗时）：`strokePerfProbe.ts`
 - 图层可见性的纯函数（四层可见性类型与归一化、可见判断、隐藏层里待取消选中的条目）：`layers.ts`，浮层界面在 `PinBoardLayersPanel.tsx`
-- 素材板表定义（仓库 schema v5 起为多态条目，v6 起含笔迹）：`src-tauri/src/library/schema.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
-- 仓库 schema 迁移测试（v1/v4/v5→v6 的数据与 step 历史、外键失败回滚、拒绝更新版本仓库）：同一文件的 `migration_tests`；它们不依赖持久化模块的私有项，因此跟着 schema 走而不是留在 `repository/`
+- 素材板表定义（仓库 schema v5 起为多态条目，v6 起含笔迹）：`src-tauri/src/library/schema/mod.rs`（`PIN_BOARD_TABLES_SQL`；v1→v2 的旧形状冻结为 `PIN_BOARD_TABLES_V2_SQL`）
+- 仓库 schema 迁移测试（v1/v4/v5→v6 的数据与 step 历史、外键失败回滚、拒绝更新版本仓库）：`src-tauri/src/library/schema/migrate.rs` 的 `migration_tests`；它们不依赖持久化模块的私有项，因此跟着 schema 走而不是留在 `repository/`
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 

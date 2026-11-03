@@ -26,8 +26,9 @@ src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领�
 src-tauri/src/storage.rs               SQLite 连接配置、路径、ID、时间与基础校验，不含领域流程
 src-tauri/src/platform/                跨平台差异唯一入口：路径表示、文件管理器、剪贴板与进程信息（规范见 docs/guides/platform.md）
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
-src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
-src-tauri/src/library/repository.rs    仓库定位、作品树查询、分组/Artwork 与回收站事务
+src-tauri/src/library/schema/         仓库格式与建表（`mod.rs`）、迁移（`migrate.rs`）、校验（`validate.rs`）
+src-tauri/src/library/repository/     仓库定位（`discovery.rs`）、作品树（`tree.rs`）、回收站（`trash.rs`）
+src-tauri/src/history/repository/     分支读写（`branches.rs`）、提交/链/检查点/精简（`graph.rs`）、存储元数据与缩略图（`storage.rs`）
 src-tauri/src/history/                 分支、历史节点、创建分支、裁剪和历史图契约
 src-tauri/src/backup/                  ChunkFile、增量提交、恢复、整仓灾备与调度
 src-tauri/src/format/                  `.clip`/`.psd` 容器探测与结构单元定位（分块与缩略图共用）

@@ -84,6 +84,15 @@ entries for the reader; they are not a template every entry has to fill.
   board clipboard, DDS cache/file, storage-overview disk scan and rendition
   cache/render responsibilities each have their own module. Command names,
   DTO fields, error text and cancellation semantics are unchanged.
+- Internal Rust structure with no user-visible change: the library repository is
+  split into discovery, tree and trash modules, the repository schema into
+  creation, migration and validation modules, and the history repository into
+  branch, graph and storage modules, all behind the same re-exports. The tree
+  read also stops selecting a description column it never read, dropping one
+  join per list. Permanent artwork deletion and artwork history reset keep their
+  single-transaction implementations, and new rollback tests inject a failure in
+  the middle of each transaction to prove that library, history, authenticity and
+  cleanup rows are committed or rolled back together.
 - The library tree menu, the library's `新建` menu and the history node menu now
   all use the shared `ContextMenu` instead of three hand-written copies. They
   close on Escape, an outside click, any scroll and window resizing, stay inside

@@ -12,8 +12,8 @@
 - Rust 单领域命令边界：`src-tauri/src/library/mod.rs`
 - 创建 Artwork、永久删除和清空回收站的业务入口：`src-tauri/src/app/usecases/library.rs`；
   Tauri 适配器在 `src-tauri/src/app/workflows.rs`，与 headless 共享同一 use-case。
-- 仓库格式与 schema：`src-tauri/src/library/schema.rs`
-- 仓库定位、Library 查询与事务：`src-tauri/src/library/repository.rs`
+- 仓库格式与 schema：`src-tauri/src/library/schema/`（`mod.rs` 常量与建表、`migrate.rs` 迁移、`validate.rs` 校验）
+- 仓库定位、Library 查询与事务：`src-tauri/src/library/repository/`（`discovery.rs` 定位/初始化/备用库迁移、`tree.rs` 树 CRUD 与搜索、`trash.rs` 回收站与永久删除）
 
 ## 交互
 
@@ -40,7 +40,7 @@
 - 仓库命令分三级进入：读命令（树、搜索、回收站列表、历史、设置快照）共享仓库租约并运行在后台线程，长备份、恢复或精简期间仍然可用；同进程的写命令先在写入闸门里按优先级排队（Shutdown > Foreground > Interactive > Background，等待有上限且可取消；后台优先级只 try、拿不到即让位），再取得跨进程仓库 owner lock，之后额外持有仓库操作锁互相串行。同进程的第二个写者因此在闸门里等待，不再互相返回 `repository_busy`；跨进程边界不变——另一个进程持 owner lock 时仍立即以 `repository_busy` 拒绝（文案「仓库正在被另一个进程写入；不支持同一仓库的多进程写入」）。进程内排队超时或与本进程写者竞争失败同样返回 `repository_busy`（可重试），但文案为「仓库正在写入，请稍后重试」。只有切换仓库路径的设置保存独占仓库租约，等待全部在途命令结束后再替换路径。前端保存新路径前立即清空旧仓库状态，并以 ready 仓库路径重建 Library/Artwork 工作区，因此仓库 A 与克隆仓库 B 即使包含相同 UUID，旧请求和选择也不会复用到 B。
 - 发现旧名称的备用 `.sqlite3` 时，先执行 `wal_checkpoint(TRUNCATE)` 合并已提交 WAL、关闭连接并清理旧 sidecar，再改名为标准数据库名；如果仍有进程占用导致 checkpoint busy，则保留原文件并返回错误，不做不完整迁移。
 - 数据库发现与「目录是否非空」判定忽略仓库根目录下的运行时文件：跨进程 owner lock 的锁库 `.lilith-write-lock.sqlite3*` 与 owner 元数据 `.lilith-write-owner.json` 不是作品数据库，也不能让首次初始化被误判为非空目录。
-- `schema.rs` 是仓库格式常量、当前建库 SQL、完整校验、轻量校验和 schema 迁移的唯一所有者；Library 业务仓储不再内嵌 schema SQL。新建仓库直接以当前 `SCHEMA_VERSION`（v6）落库；打开旧版本仓库时按 `v1 → v2 → v3 → v4 → v5 → v6` 迁移链向前升级。若仓库版本高于当前 `SCHEMA_VERSION`（例如旧程序打开新仓库），打开被直接拒绝且不写入任何结构，避免旧代码按旧表形状破坏数据；不提供降级。
+- `schema/` 目录是仓库格式常量、当前建库 SQL、完整校验、轻量校验和 schema 迁移的唯一所有者（`mod.rs` 常量与建表、`validate.rs` 校验、`migrate.rs` 迁移）；Library 业务仓储不再内嵌 schema SQL。新建仓库直接以当前 `SCHEMA_VERSION`（v6）落库；打开旧版本仓库时按 `v1 → v2 → v3 → v4 → v5 → v6` 迁移链向前升级。若仓库版本高于当前 `SCHEMA_VERSION`（例如旧程序打开新仓库），打开被直接拒绝且不写入任何结构，避免旧代码按旧表形状破坏数据；不提供降级。
 - 打开既有仓库时，`validate_repository_semantics` 除受控相对路径外还校验 `branches.source_path` / `source_path_key`：该字段按设计保存仓库之外的绝对路径，因此走独立的**结构校验**（绝对路径、无设备命名空间、不在仓库目录内），**不检查文件是否存在**（工作文件会被移动或删除，打开仓库必须仍然成功），也不拒绝网络位置（NAS 是合法用法）。挡住的是「打开他人构造或分享的仓库后，路径被写成 `\\.\`、`\\?\` 之类的设备对象或仓库内部文件」——这类值只可能来自手工写入，写入侧早已拒绝。空字符串表示分支尚未选择工作文件，属于合法状态。判定逻辑集中在 `storage::validate_branch_source_path` / `platform::path::path_namespace`，都是纯词法判断，不做 canonicalize。
 - 受控相对路径校验跳过空字符串：`history_edges.delta_path` 在检查点父节点名下按设计登记 `''`（表示该边没有反向增量，取消检查点时重建），兼容列 `history_nodes.delta_path` 同样把 `''` 当作未设置。这类值不是路径，不参与相对路径校验，也不要求文件存在；否则清理过一次检查点增量的仓库会因为自己的合法记账而拒绝打开。`snapshot_path` 没有这种记账语义（读取侧把非 NULL 一律当作可用快照），仍要求非空且合法。
 
@@ -52,6 +52,7 @@
 - 原父分组已不存在或仍在回收站时，项目恢复到树根。
 - 永久删除和清空只能从回收站执行，且都通过共享 `ConfirmDialog` 二次确认（Tauri WebView 中的原生 `window.confirm` 不可靠，禁止再用于不可逆操作）；其中一次性影响整个回收站的「清空回收站」的最终动作由滑动确认控件承担，单条永久删除沿用点击确认。应用工作流在共享运行锁和仓库 lease 内调用 Library 仓储，只把 Artwork 受控目录写入待清理队列，再提交元数据删除并运行清理；首次外部认证导出始终属于用户文件，不会由 Artwork 永久删除或清空回收站删除。仓库文件失败会返回清单并保留为可重试项。
 - 永久删除元数据时先显式删除 `final_artifacts`（级联认证记录），再删除历史节点和 Library 根，避免发布节点上的 `ON DELETE RESTRICT` 阻断已发布 Artwork 的清理；分支引用在删除历史前置空。
+- **跨领域事务登记**：永久删除一个 Artwork 在一个事务内改写 `library_nodes`（回收站根）、`branches`（清空 head/分叉起点）、`final_artifacts`（级联 `certification_records`）、`history_nodes`（级联 `history_edges`）与 `pending_file_cleanup`（登记 `artworks/<id>` 目录）。这些表必须同事务：`history_nodes.created_on_branch_id` 是 `ON DELETE RESTRICT`，且「树节点已删但历史/成品还在」会让作品既无法恢复也无法清理。固定顺序（清理入队 → 清空分支引用 → 删成品/认证 → 删历史 → 删树节点）由 `library/repository/trash.rs` 的 `permanently_delete_trash_root` 维护；`permanent_deletion_rolls_back_when_a_cross_domain_delete_fails` 在删除成品时注入失败，断言回收站根、分支 head、成品、认证记录与清理队列全部保持原状。
 - Artwork 内部的历史节点裁剪不使用项目回收站，仍按历史图规则直接永久删除。
 
 分支表保存连续自动备份失败次数、下一次重试时间和待确认的自动备份关闭通知；认证记录的仓库副本路径为非空约束；`pending_file_cleanup` 队列规定：仓库文件/目录只保存相对路径并在执行前校验仓库边界；仅发布创建失败等应用仍拥有外部临时结果的流程登记外部文件，取消发布不删除用户的首次导出文件。成功项出队，失败项记录错误；应用启动时的自动重放与页面「全部重试」都只处理仓库内条目，外部文件条目必须在设置页逐条确认后凭显式 id 执行（空 id 不等于「处理全部」），细节见 `docs/modules/history-and-backup.md`。
