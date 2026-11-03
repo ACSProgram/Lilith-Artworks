@@ -8,8 +8,7 @@ import type { ArtworkBranch, HistoryNode } from "./types";
 const dialog = vi.hoisted(() => ({ open: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => dialog);
 
-const appApi = vi.hoisted(() => ({ revealPathInFolder: vi.fn().mockResolvedValue(undefined) }));
-vi.mock("../../app/api", () => ({ appApi }));
+const revealPathInFolder = vi.fn().mockResolvedValue(undefined);
 
 const branch = (backupEnabled: boolean): ArtworkBranch => ({
   id: "branch-1",
@@ -168,7 +167,7 @@ describe("BranchSettings", () => {
   it("saves the quick-check toggle and reveals the working file folder", async () => {
     vi.useFakeTimers();
     const onSave = vi.fn().mockResolvedValue(undefined);
-    render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} />);
+    render(<BranchSettings branch={branch(true)} disabled={false} saveLocked={false} onSave={onSave} onRevealPath={revealPathInFolder} />);
 
     fireEvent.click(screen.getByRole("checkbox", { name: "快速检查" }));
     fireEvent.click(screen.getByTitle("打开所在文件夹"));
@@ -177,7 +176,7 @@ describe("BranchSettings", () => {
       vi.advanceTimersByTime(650);
       await Promise.resolve();
     });
-    expect(appApi.revealPathInFolder).toHaveBeenCalledWith("C:\\work\\artwork.psd");
+    expect(revealPathInFolder).toHaveBeenCalledWith("C:\\work\\artwork.psd");
     expect(onSave).toHaveBeenCalledWith(expect.objectContaining({
       backupEnabled: true,
       backupQuickEnabled: true,

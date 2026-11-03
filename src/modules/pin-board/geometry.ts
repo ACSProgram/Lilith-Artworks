@@ -50,13 +50,6 @@ export function viewportBounds(viewport: Viewport, width: number, height: number
   };
 }
 
-export function boundsCenter(bounds: Bounds): Point {
-  return [
-    (bounds.minX + bounds.maxX) / 2,
-    (bounds.minY + bounds.maxY) / 2,
-  ];
-}
-
 export function imagesBounds(images: Pick<PinBoardItem, "points">[]): Bounds | null {
   if (images.length === 0) return null;
   return images.reduce<Bounds>((bounds, image) => {

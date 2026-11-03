@@ -2,7 +2,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dragSlideToEnd } from "../../shared/slideToConfirmTesting";
 import { HistoryModule } from "./HistoryModule";
-import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
+import type { ArtworkBranch, ArtworkHistory, HistoryNode } from "./types";
 
 const controller = vi.hoisted(() => ({ useHistoryController: vi.fn() }));
 vi.mock("./useHistoryController", () => controller);

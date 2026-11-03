@@ -18,7 +18,8 @@ export interface ArtworkSummaryState {
  *
  * 发布页与识别页此前只能依赖历史页回调填充分支数据，因此「直接进入发布页」的跳转
  * 会在分支被填充前误判为「此 Artwork 尚无分支」。这里提供一条不依赖历史页挂载的
- * 兜底读取路径：`historyApi.get` 只有本 hook 消费，仍满足「api.ts 只由控制器消费」。
+ * 兜底读取路径：`useHistoryController` 只在历史页挂载时存在，因此这里单独读一次
+ * `historyApi.get`；两条路径都只经 `api.ts`，命令入口仍只有一处。
  *
  * `enabled` 为 false 时立即释放当前作品的数据且不发请求，供历史页自己负责的路径
  * 跳过重复读取。请求带代次，作品变化后旧响应不会回填。

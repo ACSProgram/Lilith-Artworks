@@ -1,8 +1,8 @@
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
 import { invokeCommand } from "../../shared/tauri";
 import type {
   ArtworkHistory,
   BackupCommitResult,
-  BackupRuntimeStatus,
   ForkBranchRequest,
   NodePreview,
   UpdateBranchBackupRequest,

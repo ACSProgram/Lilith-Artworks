@@ -37,8 +37,8 @@ pub(crate) async fn list_pending_file_cleanup(
 
 /// 扫描仓库内未被引用的历史文件（崩溃孤儿等），只报告、不删除。
 ///
-/// 与前台长命令同口径：持共享运行锁与仓库操作锁，可经统一取消入口取消；扫描
-/// 入口在仓库哨兵锁落地前只经 GUI 进程内暴露，不做无头子命令。
+/// 走 `run_write` 语义：经进程内写入闸门与跨进程 owner lock，再取共享运行锁与
+/// 仓库操作锁，可经统一取消入口取消；扫描入口只经 GUI 进程内暴露，不做无头子命令。
 #[tauri::command]
 pub(crate) async fn scan_repository_unreferenced(
     coordinator: State<'_, OperationCoordinator>,

@@ -2,10 +2,10 @@ import {
   Activity, Clock3, DatabaseBackup, SearchCheck, ShieldCheck,
 } from "lucide-react";
 import { SettingsOperationProgress } from "../SettingsOperationProgress";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
 import { formatBytes } from "../../shared/format";
 import type {
   AppSettings,
-  BackupRuntimeStatus,
   RepositoryStatus,
   SettingsSnapshot,
 } from "../types";

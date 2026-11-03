@@ -1,8 +1,6 @@
-import type { PinBoardItem } from "./types";
+import type { PinBoardItem, PinBoardTextureCacheLevel } from "./types";
 
 type TextureSource = Pick<PinBoardItem, "width" | "height">;
-
-export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 
 export interface PinBoardTextureBudgets {
   /** 常驻缩略图缓存预算。 */
@@ -10,9 +8,6 @@ export interface PinBoardTextureBudgets {
   /** 高清纹理 LRU 缓存预算。 */
   residentBytes: number;
 }
-
-/** 默认缓存等级（中等）。 */
-export const DEFAULT_PIN_BOARD_TEXTURE_CACHE_LEVEL: PinBoardTextureCacheLevel = "medium";
 
 /**
  * 缓存等级 → 前端 GPU 缓存预算（常驻缩略图 + 高清 LRU）。三个等级对应的
@@ -44,14 +39,8 @@ export const PIN_BOARD_RGBA_PREVIEW_BUDGET_BYTES = 64 * 1024 * 1024;
 // Keep one upload below the resident budget so a replacement can be staged
 // without making the browser allocate an unbounded transient buffer.
 export const PIN_BOARD_TEXTURE_UPLOAD_BUDGET_BYTES = 96 * 1024 * 1024;
-export const PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES = 128 * 1024 * 1024;
 export const PIN_BOARD_TEXTURE_STAGING_MARGIN_BYTES = 16 * 1024 * 1024;
 export const PIN_BOARD_TEXTURE_LOAD_BUDGET_BYTES = 96 * 1024 * 1024;
-// Resident budget for the always-cached preview (thumbnail) textures. Keep one
-// 256px RGBA preview (~256 KiB) per visited board image without evicting them
-// during normal panning; the previews are only evicted under this separate cap,
-// so a scrolled-away image still has something to draw when it comes back.
-export const PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES = 64 * 1024 * 1024;
 export const PIN_BOARD_MIN_PREVIEW_DIMENSION = 256;
 
 export interface TextureUploadLayout {

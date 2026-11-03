@@ -1,6 +1,7 @@
 import { RotateCcw, SearchCheck, Trash2 } from "lucide-react";
 import { RepositoryStoragePanel } from "../RepositoryStoragePanel";
-import type { BackupRuntimeStatus, RepositoryStatus } from "../types";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
+import type { RepositoryStatus } from "../types";
 import type { RepositoryMaintenance } from "../useRepositoryMaintenance";
 import { formatBytes } from "../../shared/format";
 import {

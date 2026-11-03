@@ -1,5 +1,5 @@
 import { createContext, useContext } from "react";
-import type { BackupRuntimeStatus } from "./types";
+import type { BackupRuntimeStatus } from "../shared/backupRuntime";
 
 export const IDLE_BACKUP_RUNTIME: BackupRuntimeStatus = {
   busy: false,

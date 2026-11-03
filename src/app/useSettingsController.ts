@@ -21,12 +21,8 @@ import {
   type DiagnosticsStatus,
 } from "../shared/diagnostics";
 import { errorMessage } from "../shared/errors";
-import type {
-  AppSettings,
-  PinBoardTextureCacheLevel,
-  RepositoryStatus,
-  SettingsSnapshot,
-} from "./types";
+import type { PinBoardTextureCacheLevel } from "../modules/pin-board/types";
+import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
 
 export type SettingsPage = "general" | "repository" | "space" | "backup" | "pin-board" | "debug";
 
@@ -39,7 +35,7 @@ export const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
   { id: "debug", label: "调试" },
 ];
 
-export const EMPTY_REPOSITORY_STATUS: RepositoryStatus = {
+const EMPTY_REPOSITORY_STATUS: RepositoryStatus = {
   configured: false,
   ready: false,
   rootPath: "",

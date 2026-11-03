@@ -1,6 +1,7 @@
 import { FolderOpen, Layers, ShieldCheck } from "lucide-react";
 import { SettingsOperationProgress } from "../SettingsOperationProgress";
-import type { AppSettings, BackupRuntimeStatus, RepositoryStatus } from "../types";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
+import type { AppSettings, RepositoryStatus } from "../types";
 import type { SettingsUpdate } from "./shared";
 
 interface RepositorySettingsPageProps {

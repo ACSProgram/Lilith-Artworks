@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { appApi } from "./api";
 import { IDLE_BACKUP_RUNTIME, useRuntimeProgress } from "./runtimeProgressContext";
+import type { BackupRuntimeStatus } from "../shared/backupRuntime";
 import { errorMessage } from "../shared/errors";
 import { formatBytes } from "../shared/format";
 import { useRequestEpoch } from "../shared/useRequestEpoch";
@@ -12,7 +13,6 @@ import {
   type UnreferencedScanCandidate,
 } from "../shared/fileCleanup";
 import type {
-  BackupRuntimeStatus,
   RepositoryBackupReport,
   RepositoryStorageDiskScan,
   RepositoryStorageOverview,

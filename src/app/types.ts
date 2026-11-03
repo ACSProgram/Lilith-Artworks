@@ -1,6 +1,7 @@
+import type { PinBoardTextureCacheLevel } from "../modules/pin-board/types";
+
 export type Theme = "system" | "light" | "dark";
 export type ContentDensity = "comfortable" | "compact";
-export type PinBoardTextureCacheLevel = "low" | "medium" | "high";
 export type BackupCheckMode = "quick" | "full";
 
 export interface PinBoardSettings {
@@ -96,26 +97,6 @@ export interface RepositoryBackupRun extends RepositoryIntegrityCounts {
   fileCount: number;
   totalBytes: number;
   createdMs: number;
-}
-
-/** 当前占用共享运行锁的任务类型；与后端 `BackupTaskKind` 的序列化值一致。 */
-export type BackupTaskKind = "automaticBackup" | "idleVerify" | "userOperation";
-
-export interface BackupRuntimeStatus {
-  busy: boolean;
-  activeBranchId: string | null;
-  taskKind: BackupTaskKind | null;
-  /**
-   * 上报进度的运行域（后端 `OperationDomain` 的序列化值，如 `maintenance`、
-   * `cleanup`），并行后台任务汇总时为 `background`；尚未上报进度时为 `null`。
-   * 它不是命令名。
-   */
-  operation: string | null;
-  progressLabel: string | null;
-  progressCurrent: number;
-  progressTotal: number;
-  automaticScheduling: boolean;
-  completionRevision: number;
 }
 
 export interface BackupDisableNoticeTarget {

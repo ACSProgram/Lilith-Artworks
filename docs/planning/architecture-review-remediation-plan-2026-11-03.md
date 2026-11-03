@@ -1,6 +1,7 @@
 # 架构审查整改计划（2026-11-03）
 
-状态：**待批准**。本文件只定义整改范围、顺序与验收口径，不代表任何一项已经实施。
+状态：**执行中**。B1 已实施、验证并提交；B2–B5 未开始。本文件
+定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
 
 2026-11-03 二次修订：已对照 Codex 复核意见调整范围与验收方式，并把工作项合并为 **5 个批次**。
 复核原文归档为 `archive/architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
@@ -174,6 +175,32 @@
   `scrub_board_dds` 路径全部一致。
 - `npx tsc --noEmit` 通过；受影响测试通过；引用检查无新增死代码。
 - 没有 UI 行为变化；DTO 字段与命令名不变。
+
+#### B1 实施记录（2026-11-03）
+
+- **文档**：修正 beta.1 标签表述、`todo.md` 的 alpha/beta 标签矛盾、`src-tauri/src/fuzz_support.rs`
+  路径、CI 的 `RUSTSEC-2026-0429` 忽略清单、`cleanup::scrub_board_dds` 路径与 `create.rs` 的
+  `read_strokes` 说明；补 `handoff-log-2026-10-09.md` 归档索引；删除 C9/C10“只有断言”残留；
+  日志轮转口径改为 `4_000_000` 字节；移除 `overview.md` 与 `todo.md` 的批次叙事标题与
+  “0.3 阶段 3”口径；`overview.md` 与 `ai-reading-guide.md` 的重复描述收敛到单处并改为链接；
+  按实际代码更正 `api.ts` 的调用方（历史侧含 `useArtworkSummary.ts`，素材板含窗口全屏、导出
+  目录选择与渲染器纹理读写几条直接路径），并把 `BackupRuntimeStatus` 的位置写进模块文档。
+- **注释**：`useArtworkSummary.ts` 更正 `historyApi.get` 的消费方；`coordinator.rs` 说明全库校验
+  已走 `run_foreground`；`cleanup_commands.rs` 改为 `run_write` 语义；`delete_subtree` 与
+  `TOOL_PEN` 补充保留用途。
+- **死代码**：删除 `containsNode`、`boundsCenter`、`useRequestEpoch.current()`、
+  `DEFAULT_PIN_BOARD_TEXTURE_CACHE_LEVEL`、两个只被测试引用的纹理预算常量与
+  `EMPTY_REPOSITORY_STATUS` 的导出；`renderer.test.ts` 改从 `textureBudgetsForLevel("low")` 取值。
+- **DTO**：新增 `src/shared/backupRuntime.ts`，`app` 与 `history` 两侧删除重复定义并直接引用；
+  `PinBoardTextureCacheLevel` 只保留 `pin-board/types.ts` 一处定义，`app/types.ts` 与
+  `texturePolicy.ts` 改为导入（方向为 `app` → 模块公开类型）。
+- **反向依赖**：`HistoryControls.tsx` 不再导入 `app/api`；`onRevealPath` 由
+  `ArtworkWorkspace` 注入（类型为 `HistoryControls.tsx` 导出的 `RevealPathAction`），未注入时
+  不渲染该入口。
+- **验证**：`npx tsc --noEmit` 通过；`npm test` 全量 56 个文件、507 项通过（含
+  `test:pin-board` 与 `src/modules/library`）；未改动 Rust 逻辑，命令名与 DTO 字段未变。
+- **偏差**：归档索引核对只有 `handoff-log-2026-10-09.md` 缺失；文档收敛保留 `overview.md`
+  为架构描述的权威来源，`ai-reading-guide.md` 只保留路由与硬边界并链接过去。
 
 ### B2 `[行为修正]` + `[纯重构]` 前端行为修正与去重
 

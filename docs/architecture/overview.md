@@ -6,7 +6,7 @@ Lilith Artworks 是本地优先的**平面美术个人项目**工作台，统一
 
 ## 层级
 
-代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。认证发布状态与成品绑定在 `authenticity/publication_repository.rs`，认证配置/记录查询在 `repository.rs`；历史破坏性删除通过 `history/deletion_repository.rs` 进入，节点校验状态在 `history/verification_repository.rs`，调度候选与分支状态在 `history/schedule_repository.rs`。
+代码任务先读 `docs/architecture/ai-reading-guide.md`，按问题选择入口；不要默认通读整个仓库。各领域入口、仓储分文件与跨模块边界见该指南。
 
 ```text
 src/app/                 应用启动、窗口、全局设置与跨模块工作区编排
@@ -22,7 +22,7 @@ src-tauri/src/cancel.rs               跨模块 CancelToken（命令运行时与
 src-tauri/src/app/usecases/            GUI 与 headless 共享的业务入口
 src-tauri/src/app/workflows.rs         跨领域 Tauri 命令适配器
 src-tauri/src/app/command_registry.rs  全部 Tauri 命令的注册表（按领域分组）
-src-tauri/src/storage.rs               SQLite 连接配置、路径与 ID 工具
+src-tauri/src/storage.rs               SQLite 连接配置、路径、ID、时间与基础校验，不含领域流程
 src-tauri/src/platform/                跨平台差异唯一入口：路径表示、文件管理器、剪贴板与进程信息（规范见 docs/guides/platform.md）
 src-tauri/src/library/mod.rs           作品树 Tauri 命令边界
 src-tauri/src/library/schema.rs        仓库格式、schema 创建、校验与迁移
@@ -38,7 +38,7 @@ src-tauri/src/cleanup.rs                 文件清理账本：批量 anti-join�
 src-tauri/resources/                    应用图标与随包分发的 TrustMark 模型
 ```
 
-前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图，并直接挂载 `PublicationView` 或 `IdentificationView`。History、Library、Pin-board 分别由 `useHistoryController.ts`、`useLibraryController.ts`、`usePinBoardController.ts` 独占各自 `api.ts`；Authenticity 的 `api.ts` 只由 `usePublicationController.ts` 与 `useIdentificationController.ts` 消费，质量预览与签名发布的活动任务与取消状态机在 `useAuthenticityOperation.ts`。素材板控制器负责画板列表、选择、生命周期结算与保存状态，导入/导出/文字/笔迹队列的 busy、进度与取消样板在 `usePinBoardTransfers.ts`；`PinBoardRenderer` 仍是纯渲染器，只处理 GPU 与交互；切换画板/作品时渲染器同步交出「待结算快照」，由模块级后台队列（`pin-board/pendingSettle.ts`）串行写回，切换因此不等待仓库写入。各模块 controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，History、Library 与 Authenticity 的 busy/finally 与错误上报来自 `useAsyncOperation.ts`；素材板的传输忙碌由传输流程自己持有（同一时刻只允许一次导入或导出），不复用按计数合并的 busy。页面组件只保留视图选择、弹窗和局部交互状态。工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
+前端业务模块不能直接互相导入。`App` 向 Library 注入 Artwork 工作区渲染与文件清理重试，负责把认证记录转换为作品树导航目标；`ArtworkWorkspace` 在应用层组合历史、素材板和认证视图，并直接挂载 `PublicationView` 或 `IdentificationView`。History 的 `api.ts` 由 `useHistoryController.ts` 与 `useArtworkSummary.ts`（工作区摘要，历史页挂载前就要读标题与分支）消费，Library 由 `useLibraryController.ts` 独占，Pin-board 主要由 `usePinBoardController.ts` / `usePinBoardTransfers.ts` 消费，另有窗口全屏、导出目录选择与渲染器纹理读写几条不经 controller 的无状态路径直接经 `api.ts` 调用；Authenticity 的 `api.ts` 只由 `usePublicationController.ts` 与 `useIdentificationController.ts` 消费，质量预览与签名发布的活动任务与取消状态机在 `useAuthenticityOperation.ts`。素材板控制器负责画板列表、选择、生命周期结算与保存状态，导入/导出/文字/笔迹队列的 busy、进度与取消样板在 `usePinBoardTransfers.ts`；`PinBoardRenderer` 仍是纯渲染器，只处理 GPU 与交互；切换画板/作品时渲染器同步交出「待结算快照」，由模块级后台队列（`pin-board/pendingSettle.ts`）串行写回，切换因此不等待仓库写入。各模块 controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，History、Library 与 Authenticity 的 busy/finally 与错误上报来自 `useAsyncOperation.ts`；素材板的传输忙碌由传输流程自己持有（同一时刻只允许一次导入或导出），不复用按计数合并的 busy。页面组件只保留视图选择、弹窗和局部交互状态。工作区只接收领域 DTO、保存共享分支并发出刷新版本信号。跨领域清理结果使用 `src/shared/fileCleanup.ts` DTO，共享运行状态（应用层与历史模块读同一条命令）使用 `src/shared/backupRuntime.ts` DTO。所有文件系统、数据库和模型操作都在 Rust 中完成。
 
 Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权、装配 `CommandContext`，然后调用 `app/usecases/` 中 GUI 与 headless 共享的业务入口。所有仓库入口都经 `OperationCoordinator` 统一取锁、取消、进度、耗时日志与事件；需要组合 checkpoint、调度唤醒、清理队列或发布流程的跨领域用例写在 `app/usecases/` 里，`app/workflows.rs` 只保留这些命令的 Tauri 适配函数。`pin_board` 命令直接在 `app/command_registry.rs` 注册，写命令走 `run_repository_write`（仓库 lease + 仓库操作锁，不取共享 `BackupState` 运行锁），浏览走共享读租约。前端命令名和 DTO 不因内部所有权变化而改变。
 
@@ -123,7 +123,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 
 设置保存使用共享运行锁：首次配置或切换到新路径时允许显式初始化；路径未改变时只验证现有数据库，缺失时拒绝静默重建；随后才原子替换 `settings.json`、唤醒调度器并刷新托盘菜单。所有仓库命令还持有 `AppState` 的仓库 lease，设置切换必须等待活动 lease 结束。前端在保存新路径前先结算素材板（`preparePinBoardRuntimeChange`，失败即中止切换并保留旧仓库）再卸载旧工作区，并以仓库路径作为工作区组件身份，因此克隆仓库即使包含相同实体 UUID 也不会复用旧选择或请求状态。
 
-## 命令执行底座（0.3 阶段 1）
+## 命令执行底座
 
 `app/command_runtime/` 是 GUI、headless 与未来维护入口共用的执行底座：
 
@@ -154,8 +154,8 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
   `invokeCommand` 识别结构化错误对象时重建为带可选字段的 `Error`，字符串错误原样保留。
 - `AppEvent` v1 信封字段（repository key、operation id、domain、phase、current/total、
   cancellable、completion revision）与首批事件（`operationStarted` / `operationProgress` /
-  `operationFinished` / `repositoryChanged` / `cleanupQueueChanged`）已冻结；阶段 3 只补订阅与
-  轮询降级，不重定义事件。`operationFinished` 追加了两个可选字段：后台调度任务用
+  `operationFinished` / `repositoryChanged` / `cleanupQueueChanged`）已冻结；事件消费侧只做订阅
+  与轮询降级，不重定义事件。`operationFinished` 追加了两个可选字段：后台调度任务用
   `artworkId` 声明完成所属作品，用 `structureChanged` 声明本次是否改变了历史图结构；命令事件
   不带这两个字段，前端按未知处理。旧客户端忽略未知字段，v1 信封本身不变。进度事件按阶段变化、
   完成或 100 ms 间隔节流，headless 的 marker 观察者不节流。
@@ -163,11 +163,12 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
   只把它交给 `invoke_handler`；Tauri 的 `generate_handler!` 需要编译期函数列表，因此这里是一张
   静态表，不是运行时注册。
 
-## 前端模块契约与事件消费（0.3 阶段 3）
+## 前端模块契约与事件消费
 
 每个业务模块按同一目录契约组织，模块之间不直接导入：
 
-- `types.ts`：边界 DTO；纯前端计算放模块自己的 model/helper 文件。
+- `types.ts`：边界 DTO；纯前端计算放模块自己的 model/helper 文件。被两个模块共用的边界
+  DTO（如运行状态、清理结果）放 `src/shared/`，不要在各自的 `types.ts` 里各写一份。
 - `api.ts`：该领域 Tauri 命令的唯一前端入口，统一经 `invokeCommand` 重建结构化错误。
 - `use*Controller.ts`：读取、mutation 回填、忙碌状态、错误上报与请求代次的唯一位置。
 - `Module.tsx`：只做视图、弹窗、局部交互与 controller 注入。
@@ -202,7 +203,7 @@ WebView 级别的整页刷新快捷键（F5 / `Ctrl+R`）由 `src/app/webviewSho
 ## 日志与诊断
 
 原生端启用 Tauri 日志插件，把日志写入操作系统应用日志目录（Windows 默认位于
-`%LOCALAPPDATA%\com.lilith.artworks\logs`），单个文件达到 4 MiB 后轮转并保留最近 5 份。
+`%LOCALAPPDATA%\com.lilith.artworks\logs`），单个文件达到 4_000_000 字节后轮转并保留最近 5 份。
 插件构建时刻意不调用 `.level()`：插件内部用 fern 的 dispatch 级别做静态过滤，一旦在构建时
 固定，运行时就无法再提级。等级因此完全由 `app::diagnostics::apply_level`
 （`log::set_max_level`）控制，是唯一的等级开关。

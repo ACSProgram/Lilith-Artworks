@@ -15,7 +15,7 @@
 - Tauri 命令与类型：`api.ts`、`types.ts`
 - 文字布局与栅格化（显示纹理与就地编辑共用度量；内容与尺寸上限常量也在这里）：`textLayout.ts`
 - 内置取色器：`PinBoardColorPicker.tsx`
-- Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程，`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
+- Rust 数据持久化：`src-tauri/src/pin_board/repository/`——`boards.rs` 管画板列表、回收站、排序与修订号，`view.rs` 管画板上下文与视图装载，`save.rs` 管保存与结算，`create.rs` 管粘贴/导入/文字/笔迹的新增流程与 `read_strokes`（整板笔迹二进制载荷），`bitmap_io.rs` 管位图导出与纹理读取，`paths.rs` 管画板目录与 DDS 路径（规范文件名 `is_item_dds_file`、相对路径 `relative_item_dds`）；类型与共享常量在 `mod.rs`，测试夹具在 `fixtures.rs`（只在 `cfg(test)` 编译）
 - 条目与导入上限（`MAX_BOARD_ITEMS`、`MAX_IMPORT_FILES`、`MAX_CLIPBOARD_IMAGE_BYTES`）：`src-tauri/src/pin_board/contracts.rs`
 - DDS/BC7 图像处理与纹理缓存：`src-tauri/src/pin_board/dds.rs`
 - 阵列排序（统一高度、阅读序、断行、落位）与导入/粘贴的落位数学：`src-tauri/src/pin_board/arrange.rs`
@@ -103,7 +103,7 @@ SQLite:
 - 画板删除 = 软删除（`deleted_at`）；Artwork 进入项目回收站时其画板随之隐藏；Artwork 永久删除时 `pin_boards` 行随外键级联删除，DDS 目录随 `artworks/<artwork-id>` 目录一并进入清理队列；
 - 画板回收站的永久删除/清空经 `pending_file_cleanup` 以 `repository_directory` 条目清理 `boards/<board-id>` 目录，失败保留并在下次启动重试；两者都经共享 `ConfirmDialog` 确认，其中「清空回收站」的最终动作由滑动确认控件承担，单块画板的永久删除沿用点击确认；
 - 画板结算清除仍为删除状态的条目时，位图条目的 DDS 同样经 `pending_file_cleanup` 以 `repository_file` 条目（原因 `pin_board_finalize`）清理：事务内入队、提交成功后由命令层单遍重放删除。提交失败则入队随事务回滚，记录与 DDS 保持一致；删除失败条目留在队列可重试（`pin_board_finalize` 条目未落库 SHA-256，重放只做引用检查后删除），不阻断结算、不循环重试。文字与笔迹条目没有实体文件，结算只删除条目记录。重放的引用检查走中立契约：本模块的 `PinBoardReferenceInventory` 负责把 `pin_board_bitmaps` 记录映射成 `artworks/<artwork-id>/boards/<board-id>/<item-id>.dds`，cleanup 不再认识画板路径布局——记录删除前 DDS 视为被引用而保留，删除后才可清理；`file_path` 不是规范文件名的坏记录不参与引用，由完整性扫描报告；
-- 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页「空间」页的「文件清理」区确认后入队清理（该区同时列出待清理队列并支持单条/全部重试）；`cleanup::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。设置页「空间」页的队列与扫描入口见 `docs/modules/history-and-backup.md`。
+- 无记录的孤儿 DDS（异常退出、手工复制或历史迁移遗留）由 `cleanup::scan_unreferenced` 扫描 `artworks/*/boards/*/` 发现，经设置页「空间」页的「文件清理」区确认后入队清理（该区同时列出待清理队列并支持单条/全部重试）；`pin_board::scrub::scrub_board_dds` 的完整性检查另按记录逐条校验 DDS 内容语义（缺失/损坏）并统计孤儿，只报告不修复。设置页「空间」页的队列与扫描入口见 `docs/modules/history-and-backup.md`。
 
 ## 渲染
 

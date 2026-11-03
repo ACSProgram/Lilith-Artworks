@@ -38,6 +38,7 @@ pub(crate) const MAX_STROKE_EXTENT: f64 = 1_000_000.0;
 /// 线宽上限，与 `pin_board_strokes.stroke_width` 的 CHECK 一致。
 pub(crate) const MAX_STROKE_WIDTH: f64 = 1000.0;
 
+/// 笔迹工具编号 0：`is_shape` 与编码/校验都依赖它，是生产常量而非测试夹具。
 pub(crate) const TOOL_PEN: u8 = 0;
 // 形状工具编号与前端 `strokeGeometry.ts` 的 `STROKE_TOOL` 一一对应，是
 // `pin_board_strokes.tool` 的既有取值。原生侧只按 `TOOL_COUNT` 校验范围，具体编号

@@ -110,18 +110,3 @@ export interface BackupCommitResult {
   unchanged: boolean;
   historyId: string | null;
 }
-
-/** 当前占用共享运行锁的任务类型；与后端 `BackupTaskKind` 的序列化值一致。 */
-export type BackupTaskKind = "automaticBackup" | "idleVerify" | "userOperation";
-
-export interface BackupRuntimeStatus {
-  busy: boolean;
-  activeBranchId: string | null;
-  taskKind: BackupTaskKind | null;
-  operation: string | null;
-  progressLabel: string | null;
-  progressCurrent: number;
-  progressTotal: number;
-  automaticScheduling: boolean;
-  completionRevision: number;
-}

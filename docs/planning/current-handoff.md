@@ -8,7 +8,10 @@
 
 ## 当前批次状态
 
-当前没有进行中的批次。0.3 收尾 UI 修正批次的计划、实施与验证记录在
+架构审查整改的 **B1（文档事实、死代码、DTO 与前端反向依赖）已实施、验证并提交**；改动范围与
+验证记录见 `architecture-review-remediation-plan-2026-11-03.md` 的「B1 实施记录」。B2–B5 未开始。
+
+0.3 收尾 UI 修正批次的计划、实施与验证记录在
 `archive/0.3-final-ui-fixes-plan-2026-11-03.md` 与 `archive/handoff-log-2026-11-03.md`
 §10–§11；该批次的界面效果尚未经维护者手工确认，仍列在 `todo.md` 的「人工验收（剩余）」。
 
@@ -17,6 +20,7 @@
 
 ## 下一步
 
+- 按整改计划进入 B2（右键菜单行为修正、素材板保存契约测试与前端去重）。
 - 按 `todo.md` 的「人工验收（剩余）」逐项完成剩余人工验收，包括历史页头三档宽度、空间页 busy
   与后台任务下的草稿编辑。
 - 切 `0.3.0` 前：跑 `stress_format` / `stress_damage`，用升级前的二进制造一份多节点旧仓库并在升级后
@@ -35,11 +39,11 @@
 - 版本：`dev` 的五处版本字段是 `0.3.0-beta.1`；`v0.3.0-beta.1` 已打标签并作为 Pre-release 公开
   （2026-10-25）。之后的改动全部写在 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者
   按 `docs/guides/release-policy.md` 单独决定。
-- repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地；alpha6 与
+- repository schema v6（v4 → v5 随 alpha3 落地，v5 → v6 随 alpha5 落地；alpha6 与
   beta.1 沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 的
-  alpha1 与 alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的
+  alpha1 与 alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 的
   v5 → v6），高于当前版本的仓库由旧程序直接拒绝。
-- 0.3 基线（阶段 0 一次性采集）已归档到 `archive/0.3-baseline-2026-10-18.md`；该文档现为
+- 0.3 基线（一次性采集）已归档到 `archive/0.3-baseline-2026-10-18.md`；该文档现为
   0.2 → 0.3.0-beta.1 的对比报告。长期回归对照用 `stress_bench`，其 release 条目已随
   2026-10-25 的全量压力测试同轮刷新。
 - 运行要求：Windows + WebView2；素材板另需支持 WebGPU 与 BC7 纹理压缩的图形适配器（见

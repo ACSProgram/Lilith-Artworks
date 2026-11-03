@@ -1,5 +1,5 @@
 import { LoaderCircle, X } from "lucide-react";
-import type { BackupRuntimeStatus } from "./types";
+import type { BackupRuntimeStatus } from "../shared/backupRuntime";
 
 export function SettingsOperationProgress({
   runtime,

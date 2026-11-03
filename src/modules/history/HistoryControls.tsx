@@ -7,7 +7,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ConfirmDialog as SharedConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
-import { appApi } from "../../app/api";
 import { checkModeLabel, describeCheckRun, formatCheckElapsed, formatClockTime } from "./historyModel";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
 
@@ -166,11 +165,18 @@ export function BranchScheduleStatus({
   </div>;
 }
 
+/**
+ * 「在文件管理器中显示」动作。由应用层注入（`appApi.revealPathInFolder`），历史模块
+ * 不导入 `app/api`；未注入时分支设置不渲染该入口。
+ */
+export type RevealPathAction = (path: string) => void | Promise<void>;
+
 export function BranchSettings({
   branch,
   disabled,
   saveLocked,
   onSave,
+  onRevealPath,
 }: {
   branch: ArtworkBranch;
   /** 只锁草稿输入：本页自己的操作进行时为真。 */
@@ -178,6 +184,7 @@ export function BranchSettings({
   /** 锁写回：后台任务占用运行锁时为真，草稿保留并显示「未保存」。 */
   saveLocked: boolean;
   onSave: (request: UpdateBranchBackupRequest) => Promise<void>;
+  onRevealPath?: RevealPathAction;
 }) {
   const [title, setTitle] = useState(branch.title);
   const [enabled, setEnabled] = useState(branch.backupEnabled);
@@ -278,8 +285,9 @@ export function BranchSettings({
     if (typeof value === "string") setSourcePath(value);
   };
   const revealSource = async () => {
+    if (!onRevealPath) return;
     try {
-      await appApi.revealPathInFolder(sourcePath);
+      await onRevealPath(sourcePath);
     } catch {
       // 失败时静默：文件可能刚被移动，下一次保存路径时会重新校验。
     }
@@ -310,7 +318,7 @@ export function BranchSettings({
           <div className="branch-source-actions">
             {hasSource
               ? <>
-                <button className="icon-button" type="button" title="打开所在文件夹" disabled={pathActionsDisabled} onClick={() => void revealSource()}><FolderOpen aria-hidden="true" size={15} /></button>
+                {onRevealPath && <button className="icon-button" type="button" title="打开所在文件夹" disabled={pathActionsDisabled} onClick={() => void revealSource()}><FolderOpen aria-hidden="true" size={15} /></button>}
                 <button className="icon-button" type="button" title="修改工作文件" disabled={pathActionsDisabled} onClick={() => void chooseSource()}><FilePenLine aria-hidden="true" size={15} /></button>
                 <button className="icon-button" type="button" title="清除工作文件路径" disabled={pathActionsDisabled} onClick={() => setSourcePath("")}><Eraser aria-hidden="true" size={15} /></button>
               </>

@@ -7,10 +7,10 @@ import {
   RefreshCw,
   ScanLine,
 } from "lucide-react";
+import type { BackupRuntimeStatus } from "../shared/backupRuntime";
 import { formatBytes } from "../shared/format";
 import { SettingsOperationProgress } from "./SettingsOperationProgress";
 import type {
-  BackupRuntimeStatus,
   RepositoryStorageDiskScan,
   RepositoryStorageOverview,
   StorageCategoryKind,

@@ -12,6 +12,8 @@ use crate::{cleanup, storage};
 
 use super::{BranchDeletion, HistoryDeletion};
 
+/// 防御性删除入口：自行开连接与事务，供测试直接锁住「未走预检也不能删错」的
+/// 边界。生产路径走 [`delete_subtree_prechecked`]。
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn delete_subtree(
     root: &Path,

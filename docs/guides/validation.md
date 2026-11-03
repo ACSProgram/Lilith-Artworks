@@ -26,7 +26,7 @@
   真实快照写入路径上返回 `ErrorKind::StorageFull`，断言干净失败、仓库不受影响且可重试）。
   两者不引入新依赖、随 `cargo test --lib` 运行、秒级完成，因此进 Windows CI。
 - **四个解析器各有一组确定性畸形输入模糊**（`chunk_file` 快照/增量容器、`pin_board::dds`
-  DDS 头、`authenticity::c2pa` 清单、`app::settings` 设置文件），生成器集中在 `src/fuzz_support.rs`
+  DDS 头、`authenticity::c2pa` 清单、`app::settings` 设置文件），生成器集中在 `src-tauri/src/fuzz_support.rs`
   （只在 `cfg(test)` 下编译，亦是 `backup::test_support::Rng` 的实现）。断言的是「不受信任的
   字节不能换来 panic / 越界 / 无界分配 / 无限循环」：被接受的容器必须自洽（块数量不超过文件容量、
   可物化且长度等于声明值），被接受的 DDS 尺寸必须落在声明上限之内，解析失败的设置文件必须被

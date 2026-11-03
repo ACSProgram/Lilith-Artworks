@@ -5,7 +5,8 @@ import {
   dispatchRuntimeEvent,
   resetRuntimeEventBridgeForTests,
 } from "../../shared/useRuntimeSubscription";
-import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
+import type { ArtworkBranch, ArtworkHistory, HistoryNode } from "./types";
 
 const historyApi = vi.hoisted(() => ({
   get: vi.fn(),

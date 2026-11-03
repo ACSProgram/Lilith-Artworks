@@ -25,27 +25,24 @@
 ## 边界
 
 - 前端模块之间不互相导入；跨模块流程在 `src/app/` 编排。
-- 跨模块的确认交互复用 `src/shared/ConfirmDialog.tsx`；不可逆的高风险操作在它的
-  `ConfirmView` 上置 `slideToConfirm: true`，走 `src/shared/SlideToConfirm.tsx` 的滑动确认，
-  不要另写拖拽、长按或二段式点击控件；测试里驱动该控件用 `src/shared/slideToConfirmTesting.ts`。
-  共享控件清单见 `docs/architecture/overview.md`。
-- Tauri 命令是薄适配器：仓库入口统一经 `src-tauri/src/app/command_runtime/` 的
-  `OperationCoordinator` 与 `CommandContext`，业务入口放在 `src-tauri/src/app/usecases/`，
-  GUI 与 headless 共享；跨领域流程仍由 `src-tauri/src/app/workflows.rs` 的适配器编排。
-  领域模块只暴露单领域服务。
-- History、Library、Pin-board 的 `api.ts` 分别只由各自 `use*Controller.ts` 消费；Authenticity 的
-  `api.ts` 只由 `usePublicationController.ts` 与 `useIdentificationController.ts` 消费，质量预览
-  与签名发布共用一个活动任务取消状态机（`useAuthenticityOperation.ts`），页面组件不直接调用命令。
-  controller 的请求代次统一来自 `src/shared/useRequestEpoch.ts`，
-  busy 与错误上报来自 `useAsyncOperation.ts`（素材板的传输忙碌由传输流程自己持有），
-  事件只经 `src/shared/useRuntimeSubscription.ts` 订阅，不各自 `listen`。
+- 跨模块的确认交互复用 `src/shared/ConfirmDialog.tsx`；不可逆的高风险操作置
+  `slideToConfirm: true`，测试里驱动该控件用 `src/shared/slideToConfirmTesting.ts`。语义与
+  共享控件清单见 `docs/architecture/overview.md` 的「前端共享控件」，不要另写第二套确认、
+  拖拽或二段式点击控件。
+- Tauri 命令是薄适配器：仓库入口统一经 `OperationCoordinator` 与 `CommandContext`，业务入口
+  放在 `src-tauri/src/app/usecases/`，GUI 与 headless 共享；跨领域流程由 `app/workflows.rs`
+  编排。分层见 `docs/architecture/overview.md` 的「命令执行底座」。
+- `api.ts` 的调用方：读取、mutation 与运行状态由各自 controller 负责；素材板的窗口全屏、
+  导出目录选择与渲染器纹理读写是直接调用它的无状态路径。controller 的请求代次、busy/错误上报
+  与事件订阅分别来自 `useRequestEpoch.ts`、`useAsyncOperation.ts` 与
+  `useRuntimeSubscription.ts`，不各自持有计数器或 `listen`。目录契约与各模块的分工见
+  `docs/architecture/overview.md` 的「前端模块契约与事件消费」。
 - `src/modules/<module>/api.ts` 是该领域 Tauri 命令的唯一前端入口。
-- `src-tauri/src/storage.rs` 负责连接配置、路径、ID、时间与基础校验，不包含领域流程。
 - `history` 只管理 SQLite 图元数据，不读取 ChunkFile；`backup` 负责物化与调度。
 - `preview` 只读传入的文件、返回派生缩略图，不写仓库文件也不进 ChunkFile；提交时来源是工作文件，手动刷新时由 backup 把节点内容物化到 `temp/` 再交给它；任何失败只让该节点没有预览。判断「某节点的格式有没有抽取器」走 `preview::supports_preview`，它只看分支工作文件的扩展名（节点自身存的是 ChunkFile 容器），只用于决定前端要不要给出预览占位。
 - `pin_board` 直接注册 Tauri 命令（不经 `app/workflows.rs`）：浏览走 `run_read`，
-  变更走 `run_repository_write`。画板通过公开的 repository 函数持久化画板/图片/历史，
-  DDS 实体存于 `artworks/<artwork-id>/boards/`；画板不进入分支历史。
+  变更走 `run_repository_write`。画板不进入分支历史；持久化边界与 DDS 布局见
+  `docs/modules/pin-board.md`。
 - 认证发布检查点由 `src-tauri/src/app/usecases/authenticity.rs` 调用公开的
   `backup::ensure_checkpoint` 建立；`authenticity` 模块本身不导入 backup、不读取 `chunk_file/`。
 - 破坏性历史操作经 `src-tauri/src/history/deletion_repository.rs` 进入；普通图操作经

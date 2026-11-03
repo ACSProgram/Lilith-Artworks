@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
 import { errorMessage } from "../../shared/errors";
 import { useAsyncOperation } from "../../shared/useAsyncOperation";
 import { useRequestEpoch } from "../../shared/useRequestEpoch";
@@ -6,7 +7,7 @@ import { useRuntimeSubscription } from "../../shared/useRuntimeSubscription";
 import { historyApi } from "./api";
 import { mergeNodeVerifyStates } from "./historyModel";
 import type {
-  ArtworkHistory, BackupCommitResult, BackupRuntimeStatus, ForkBranchRequest,
+  ArtworkHistory, BackupCommitResult, ForkBranchRequest,
   HistoryNode, NodePreview, RenameHistoryNodeRequest, UpdateBranchBackupRequest,
 } from "./types";
 

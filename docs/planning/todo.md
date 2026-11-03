@@ -12,7 +12,7 @@
 0.3 在 `dev` 上分批实施；`0.3.0-beta.1` 已打标签并以 Pre-release 公开（2026-10-25，附
 setup.exe 与 SBOM），alpha1–alpha6 未打标签。beta.1 之后的改动只记在 `CHANGELOG.md` 的
 `Unreleased`，尚未切版本。0.3 沿用 repository schema v6，共有两次迁移（alpha3 的 v4 → v5 与
-alpha5 阶段 1 的 v5 → v6）。
+alpha5 的 v5 → v6）。
 
 发布前压力测试（含 `manual` 8 GiB 档）已在 2026-10-25 全量通过，实测见
 `docs/user/stress-test-report.md`；`manual` 档只在正式发布前运行，不随日常开发或候选版本切分
@@ -68,7 +68,7 @@ alpha5 阶段 1 的 v5 → v6）。
 - `.procreate` 的真实文件仍缺样本：本机只有合成 ZIP 单测，需要一份真实 `.procreate` 验证
   `QuickLook` 缩略图与缺条目占位。
 
-### 自动备份调度修复阶段 2–5
+### 自动备份调度的界面观察
 
 计划见 `archive/backup-scheduling-fix-plan-2026-10-20.md`。退避、让位日志与退出链路已确认，
 只剩界面侧的启动时机：
@@ -123,10 +123,11 @@ alpha5 阶段 1 的 v5 → v6）。
 - **分支模型**：`main` 固定为 0.2 发布线（`v0.2.0`，指向 `0be6224`），不再接收 0.3 改动；
   `dev` 从 `0be6224` 创建，作为 0.3 开发线。历史与发布记录见
   `archive/handoff-log-2026-10-18.md`。
-- **0.3 版本线**：alpha1–alpha6 与 beta.1 都是未打标签的过渡版本，beta.1 是 0.3 线当前最后一版。
+- **0.3 版本线**：alpha1–alpha6 未打标签；beta.1 已于 2026-10-25 打标签并作为 Pre-release 公开，
+  是 0.3 线当前最后一版。
   逐批范围与落实口径见 `archive/handoff-log-2026-10-18.md` 至
   `archive/handoff-log-2026-10-25.md` 与两份计划正文；0.3 因此有两次迁移（alpha3 的 v4 → v5
-  与 alpha5 阶段 1 的 v5 → v6）。
+  与 alpha5 的 v5 → v6）。
 - **快速命中计数改为自适应强制全量（2026-10-21）**：不采用固定 N。阈值按本轮到期队列长度与分支
   文件大小分档，并以 7 天为年龄上限；后台忙时把全量确认推迟到队列消化后，长间隔下允许阈值小于 8。
   数值与实测依据见 `docs/modules/history-and-backup.md` 的「调度」。

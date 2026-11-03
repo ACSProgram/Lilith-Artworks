@@ -1,4 +1,5 @@
 import { invokeCommand } from "../shared/tauri";
+import type { BackupRuntimeStatus } from "../shared/backupRuntime";
 import type { DiagnosticsStatus } from "../shared/diagnostics";
 import type {
   CleanupReport,
@@ -8,7 +9,6 @@ import type {
 import type {
   AppSettings,
   BackupDisableNoticeTarget,
-  BackupRuntimeStatus,
   RepositoryBackupReport,
   RepositoryBackupRun,
   RepositoryScrubReport,

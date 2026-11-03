@@ -70,6 +70,18 @@ entries for the reader; they are not a template every entry has to fill.
   (`.procreate` previews read entries with `new` + `by_index` under a decode
   budget) nor c2pa 0.90.11 calls that extract-to-disk path, and the patched
   zip 9 cannot be adopted while c2pa pins zip 8.x.
+- Internal cleanup with no user-visible change: the backup runtime DTO has one
+  definition in `src/shared/backupRuntime.ts`, `PinBoardTextureCacheLevel` has
+  one definition in `pin-board/types.ts`, the history branch settings receive
+  the reveal-folder action from the app layer instead of importing `app/api`,
+  and unreferenced exports plus the stale texture-budget constants are gone.
+- Documentation and comments now match the code they describe: the log rotation
+  size is the actual 4,000,000 bytes, the Rust audit ignore list includes
+  RUSTSEC-2026-0429, the fuzz generators live in `src-tauri/src/fuzz_support.rs`,
+  the board DDS scrub entry is `pin_board::scrub::scrub_board_dds`, and the
+  archive index lists the 2026-10-09 log. The `api.ts` consumer lists name
+  `useArtworkSummary.ts` and the pin board's direct command paths, and the
+  architecture pages no longer carry per-batch headings such as `0.3 阶段 3`.
 
 ### Fixed
 

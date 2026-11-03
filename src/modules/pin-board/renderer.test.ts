@@ -21,10 +21,10 @@ import { beginStrokeDraft, extendStrokeDraft } from "./strokeDrawing";
 import { normalizeLayerVisibility, type PinBoardLayerVisibility } from "./layers";
 import {
   PIN_BOARD_MIN_PREVIEW_DIMENSION,
-  PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
-  PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES,
   textureBudgetsForLevel,
 } from "./texturePolicy";
+
+const LOW_TEXTURE_BUDGETS = textureBudgetsForLevel("low");
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -88,9 +88,9 @@ function rendererWith(options: Record<string, unknown>): PinBoardRenderer {
     eraseFrom: null,
     eraseCandidates: [],
     strokeWidthValue: 10,
-    // 基准预算（低档）：与历史常量一致，预算相关的断言依赖这些值。
-    textureBudgetBytes: PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES,
-    previewTextureBudgetBytes: PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES,
+    // 基准预算取低档：预算相关的断言依赖这些值。
+    textureBudgetBytes: LOW_TEXTURE_BUDGETS.residentBytes,
+    previewTextureBudgetBytes: LOW_TEXTURE_BUDGETS.previewBytes,
     ...options,
   });
   return renderer;
@@ -166,7 +166,7 @@ describe("pin-board renderer keep-alive", () => {
   it("reserves space for an incoming high-zoom texture before loading it", () => {
     const renderer = rendererWith({
       textures: new Map([
-        [1, makeLoaded(PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES - 8 * 1024 * 1024, 1)],
+        [1, makeLoaded(LOW_TEXTURE_BUDGETS.residentBytes - 8 * 1024 * 1024, 1)],
         [2, makeLoaded(8 * 1024 * 1024, 2)],
       ]),
     });
@@ -204,7 +204,7 @@ describe("pin-board renderer keep-alive", () => {
     const renderer = rendererWith({
       textures: new Map([
         // 受保护的高清纹理贴着预算上限，另有一张可淘汰的高清纹理做淘汰对象。
-        [1, makeLoaded(PIN_BOARD_TEXTURE_RESIDENT_BUDGET_BYTES - 4 * 1024 * 1024, 1)],
+        [1, makeLoaded(LOW_TEXTURE_BUDGETS.residentBytes - 4 * 1024 * 1024, 1)],
         [3, makeLoaded(8 * 1024 * 1024, 3)],
       ]),
       previewTextures: new Map([
@@ -226,7 +226,7 @@ describe("pin-board renderer keep-alive", () => {
   it("evicts preview textures against their own budget", () => {
     const renderer = rendererWith({
       previewTextures: new Map([
-        [1, makeLoaded(PIN_BOARD_PREVIEW_TEXTURE_BUDGET_BYTES - 4 * 1024 * 1024, 1)],
+        [1, makeLoaded(LOW_TEXTURE_BUDGETS.previewBytes - 4 * 1024 * 1024, 1)],
         [2, makeLoaded(4 * 1024 * 1024, 2)],
       ]),
     });

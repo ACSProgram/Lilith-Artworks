@@ -56,8 +56,3 @@ export function orderedSelection(
     .map((node) => node.id)
     .filter((id) => selectedIds.has(id));
 }
-
-export function containsNode(node: LibraryNode, id: string): boolean {
-  return node.id === id || node.children.some((child) => containsNode(child, id));
-}
-

@@ -4,12 +4,13 @@ import {
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
+import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
 import { formatBytes } from "../../shared/format";
 import { useMenuPlacement } from "../../shared/useMenuPlacement";
 import {
   BranchScheduleStatus, BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
 } from "./HistoryControls";
-import type { ConfirmRequest } from "./HistoryControls";
+import type { ConfirmRequest, RevealPathAction } from "./HistoryControls";
 import { HistoryBranchView, HistoryInspector } from "./HistoryBranchView";
 import { HistoryOverview } from "./HistoryOverview";
 import {
@@ -19,7 +20,7 @@ import {
   type HistoryViewMode,
 } from "./historyModel";
 import { HoverPreview } from "./NodePreview";
-import type { ArtworkBranch, ArtworkHistory, BackupRuntimeStatus, HistoryNode } from "./types";
+import type { ArtworkBranch, ArtworkHistory, HistoryNode } from "./types";
 import { useCompactSelection } from "./useCompactSelection";
 import { useHistoryController } from "./useHistoryController";
 import { useNodePreview } from "./useNodePreview";
@@ -31,6 +32,8 @@ interface HistoryModuleProps {
   onSelectBranch: (branchId: string) => void;
   onHistoryChanged: (history: ArtworkHistory) => void;
   onError: (message: string | null) => void;
+  /** 应用层注入的目录 reveal；不注入时分支设置不显示该入口。 */
+  onRevealPath?: RevealPathAction;
 }
 
 const MINDMAP_NODE_WIDTH_KEY = "lilith-artworks.history-node-min-width-v1";
@@ -42,7 +45,10 @@ function loadMindmapNodeWidth(): number {
     : 280;
 }
 
-export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0, onSelectBranch, onHistoryChanged, onError }: HistoryModuleProps) {
+export function HistoryModule({
+  artworkId, selectedBranchId, refreshVersion = 0, onSelectBranch, onHistoryChanged,
+  onError, onRevealPath,
+}: HistoryModuleProps) {
   const {
     history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
     restoreNode, compactNodes, deleteBranch, resetArtworkHistory, reverifyBranch, deleteSubtree,
@@ -346,7 +352,7 @@ export function HistoryModule({ artworkId, selectedBranchId, refreshVersion = 0,
     </header>
 
     {selectedBranch && <section className="branch-band">
-      <BranchSettings branch={selectedBranch} disabled={draftLocked} saveLocked={writeLocked} onSave={saveBranch} />
+      <BranchSettings branch={selectedBranch} disabled={draftLocked} saveLocked={writeLocked} onSave={saveBranch} onRevealPath={onRevealPath} />
       <div className="branch-status-actions">
         <BranchScheduleStatus branch={selectedBranch} onReverify={reverifyBranch} />
         {view === "branch" && selectedBranch.createdFromHistoryId && <button className="danger-button" type="button" disabled={writeLocked} onClick={() => {

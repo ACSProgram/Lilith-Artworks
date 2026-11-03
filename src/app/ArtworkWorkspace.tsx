@@ -3,6 +3,7 @@ import { Fingerprint, GitCommitVertical, Images, ShieldCheck } from "lucide-reac
 import { IdentificationView } from "../modules/authenticity/IdentificationView";
 import { PublicationView } from "../modules/authenticity/PublicationView";
 import type { CertificationRecord } from "../modules/authenticity/types";
+import { appApi } from "./api";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { SectionErrorFallback } from "./ErrorFallback";
 import { HistoryModule } from "../modules/history/HistoryModule";
@@ -104,7 +105,7 @@ export function ArtworkWorkspace({
       >
         {/* 切换作品时按 key={artworkId} 整块重置这三个标签页，与过去整棵工作区重挂载的行为一致；
             素材板窗格不带 key，跨作品保留渲染器与 GPU 设备（见文档 keep-alive 语义）。 */}
-        {view === "history" && <div key={artworkId} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} /></div>}
+        {view === "history" && <div key={artworkId} className="workspace-view-pane"><HistoryModule artworkId={artworkId} selectedBranchId={branchId} refreshVersion={historyRefreshVersion} onSelectBranch={setBranchId} onHistoryChanged={applyWorkspaceHistory} onError={onError} onRevealPath={appApi.revealPathInFolder} /></div>}
         {view === "publish" && <div key={artworkId} className="workspace-view-pane"><PublicationView artworkTitle={title} branches={branches} selectedBranchId={branchId} branchesLoading={branchesLoading} branchesError={branchesError} onRetryBranches={summary.retry} selectedRecordId={initialRecordId} recordNavigationKey={navigationKey} onSelectBranch={setBranchId} onError={onError} onNavigateRecord={onNavigateRecord} onRetryFileCleanup={onRetryFileCleanup} onPublicationChanged={refreshAfterPublication} /></div>}
         {view === "identify" && <div key={artworkId} className="workspace-view-pane"><IdentificationView onError={onError} onNavigateRecord={onNavigateRecord} /></div>}
       </ErrorBoundary>
