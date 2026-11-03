@@ -1,6 +1,7 @@
 import { diagnosticsLog } from "../../shared/diagnostics";
 import { errorMessage } from "../../shared/errors";
 import { pinBoardApi } from "./api";
+import { editableItemFields, editableTextPayload } from "./savePayload";
 import type { PinBoardEditableItem, PinBoardItem } from "./types";
 
 /**
@@ -345,24 +346,8 @@ function isRetryableSettleError(error: unknown): boolean {
  */
 function editableItems(items: PinBoardItem[]): PinBoardEditableItem[] {
   return items.map((item) => ({
-    itemId: item.itemId,
-    order: item.order,
-    layer: item.layer,
-    deleted: item.deleted,
-    points: item.points.map((point) => [...point]) as PinBoardEditableItem["points"],
-    uv: item.uv.map((point) => [...point]) as PinBoardEditableItem["uv"],
-    ...(item.kind === "text"
-      ? {
-        text: {
-          text: item.text,
-          fontSize: item.fontSize,
-          color: item.color,
-          align: item.align,
-          measuredWidth: item.width,
-          measuredHeight: item.height,
-        },
-      }
-      : {}),
+    ...editableItemFields(item),
+    ...(item.kind === "text" ? { text: editableTextPayload(item) } : {}),
   }));
 }
 

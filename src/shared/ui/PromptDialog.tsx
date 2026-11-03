@@ -3,10 +3,12 @@ import { Modal } from "./Modal";
 
 interface PromptDialogProps {
   title: string;
+  eyebrow?: string;
   label?: string;
   initialValue?: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  busy?: boolean;
   onConfirm: (value: string) => void;
   onCancel: () => void;
 }
@@ -22,10 +24,12 @@ interface PromptDialogProps {
  */
 export function PromptDialog({
   title,
+  eyebrow,
   label,
   initialValue = "",
   confirmLabel = "确认",
   cancelLabel = "取消",
+  busy = false,
   onConfirm,
   onCancel,
 }: PromptDialogProps) {
@@ -39,19 +43,20 @@ export function PromptDialog({
 
   const confirm = () => {
     const trimmed = value.trim();
-    if (trimmed) onConfirm(trimmed);
+    if (trimmed && !busy) onConfirm(trimmed);
   };
 
   return (
     <Modal
       title={title}
+      eyebrow={eyebrow}
       onClose={onCancel}
       footer={(
         <>
           <button className="secondary-button" type="button" onClick={onCancel}>
             {cancelLabel}
           </button>
-          <button className="primary-button" type="button" disabled={!value.trim()} onClick={confirm}>
+          <button className="primary-button" type="button" disabled={busy || !value.trim()} onClick={confirm}>
             {confirmLabel}
           </button>
         </>

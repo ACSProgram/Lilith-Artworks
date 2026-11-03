@@ -4,7 +4,7 @@
 
 按问题只读取一条路径：
 
-- 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；总览与时间轴：`HistoryOverview.tsx`；当前分支列表与「节点信息」栏：`HistoryBranchView.tsx`；节点格式/缩略图/悬停浮层状态：`useNodePreview.ts`；精简模式的选择集合：`useCompactSelection.ts`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`。
+- 页面选择状态、右键菜单、分支进入与精简选择：`src/modules/history/HistoryModule.tsx`；总览与时间轴：`HistoryOverview.tsx`；当前分支列表与「节点信息」栏：`HistoryBranchView.tsx`；节点格式/缩略图/悬停浮层状态：`useNodePreview.ts`；精简模式的选择集合：`useCompactSelection.ts`；历史读取、运行状态和命令编排：`src/modules/history/useHistoryController.ts`；分支设置的草稿与 650 ms 防抖：`useBranchSettingsDraft.ts`。
 - 工作区摘要（作品标题与分支列表）的非历史页兜底读取：`src/modules/history/useArtworkSummary.ts`；由 `src/app/ArtworkWorkspace.tsx` 在活动视图不是历史页且当前作品分支尚未加载时启用，只消费同一个 `history/api.ts`。
 - 总览 mindmap 与左侧时间轴的纯展示：`src/modules/history/HistoryGraph.tsx`。
 - 分支设置、保存状态、系统文件窗口和确认窗口：`src/modules/history/HistoryControls.tsx`，视觉规则只读 `src/styles/history.css`。
@@ -204,7 +204,7 @@ History 公开只读的 `next_backup_disable_notice_target` 查询，按分支�
 
 精简在 UI 上以「删除节点」呈现：工具栏按钮用共享的红色描边删除样式，确认弹窗同名。删除前先经一次普通确认；若所选节点里存在主动提交节点，或存在标题被人工改过的节点，再追加一道更强的滑动确认（`src/shared/SlideToConfirm.tsx`，须把滑块拖到底），因为这两类节点承载明确的人工意图。改名与否由 `historyModel.ts` 把 `title` 与提交时生成的默认标题（备注非空取备注、否则按 `commitKind` 取「自动备份」/「主动提交」）比对得出，不为此增加 schema 或 DTO 字段；调度器写入自动备份时固定使用空备注，因此自动备份节点的默认标题恒为「自动备份」。
 
-历史页的确认弹窗在操作运行期间把页脚取消按钮换成「取消操作」，并禁止关窗（共享控件的 `busy` 契约见 `docs/architecture/overview.md` 的「前端共享控件」）。该入口只在**本页自己的**操作运行时提供：`runtime.busy` 也可能来自后台自动备份或空闲完整性检查，那不是这个操作。页面按控件分级：提交、精简、检查点、删除、重置、缩略图重提与分支设置的写回占用运行锁；分支名称、提交备注与分支设置草稿只在本页或另一前台用户操作进行时禁用，后台自动备份与空闲校验期间仍可编辑，`BranchSettings` 的防抖保存在锁释放后才执行。
+历史页的确认弹窗在操作运行期间把页脚取消按钮换成「取消操作」，并禁止关窗（共享控件的 `busy` 契约见 `docs/architecture/overview.md` 的「前端共享控件」）。该入口只在**本页自己的**操作运行时提供：`runtime.busy` 也可能来自后台自动备份或空闲完整性检查，那不是这个操作。页面按控件分级：提交、精简、检查点、删除、重置、缩略图重提与分支设置的写回占用运行锁；分支名称、提交备注与分支设置草稿只在本页或另一前台用户操作进行时禁用，后台自动备份与空闲校验期间仍可编辑，`BranchSettings` 的防抖保存在锁释放后才执行。节点右键菜单使用共享 `ContextMenu`（Escape、外部点击、滚动与窗口缩放统一关闭），重命名使用共享 `PromptDialog`。
 
 取消本身分两层。原生共享取消标志只覆盖**正在执行的那一条命令**（`BackupState` 在每条命令取得运行锁时清零、命令结束时再清零一次，见 `src-tauri/src/backup/runtime.rs`），因此精简这类逐节点调用必须由前端自己记住「已请求取消」：批量循环在启动下一个节点之前检查该标记，命中即停止并刷新历史。已删除的节点不恢复，精简选择保留——其中已不在树里的节点会被剔除，计数不会虚高。
 

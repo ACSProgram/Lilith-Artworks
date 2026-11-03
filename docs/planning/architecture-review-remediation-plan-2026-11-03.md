@@ -1,7 +1,7 @@
 # 架构审查整改计划（2026-11-03）
 
-状态：**执行中**。B1 已实施、验证并提交；B2–B5 未开始。本文件
-定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
+状态：**执行中**。B1、B2 已实施并通过自动化验证（B2 的菜单项仍待维护者手工验收）；
+B3–B5 未开始。本文件定义整改范围、顺序与验收口径，实施记录追加在对应批次末尾。
 
 2026-11-03 二次修订：已对照 Codex 复核意见调整范围与验收方式，并把工作项合并为 **5 个批次**。
 复核原文归档为 `archive/architecture-review-remediation-plan-review-2026-11-03.md`，采纳与
@@ -268,6 +268,41 @@
 - 右键菜单四项手工验收通过；若暂缓，记录为后续 UX 项。
 - 保存契约测试通过，且明确断言两条路径的差异，而不是相等。
 - `npx tsc --noEmit` 与前端测试通过；没有新增通用弹窗/菜单/任务框架。
+
+#### B2 实施记录（2026-11-03）
+
+- **右键菜单**：`ContextMenu` 改用 `useMenuPlacement` 按测量尺寸落在视口内；素材板、作品树、
+  作品树的「新建」菜单与历史节点菜单共用这一套 Escape / 外部点击 / 滚动 / 缩放关闭逻辑。
+  删除作品树与历史页各自的手写关闭监听、`useMenuPlacement` 调用、`CommandMenu` 与
+  `context-separator`，作品树的「新建」入口改为共享菜单定位。`EditNodeDialog` 改用共享
+  `PromptDialog`（新增 `eyebrow` / `busy`），因此重命名也能用 Escape 关闭并在打开时选中原文。
+- **保存契约**：新增 `pendingSettle.ts` 与 `renderer.ts` 共用的 `savePayload.ts`，只共享字段
+  克隆与文字载荷构造；切换快照继续总是携带文字载荷，常规保存只在签名变化时携带。测试覆盖
+  `text` / `stroke` / `bitmap` 三类条目，并只断言各自路径的取舍，不断言两个完整请求相等。
+- **几何与 hooks**：`strokePreview.ts` 的箭头头部改用 `strokeRender.arrowHeadPoints`；点到线段
+  距离与点集包围盒收敛到 `geometry.ts`（`distanceToSegment`、`pointsBounds`），
+  `strokeRender.boundsQuad` 也复用 `pointsBounds`。`PublicationPreviewDialog` 拆出
+  `usePreviewViewport`（缩放、滚动、拖拽、导航框）与 `usePreviewTiles`（局部图去抖与缓存）。
+  分支设置的 650ms 防抖状态机移到控制器层 `useBranchSettingsDraft.ts`；`useArtworkSummary`
+  改用 `useRequestEpoch`；发布与识别控制器的忙状态改由 `useAsyncOperation` 计数维护，
+  发布流程自己的活动任务状态机保持不变。
+- **设置维护**：`useRepositoryMaintenance.ts` 变为组合根，空间、备份、完整性三个域 hook
+  （`useRepositorySpaceMaintenance` / `useRepositoryBackupMaintenance` /
+  `useRepositoryIntegrityMaintenance`）共享 `useSettingsOperationRunner` 的同一操作闸门与
+  进度状态；对外返回类型与页面消费方式不变。
+- **测试组织**：`App.repositorySwitch.test.tsx` 按设置/仓储页、备份页、空间页拆为
+  `App.settingsPage.test.tsx`、`App.backupPage.test.tsx`、`App.spacePage.test.tsx`，夹具移到
+  `repositoryTestSupport.ts`；覆盖范围与文件名一致，原 20 项用例全部保留。
+- **CSS**：共享 `ContextMenu` / `Modal` / `PromptDialog` 样式移入 `index.css`，素材板样式表
+  只保留模块规则；删除 `.tree-root` 死规则、`history.css` 重复的 `.segmented-control` 与
+  已无消费者的 `.compact-dialog`、`.command-menu`、`.dialog-input`、`.field-label`。
+- **验证**：`npx tsc --noEmit` 通过；`npm test` 全量 58 个文件、509 项通过（含素材板与新增的
+  保存契约用例）；未改动 Rust 代码、命令名、DTO 字段与版本号；未提交 Git。
+- **偏差**：右键菜单的键盘/滚动/缩放/定位/焦点四项仍待维护者手工验收，已登记到
+  `todo.md` 的「人工验收（剩余）」。`useBranchSettingsDraft` 放在控制器层独立文件而不是
+  `useHistoryController.ts` 内部，避免 `HistoryModule.test.tsx` 对控制器整模块 mock 时连带
+  失去草稿 hook；仍满足「防抖状态机不再属于控件」的目标。`index.css` 中 library/settings
+  规则的进一步拆分未做：会改变加载顺序，按计划留待后续批次并记录。
 
 ### B3 `[纯重构]` + `[拆分]` Rust 基础收敛、生产拆分与应用层收口
 

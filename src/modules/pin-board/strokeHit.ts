@@ -16,7 +16,7 @@
  * 不保存任何状态。
  */
 
-import { imageBounds, type Bounds, type Point } from "./geometry";
+import { distanceToSegment, imageBounds, type Bounds, type Point } from "./geometry";
 import { STROKE_TOOL, type PinBoardStrokeGeometry } from "./strokeGeometry";
 import {
   arrowHeadPoints,
@@ -258,21 +258,6 @@ export function strokeOutlineSignature(
   geometryVersion: number,
 ): string {
   return `${geometryVersion}|${item.points.flat().join(",")}|${item.uv.flat().join(",")}`;
-}
-
-function distanceToSegment(point: Point, start: Point, end: Point): number {
-  const deltaX = end[0] - start[0];
-  const deltaY = end[1] - start[1];
-  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
-  if (!(lengthSquared > 0)) {
-    return Math.hypot(point[0] - start[0], point[1] - start[1]);
-  }
-  let ratio = ((point[0] - start[0]) * deltaX + (point[1] - start[1]) * deltaY) / lengthSquared;
-  ratio = Math.min(1, Math.max(0, ratio));
-  return Math.hypot(
-    point[0] - (start[0] + deltaX * ratio),
-    point[1] - (start[1] + deltaY * ratio),
-  );
 }
 
 function pointNearBounds(point: Point, bounds: Bounds, pad: number): boolean {

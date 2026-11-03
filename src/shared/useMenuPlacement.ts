@@ -1,4 +1,4 @@
-import { useLayoutEffect, useRef, useState } from "react";
+import { useLayoutEffect, useState } from "react";
 import type { CSSProperties } from "react";
 import { MENU_VIEWPORT_MARGIN, placeMenu } from "./menuPlacement";
 import type { MenuAnchor, MenuPosition } from "./menuPlacement";

@@ -6,7 +6,8 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent } from "react";
 import type { BackupRuntimeStatus } from "../../shared/backupRuntime";
 import { formatBytes } from "../../shared/format";
-import { useMenuPlacement } from "../../shared/useMenuPlacement";
+import { ContextMenu } from "../../shared/ui/ContextMenu";
+import type { ContextMenuItem } from "../../shared/ui/ContextMenu";
 import {
   BranchScheduleStatus, BranchSettings, chooseRestoreOutput, ConfirmDialog, EditNodeDialog, ForkDialog,
 } from "./HistoryControls";
@@ -67,7 +68,6 @@ export function HistoryModule({
   const [mindmapMode, setMindmapMode] = useState<"compact" | "timeline">("compact");
   const [mindmapNodeWidth, setMindmapNodeWidth] = useState(loadMindmapNodeWidth);
   const nodeElements = useRef(new Map<string, HTMLButtonElement>());
-  const contextPlacement = useMenuPlacement(context);
 
   // 写操作要和后台任务共用运行锁，因此沿用 runtime.busy；草稿输入只在本页自己的
   // 或另一个前台用户操作进行时锁住，后台自动备份与空闲校验期间可以继续编辑，
@@ -139,12 +139,6 @@ export function HistoryModule({
     const fallback = history.branches[0]?.id;
     if (fallback) onSelectBranch(fallback);
   }, [history, onSelectBranch, selectedBranchId]);
-
-  useEffect(() => {
-    const close = () => setContext(null);
-    window.addEventListener("click", close);
-    return () => window.removeEventListener("click", close);
-  }, []);
 
   const commit = async () => {
     if (!selectedBranch) return;
@@ -311,11 +305,85 @@ export function HistoryModule({
     </button>;
   };
 
-  const contextBranches = actionNode ? branchesContainingNode(history, actionNode.id) : [];
-  const uniqueContextBranch = contextBranches.length === 1 ? contextBranches[0] : null;
-  const childBranches = actionNode
-    ? history.branches.filter((branch) => branch.createdFromHistoryId === actionNode.id)
-    : [];
+  const contextItems = (node: HistoryNode): ContextMenuItem[] => {
+    const items: ContextMenuItem[] = [];
+    const containing = branchesContainingNode(history, node.id);
+    const unique = containing.length === 1 ? containing[0] : null;
+    const children = history.branches.filter((branch) => branch.createdFromHistoryId === node.id);
+    if (unique) {
+      items.push({
+        key: "enter-branch",
+        label: `进入分支：${unique.title}`,
+        icon: <GitBranch size={15} />,
+        onClick: () => enterBranch(unique),
+      });
+    }
+    for (const branch of children) {
+      items.push({
+        key: `delete-branch-${branch.id}`,
+        label: `删除分支：${branch.title}`,
+        icon: <Trash2 size={15} />,
+        danger: true,
+        onClick: () => setConfirmRequest({ kind: "delete-branch", node, branch }),
+      });
+    }
+    if (unique || children.length > 0) items.push({ key: "separator-branch", divider: true });
+    items.push(
+      {
+        key: "edit-name",
+        label: "编辑节点名称",
+        icon: <Pencil size={15} />,
+        onClick: () => setEditOpen(true),
+      },
+      {
+        key: "fork",
+        label: "从此处创建分支",
+        icon: <GitFork size={15} />,
+        onClick: () => setForkOpen(true),
+      },
+      {
+        key: "restore",
+        label: "恢复到文件",
+        icon: <Download size={15} />,
+        onClick: () => void beginRestore(node),
+      },
+    );
+    items.push(node.isCheckpoint && isForcedCheckpoint(node, history)
+      ? {
+        key: "checkpoint",
+        label: "强制检查点",
+        icon: <CircleDot size={15} />,
+        disabled: true,
+        disabledTitle: "分支 head、分支起点和分叉点必须保留",
+      }
+      : {
+        key: "checkpoint",
+        label: node.isCheckpoint ? "取消检查点" : "设为检查点",
+        icon: <CircleDot size={15} />,
+        onClick: () => setConfirmRequest({ kind: "checkpoint", node, enable: !node.isCheckpoint }),
+      });
+    if (view === "branch" && selectedBranch && branchNodeIds.has(node.id)) {
+      items.push(
+        { key: "separator-nodes", divider: true },
+        {
+          key: "delete-nodes",
+          label: "删除此节点及后续历史",
+          icon: <Trash2 size={15} />,
+          danger: true,
+          onClick: () => {
+            const descendants = branchLine.slice(branchLine.findIndex((entry) => entry.id === node.id));
+            setConfirmRequest({
+              kind: "delete-nodes",
+              node,
+              branch: selectedBranch,
+              descendantCount: descendants.length,
+            });
+          },
+        },
+      );
+    }
+    return items;
+  };
   // 没有历史、也没有第二个分支或工作文件时不给入口：重置只会重建一条空分支。
   const canResetArtwork = history.nodes.length > 0
     || history.branches.length > 1
@@ -422,22 +490,13 @@ export function HistoryModule({
       onLeave={scheduleHoverClose}
     />}
 
-    {context && actionNode && !compactMode && <div className="context-menu history-context" ref={contextPlacement.ref} style={contextPlacement.style} onClick={(event) => event.stopPropagation()}>
-      {uniqueContextBranch && <button onClick={() => enterBranch(uniqueContextBranch)}><GitBranch size={15} />进入分支：{uniqueContextBranch.title}</button>}
-      {childBranches.map((branch) => <button key={branch.id} className="danger" onClick={() => { setConfirmRequest({ kind: "delete-branch", node: actionNode, branch }); setContext(null); }}><Trash2 size={15} />删除分支：{branch.title}</button>)}
-      {(uniqueContextBranch || childBranches.length > 0) && <div className="context-separator" />}
-      <button onClick={() => { setEditOpen(true); setContext(null); }}><Pencil size={15} />编辑节点名称</button>
-      <button onClick={() => { setForkOpen(true); setContext(null); }}><GitFork size={15} />从此处创建分支</button>
-      <button onClick={() => { setContext(null); void beginRestore(actionNode); }}><Download size={15} />恢复到文件</button>
-      {actionNode.isCheckpoint && isForcedCheckpoint(actionNode, history)
-        ? <button disabled title="分支 head、分支起点和分叉点必须保留"><CircleDot size={15} />强制检查点</button>
-        : <button onClick={() => { setConfirmRequest({ kind: "checkpoint", node: actionNode, enable: !actionNode.isCheckpoint }); setContext(null); }}><CircleDot size={15} />{actionNode.isCheckpoint ? "取消检查点" : "设为检查点"}</button>}
-      {view === "branch" && selectedBranch && branchNodeIds.has(actionNode.id) && <><div className="context-separator" /><button className="danger" onClick={() => {
-        const descendants = branchLine.slice(branchLine.findIndex((node) => node.id === actionNode.id));
-        setConfirmRequest({ kind: "delete-nodes", node: actionNode, branch: selectedBranch, descendantCount: descendants.length });
-        setContext(null);
-      }}><Trash2 size={15} />删除此节点及后续历史</button></>}
-    </div>}
+    {context && actionNode && !compactMode && <ContextMenu
+      x={context.x}
+      y={context.y}
+      className="history-context"
+      items={contextItems(actionNode)}
+      onClose={() => setContext(null)}
+    />}
 
     {forkOpen && actionNode && <ForkDialog node={actionNode} busy={busy} onClose={() => setForkOpen(false)} onSubmit={async (title, sourcePath) => {
       if (await forkBranch({ artworkId, fromHistoryId: actionNode.id, title, sourcePath })) setForkOpen(false);

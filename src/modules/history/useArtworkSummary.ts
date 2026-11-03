@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { useRequestEpoch } from "../../shared/useRequestEpoch";
 import { historyApi } from "./api";
 import type { ArtworkHistory } from "./types";
 
@@ -29,32 +30,32 @@ export function useArtworkSummary(artworkId: string, enabled: boolean): ArtworkS
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
-  const request = useRef(0);
+  const { begin, invalidate, isCurrent } = useRequestEpoch();
 
   useEffect(() => {
     if (!enabled) {
-      request.current += 1;
+      invalidate();
       setHistory(null);
       setLoading(false);
       setError(null);
       return;
     }
-    const requestId = ++request.current;
+    const requestId = begin();
     setLoading(true);
     setError(null);
     historyApi.get(artworkId)
       .then((next) => {
-        if (requestId !== request.current || next.artworkId !== artworkId) return;
+        if (!isCurrent(requestId) || next.artworkId !== artworkId) return;
         setHistory(next);
         setLoading(false);
       })
       .catch((failure) => {
-        if (requestId !== request.current) return;
+        if (!isCurrent(requestId)) return;
         setError(message(failure));
         setLoading(false);
       });
-    return () => { request.current += 1; };
-  }, [artworkId, enabled, revision]);
+    return invalidate;
+  }, [artworkId, begin, enabled, invalidate, isCurrent, revision]);
 
   const retry = useCallback(() => setRevision((current) => current + 1), []);
 

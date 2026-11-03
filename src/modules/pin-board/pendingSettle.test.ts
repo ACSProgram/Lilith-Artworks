@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { STROKE_TOOL } from "./strokeGeometry";
 import type { PinBoardItem } from "./types";
 
 const api = vi.hoisted(() => ({
@@ -129,6 +130,39 @@ describe("pin-board pending settle", () => {
         },
       }),
     ]);
+  });
+
+  it("sends stroke geometry without a text payload", async () => {
+    const stroke: PinBoardItem = {
+      boardId: 4,
+      itemId: 11,
+      kind: "stroke",
+      width: 120,
+      height: 80,
+      order: 11,
+      layer: 3,
+      deleted: false,
+      points: [[0, 0], [120, 0], [120, 80], [0, 80]],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+      available: true,
+      tool: STROKE_TOOL.pen,
+      color: "#ffffff",
+      strokeWidth: 6,
+    };
+
+    stageBoardSettle({ boardId: 4, revision: "r1", items: [stroke] });
+    await settleMicrotasks();
+
+    const [sent] = api.savePinBoard.mock.calls[0][1];
+    expect(sent).toEqual({
+      itemId: 11,
+      order: 11,
+      layer: 3,
+      deleted: false,
+      points: [[0, 0], [120, 0], [120, 80], [0, 80]],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]],
+    });
+    expect(sent.text).toBeUndefined();
   });
 
   it("retries a busy write silently instead of reporting it", async () => {

@@ -5,7 +5,7 @@
 - 页面编排与快捷键绑定：`src/modules/pin-board/PinBoardModule.tsx`；主工具栏 `PinBoardToolbar.tsx`，画板列表/回收站/拖放排序 `PinBoardSidebar.tsx`，画布舞台 `PinBoardCanvasStage.tsx`，整画布导出对话框 `PinBoardDialogs.tsx`，画布右键菜单 `PinBoardContextMenu.tsx`，传输进度条 `PinBoardTransferProgress.tsx`
 - 文字就地编辑：画布覆盖层与字体栏 `PinBoardTextEditor.tsx`，有效字号/屏幕几何/草稿校验/文字签名 `textEditing.ts`
 - 画板列表与选择、保存与生命周期参与者：`usePinBoardController.ts`；导入（选择器/剪贴板/拖入）、导出、整画布导出、新建文字与笔迹落库队列：`usePinBoardTransfers.ts`
-- 后台结算队列与其展示状态：`pendingSettle.ts`、`usePendingSettle.ts`
+- 后台结算队列与其展示状态：`pendingSettle.ts`、`usePendingSettle.ts`；两条保存路径共用的字段克隆与文字载荷构造：`savePayload.ts`
 - 侧栏拖放排序的纯函数（插到目标行前/后、无变化时返回 null）：`boardOrder.ts`
 - WebGPU/Canvas 渲染与编辑状态：`renderer.ts`；设备/管线/纹理上传与 DDS·RGBA 负载校验 `rendererGpu.ts`；绘制预览层 `strokePreview.ts`；整画布导出的目标纹理、行带回读与导出笔迹缓冲 `rendererExport.ts`
 - 纹理请求尺寸与两级缓存预算：`texturePolicy.ts`
@@ -325,7 +325,7 @@ SQLite:
 
 **撤销与保存**：一次编辑会话只产生一条撤销记录；`ImageSnapshot` 与 `stateKey` 覆盖文字内容、字号、颜色、对齐与测量宽高。提交、撤销、重做后旧纹理立即失效：可见文字先同步栅格化并换上新纹理（编辑框与画面在同一帧交接，退出编辑不闪空白），不可见或同步重建失败时清掉质量上限与失败记录并重新排队纹理加载。
 
-**保存契约**：`PinBoardEditableItem` 增加可选 `text`（内容、字号、颜色、对齐、测量宽高），普通保存只对文字签名变化的条目携带；后台结算快照对文字条目全量携带。Rust 侧在同一事务里校验并更新 `pin_board_texts`，文字变化与变换变化合并为一次保存、一个 step、一次 revision；文字-only 变化也会写一个 step（`pin_board_history` 仍只存变换）。非文字条目携带文字载荷、空内容、字号/颜色/对齐/度量越界都会被拒绝。字体族固定，不在保存契约里。编辑期间切画板/作品、锁定、全屏、退出、拖入导入与导出都先提交草稿；自动保存不会写入未提交的草稿。
+**保存契约**：`PinBoardEditableItem` 增加可选 `text`（内容、字号、颜色、对齐、测量宽高），普通保存只对文字签名变化的条目携带；后台结算快照对文字条目全量携带。两条路径只共享 `savePayload.ts` 的字段克隆与文字载荷构造，是否携带文字由调用方决定，不能合并成同一种输出。Rust 侧在同一事务里校验并更新 `pin_board_texts`，文字变化与变换变化合并为一次保存、一个 step、一次 revision；文字-only 变化也会写一个 step（`pin_board_history` 仍只存变换）。非文字条目携带文字载荷、空内容、字号/颜色/对齐/度量越界都会被拒绝。字体族固定，不在保存契约里。编辑期间切画板/作品、锁定、全屏、退出、拖入导入与导出都先提交草稿；自动保存不会写入未提交的草稿。
 
 把整块画板按**可见内容**合成一张透明 PNG：所有未删除、`available` 且所在图层可见的条目，按内容
 外框裁剪，边距默认 10 像素、可调 0–64。文字与笔迹因此也有了交付级出口——它们的单条导出已删除，

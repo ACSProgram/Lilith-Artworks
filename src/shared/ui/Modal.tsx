@@ -4,6 +4,7 @@ import { X } from "lucide-react";
 interface ModalProps {
   className?: string;
   title: string;
+  eyebrow?: string;
   description?: string;
   children: ReactNode;
   footer: ReactNode;
@@ -14,6 +15,7 @@ interface ModalProps {
 export function Modal({
   className,
   title,
+  eyebrow,
   description,
   children,
   footer,
@@ -49,6 +51,7 @@ export function Modal({
       >
         <header className="modal-header">
           <div>
+            {eyebrow && <small className="modal-eyebrow">{eyebrow}</small>}
             <h2 id={titleId}>{title}</h2>
             {description && <p id={descriptionId}>{description}</p>}
           </div>

@@ -28,9 +28,6 @@
 .history-header h1 { margin: 3px 0 0; overflow: hidden; font-size: 19px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .history-header-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
 .history-header-actions select { width: min(240px, 32vw); height: 34px; padding: 0 28px 0 9px; border: 1px solid var(--control-border); border-radius: 6px; color: var(--text); background: var(--control-bg); font-size: 12px; }
-.segmented-control { display: inline-flex; align-items: center; gap: 2px; padding: 2px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-subtle); }
-.segmented-control button { min-height: 26px; padding: 0 9px; border: 0; border-radius: 4px; color: var(--muted); background: transparent; font-size: 11px; cursor: pointer; }
-.segmented-control button.active { color: inherit; background: var(--surface); box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
 /* 页头二级菜单：与发布页的「更多发布操作」同一形态，破坏性操作收在折叠菜单里，
    点开条目后再走滑动确认，避免在页头直接摆一颗红色按钮。 */
 .history-more-menu { position: relative; }
@@ -408,7 +405,6 @@
 .history-context button:disabled { opacity: .45; cursor: default; }
 
 .node-editor > header small { display: block; margin-bottom: 3px; color: var(--muted); font-size: 9px; font-weight: 650; text-transform: uppercase; }
-.compact-dialog { width: min(460px, 100%); }
 
 @media (max-width: 1180px) {
   .history-header { align-items: flex-start; }

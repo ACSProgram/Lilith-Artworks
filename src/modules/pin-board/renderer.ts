@@ -26,6 +26,7 @@ import type {
   SavePinBoardResult,
 } from "./types";
 import { parseStrokeBatch, type PinBoardStrokeGeometry } from "./strokeGeometry";
+import { editableItemFields, editableTextPayload } from "./savePayload";
 import {
   DEFAULT_STROKE_COLOR,
   DEFAULT_STROKE_WIDTH,
@@ -2331,25 +2332,12 @@ export class PinBoardRenderer {
 
   private editableImages(): PinBoardEditableItem[] {
     return this.images.map((image) => {
-      const { itemId, order, layer, deleted, points, uv } = image;
       const text = image.kind === "text"
-        && pinBoardTextSignature(image) !== this.savedTextSignatures.get(itemId)
-        ? {
-          text: image.text,
-          fontSize: image.fontSize,
-          color: image.color,
-          align: image.align,
-          measuredWidth: image.width,
-          measuredHeight: image.height,
-        }
+        && pinBoardTextSignature(image) !== this.savedTextSignatures.get(image.itemId)
+        ? editableTextPayload(image)
         : undefined;
       return {
-        itemId,
-        order,
-        layer,
-        deleted,
-        points: cloneQuad(points),
-        uv: cloneQuad(uv),
+        ...editableItemFields(image),
         ...(text ? { text } : {}),
       };
     });

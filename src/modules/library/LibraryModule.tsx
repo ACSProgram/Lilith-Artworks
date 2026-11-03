@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import {
   Fragment,
-  useEffect,
   useMemo,
   useState,
   type MouseEvent as ReactMouseEvent,
@@ -22,12 +21,13 @@ import {
 import type { CleanupReport } from "../../shared/fileCleanup";
 import { ConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
-import { useMenuPlacement } from "../../shared/useMenuPlacement";
+import { ContextMenu } from "../../shared/ui/ContextMenu";
+import type { ContextMenuItem } from "../../shared/ui/ContextMenu";
 import { flattenTree, selectionForClick, visibleTree } from "./tree";
 import { NodeEditor, TrashDialog } from "./LibraryDialogs";
 import type { EditorState } from "./LibraryDialogs";
 import { LibraryTreeView } from "./LibraryTreeView";
-import { CommandMenu, NodeOverview, WorkspaceEmpty } from "./LibraryViews";
+import { NodeOverview, WorkspaceEmpty } from "./LibraryViews";
 import type { LibraryNode, LibrarySearchResult, MoveLibraryNodesRequest } from "./types";
 import { useLibraryController } from "./useLibraryController";
 
@@ -75,6 +75,11 @@ interface ContextState {
   y: number;
 }
 
+interface MenuPosition {
+  x: number;
+  y: number;
+}
+
 interface PendingConfirm extends ConfirmView {
   run: () => Promise<void>;
 }
@@ -88,13 +93,12 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     createGroup, createArtwork, renameNode, trashNodes, moveNodes, restoreTrash,
     permanentlyDeleteTrash, emptyTrash, acknowledgeBackupDisableNotices,
   } = controller;
-  const [newMenuOpen, setNewMenuOpen] = useState(false);
+  const [newMenu, setNewMenu] = useState<MenuPosition | null>(null);
   const [context, setContext] = useState<ContextState | null>(null);
   const [editor, setEditor] = useState<EditorState | null>(null);
   const [trashOpen, setTrashOpen] = useState(false);
   const [workspaceTarget, setWorkspaceTarget] = useState<LibraryWorkspaceTarget | null>(null);
   const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
-  const contextPlacement = useMenuPlacement(context);
 
   const allNodes = useMemo(() => flattenTree(tree.nodes), [tree.nodes]);
 
@@ -114,23 +118,6 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     (count, node) => count + (node.artwork?.backupDisableNoticeCount ?? 0), 0,
   ), [allNodes]);
 
-  useEffect(() => {
-    if (!context && !newMenuOpen) return;
-    const close = () => {
-      setContext(null);
-      setNewMenuOpen(false);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") close();
-    };
-    window.addEventListener("pointerdown", close);
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("pointerdown", close);
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [context, newMenuOpen]);
-
   const creationParent = (node: LibraryNode | null): string | null => {
     if (!node) return null;
     return node.kind === "group" ? node.id : node.parentId;
@@ -147,7 +134,7 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
       setAnchorId(node.id);
       setActiveId(node.id);
     }
-    setNewMenuOpen(false);
+    setNewMenu(null);
     setContext({
       node,
       x: event.clientX,
@@ -236,6 +223,46 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
     }
   };
 
+  const contextItems = (state: ContextState): ContextMenuItem[] => {
+    const node = state.node;
+    const items: ContextMenuItem[] = [];
+    if (!node || node.kind === "group") {
+      items.push(
+        {
+          key: "new-group",
+          label: "新建分组",
+          icon: <FolderPlus aria-hidden="true" size={16} />,
+          onClick: () => setEditor({ mode: "group", parentId: creationParent(node), node: null }),
+        },
+        {
+          key: "new-artwork",
+          label: "新建 Artwork",
+          icon: <FileImage aria-hidden="true" size={16} />,
+          onClick: () => setEditor({ mode: "artwork", parentId: creationParent(node), node: null }),
+        },
+      );
+    }
+    if (node) {
+      items.push(
+        { key: "separator", divider: true },
+        {
+          key: "rename",
+          label: "重命名",
+          icon: <Pencil aria-hidden="true" size={16} />,
+          onClick: () => setEditor({ mode: "rename", parentId: node.parentId, node }),
+        },
+        {
+          key: "trash",
+          label: `移到回收站${selectedIds.size > 1 ? ` ${selectedIds.size} 项` : ""}`,
+          icon: <Trash2 aria-hidden="true" size={16} />,
+          danger: true,
+          onClick: () => beginTrashMove(node),
+        },
+      );
+    }
+    return items;
+  };
+
   return (
     <Fragment>
       <aside className="library-sidebar">
@@ -252,22 +279,44 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
                 title="新建"
                 disabled={!repositoryReady || operationBusy}
                 onPointerDown={(event) => event.stopPropagation()}
-                onClick={() => setNewMenuOpen((current) => !current)}
+                onClick={(event) => {
+                  const bounds = event.currentTarget.getBoundingClientRect();
+                  setNewMenu((current) => current ? null : {
+                    x: bounds.left,
+                    y: bounds.bottom + 4,
+                  });
+                }}
               >
                 <Plus aria-hidden="true" size={18} />
               </button>
-              {newMenuOpen && (
-                <CommandMenu
-                  className="new-command-menu"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onGroup={() => {
-                    setEditor({ mode: "group", parentId: creationParent(activeNode), node: null });
-                    setNewMenuOpen(false);
-                  }}
-                  onArtwork={() => {
-                    setEditor({ mode: "artwork", parentId: creationParent(activeNode), node: null });
-                    setNewMenuOpen(false);
-                  }}
+              {newMenu && (
+                <ContextMenu
+                  x={newMenu.x}
+                  y={newMenu.y}
+                  ariaLabel="新建"
+                  items={[
+                    {
+                      key: "group",
+                      label: "新建分组",
+                      icon: <FolderPlus aria-hidden="true" size={16} />,
+                      onClick: () => setEditor({
+                        mode: "group",
+                        parentId: creationParent(activeNode),
+                        node: null,
+                      }),
+                    },
+                    {
+                      key: "artwork",
+                      label: "新建 Artwork",
+                      icon: <FileImage aria-hidden="true" size={16} />,
+                      onClick: () => setEditor({
+                        mode: "artwork",
+                        parentId: creationParent(activeNode),
+                        node: null,
+                      }),
+                    },
+                  ]}
+                  onClose={() => setNewMenu(null)}
                 />
               )}
             </div>
@@ -400,35 +449,12 @@ export function LibraryModule({ repositoryReady, onConfigure, onError, onRetryFi
       </section>
 
       {context && (
-        <div
-          className="context-menu"
-          ref={contextPlacement.ref}
-          style={contextPlacement.style}
-          onPointerDown={(event) => event.stopPropagation()}
-        >
-          {(!context.node || context.node.kind === "group") && (
-            <>
-              <button type="button" onClick={() => {
-                setEditor({ mode: "group", parentId: creationParent(context.node), node: null });
-                setContext(null);
-              }}><FolderPlus aria-hidden="true" size={16} />新建分组</button>
-              <button type="button" onClick={() => {
-                setEditor({ mode: "artwork", parentId: creationParent(context.node), node: null });
-                setContext(null);
-              }}><FileImage aria-hidden="true" size={16} />新建 Artwork</button>
-            </>
-          )}
-          {context.node && (
-            <>
-              <div className="context-separator" />
-              <button type="button" onClick={() => {
-                setEditor({ mode: "rename", parentId: context.node?.parentId ?? null, node: context.node });
-                setContext(null);
-              }}><Pencil aria-hidden="true" size={16} />重命名</button>
-              <button className="danger" type="button" onClick={() => beginTrashMove(context.node!)}><Trash2 aria-hidden="true" size={16} />移到回收站{selectedIds.size > 1 ? ` ${selectedIds.size} 项` : ""}</button>
-            </>
-          )}
-        </div>
+        <ContextMenu
+          x={context.x}
+          y={context.y}
+          items={contextItems(context)}
+          onClose={() => setContext(null)}
+        />
       )}
 
       {editor && (

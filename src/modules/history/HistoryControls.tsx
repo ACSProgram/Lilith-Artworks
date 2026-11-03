@@ -3,14 +3,15 @@ import {
   AlertTriangle, Ban, Check, ChevronDown, CircleHelp, Copy, Eraser, FileOutput, FilePenLine,
   FolderOpen, GitBranch, GitFork, LoaderCircle, RotateCcw, Timer, Trash2, X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { ConfirmDialog as SharedConfirmDialog } from "../../shared/ConfirmDialog";
 import type { ConfirmView } from "../../shared/ConfirmDialog";
+import { PromptDialog } from "../../shared/ui/PromptDialog";
 import { checkModeLabel, describeCheckRun, formatCheckElapsed, formatClockTime } from "./historyModel";
+import { useBranchSettingsDraft } from "./useBranchSettingsDraft";
+import type { BranchSettingsSaveState } from "./useBranchSettingsDraft";
 import type { ArtworkBranch, HistoryNode, UpdateBranchBackupRequest } from "./types";
-
-type SaveState = "saved" | "dirty" | "saving" | "error";
 
 export function BranchScheduleStatus({
   branch,
@@ -186,98 +187,20 @@ export function BranchSettings({
   onSave: (request: UpdateBranchBackupRequest) => Promise<void>;
   onRevealPath?: RevealPathAction;
 }) {
-  const [title, setTitle] = useState(branch.title);
-  const [enabled, setEnabled] = useState(branch.backupEnabled);
-  const [interval, setInterval] = useState(branch.backupIntervalMinutes);
-  const [quick, setQuick] = useState(branch.backupQuickEnabled);
-  const [sourcePath, setSourcePath] = useState(branch.sourcePath);
-  const [saveState, setSaveState] = useState<SaveState>("saved");
-  const requestVersion = useRef(0);
-  const persisted = useRef({
-    id: branch.id,
-    title: branch.title,
-    enabled: branch.backupEnabled,
-    interval: branch.backupIntervalMinutes,
-    quick: branch.backupQuickEnabled,
-    sourcePath: branch.sourcePath,
-  });
-
-  useEffect(() => {
-    const previous = persisted.current;
-    const branchChanged = previous.id !== branch.id;
-    setTitle((current) => branchChanged || current === previous.title ? branch.title : current);
-    setEnabled((current) => branchChanged || current === previous.enabled
-      ? branch.backupEnabled
-      : current);
-    setInterval((current) => branchChanged || current === previous.interval
-      ? branch.backupIntervalMinutes
-      : current);
-    setQuick((current) => branchChanged || current === previous.quick
-      ? branch.backupQuickEnabled
-      : current);
-    setSourcePath((current) => branchChanged || current === previous.sourcePath
-      ? branch.sourcePath
-      : current);
-    persisted.current = {
-      id: branch.id,
-      title: branch.title,
-      enabled: branch.backupEnabled,
-      interval: branch.backupIntervalMinutes,
-      quick: branch.backupQuickEnabled,
-      sourcePath: branch.sourcePath,
-    };
-    requestVersion.current += 1;
-    if (branchChanged) setSaveState("saved");
-  }, [
-    branch.backupEnabled,
-    branch.backupIntervalMinutes,
-    branch.backupQuickEnabled,
-    branch.id,
-    branch.sourcePath,
-    branch.title,
-  ]);
-
-  // 没有工作文件的分支没有可读取的源，自动备份必须保持关闭：开关置灰、间隔禁用，
-  // 保存时也强制写回 false（Rust 侧同样兜底），避免"看起来开着却什么也不做"。
-  const hasSource = sourcePath.trim().length > 0;
-  const effectiveEnabled = hasSource && enabled;
-
-  const valid = title.trim().length > 0 && interval >= 1 && interval <= 10_080;
-  const dirty = title.trim() !== branch.title
-    || effectiveEnabled !== branch.backupEnabled
-    || interval !== branch.backupIntervalMinutes
-    || quick !== branch.backupQuickEnabled
-    || sourcePath !== branch.sourcePath;
-
-  useEffect(() => {
-    if (!dirty) {
-      setSaveState("saved");
-      return;
-    }
-    if (!valid) return;
-    setSaveState("dirty");
-    // 运行锁被后台任务占着时不提交：saveLocked 变回 false 后 effect 会重新计时。
-    if (disabled || saveLocked) return;
-    const version = ++requestVersion.current;
-    const timer = window.setTimeout(() => {
-      setSaveState("saving");
-      void onSave({
-        branchId: branch.id,
-        title: title.trim(),
-        expectedBackupEnabled: branch.backupEnabled,
-        backupEnabled: effectiveEnabled,
-        backupIntervalMinutes: interval,
-        backupQuickEnabled: quick,
-        ...(sourcePath !== branch.sourcePath ? { sourcePath } : {}),
-      }).then(() => {
-        if (requestVersion.current === version) setSaveState("saved");
-      }).catch(() => {
-        setSourcePath(branch.sourcePath);
-        if (requestVersion.current === version) setSaveState("error");
-      });
-    }, 650);
-    return () => window.clearTimeout(timer);
-  }, [branch.id, branch.sourcePath, dirty, disabled, effectiveEnabled, interval, onSave, quick, saveLocked, sourcePath, title, valid]);
+  const {
+    title,
+    setTitle,
+    setEnabled,
+    backupInterval,
+    setBackupInterval,
+    quick,
+    setQuick,
+    sourcePath,
+    setSourcePath,
+    hasSource,
+    effectiveEnabled,
+    saveState,
+  } = useBranchSettingsDraft(branch, disabled, saveLocked, onSave);
 
   const pathActionsDisabled = disabled || branch.finalArtifactLocked;
   const chooseSource = async () => {
@@ -349,9 +272,9 @@ export function BranchSettings({
               type="number"
               min={1}
               max={10_080}
-              value={interval}
+              value={backupInterval}
               disabled={disabled || !effectiveEnabled || branch.finalArtifactLocked}
-              onChange={(event) => setInterval(Number(event.target.value))}
+              onChange={(event) => setBackupInterval(Number(event.target.value))}
             />
             <span>分钟</span>
           </label>
@@ -377,7 +300,7 @@ export function BranchSettings({
   </div>;
 }
 
-function SaveIndicator({ state }: { state: SaveState }) {
+function SaveIndicator({ state }: { state: BranchSettingsSaveState }) {
   return <span className={`save-state ${state}`} role="status">
     {state === "saving" && <LoaderCircle className="spin" size={13} />}
     {state === "saved" && <Check size={13} />}
@@ -429,17 +352,16 @@ export function EditNodeDialog({
   onClose: () => void;
   onSubmit: (value: string) => Promise<void>;
 }) {
-  const [value, setValue] = useState(initialValue);
-  return <div className="dialog-backdrop" onMouseDown={onClose}>
-    <form className="node-editor compact-dialog" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()} onSubmit={(event) => {
-      event.preventDefault();
-      if (value.trim() && !busy) void onSubmit(value.trim());
-    }}>
-      <header><div><small>历史节点</small><h2>编辑节点名称</h2></div><button className="icon-button" type="button" title="关闭" onClick={onClose}><X size={18} /></button></header>
-      <div className="editor-fields"><label><span>名称</span><input autoFocus maxLength={160} value={value} onChange={(event) => setValue(event.target.value)} /></label></div>
-      <footer><button className="text-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit" disabled={!value.trim() || busy}>保存</button></footer>
-    </form>
-  </div>;
+  return <PromptDialog
+    title="编辑节点名称"
+    eyebrow="历史节点"
+    label="名称"
+    initialValue={initialValue}
+    confirmLabel="保存"
+    busy={busy}
+    onCancel={onClose}
+    onConfirm={(value) => void onSubmit(value)}
+  />;
 }
 
 export type ConfirmRequest =

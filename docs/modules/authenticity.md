@@ -3,7 +3,7 @@
 ## 上下文入口
 
 - Artwork 级页面切换与跨作品跳转：`src/app/App.tsx`、`src/app/ArtworkWorkspace.tsx`；Library 只接收应用层转换后的导航目标。
-- 发布 UI：`PublicationView.tsx`（发布页、取消发布与记录列表）、`RecordView.tsx`（只读记录）、`PublicationPreviewDialog.tsx`（质量预览对话框）；样式只读 `src/styles/authenticity.css`。
+- 发布 UI：`PublicationView.tsx`（发布页、取消发布与记录列表）、`RecordView.tsx`（只读记录）、`PublicationPreviewDialog.tsx`（质量预览对话框；缩放/滚动/拖拽在 `usePreviewViewport.ts`，局部图去抖与缓存在 `usePreviewTiles.ts`）；样式只读 `src/styles/authenticity.css`。
 - 识别 UI：`IdentificationView.tsx`；发布页、识别结果与记录搜索共用的记录列表是 `RecordList.tsx`，发布、识别与只读记录共用的框选组件是 `RegionEditor.tsx`，放大镜是 `RegionLoupe.tsx` + `loupe.ts`；预览几何与局部图纯函数在 `previewViewport.ts`、`previewTile.ts`。
 - 发布状态、预览、发布、导出与删除：`usePublicationController.ts`；识别预览、解码与记录搜索：`useIdentificationController.ts`；两者共用的活动任务取消状态机：`useAuthenticityOperation.ts`；共享签名配置与 PEM 规范化：`publicationStorage.ts`。
 - 前端 DTO 与 Tauri 命令：`src/modules/authenticity/types.ts`、`api.ts`；`api.ts` 只由上述两个 controller 消费。

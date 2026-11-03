@@ -65,6 +65,9 @@ Rust 的 Tauri 命令是薄适配器：解析 DTO、检查文件选择器授权�
   （键盘按 `→` 逐步推进）才触发；单击或半途松手都会回弹，因此不存在「在同一个位置连点两次」
   的误确认路径，也不需要用户多读一段文案。接入方式是在 `ConfirmView` 上置 `slideToConfirm: true`，
   轨迹文案仍取 `action`。
+- `ui/ContextMenu.tsx`、`ui/Modal.tsx`、`ui/PromptDialog.tsx`：跨模块复用的右键菜单、模态框与
+  单行文本输入。`ContextMenu` 独占关闭监听（外部点击、Escape、滚动、窗口缩放）并按测量尺寸收敛
+  在视口内，模块不要另写一套；三者样式统一在 `src/styles/index.css`。
 - `slideToConfirmTesting.ts`：驱动滑动控件的测试助手。jsdom 不实现 `PointerEvent`，它用带坐标的
   `MouseEvent` 触发 `pointer*`，行程取控件导出量不到布局时的回退值。`*_test` 里的弹窗测试统一从
   这里取，不要再各写一份拖拽序列。

@@ -1,20 +1,6 @@
 import { FileImage, FolderPlus, GitBranch } from "lucide-react";
-import type { PointerEvent as ReactPointerEvent, ReactNode } from "react";
+import type { ReactNode } from "react";
 import type { LibraryNode } from "./types";
-
-export function CommandMenu({ className, onGroup, onArtwork, onPointerDown }: {
-  className: string;
-  onGroup: () => void;
-  onArtwork: () => void;
-  onPointerDown: (event: ReactPointerEvent) => void;
-}) {
-  return (
-    <div className={`command-menu ${className}`} onPointerDown={onPointerDown}>
-      <button type="button" onClick={onGroup}><FolderPlus aria-hidden="true" size={16} />新建分组</button>
-      <button type="button" onClick={onArtwork}><FileImage aria-hidden="true" size={16} />新建 Artwork</button>
-    </div>
-  );
-}
 
 export function WorkspaceEmpty({ icon, title, description, action }: {
   icon: ReactNode;

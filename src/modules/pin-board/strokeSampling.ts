@@ -18,7 +18,7 @@
  * 缩放定，因此放大后不会看到折线。
  */
 
-import type { Point } from "./geometry";
+import { distanceToSegment, type Point } from "./geometry";
 import { MAX_STROKE_POINTS } from "./strokeGeometry";
 
 /** 一个采样点：世界坐标 + 压感（0–1，无压感设备恒为 0）。 */
@@ -90,7 +90,7 @@ export function simplifyPolyline(
     let farthest = -1;
     let farthestDistance = tolerance;
     for (let index = first + 1; index < last; index += 1) {
-      const value = perpendicularDistance(
+      const value = distanceToSegment(
         samples[index].point,
         samples[first].point,
         samples[last].point,
@@ -392,20 +392,6 @@ function dedupe(samples: readonly PressureSample[]): PressureSample[] {
     result.push(copySample(sample));
   }
   return result;
-}
-
-/** 点到线段的垂距；两端重合时退化成点距。 */
-function perpendicularDistance(point: Point, start: Point, end: Point): number {
-  const deltaX = end[0] - start[0];
-  const deltaY = end[1] - start[1];
-  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
-  if (!(lengthSquared > 0)) return distance(point, start);
-  const projection = ((point[0] - start[0]) * deltaX + (point[1] - start[1]) * deltaY) / lengthSquared;
-  const clamped = Math.min(1, Math.max(0, projection));
-  return Math.hypot(
-    point[0] - (start[0] + deltaX * clamped),
-    point[1] - (start[1] + deltaY * clamped),
-  );
 }
 
 /** 折线在 `middle` 处的转角（0 = 直行，π = 原路折返）。 */

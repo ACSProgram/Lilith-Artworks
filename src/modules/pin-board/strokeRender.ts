@@ -34,7 +34,7 @@ import {
   type PinBoardStrokeGeometry,
 } from "./strokeGeometry";
 import type { Bounds, Point, Quad } from "./geometry";
-import { quadIntersectsBounds } from "./geometry";
+import { pointsBounds, quadIntersectsBounds } from "./geometry";
 import type { PinBoardStrokeItem } from "./types";
 
 /** 图元类型，与着色器里的 `params.x` 一一对应。 */
@@ -604,22 +604,13 @@ function ellipsePrimitive(
 }
 
 function boundsQuad(points: readonly Point[], pad: number): Quad {
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const [x, y] of points) {
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  }
+  const bounds = pointsBounds(points);
   const extent = Math.max(pad, STROKE_MIN_AA_WORLD_UNITS);
   return [
-    [minX - extent, minY - extent],
-    [maxX + extent, minY - extent],
-    [maxX + extent, maxY + extent],
-    [minX - extent, maxY + extent],
+    [bounds.minX - extent, bounds.minY - extent],
+    [bounds.maxX + extent, bounds.minY - extent],
+    [bounds.maxX + extent, bounds.maxY + extent],
+    [bounds.minX - extent, bounds.maxY + extent],
   ];
 }
 

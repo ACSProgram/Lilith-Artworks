@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useCallback, useEffect, useState } from "react";
 import { errorMessage } from "../../shared/errors";
+import { useAsyncOperation } from "../../shared/useAsyncOperation";
 import { useRequestEpoch } from "../../shared/useRequestEpoch";
 import { authenticityApi } from "./api";
 import type {
@@ -22,12 +23,12 @@ export function useIdentificationController({ onError }: IdentificationControlle
   const [result, setResult] = useState<DecodeResult | null>(null);
   const [query, setQuery] = useState("");
   const [records, setRecords] = useState<CertificationRecord[]>([]);
-  const [previewBusy, setPreviewBusy] = useState(false);
-  const [decodeBusy, setDecodeBusy] = useState(false);
-  const [searching, setSearching] = useState(false);
+  const { busy: previewBusy, run: runPreview } = useAsyncOperation();
+  const { busy: decodeBusy, run: runDecode } = useAsyncOperation();
+  const { busy: searching, run: runSearch } = useAsyncOperation();
   const { begin: beginPreview, isCurrent: isPreviewCurrent } = useRequestEpoch();
   const { begin: beginDecode, invalidate: invalidateDecode, isCurrent: isDecodeCurrent } = useRequestEpoch();
-  const { begin: beginSearch, isCurrent: isSearchCurrent } = useRequestEpoch();
+  const { begin: beginSearch, invalidate: invalidateSearch, isCurrent: isSearchCurrent } = useRequestEpoch();
 
   const applyPreview = useCallback(async (selected: string, requestId: number) => {
     try {
@@ -39,8 +40,6 @@ export function useIdentificationController({ onError }: IdentificationControlle
       setResult(null);
     } catch (error) {
       if (isPreviewCurrent(requestId)) onError(errorMessage(error));
-    } finally {
-      if (isPreviewCurrent(requestId)) setPreviewBusy(false);
     }
   }, [isPreviewCurrent, onError]);
 
@@ -50,68 +49,65 @@ export function useIdentificationController({ onError }: IdentificationControlle
       filters: [{ name: "图片", extensions: ["png", "jpg", "jpeg", "webp", "tif", "tiff"] }],
     });
     if (typeof selected !== "string") return;
-    const requestId = beginPreview();
-    invalidateDecode();
-    setPreviewBusy(true);
-    await applyPreview(selected, requestId);
-  }, [applyPreview, beginPreview, invalidateDecode]);
+    await runPreview(async () => {
+      const requestId = beginPreview();
+      invalidateDecode();
+      await applyPreview(selected, requestId);
+    });
+  }, [applyPreview, beginPreview, invalidateDecode, runPreview]);
 
   // 拖放导入：前端读取原始字节后由后端落到系统临时目录并授权，再走同一条外部
   // 图片预览路径，因此识别仍使用受控的文件路径。
   const importDropped = useCallback(async (fileName: string, dataBase64: string) => {
-    const requestId = beginPreview();
-    invalidateDecode();
-    setPreviewBusy(true);
-    onError(null);
-    try {
-      const staged = await authenticityApi.stageDroppedImage({ fileName, dataBase64 });
-      if (!isPreviewCurrent(requestId)) return;
-      await applyPreview(staged, requestId);
-    } catch (error) {
-      if (isPreviewCurrent(requestId)) {
-        setPreviewBusy(false);
-        onError(errorMessage(error));
+    await runPreview(async () => {
+      const requestId = beginPreview();
+      invalidateDecode();
+      onError(null);
+      try {
+        const staged = await authenticityApi.stageDroppedImage({ fileName, dataBase64 });
+        if (!isPreviewCurrent(requestId)) return;
+        await applyPreview(staged, requestId);
+      } catch (error) {
+        if (isPreviewCurrent(requestId)) onError(errorMessage(error));
       }
-    }
-  }, [applyPreview, beginPreview, invalidateDecode, isPreviewCurrent, onError]);
+    });
+  }, [applyPreview, beginPreview, invalidateDecode, isPreviewCurrent, onError, runPreview]);
 
   const decode = useCallback(async () => {
     if (!path) return;
-    const requestId = beginDecode();
     const inputPath = path;
     const inputRegion = region;
-    setDecodeBusy(true);
-    onError(null);
-    try {
-      const next = await authenticityApi.decode(inputPath, inputRegion);
-      // 换图会推进代次（`choose` / `importDropped` 都调用 `invalidateDecode`），
-      // 因此这里只需判断代次，不必再比较路径。
-      if (isDecodeCurrent(requestId)) setResult(next);
-    } catch (error) {
-      if (isDecodeCurrent(requestId)) onError(errorMessage(error));
-    } finally {
-      if (isDecodeCurrent(requestId)) setDecodeBusy(false);
-    }
-  }, [beginDecode, isDecodeCurrent, onError, path, region]);
+    await runDecode(async () => {
+      const requestId = beginDecode();
+      onError(null);
+      try {
+        const next = await authenticityApi.decode(inputPath, inputRegion);
+        // 换图会推进代次（`choose` / `importDropped` 都调用 `invalidateDecode`），
+        // 因此这里只需判断代次，不必再比较路径。
+        if (isDecodeCurrent(requestId)) setResult(next);
+      } catch (error) {
+        if (isDecodeCurrent(requestId)) onError(errorMessage(error));
+      }
+    });
+  }, [beginDecode, isDecodeCurrent, onError, path, region, runDecode]);
 
   const searchRecords = useCallback(async () => {
-    const requestId = beginSearch();
     const requestedQuery = query.trim();
     if (!requestedQuery) {
+      invalidateSearch();
       setRecords([]);
-      setSearching(false);
       return;
     }
-    setSearching(true);
-    try {
-      const next = await authenticityApi.searchRecords(requestedQuery);
-      if (isSearchCurrent(requestId)) setRecords(next);
-    } catch (error) {
-      if (isSearchCurrent(requestId)) onError(errorMessage(error));
-    } finally {
-      if (isSearchCurrent(requestId)) setSearching(false);
-    }
-  }, [beginSearch, isSearchCurrent, onError, query]);
+    await runSearch(async () => {
+      const requestId = beginSearch();
+      try {
+        const next = await authenticityApi.searchRecords(requestedQuery);
+        if (isSearchCurrent(requestId)) setRecords(next);
+      } catch (error) {
+        if (isSearchCurrent(requestId)) onError(errorMessage(error));
+      }
+    });
+  }, [beginSearch, invalidateSearch, isSearchCurrent, onError, query, runSearch]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => { void searchRecords(); }, 220);
@@ -135,7 +131,7 @@ export function useIdentificationController({ onError }: IdentificationControlle
     setQuery,
     records,
     busy: previewBusy || decodeBusy,
-    searching,
+    searching: searching && query.trim().length > 0,
     choose,
     importDropped,
     decode,

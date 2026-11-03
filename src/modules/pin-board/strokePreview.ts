@@ -8,7 +8,7 @@
 
 import { screenToWorld, viewportBounds, type Point, type Viewport } from "./geometry";
 import { strokeDraftSamples, type StrokeDraft } from "./strokeDrawing";
-import { strokePointRadius } from "./strokeRender";
+import { strokePointRadius, arrowHeadPoints } from "./strokeRender";
 
 /** 一次指针事件换算出的笔迹采样：世界坐标 + 压感 + 指针类型。 */
 export interface PointerStrokeSample {
@@ -110,21 +110,14 @@ export function drawStrokePreview(options: StrokePreviewOptions): void {
       strokePreviewSegment(context, start, end);
       return;
     case "arrow": {
-      const deltaX = end[0] - start[0];
-      const deltaY = end[1] - start[1];
-      const length = Math.hypot(deltaX, deltaY);
-      if (length < 1e-6) return;
-      const unitX = deltaX / length;
-      const unitY = deltaY / length;
-      const headLength = Math.min(length, Math.max(width * 4, 1e-4));
-      const halfBase = headLength * 0.5;
-      const base: Point = [end[0] - unitX * headLength, end[1] - unitY * headLength];
+      const head = arrowHeadPoints(start, end, width);
+      if (!head) return;
       // 杆止于三角形底边，与渲染层一致：圆头藏在箭头里，不会从箭尖后面冒出来。
-      strokePreviewSegment(context, start, base);
+      strokePreviewSegment(context, start, head.base);
       context.beginPath();
       context.moveTo(end[0], end[1]);
-      context.lineTo(base[0] - unitY * halfBase, base[1] + unitX * halfBase);
-      context.lineTo(base[0] + unitY * halfBase, base[1] - unitX * halfBase);
+      context.lineTo(head.left[0], head.left[1]);
+      context.lineTo(head.right[0], head.right[1]);
       context.closePath();
       context.fill();
       return;

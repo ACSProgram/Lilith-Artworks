@@ -1,4 +1,5 @@
 import { useEffect, type ReactNode } from "react";
+import { useMenuPlacement } from "../useMenuPlacement";
 
 export interface ContextMenuItem {
   key: string;
@@ -28,8 +29,7 @@ interface ContextMenuProps {
   className?: string;
   /** 菜单的无障碍标签。 */
   ariaLabel?: string;
-  /** 视口边缘保护用的最大宽度/高度。 */
-  maxWidth?: number;
+  /** 超过后菜单自身滚动；定位按测量后的实际尺寸收敛在视口内。 */
   maxHeight?: number;
   onClose: () => void;
 }
@@ -45,8 +45,7 @@ export function ContextMenu({
   items,
   className,
   ariaLabel,
-  maxWidth = 230,
-  maxHeight = 240,
+  maxHeight,
   onClose,
 }: ContextMenuProps) {
   useEffect(() => {
@@ -71,15 +70,15 @@ export function ContextMenu({
     };
   }, [onClose]);
 
-  const left = Math.min(x, Math.max(window.innerWidth - maxWidth, 8));
-  const top = Math.min(y, Math.max(window.innerHeight - maxHeight, 8));
+  const placement = useMenuPlacement({ x, y });
 
   return (
     <div
+      ref={placement.ref}
       className={`context-menu${className ? ` ${className}` : ""}`}
       role="menu"
       aria-label={ariaLabel}
-      style={{ left, top }}
+      style={maxHeight === undefined ? placement.style : { ...placement.style, maxHeight, overflowY: "auto" }}
       onPointerDown={(event) => event.stopPropagation()}
       onContextMenu={(event) => event.preventDefault()}
     >

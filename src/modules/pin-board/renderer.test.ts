@@ -1995,6 +1995,45 @@ describe("pin-board text inline editing", () => {
     expect(editable.find((item) => item.itemId === 2)?.text).toBeUndefined();
   });
 
+  // 两条保存路径的差异是契约：常规保存只带签名变化的文字载荷，切换快照总是带
+  // 文字载荷（见 pendingSettle.test.ts）。这里固定常规保存对三类条目的取舍。
+  it("leaves bitmap and stroke payloads free of text", () => {
+    const text = textItem({ itemId: 1 });
+    const base = {
+      boardId: 9,
+      width: 20,
+      height: 26,
+      order: 0,
+      layer: 1,
+      deleted: false,
+      points: [[0, 0], [40, 0], [40, 52], [0, 52]] as PinBoardItem["points"],
+      uv: [[0, 0], [1, 0], [1, 1], [0, 1]] as PinBoardItem["uv"],
+      available: true,
+    };
+    const bitmap: PinBoardItem = { ...base, itemId: 2, kind: "bitmap" };
+    const stroke: PinBoardItem = {
+      ...base,
+      itemId: 3,
+      kind: "stroke",
+      tool: STROKE_TOOL.pen,
+      color: "#ffffff",
+      strokeWidth: 4,
+    };
+    const renderer = rendererWith({
+      images: [text, bitmap, stroke],
+      savedTextSignatures: new Map([[1, "old-signature"]]),
+    });
+    text.text = "changed";
+
+    const editable = (renderer as unknown as {
+      editableImages: () => { itemId: number; text?: { text: string } }[];
+    }).editableImages();
+
+    expect(editable.find((item) => item.itemId === 1)?.text?.text).toBe("changed");
+    expect(editable.find((item) => item.itemId === 2)?.text).toBeUndefined();
+    expect(editable.find((item) => item.itemId === 3)?.text).toBeUndefined();
+  });
+
   it("counts text-only changes in the dirty state key", () => {
     const image = textItem();
     const renderer = textRenderer([image]);

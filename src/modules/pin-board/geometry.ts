@@ -22,13 +22,13 @@ export const DEFAULT_VIEWPORT: Viewport = {
   height: 5000,
 };
 
-export function imageBounds(image: Pick<PinBoardItem, "points">): Bounds {
+export function pointsBounds(points: readonly Point[]): Bounds {
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;
   let maxX = Number.NEGATIVE_INFINITY;
   let maxY = Number.NEGATIVE_INFINITY;
 
-  for (const [x, y] of image.points) {
+  for (const [x, y] of points) {
     minX = Math.min(minX, x);
     minY = Math.min(minY, y);
     maxX = Math.max(maxX, x);
@@ -36,6 +36,10 @@ export function imageBounds(image: Pick<PinBoardItem, "points">): Bounds {
   }
 
   return { minX, minY, maxX, maxY };
+}
+
+export function imageBounds(image: Pick<PinBoardItem, "points">): Bounds {
+  return pointsBounds(image.points);
 }
 
 export function viewportBounds(viewport: Viewport, width: number, height: number): Bounds {
@@ -209,6 +213,22 @@ export function quadCenter(quad: Quad): Point {
     quad.reduce((sum, point) => sum + point[0], 0) / 4,
     quad.reduce((sum, point) => sum + point[1], 0) / 4,
   ];
+}
+
+/** 点到线段的最短距离；两端重合时退化成点距。 */
+export function distanceToSegment(point: Point, start: Point, end: Point): number {
+  const deltaX = end[0] - start[0];
+  const deltaY = end[1] - start[1];
+  const lengthSquared = deltaX * deltaX + deltaY * deltaY;
+  if (!(lengthSquared > 0)) {
+    return Math.hypot(point[0] - start[0], point[1] - start[1]);
+  }
+  const ratio = Math.min(1, Math.max(0,
+    ((point[0] - start[0]) * deltaX + (point[1] - start[1]) * deltaY) / lengthSquared));
+  return Math.hypot(
+    point[0] - (start[0] + deltaX * ratio),
+    point[1] - (start[1] + deltaY * ratio),
+  );
 }
 
 export function imageSize(image: Pick<PinBoardItem, "points">): Point {

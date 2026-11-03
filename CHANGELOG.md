@@ -75,6 +75,25 @@ entries for the reader; they are not a template every entry has to fill.
   one definition in `pin-board/types.ts`, the history branch settings receive
   the reveal-folder action from the app layer instead of importing `app/api`,
   and unreferenced exports plus the stale texture-budget constants are gone.
+- The library tree menu, the library's `新建` menu and the history node menu now
+  all use the shared `ContextMenu` instead of three hand-written copies. They
+  close on Escape, an outside click, any scroll and window resizing, stay inside
+  the viewport using their measured size, and no longer leave a second menu open
+  behind them. The history node rename dialog now reuses `PromptDialog`, so it
+  also closes on Escape and selects the current name when it opens.
+- Internal front-end cleanup with no user-visible behavior change: the two
+  pin-board save paths share only the field-cloning and text-payload helpers
+  (the settle snapshot still always carries text, the regular save still only
+  carries changed text), arrow-head preview geometry and point-to-segment /
+  bounds helpers are shared, the publication preview dialog is split into
+  `usePreviewViewport` and `usePreviewTiles`, the branch-settings 650 ms debounce
+  state machine lives in `useBranchSettingsDraft`, `useArtworkSummary` uses the
+  shared request epoch, the publication and identification busy flags use
+  `useAsyncOperation`, and `useRepositoryMaintenance` is composed from the
+  space, backup and integrity hooks behind one operation gate. The App
+  repository-switching tests are split by settings, backup and space page, and
+  the pin-board save-contract tests cover text, stroke and bitmap items without
+  asserting the two paths produce the same request.
 - Documentation and comments now match the code they describe: the log rotation
   size is the actual 4,000,000 bytes, the Rust audit ignore list includes
   RUSTSEC-2026-0429, the fuzz generators live in `src-tauri/src/fuzz_support.rs`,

@@ -16,7 +16,7 @@
  * 形状只差那一次光滑（亚像素级）。
  */
 
-import type { Point } from "./geometry";
+import { pointsBounds, type Point } from "./geometry";
 import {
   MAX_STROKE_EXTENT,
   MAX_STROKE_POINTS,
@@ -409,20 +409,6 @@ function shapeCommit(
     centerX: left + width / 2,
     centerY: top - height / 2,
   };
-}
-
-function pointsBounds(points: readonly Point[]) {
-  let minX = Number.POSITIVE_INFINITY;
-  let minY = Number.POSITIVE_INFINITY;
-  let maxX = Number.NEGATIVE_INFINITY;
-  let maxY = Number.NEGATIVE_INFINITY;
-  for (const [x, y] of points) {
-    minX = Math.min(minX, x);
-    minY = Math.min(minY, y);
-    maxX = Math.max(maxX, x);
-    maxY = Math.max(maxY, y);
-  }
-  return { minX, minY, maxX, maxY };
 }
 
 /** 压感收敛到 0–1；缺失或非有限值按 0（设备没给数据）处理。 */

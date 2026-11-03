@@ -60,7 +60,9 @@ export function usePublicationController({
   const [publishing, setPublishing] = useState(false);
   const [privateKey, setPrivateKey] = useState("");
   const [watermarkId, setWatermarkId] = useState("");
-  const [busy, setBusy] = useState(false);
+  const { busy: loading, run: runLoad } = useAsyncOperation();
+  const { busy: operationBusy, run: runBusyOperation } = useAsyncOperation();
+  const busy = loading || operationBusy;
   const [result, setResult] = useState<CertificationRecord | null>(null);
   const [publishMetrics, setPublishMetrics] = useState<PublishResult | null>(null);
   const [sizeEstimate, setSizeEstimate] = useState<number | null>(null);
@@ -151,26 +153,25 @@ export function usePublicationController({
     if (!selectedBranchId) return;
     const branchId = selectedBranchId;
     const requestId = beginLoad();
-    setBusy(true);
+    // 命令成功才继续：`runLoad` 会把错误原样抛出，失败分支只负责提示与退出。
+    let next: BranchPublication;
     try {
-      const next = await authenticityApi.getPublication(branchId);
-      if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
-      applyPublication(next);
-      setBusy(false);
-      if (next.artifact) {
-        await loadArtifactPreview(branchId);
-      } else {
-        invalidateArtifactPreview();
-        setArtifactPreviewBusy(false);
-        setArtifactPreviewError(null);
-        setPreview(null);
-      }
+      next = await runLoad(() => authenticityApi.getPublication(branchId));
     } catch (error) {
       if (isLoadCurrent(requestId) && selectedBranchIdRef.current === branchId) {
         onError(errorMessage(error));
       }
-    } finally {
-      if (isLoadCurrent(requestId)) setBusy(false);
+      return;
+    }
+    if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
+    applyPublication(next);
+    if (next.artifact) {
+      await loadArtifactPreview(branchId);
+    } else {
+      invalidateArtifactPreview();
+      setArtifactPreviewBusy(false);
+      setArtifactPreviewError(null);
+      setPreview(null);
     }
   }, [
     applyPublication,
@@ -179,6 +180,7 @@ export function usePublicationController({
     isLoadCurrent,
     loadArtifactPreview,
     onError,
+    runLoad,
     selectedBranchId,
   ]);
 
@@ -200,7 +202,6 @@ export function usePublicationController({
     setResult(null);
     setPublishMetrics(null);
     setWatermarkId("");
-    setBusy(Boolean(selectedBranchId));
     void load();
     return invalidateLoad;
   }, [invalidateArtifactPreview, invalidateLoad, invalidateOutputPreview, load, resetOperationCancelling, selectedBranchId]);
@@ -281,22 +282,20 @@ export function usePublicationController({
     if (typeof artifactPath !== "string") return;
     const branchId = selectedBranch.id;
     const requestId = beginLoad();
-    setBusy(true);
     onError(null);
+    let next: BranchPublication;
     try {
-      const next = await authenticityApi.enterPublication(branchId, artifactPath);
-      if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
-      applyPublication(next);
-      setBusy(false);
-      await Promise.all([
-        next.artifact ? loadArtifactPreview(branchId) : Promise.resolve(),
-        onPublicationChanged?.() ?? Promise.resolve(),
-      ]);
+      next = await runBusyOperation(() => authenticityApi.enterPublication(branchId, artifactPath));
     } catch (error) {
       if (isLoadCurrent(requestId)) onError(errorMessage(error));
-    } finally {
-      if (isLoadCurrent(requestId)) setBusy(false);
+      return;
     }
+    if (!isLoadCurrent(requestId) || selectedBranchIdRef.current !== branchId) return;
+    applyPublication(next);
+    await Promise.all([
+      next.artifact ? loadArtifactPreview(branchId) : Promise.resolve(),
+      onPublicationChanged?.() ?? Promise.resolve(),
+    ]);
   }, [
     applyPublication,
     beginLoad,
@@ -304,6 +303,7 @@ export function usePublicationController({
     loadArtifactPreview,
     onError,
     onPublicationChanged,
+    runBusyOperation,
     selectedBranch,
   ]);
 
@@ -398,89 +398,87 @@ export function usePublicationController({
     });
     if (!outputPath) return;
     const branchId = selectedBranch.id;
-    beginOperation("publish");
-    setBusy(true);
-    setPublishing(true);
-    setResult(null);
-    setPublishMetrics(null);
-    onError(null);
-    let cancelled = false;
-    try {
-      const published = await authenticityApi.publish({
-        branchId,
-        outputPath,
-        privateKeyPem: privateKeyPem(privateKey),
-        config,
-        watermarkId: watermarkId.trim() || null,
-        previewCacheToken: outputPreview?.cacheToken ?? null,
-      });
-      setPrivateKey("");
-      setWatermarkId("");
-      if (selectedBranchIdRef.current === branchId) {
-        setResult(published.record);
-        setPublishMetrics(published);
+    await runBusyOperation(async () => {
+      beginOperation("publish");
+      setPublishing(true);
+      setResult(null);
+      setPublishMetrics(null);
+      onError(null);
+      let cancelled = false;
+      try {
+        const published = await authenticityApi.publish({
+          branchId,
+          outputPath,
+          privateKeyPem: privateKeyPem(privateKey),
+          config,
+          watermarkId: watermarkId.trim() || null,
+          previewCacheToken: outputPreview?.cacheToken ?? null,
+        });
+        setPrivateKey("");
+        setWatermarkId("");
+        if (selectedBranchIdRef.current === branchId) {
+          setResult(published.record);
+          setPublishMetrics(published);
+          setOutputPreviewOpen(false);
+          setOutputPreview(null);
+          await load();
+        }
+        await onPublicationChanged?.();
+      } catch (error) {
         setOutputPreviewOpen(false);
-        setOutputPreview(null);
-        await load();
+        if (!isCancelRequested()) onError(errorMessage(error));
+        cancelled = isCancelRequested();
+      } finally {
+        setPublishing(false);
+        finishOperation("publish", cancelled);
       }
-      await onPublicationChanged?.();
-    } catch (error) {
-      setOutputPreviewOpen(false);
-      if (!isCancelRequested()) onError(errorMessage(error));
-      cancelled = isCancelRequested();
-    } finally {
-      setPublishing(false);
-      if (selectedBranchIdRef.current === branchId) setBusy(false);
-      finishOperation("publish", cancelled);
-    }
-  }, [artworkTitle, beginOperation, config, finishOperation, isCancelRequested, load, onError, onPublicationChanged, outputPreview, privateKey, publication, selectedBranch, watermarkId]);
+    });
+  }, [artworkTitle, beginOperation, config, finishOperation, isCancelRequested, load, onError, onPublicationChanged, outputPreview, privateKey, publication, runBusyOperation, selectedBranch, watermarkId]);
 
   const cancelPublication = useCallback(async () => {
     if (!selectedBranch) return;
     const branchId = selectedBranch.id;
-    setBusy(true);
-    try {
-      const report = await authenticityApi.cancelPublication(branchId);
-      setCleanupFailures(report.failures);
-      if (report.failures.length > 0) {
-        onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
+    await runBusyOperation(async () => {
+      try {
+        const report = await authenticityApi.cancelPublication(branchId);
+        setCleanupFailures(report.failures);
+        if (report.failures.length > 0) {
+          onError(`分支已解除发布状态，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
+        }
+        clearSharedSigning();
+        if (selectedBranchIdRef.current === branchId) {
+          setDeleteConfirmOpen(false);
+          setPublication(null);
+          setConfig(null);
+          setPreview(null);
+          setOutputPreview(null);
+          setOutputPreviewOpen(false);
+          setPrivateKey("");
+          setWatermarkId("");
+          setResult(null);
+          setPublishMetrics(null);
+          setViewingRecord(null);
+        }
+        await onPublicationChanged?.();
+      } catch (error) {
+        onError(errorMessage(error));
       }
-      clearSharedSigning();
-      if (selectedBranchIdRef.current === branchId) {
-        setDeleteConfirmOpen(false);
-        setPublication(null);
-        setConfig(null);
-        setPreview(null);
-        setOutputPreview(null);
-        setOutputPreviewOpen(false);
-        setPrivateKey("");
-        setWatermarkId("");
-        setResult(null);
-        setPublishMetrics(null);
-        setViewingRecord(null);
-      }
-      await onPublicationChanged?.();
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      if (selectedBranchIdRef.current === branchId) setBusy(false);
-    }
-  }, [onError, onPublicationChanged, selectedBranch]);
+    });
+  }, [onError, onPublicationChanged, runBusyOperation, selectedBranch]);
 
   const retryCleanup = useCallback(async () => {
     if (cleanupFailures.length === 0) return;
-    setBusy(true);
-    onError(null);
-    try {
-      const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
-      setCleanupFailures(report.failures);
-      if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
-    } catch (error) {
-      onError(errorMessage(error));
-    } finally {
-      setBusy(false);
-    }
-  }, [cleanupFailures, onError, onRetryFileCleanup]);
+    await runBusyOperation(async () => {
+      onError(null);
+      try {
+        const report = await onRetryFileCleanup(cleanupFailures.map((failure) => failure.id));
+        setCleanupFailures(report.failures);
+        if (report.failures.length > 0) onError(`仍有 ${report.failures.length} 个文件无法清理。`);
+      } catch (error) {
+        onError(errorMessage(error));
+      }
+    });
+  }, [cleanupFailures, onError, onRetryFileCleanup, runBusyOperation]);
 
   // 框选放大镜：发布页的取样源是分支最终成品，由后端按 branchId 解析受控路径裁剪，
   // 因此复用既有的「原始成品」局部通道，不引入新的路径参数。
