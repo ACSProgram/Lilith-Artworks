@@ -8,9 +8,17 @@
 
 ## 当前批次状态
 
+发布阻塞修复批次（`archive/0.3-release-blocker-fix-plan-2026-11-03.md`）已完成并提交到 `dev`：
+轨道 A 给 `ArtifactReferenceInventory` 补上 `scan_candidates`，
+取消发布时因内容被替换而保留的成品副本与认证副本现在会被「空间」页的垃圾扫描列出；轨道 B 把 zstd
+升到 0.14，四条 RUSTSEC 公告清零。同轮把新出现的 `RUSTSEC-2026-0429`（zip 8.6.0）按 0367/0368/0369
+的口径加进 CI ignore 并在 `todo.md` 记明移除条件。验证：`cargo test --lib` 441 通过、
+`cargo audit` 零漏洞、`cargo fmt --check`、`npx tsc --noEmit`、`npm test` 56 文件 / 502 项全绿、
+`npm run legal` 已重新生成。细节与遗留项见 `archive/handoff-log-2026-11-03.md` §7。
+
 2026-11-03 用一次性无头探针把 0.3 人工验收里能程序判定的部分跑完，结论见
 `archive/handoff-log-2026-11-03.md`：十个场景 51 条断言，50 条通过；唯一失败项是「被替换后保留
-的成品副本不会被垃圾扫描发现」，作为缺陷记在 `todo.md`。同轮核对到既有前端与单元测试已覆盖
+的成品副本不会被垃圾扫描发现」，已由上面的修复批次闭合。同轮核对到既有前端与单元测试已覆盖
 精简确认、取消提示、只读记录、长任务 busy 拒绝、错误边界、历史重置确认与缩略图格式，因此没有
 新增永久测试。探针脚本、临时无头子命令与构建产物已全部删除/回退。
 
@@ -18,18 +26,16 @@
 （含 `manual` 8 GiB）与表层文档收尾。beta.1 已于同日打标签并以 Pre-release 公开，附 setup.exe、
 SBOM 与校验和；`todo.md` 里此前「七个版本都没有打标签」的说法已按事实更正。
 
-beta.1 之后 `dev` 上有三个提交，都只记在 `CHANGELOG.md` 的 `Unreleased`、尚未切版本：历史重置
-（`9dd5f5e`）、托盘备份勾选项（`4bf74bd`）、图标与 NSIS 图标（`7a6cb14`）。这三个提交之后没有
-复跑任何压力分组。
+beta.1 之后 `dev` 上已有四个提交，都只记在 `CHANGELOG.md` 的 `Unreleased`、尚未切版本：历史重置
+（`9dd5f5e`）、托盘备份勾选项（`4bf74bd`）、图标与 NSIS 图标（`7a6cb14`）与本批次。本批次之后
+没有复跑任何压力分组。
 
 ## 下一步
 
-- 按 `archive/0.3-release-blocker-fix-plan-2026-11-03.md` 做发布阻塞修复批次（一个批次两条轨道）：
-  轨道 A 补齐 `ArtifactReferenceInventory::scan_candidates`（取消发布保留的成品/认证副本进入垃圾
-  扫描）；轨道 B 把 zstd 升到 0.14 清除四条 RUSTSEC 公告、让 `dependency-audit` 转绿。两件都不改
-  schema、不改界面，完成后 `dev` 的 CI 应全绿。
-- 继续逐项人工验收 `todo.md` 中剩余项（界面观感、桌面集成、迁移与文件清理确认）。
-- 切 `0.3.0` 前先补 `verify-metadata.mjs` 的 `0.3.0 → 6` 登记，再按发行政策同步五处版本字段、
+- 继续逐项人工验收 `todo.md` 中剩余项（界面观感、桌面集成、迁移与文件清理确认）；其中
+  「替换副本 → 取消发布 → 过宽限期 → 空间页扫描 → 确认清理」是本批次唯一的人工验收步骤。
+- 切 `0.3.0` 前：跑 `stress_format` / `stress_damage`，用升级前的二进制造一份多节点旧仓库并在升级后
+  逐节点 restore 比对，再补 `verify-metadata.mjs` 的 `0.3.0 → 6` 登记、按发行政策同步五处版本字段、
   跑 `npm run legal`、同步 `README.md` 与文档里的版本引用。
 - 0.4 草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成第二轮
   修订，清掉全部待决策项，待维护者批准；见

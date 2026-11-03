@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
@@ -47,6 +48,45 @@ pub(crate) struct ManagedFile {
 pub(crate) struct ScanCandidateFile {
     pub(crate) path: PathBuf,
     pub(crate) reason: &'static str,
+}
+
+/// 列出 `directory` 的直属普通文件，把 `accept` 认可的文件记为扫描候选。
+///
+/// 目录不存在按空处理；非 UTF-8 文件名跳过；子目录不递归；`DirEntry::file_type`
+/// 不跟随符号链接，指向文件的链接不会被当成普通文件。
+pub(crate) fn collect_candidate_files(
+    directory: &Path,
+    reason: &'static str,
+    accept: impl Fn(&str) -> bool,
+    files: &mut Vec<ScanCandidateFile>,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(format!("无法读取目录 {}：{error}", directory.display())),
+    };
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("无法读取目录项：{error}"))?;
+        let is_file = entry
+            .file_type()
+            .map_err(|error| format!("无法读取目录项类型：{error}"))?
+            .is_file();
+        if !is_file {
+            continue;
+        }
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !accept(name) {
+            continue;
+        }
+        files.push(ScanCandidateFile {
+            path: entry.path(),
+            reason,
+        });
+    }
+    Ok(())
 }
 
 /// 一条仍被记录指向、但当前存储模型已经不需要的受管理文件。

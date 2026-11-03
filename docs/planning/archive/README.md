@@ -221,9 +221,9 @@
   取消发布、历史重置（含已发布拒绝）、拖放暂存两条路径、schema 上限拒绝、识别输入的错误面、
   素材板数据侧与整仓灾备。50 条通过；唯一失败项是被替换后保留的成品副本不会被垃圾扫描发现
   （`ArtifactReferenceInventory` 没有实现 `scan_candidates`，与 `docs/modules/authenticity.md`
-  的描述冲突），该缺陷记在 `../todo.md`。同文第 4 节列出本轮核对到的既有测试覆盖，第 5 节
-  列出仍只能人工判定的部分。
-- `0.3-release-blocker-fix-plan-2026-11-03.md`：0.3.0 正式版前的单批次修复计划（**待实施**）——
+  的描述冲突），该缺陷随后由同批次修复（见同文第 7 节），并已从 `../todo.md` 删除。同文第 4 节
+  列出本轮核对到的既有测试覆盖，第 5 节列出仍只能人工判定的部分。
+- `0.3-release-blocker-fix-plan-2026-11-03.md`：0.3.0 正式版前的单批次修复计划（**已实施并提交**）——
   轨道 A 补齐 `ArtifactReferenceInventory::scan_candidates`，让取消发布保留的成品副本与认证副本
   进入「空间」页的垃圾扫描候选；轨道 B 把 zstd 从 0.13 升到 0.14，清除四条 RUSTSEC 公告、让
   `dependency-audit` 转绿。含候选规则、并发与宽限期边界、测试清单、旧仓库 delta 兼容性验证口径，

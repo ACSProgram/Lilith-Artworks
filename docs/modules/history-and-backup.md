@@ -55,7 +55,7 @@ delta 打开时不再把压缩体和完整解压体同时读入内存。zstd 或
 
 删除分支时，文件候选同时收集该分支节点的 `snapshot_path`、旧兼容 `delta_path` 和 `history_edges.delta_path`。候选不再由调用方在事务提交后直接删除：删除事务内先一次收集契约层提供的完整引用清单，再逐路径判定当前图是否仍引用它（事务可见本事务的删除结果），只把已经无引用的 snapshot/delta 入队 `pending_file_cleanup`（原因 `history_branch_deletion`），提交成功后由应用层单遍重放删除。共享祖先或其它分支仍在使用的文件既不入队也不会被误删；删除失败只留队列可重试，不改变分支删除的成功语义。删除历史子树（`history_subtree_deletion`）与取消检查点（`history_checkpoint_release`）走同一条「事务内复查引用后入队」的路径。
 
-清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。**垃圾文件扫描**补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 报告受管理命名模式（历史 snapshot/delta 与画板 DDS；路径规则不再写在 cleanup 里），以及作品 `temp/` 下崩溃残留的 `.tmp*` 暂存文件（备份、恢复与检查点在发布前写下的 `NamedTempFile`，从不进入引用清单，正常路径由 `Drop` 删除）。
+清理账本只重放已入队的条目，因此崩溃发生在 `history::commit` 之前（snapshot/delta 已发布、数据库未提交）时留下的孤儿文件从未入队，不会被自动回收。**垃圾文件扫描**补上这一「发现」能力：`cleanup::scan_unreferenced` 遍历各作品目录，由 `ReferenceInventory::scan_candidates` 按各领域自己的规则报告受管理文件（历史 snapshot/delta 与画板 DDS 按命名模式匹配；成品目录 `artifacts/<branch>/` 与其中 `certifications/` 的直属普通文件按目录列出——路径规则不再写在 cleanup 里），以及作品 `temp/` 下崩溃残留的 `.tmp*` 暂存文件（备份、恢复与检查点在发布前写下的 `NamedTempFile`，从不进入引用清单，正常路径由 `Drop` 删除）。成品与认证副本不按文件名过滤：取消发布时因内容被替换而保留的副本（reason「最终成品副本未被引用」/「认证副本未被引用」）、崩溃残留的 `.tmp*` 与用户手工改过名的副本都要能被列出，正在使用的副本由引用反查排除。
 
 扫描的候选有两类：一类是**未被引用**的文件（崩溃孤儿、手工复制与历史迁移遗留）；另一类是**仍被记录指向但当前存储模型已经不需要**的文件，由 `ReferenceInventory::redundant_targets` 报告——目前只有历史领域的两种：检查点已持有 snapshot 后残留的子边反向增量，以及节点已有 snapshot 时兼容列 `history_nodes.delta_path` 的遗留记账。历史引用清单因此按「真正会读的文件」计算：只有父节点既不是检查点（或检查点但没有 snapshot）时，边增量才进清单；节点持有 snapshot 时其兼容列不再进清单。这两类路径因此不再被引用复查保护，确认清理后会真正删除。
 

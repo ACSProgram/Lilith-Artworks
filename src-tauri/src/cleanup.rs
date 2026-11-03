@@ -674,8 +674,8 @@ fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {
     i64::try_from(elapsed.as_millis()).ok()
 }
 
-/// 扫描 `artworks/*/` 下由各领域 provider 声明的受管理文件（历史 snapshot/delta
-/// 与画板 DDS 等），作为**垃圾文件扫描**的发现机制。候选有两类：
+/// 扫描 `artworks/*/` 下由各领域 provider 声明的受管理文件（历史 snapshot/delta、
+/// 画板 DDS、成品与认证副本等），作为**垃圾文件扫描**的发现机制。候选有两类：
 ///
 /// - 未被任何记录引用的崩溃孤儿、手工复制或历史迁移遗留；
 /// - 仍被记录指向、但当前存储模型已经不需要的文件（如检查点已持有 snapshot 后
@@ -683,9 +683,9 @@ fn modified_ms(metadata: &fs::Metadata) -> Option<i64> {
 ///
 /// 只报告、不删除；确认清理由 `cleanup_unreferenced` 完成。
 ///
-/// 护栏：只考虑 provider 报告的命名模式与目录；只报告修改时间早于宽限期
+/// 护栏：只考虑 provider 声明的目录与命名模式；只报告修改时间早于宽限期
 /// （`SCAN_GRACE_MS`）的文件，避免与进行中的提交、精简、检查点发布或画板写入
-/// 赛跑；引用判定一次读取完整引用清单，不再逐文件查五张表。调用方须在仓库操作
+/// 赛跑；引用判定一次读取完整引用清单，不再逐文件查表。调用方须在仓库操作
 /// 锁内运行本函数（与调度器、前台长命令互斥），本函数自身不加锁。
 pub(crate) fn scan_unreferenced(
     root: &Path,
@@ -1547,6 +1547,108 @@ mod tests {
         assert_eq!(report.cleaned_count, 1);
         assert!(!orphan.exists());
         assert!(referenced.is_file());
+    }
+
+    /// 造一个能过 `verify`（`library::open_existing` 会逐个校验 UUID、外键与仓库
+    /// 相对路径）的已发布分支：作品、分支、历史节点、成品记录都有真实 id。
+    /// 返回 `(成品目录, 被引用成品的仓库相对路径)`。
+    fn seed_published_artifact(root: &Path) -> (PathBuf, String) {
+        crate::library::initialize(root).unwrap();
+        let created =
+            crate::library::create_artwork(root, None, "Artwork", "Main", Path::new(""), false)
+                .unwrap();
+        let history_id = storage::new_id();
+        let artifact_id = storage::new_id();
+        let zeros = "0".repeat(64);
+        let artifact_directory = root
+            .join("artworks")
+            .join(&created.artwork_id)
+            .join("artifacts")
+            .join(&created.branch_id);
+        fs::create_dir_all(&artifact_directory).unwrap();
+        let referenced = artifact_directory.join("final.png");
+        fs::write(&referenced, b"final").unwrap();
+        let referenced_relative = storage::relative_path(root, &referenced).unwrap();
+        storage::open(root)
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO history_nodes
+                   (id, artwork_id, created_on_branch_id, parent_id, title, note, commit_kind,
+                    is_checkpoint, created_ms, logical_size, chunk_file_size, sha256, chunk_count,
+                    snapshot_path)
+                 VALUES ('{history_id}', '{artwork}', '{branch}', NULL, 'node', '', 'manual',
+                         1, 0, 1, 1, '{zeros}', 1,
+                         'artworks/{artwork}/snapshots/{history_id}.lbc');
+                 INSERT INTO final_artifacts
+                   (id, branch_id, history_id, source_path, source_sha256, media_type,
+                    byte_size, created_ms)
+                 VALUES ('{artifact_id}', '{branch}', '{history_id}', '{referenced_relative}',
+                         '{zeros}', 'image/png', 5, 0);
+                 UPDATE branches SET head_history_id = '{history_id}' WHERE id = '{branch}';",
+                artwork = created.artwork_id,
+                branch = created.branch_id,
+            ))
+            .unwrap();
+        (artifact_directory, referenced_relative)
+    }
+
+    /// 取消发布时因内容被替换而留在仓库里的成品副本与认证副本必须能被垃圾扫描发现：
+    /// 它们的记录已被删除，只剩文件占着磁盘，没有别的入口能清理。
+    #[test]
+    fn scan_reports_retained_artifact_and_certification_copies() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let (artifact_directory, referenced_relative) = seed_published_artifact(&root);
+        let referenced = storage::resolve_path(&root, &referenced_relative).unwrap();
+        let certifications = artifact_directory.join("certifications");
+        fs::create_dir_all(&certifications).unwrap();
+        let retained_artifact = artifact_directory.join("replaced.png");
+        let retained_certification = certifications.join("record.jpg");
+        let still_writing = artifact_directory.join("publishing.png");
+        for path in [&retained_artifact, &retained_certification, &still_writing] {
+            fs::write(path, b"payload").unwrap();
+        }
+        age_file(&retained_artifact);
+        age_file(&retained_certification);
+
+        let candidates = scan_unreferenced(&root, || false, |_, _| {}).unwrap();
+        let mut reported = candidates
+            .iter()
+            .map(|candidate| (candidate.path.clone(), candidate.reason.clone()))
+            .collect::<Vec<_>>();
+        reported.sort();
+        // 只有不被记录引用的副本进候选；宽限期内的副本可能仍在写入，不报告。
+        assert_eq!(
+            reported,
+            vec![
+                (
+                    storage::relative_path(&root, &retained_certification).unwrap(),
+                    "认证副本未被引用".to_owned(),
+                ),
+                (
+                    storage::relative_path(&root, &retained_artifact).unwrap(),
+                    "最终成品副本未被引用".to_owned(),
+                ),
+            ]
+        );
+        assert!(!reported
+            .iter()
+            .any(|(path, _)| path == &storage::relative_path(&root, &still_writing).unwrap()));
+
+        let paths = candidates
+            .iter()
+            .map(|candidate| candidate.path.clone())
+            .collect::<Vec<_>>();
+        let report = cleanup_unreferenced(&root, &paths).unwrap();
+        assert!(report.failures.is_empty());
+        assert_eq!(report.cleaned_count, 2);
+        assert_eq!(report.pending_count, 0);
+        assert!(!retained_artifact.exists());
+        assert!(!retained_certification.exists());
+        // 被引用的成品与仍在写入的副本都保留，清理后仓库仍通过完整性校验。
+        assert!(referenced.is_file());
+        assert!(still_writing.is_file());
+        crate::library::open_existing(&root).unwrap();
     }
 
     fn enqueue_missing_files(root: &Path, count: usize) {

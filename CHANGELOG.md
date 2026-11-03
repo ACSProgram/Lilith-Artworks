@@ -45,6 +45,31 @@ entries for the reader; they are not a template every entry has to fill.
   ghost is narrower so those props stay readable at small frame sizes. The
   NSIS installer and uninstaller are pointed at the same file, so setup and
   uninstall stop falling back to the stock NSIS icon.
+- `zstd` moves from 0.13 to 0.14 (zstd-safe 8.2, zstd-sys 2.1), which clears
+  the four RUSTSEC advisories (2026-0391, 2026-0398, 2026-0403, 2026-0410) that
+  had turned the dependency audit red. The stored format does not change:
+  deltas remain zstd frames, which are self-describing and readable across
+  versions.
+- The dependency audit additionally ignores RUSTSEC-2026-0429 (zip 8.6.0, an
+  oversized symlink buffer inside `ZipArchive::extract()`). Neither this crate
+  (`.procreate` previews read entries with `new` + `by_index` under a decode
+  budget) nor c2pa 0.90.11 calls that extract-to-disk path, and the patched
+  zip 9 cannot be adopted while c2pa pins zip 8.x.
+
+### Fixed
+
+- Cancelling a publication no longer strands repository copies where nothing
+  can find them. When the final artifact or a certification copy had been
+  replaced on disk, the command deliberately keeps the file and drops its
+  record, and the space page's garbage scan never listed it, so the disk was
+  visibly occupied with no way to reclaim it. The scan now reports the direct
+  files of `artworks/<artwork>/artifacts/<branch>/` and of its `certifications/`
+  directory as `最终成品副本未被引用` and `认证副本未被引用`; copies still
+  referenced by an artifact or certification record stay excluded by the same
+  reference lookup the scan already performed, so nothing in use is offered for
+  deletion. Crash leftovers (`.tmp*`) and renamed copies are covered because the
+  scan does not filter by file name, and candidates still obey the 30-minute
+  grace period.
 
 ## 0.3.0-beta.1 - 2026-10-25
 

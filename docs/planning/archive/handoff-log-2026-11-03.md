@@ -85,3 +85,57 @@ S3.5 连续两次失败，不是探针写错：
 
 探针脚本与全部工作区、`target/debug` 下本次构建、两个临时子命令与 `checkpoint` 的 `--release`
 开关全部删除/回退；仓库中不保留任何一次性代码或测试（`git status` 只剩文档改动）。
+
+## 7. 发布阻塞修复批次（按 `0.3-release-blocker-fix-plan-2026-11-03.md` 执行）
+
+第 3 节的缺陷与 zstd 审计红合并为一批修复，同批完成、同批验证并提交。
+
+**轨道 A：认证成品与认证副本进入垃圾扫描。** `ArtifactReferenceInventory` 补上
+`scan_candidates`：遍历 `artworks/<artwork>/artifacts/<branch>/` 的直属普通文件
+（reason `最终成品副本未被引用`）与该目录下 `certifications/` 的直属普通文件
+（reason `认证副本未被引用`）。路径拼接复用 `authenticity/publication_repository.rs` 的
+`artwork_artifacts_directory` / `certification_copy_directory`（由 `final_artifact_directory`
+与 `certification_copy_path` 拆出），扫描侧不另写一套规则。不按文件名过滤——崩溃残留的 `.tmp*`
+与用户改名过的副本正是最需要被扫到的两类；正在使用的副本由扫描主流程的引用反查排除，宽限期与
+确认清理前的 SHA-256 复查兜住误删。目录不存在按空处理，非 UTF-8 文件名跳过，不递归未知子目录，
+不跟随符号链接。三个领域共用的目录遍历逻辑同时收敛到 `contracts::collect_candidate_files`，
+history / pin_board / authenticity 各自的一份重复实现随之删除。
+
+**轨道 B：zstd 0.13 → 0.14。** `Cargo.toml` 改为 `zstd = "0.14"`，`Cargo.lock` 连带更新到
+zstd 0.14.3 / zstd-safe 8.2.0 / zstd-sys 2.1.2。四个调用点（`delta.rs` 的 `Decoder::new`、
+`chunk_file/mod.rs` 的头部嗅探后流式解压、`snapshot.rs` 的 `Encoder::new`、
+`tests.rs` 的 `encode_all`）签名未变，无需适配。
+
+**新增测试（5 个）：**
+
+| 测试 | 覆盖 |
+| --- | --- |
+| `authenticity::contracts::tests::lists_artifact_and_certification_copies_as_candidates` | 三类文件（被引用成品、孤儿成品、孤儿认证副本）都进候选，两条 reason 各归其位 |
+| `referenced_copy_stays_in_the_reference_list` | 被成品记录指向的副本在 `collect_targets` 里，anti-join 后只剩两个孤儿 |
+| `reports_nothing_when_the_artwork_has_no_artifacts_directory` | 没有 `artifacts/` 时不报错、零候选 |
+| `does_not_descend_into_unknown_subdirectories` | 分支目录下的未知子目录不被递归扫成孤儿 |
+| `cleanup::tests::scan_reports_retained_artifact_and_certification_copies` | 端到端：扫描列出孤儿 → 确认清理 → 孤儿消失、被引用成品与宽限期内副本仍在、`library::open_existing`（verify）通过 |
+
+**验证结果：**
+
+- `cargo test --lib` 全量 441 通过 / 0 失败 / 1 ignored（含 `chunk_file` 格式与损坏用例；
+  新增 5 个用例在内）。
+- `cargo audit`（本地公告库已拉到最新，1402 条）：四条 zstd 公告消失；按 CI 的 ignore 清单运行
+  后**零漏洞**。
+- `cargo fmt --check` 通过；`npx tsc --noEmit` 通过；`npm test` 56 文件 / 502 项通过。
+- `npm run legal` 重新生成 `licenses/THIRD_PARTY_LICENSES.html`（529 个组件，zstd 栈版本变化）。
+
+**执行中新出现、按 0367/0368/0369 同一口径处理的一条：** 公告库当日新增 `RUSTSEC-2026-0429`（zip 8.6.0，
+`ZipArchive::extract()` 按声明尺寸预分配符号链接缓冲区，high / CVSS 7.5），10-31 那次 CI 时
+公告库还没有这条。经确认本仓库与 c2pa 0.90.11 都只做 `ZipArchive::new` + `by_index` 流式读
+（`preview/zip.rs` 的解压自带预算与取消），源码里没有任何 `.extract(` 调用，因此按 0367/0368/0369
+的同一口径加进 CI ignore（`windows-ci.yml` 与 `release.yml` 两份清单同步），并在 `todo.md` 记明
+「等 c2pa 升到 zip 9 时一并移除」。
+
+**本批次未做（沿用计划边界与项目纪律）：**
+
+- 升级前二进制造旧仓库、升级后逐节点 restore 比对（验证清单第 3 项）：需要两份二进制与人工
+  比对，留作切 `0.3.0` 前的人工项；本次以 `cargo test --lib` 的 `chunk_file` 用例兜住格式与
+  损坏路径。
+- `stress_format` / `stress_damage`：按 `docs/guides/validation.md` 只在发布前由维护者发起。
+- 人工一步：替换副本 → 取消发布 → 等过 30 分钟宽限期 → 空间页扫描能看到它 → 确认清理后文件消失。

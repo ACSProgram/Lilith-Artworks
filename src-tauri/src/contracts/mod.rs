@@ -12,6 +12,6 @@ pub(crate) use backup::{
     BackupIntegrityReport, BackupVerificationMode, RepositoryIntegrityProvider,
 };
 pub(crate) use reference::{
-    install_reference_inventories, reference_inventories, ManagedFile, ManagedFileOwner,
-    RedundantFile, ReferenceInventories, ReferenceInventory, ScanCandidateFile,
+    collect_candidate_files, install_reference_inventories, reference_inventories, ManagedFile,
+    ManagedFileOwner, RedundantFile, ReferenceInventories, ReferenceInventory, ScanCandidateFile,
 };

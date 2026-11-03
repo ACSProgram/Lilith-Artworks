@@ -52,8 +52,8 @@ v5 → v6）。逐批记录见 `archive/handoff-log-2026-10-18.md` 至
 第 2–3 节）：
 
 - 取消发布时若成品或认证副本已被替换：日志里有 `[cleanup] retained`，发布页不出现失败横幅。
-  被保留的文件**当前不会**进入垃圾扫描候选（实现缺口，见「待实现 / 待补强」的 P2）；该缺口按
-  `archive/0.3-release-blocker-fix-plan-2026-11-03.md` 轨道 A 修复后，此项按「能被扫到并清理」验收。
+  被保留的文件在越过 30 分钟宽限期后由「空间」页的垃圾文件扫描列出（`最终成品副本未被引用` /
+  `认证副本未被引用`），确认清理后文件消失；此项按「能被扫到并清理」验收。
 - 连续切换质量、背景、水印参数做多次预览后，`temp/authenticity-preview-<session>/` 总量不超过
   512 MiB，且最近一次预览的高清局部与框选放大镜仍正常。
 
@@ -140,12 +140,10 @@ vN→vN+1 迁移，并同步接入 `textLayout.ts` 的度量/栅格化、Rust �
 
 | 优先级 | 事项 | 现状 | 影响与下一步 | 归属 |
 | --- | --- | --- | --- | --- |
-| P1 | Rust 依赖审计红（zstd 四条公告） | `zstd 0.13.3` / `zstd-safe 7.2.4` / `zstd-sys 2.0.16` 命中 `RUSTSEC-2026-0391`、`0398`、`0403`、`0410`；`dev` 最近两次推送的 Windows CI 都因此失败（`validate` 绿、`dependency-audit` 红）。修复版已发布：zstd ≥0.14.3、zstd-safe ≥8.2.0、zstd-sys ≥2.1.2 | 审计不过就不能打标签。zstd 是本仓库直接依赖（delta 压缩/解压），升级后须重跑 `chunk_file` 单测与 `stress_format` / `stress_damage`，确认旧仓库 delta 仍可读 | `archive/0.3-release-blocker-fix-plan-2026-11-03.md` 轨道 B |
-| P2 | 认证成品与认证副本不进垃圾扫描 | `ArtifactReferenceInventory` 只实现 `collect_targets`，没有实现 `scan_candidates`，因此 `artworks/<id>/artifacts/` 与 `certifications/` 下的孤儿文件不会被「空间」页的垃圾文件扫描发现（2026-11-03 探针实测；与 `docs/modules/authenticity.md` 的描述不一致） | 取消发布时因内容被替换而保留的副本只能手工找路径删除。可给该清单补 `scan_candidates`（命名规则与成品/副本路径一致、给出具体 reason），或改文档并另给入口 | `archive/0.3-release-blocker-fix-plan-2026-11-03.md` 轨道 A |
 | P2 | 长任务与灾备调度并行的降级策略 | 纹理读取持共享读租约；灾备/扫描持仓库操作锁期间画板浏览可继续、画板写入会等待 | 实测卡顿不可接受时再评估，例如提供缩略图缓存或更明确的写入等待状态 | 未覆盖 |
 | P2 | 历史长操作的结果刷新与批量化 | 精简仍由前端逐节点调用 `compact`；取消已改为前端批级标记（逐节点循环启动下一个节点前检查，命中即停止并刷新历史），某步失败仍靠命令报错与轮询刷新 | 大量节点操作会产生多次锁竞争；可提供一次性批量命令，返回完成数量、取消点与剩余节点 | 未覆盖 |
 | P2 | 跨画板保留纹理（切回更快） | 按「切换即全释放」策略，疯狂切换会产生 2–4 s 的异步纹理装载批次（含 DDS 解码与磁盘 IO 等待，非主线程阻塞） | 若要更顺滑的切回，可跨画板保留纹理复用，但常驻内存更高、预算管理更复杂 | 未覆盖 |
-| P2 | 升级 c2pa 至 0.91.3（连带 zip 9.0.4） | 已实测：0.91 校验器把 ≤0.90 签名的 soft binding CBOR 文本串判 `claim.malformed`，既有认证记录会全部 fail closed；三条 zip 公告（RUSTSEC-2026-0367/0368/0369）暂以 CI ignore 覆盖 | 待上游提供旧清单迁移/兼容方案后重评；升级时需用 `regenerate_c2pa_fixtures` 重签 fixture，并先定旧记录的读取口径 | 未覆盖 |
+| P2 | 升级 c2pa 至 0.91.3（连带 zip 9.0.4） | 已实测：0.91 校验器把 ≤0.90 签名的 soft binding CBOR 文本串判 `claim.malformed`，既有认证记录会全部 fail closed；四条 zip 公告（RUSTSEC-2026-0367/0368/0369/0429）暂以 CI ignore 覆盖 | 待上游提供旧清单迁移/兼容方案后重评；升级时需用 `regenerate_c2pa_fixtures` 重签 fixture，并先定旧记录的读取口径。0429 只影响 `ZipArchive::extract()` 落盘解压，本仓库与 c2pa 都不调用该路径（`preview/zip.rs` 用 `new` + `by_index` 流式读），升级后可一并移除 ignore | 未覆盖 |
 | P2 | 移除 `RUSTSEC-2026-0387`（crypto-bigint 0.5.5）的 CI ignore | c2pa 0.90.11 → ecdsa 0.16.9 → … → crypto-bigint 0.5.5；修复版 0.7.6 需要 ecdsa 0.17 / p256 0.14，而 c2pa 0.91.x 使用的 `c2pa_raw_crypto 0.1.2` 仍锁定旧栈，升级 c2pa 也不能消除该公告 | 待 `c2pa_raw_crypto` 更新 RustCrypto 栈后升级并移除 ignore；在此之前保留本地签名进程的威胁模型评估 | 未覆盖 |
 | P3 | 历史页 busy 一刀切禁用（P7/A7，2026-10-20 记入） | `HistoryModule.tsx` 的分支设置、提交框与精简控件统一 `disabled={busy \|\| runtime.busy}` | 后台任务期间这些控件全部不可用。可按控件逐条梳理：需要运行锁的（提交、精简、检查点）保持禁用，纯展示与不冲突的解锁 | 未覆盖 |
 | P3 | 大文件内存与快照上界的实际收紧（测试体检 3.7） | 2026-10-25 已取得五档 release 实测（含 `manual` 8 GiB），断言常数仍按「灾难性上界」保留 | 按实测收紧 C3 与快照上界，避免把正常波动判成失败 | 未覆盖 |

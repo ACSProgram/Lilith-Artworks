@@ -1,10 +1,11 @@
-use std::{fs, path::Path};
+use std::path::Path;
 
 use rusqlite::Connection;
 
 use crate::{
     contracts::{
-        ManagedFile, ManagedFileOwner, RedundantFile, ReferenceInventory, ScanCandidateFile,
+        collect_candidate_files, ManagedFile, ManagedFileOwner, RedundantFile, ReferenceInventory,
+        ScanCandidateFile,
     },
     storage,
 };
@@ -65,25 +66,25 @@ impl ReferenceInventory for HistoryReferenceInventory {
         artwork_directory: &Path,
         files: &mut Vec<ScanCandidateFile>,
     ) -> Result<(), String> {
-        collect_scan_directory(
+        collect_candidate_files(
             &artwork_directory.join("snapshots"),
-            is_snapshot_name,
             "历史快照未被引用",
+            is_snapshot_name,
             files,
         )?;
-        collect_scan_directory(
+        collect_candidate_files(
             &artwork_directory.join("deltas"),
-            is_delta_name,
             "历史增量未被引用",
+            is_delta_name,
             files,
         )?;
         // 作品 `temp/` 只存放备份、恢复与检查点在发布前写下的 `NamedTempFile`
         // （`backup/worker.rs`、`backup/restore.rs`）。正常路径由 `Drop` 删除，
         // 进程被强杀或断电时残留，且永远不会进入引用清单。
-        collect_scan_directory(
+        collect_candidate_files(
             &artwork_directory.join("temp"),
-            is_scratch_name,
             "备份或恢复中断后残留的临时文件",
+            is_scratch_name,
             files,
         )
     }
@@ -148,39 +149,6 @@ impl ReferenceInventory for HistoryReferenceInventory {
         }
         Ok(())
     }
-}
-
-fn collect_scan_directory(
-    directory: &Path,
-    matches_name: fn(&str) -> bool,
-    reason: &'static str,
-    files: &mut Vec<ScanCandidateFile>,
-) -> Result<(), String> {
-    let entries = match fs::read_dir(directory) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(error) => return Err(format!("无法读取目录 {}：{error}", directory.display())),
-    };
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("无法读取目录项：{error}"))?;
-        let file_type = entry
-            .file_type()
-            .map_err(|error| format!("无法读取目录项类型：{error}"))?;
-        if !file_type.is_file() {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if matches_name(name) {
-            files.push(ScanCandidateFile {
-                path: entry.path(),
-                reason,
-            });
-        }
-    }
-    Ok(())
 }
 
 /// snapshot 命名：`<history-id>.lbc`，或旧版本修复 head snapshot 时写下的

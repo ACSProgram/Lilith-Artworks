@@ -6,14 +6,29 @@ use crate::{cleanup, platform::path::display_path, storage};
 
 use super::model::FinalArtifact;
 
+/// 成品目录在作品目录下的名字：`artworks/<artwork>/artifacts/`。
+const ARTIFACTS_DIRECTORY: &str = "artifacts";
+/// 认证副本目录在成品目录下的名字。
+const CERTIFICATIONS_DIRECTORY: &str = "certifications";
+
+/// 作品目录下的成品父目录：`artworks/<artwork>/artifacts/`。
+///
+/// 垃圾扫描按作品目录遍历，拿不到 `root`，因此它与 [`final_artifact_directory`]
+/// 共用这一份拼接规则，不在扫描侧另写一套。
+pub(crate) fn artwork_artifacts_directory(artwork_directory: &Path) -> PathBuf {
+    artwork_directory.join(ARTIFACTS_DIRECTORY)
+}
+
+/// 成品目录下的认证副本目录。
+pub(crate) fn certification_copy_directory(final_artifact_directory: &Path) -> PathBuf {
+    final_artifact_directory.join(CERTIFICATIONS_DIRECTORY)
+}
+
 /// 最终成品的唯一存放目录：`artworks/<artwork>/artifacts/<branch>/`。
 ///
 /// 最终成品与认证副本的路径布局只在这里拼接，`artifact` 与 `repository` 共用。
 pub(crate) fn final_artifact_directory(root: &Path, artwork_id: &str, branch_id: &str) -> PathBuf {
-    root.join("artworks")
-        .join(artwork_id)
-        .join("artifacts")
-        .join(branch_id)
+    artwork_artifacts_directory(&root.join("artworks").join(artwork_id)).join(branch_id)
 }
 
 /// 认证仓库副本的路径：成品目录下的 `certifications/<record>.jpg`。
@@ -23,8 +38,7 @@ pub(crate) fn certification_copy_path(
     branch_id: &str,
     record_id: &str,
 ) -> PathBuf {
-    final_artifact_directory(root, artwork_id, branch_id)
-        .join("certifications")
+    certification_copy_directory(&final_artifact_directory(root, artwork_id, branch_id))
         .join(format!("{record_id}.jpg"))
 }
 

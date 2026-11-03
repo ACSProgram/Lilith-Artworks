@@ -13,7 +13,10 @@ use std::{fs, path::Path};
 use rusqlite::Connection;
 
 use crate::{
-    contracts::{ManagedFile, ManagedFileOwner, ReferenceInventory, ScanCandidateFile},
+    contracts::{
+        collect_candidate_files, ManagedFile, ManagedFileOwner, ReferenceInventory,
+        ScanCandidateFile,
+    },
     storage,
 };
 
@@ -89,39 +92,10 @@ impl ReferenceInventory for PinBoardReferenceInventory {
             if !file_type.is_dir() {
                 continue;
             }
-            collect_dds_directory(&entry.path(), files)?;
+            collect_candidate_files(&entry.path(), "画板图片未被引用", is_dds_name, files)?;
         }
         Ok(())
     }
-}
-
-fn collect_dds_directory(
-    directory: &Path,
-    files: &mut Vec<ScanCandidateFile>,
-) -> Result<(), String> {
-    let entries = fs::read_dir(directory)
-        .map_err(|error| format!("无法读取画板图片目录 {}：{error}", directory.display()))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| format!("无法读取画板图片目录项：{error}"))?;
-        if !entry
-            .file_type()
-            .map_err(|error| format!("无法读取画板图片目录项类型：{error}"))?
-            .is_file()
-        {
-            continue;
-        }
-        let name = entry.file_name();
-        let Some(name) = name.to_str() else {
-            continue;
-        };
-        if is_dds_name(name) {
-            files.push(ScanCandidateFile {
-                path: entry.path(),
-                reason: "画板图片未被引用",
-            });
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
