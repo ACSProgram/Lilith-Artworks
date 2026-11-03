@@ -1,6 +1,6 @@
 # 当前任务交接
 
-更新时间：2026-10-25
+更新时间：2026-11-03
 
 本文件只记录**当前状况**：当前批次状态、当前基线，以及未完成事项的指针。历史增量（已完成批次、
 已通过的人工验收、被替代的计划）一律在 `archive/`，不在本文件累积；未完成事项只写 `todo.md`。
@@ -8,35 +8,42 @@
 
 ## 当前批次状态
 
-2026-10-25 已完成 `0.3.0-beta.1` 的切分与收尾。切版本本身：`CHANGELOG.md` 的 `Unreleased` 落为
-`## 0.3.0-beta.1 - 2026-10-25`，五处版本字段、许可清单、`README.md` 与 `verify-metadata.mjs` 的
-版本→schema 登记表（`beta.1 → 6`）同轮同步，`verify-metadata` 通过；切版本不触发任何门槛。
-同日完成 0.3 线的发布前全量压力测试（含 `manual` 8 GiB 档，五档各 10/10，无产品侧失败）与表层
-文档收尾：`todo.md` 精简为待验收与待补强两段，`docs/README.md` 的归档索引改回当前事实，根
-`README.md` 按当前功能与状态重写。记录见 `archive/handoff-log-2026-10-25.md` 第 1–11 节，实测
-数据见 `docs/user/stress-test-report.md`，与 0.2 的对比见
-`archive/0.3-baseline-2026-10-18.md` 第 7 节。
+2026-11-03 用一次性无头探针把 0.3 人工验收里能程序判定的部分跑完，结论见
+`archive/handoff-log-2026-11-03.md`：十个场景 51 条断言，50 条通过；唯一失败项是「被替换后保留
+的成品副本不会被垃圾扫描发现」，作为缺陷记在 `todo.md`。同轮核对到既有前端与单元测试已覆盖
+精简确认、取消提示、只读记录、长任务 busy 拒绝、错误边界、历史重置确认与缩略图格式，因此没有
+新增永久测试。探针脚本、临时无头子命令与构建产物已全部删除/回退。
 
-0.3 的实现与文档已收口，人工验收正在逐项进行：已通过的项逐条记入
-`archive/handoff-log-2026-10-25.md` 第 10 节并从 `todo.md` 删除；未通过或未执行的项继续留在
-`todo.md`。
+2026-10-25 的批次见 `archive/handoff-log-2026-10-25.md`：`0.3.0-beta.1` 切分、全量压力测试
+（含 `manual` 8 GiB）与表层文档收尾。beta.1 已于同日打标签并以 Pre-release 公开，附 setup.exe、
+SBOM 与校验和；`todo.md` 里此前「七个版本都没有打标签」的说法已按事实更正。
+
+beta.1 之后 `dev` 上有三个提交，都只记在 `CHANGELOG.md` 的 `Unreleased`、尚未切版本：历史重置
+（`9dd5f5e`）、托盘备份勾选项（`4bf74bd`）、图标与 NSIS 图标（`7a6cb14`）。这三个提交之后没有
+复跑任何压力分组。
 
 ## 下一步
 
-- 继续逐项人工验收 `todo.md` 中其余待验收项（界面行为、桌面集成、迁移与文件清理确认）。
+- 按 `archive/0.3-release-blocker-fix-plan-2026-11-03.md` 做发布阻塞修复批次（一个批次两条轨道）：
+  轨道 A 补齐 `ArtifactReferenceInventory::scan_candidates`（取消发布保留的成品/认证副本进入垃圾
+  扫描）；轨道 B 把 zstd 升到 0.14 清除四条 RUSTSEC 公告、让 `dependency-audit` 转绿。两件都不改
+  schema、不改界面，完成后 `dev` 的 CI 应全绿。
+- 继续逐项人工验收 `todo.md` 中剩余项（界面观感、桌面集成、迁移与文件清理确认）。
+- 切 `0.3.0` 前先补 `verify-metadata.mjs` 的 `0.3.0 → 6` 登记，再按发行政策同步五处版本字段、
+  跑 `npm run legal`、同步 `README.md` 与文档里的版本引用。
 - 0.4 草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成第二轮
   修订，清掉全部待决策项，待维护者批准；见
   `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
-- 是否打 `v0.3.0-beta.1` 标签、以及发布产物（NSIS、SBOM、签名披露）由维护者单独决定，口径见
+- 是否打 `v0.3.0` 标签、以及发布产物（NSIS、SBOM、签名披露）由维护者单独决定，口径见
   `docs/guides/release-policy.md`。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 已切 `0.3.0-beta.1`（未打标签的过渡版本），五处版本字段、`CHANGELOG.md` 与逐版本
-  schema 映射同步；日常改动写入 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者按
-  `docs/guides/release-policy.md` 单独决定。
+- 版本：`dev` 的五处版本字段是 `0.3.0-beta.1`；`v0.3.0-beta.1` 已打标签并作为 Pre-release 公开
+  （2026-10-25）。之后的改动全部写在 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者
+  按 `docs/guides/release-policy.md` 单独决定。
 - repository schema v6（v4 → v5 随 alpha3 阶段 7 落地，v5 → v6 随 alpha5 阶段 1 落地；alpha6 与
   beta.1 沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 的
   alpha1 与 alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 阶段 1 的
