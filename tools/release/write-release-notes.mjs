@@ -10,12 +10,12 @@ if (!outputPath) {
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, "package.json"), "utf8"));
 const version = packageJson.version;
 const schemaSource = fs.readFileSync(
-  path.join(root, "src-tauri", "src", "library", "schema.rs"),
+  path.join(root, "src-tauri", "src", "library", "schema", "mod.rs"),
   "utf8",
 );
 const schemaVersion = schemaSource.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
 if (!schemaVersion) {
-  throw new Error("Could not read SCHEMA_VERSION from src-tauri/src/library/schema.rs");
+  throw new Error("Could not read SCHEMA_VERSION from src-tauri/src/library/schema/mod.rs");
 }
 const changelog = fs.readFileSync(path.join(root, "CHANGELOG.md"), "utf8");
 const escapedVersion = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");

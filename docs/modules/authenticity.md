@@ -42,7 +42,8 @@ C2PA 是每次认证导出的强制基础，不能关闭。发布版固定输出
 
 TrustMark 可关闭。启用时使用 Q/BCH_SUPER 模型和 40 位二进制 ID，只在用户框选的最多 8 个矩形区域内嵌入，强度范围为 0.50 到 1.50；没有框选区域时自动降级为仅 C2PA。模型文件不可用时 UI 也强制降级为仅 C2PA。模型变体和编码/解码模型 SHA-256 由后端读取后显示，不在前端写死。私钥只存在于单次命令内并用 `Zeroizing` 包装，不写入配置、数据库、localStorage 或日志。
 
-**小选区水印警告**：编码前按每个选区在 rendition 上的像素边界判定（`trustmark::region_bounds`，与 `encode_regions` 共用同一套换算，起点 `floor`、终点 `ceil`）；任一边长小于 `WATERMARK_MIN_STABLE_EDGE = 256` 时，发布结果（`PublishResult.watermarkWarnings`，由 `publish::publish` 直接返回）回传结构化警告（区域序号、rendition 像素边长、阈值）并写一行 `log::warn!`。前端在框选时就地提示（按源像素尺寸=rendition 像素尺寸即时算出），并在发布结果区显示后端返回的同一警告。这是提示不是错误：发布照常成功。阈值 256 取实测最小稳定边长（见 `docs/user/stress-test-report.md`），是降低风险而不是保证——更大的选区或更平滑的内容仍可能失败，C2PA 声明与本地记录匹配始终不受影响。
+**小选区水印警告**：编码前按每个选区在 rendition 上的像素边界判定（`trustmark::region_bounds`，与 `encode_regions` 共用同一套换算，起点 `floor`、终点 `ceil`）；任一边长小于 `WATERMARK_MIN_STABLE_EDGE = 256` 时，发布结果（`PublishResult.watermarkWarnings`，由 `publish::publish` 直接返回）回传结构化警告（区域序号、rendition 像素边长、阈值）并写一行 `log::warn!`。前端在框选时就地提示（按源像素尺寸=rendition 像素尺寸即时算出），并在发布结果区显示后端返回的同一警告。这是提示不是错误：发布照常成功。阈值 256 取实测最小稳定边长（见 `docs/guides/stress-test-evidence.md` 的「认证（G 组）」），
+是降低风险而不是保证——更大的选区或更平滑的内容仍可能失败，C2PA 声明与本地记录匹配始终不受影响。
 
 **模型完整性**：两个随包 ONNX 文件（`encoder_Q.onnx` / `decoder_Q.onnx`，约 62 MB）的 SHA-256 固化为 `authenticity/state.rs` 的常量，与 `src-tauri/resources/models/README.md` 记录的值一致。首次需要模型时（`model_files_ready` / `model_info` / `with_engine`）读一次摘要并缓存结论；文件缺失或摘要不匹配时 `model_files_ready` 为假、`with_engine` 直接拒绝加载并给出明确错误（指明是编码器还是解码器），不再静默加载被替换的模型。缓存意味着运行期间替换文件要到下次启动才被发现，与引擎只初始化一次的语义一致。`pinned_digests_match_the_shipped_models` 单测把常量与本仓 `resources/models` 的实际文件对齐，换模型忘记更新常量会在提交前失败；**换模型时必须同步更新这两个常量与该 README**。模型目录只从随包资源目录解析，不保留编译期 `CARGO_MANIFEST_DIR` 回退路径——开发机路径不应进入发布产物，也不该让「模型是否被替换」多一个不可预测的落点。
 
@@ -132,7 +133,8 @@ cancel_authenticity_operation
 ## 可靠性不变量与覆盖
 
 认证模块的安全边界与可靠性承诺，由自动化压力测试（`stress_authenticity`，随 Windows CI 运行，见
-`docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）以独立进程调用真实可执行文件验证：
+`docs/guides/validation.md`；逐组结果与场景编号见 `docs/guides/stress-test-evidence.md`）以独立进程
+调用真实可执行文件验证：
 
 | 不变量 | 证明场景 |
 | --- | --- |

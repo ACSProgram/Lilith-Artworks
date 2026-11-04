@@ -1,6 +1,6 @@
 # 当前任务交接
 
-更新时间：2026-11-03
+更新时间：2026-11-04
 
 本文件只记录**当前状况**：当前批次状态、当前基线，以及未完成事项的指针。历史增量（已完成批次、
 已通过的人工验收、被替代的计划）一律在 `archive/`，不在本文件累积；未完成事项只写 `todo.md`。
@@ -8,39 +8,37 @@
 
 ## 当前批次状态
 
-架构审查整改（B1–B5）已收尾：五个批次全部实施完成并通过自动化验证，计划与实施记录归档在
-`archive/architecture-review-remediation-plan-2026-11-03.md`。剩余只有维护者手工验收——B2 的
-右键菜单四项、B4 的仓储流程与 B5 的画板流程，逐项列在 `todo.md` 的「人工验收（剩余）」。
+本批次做三件事：压力测试报告改回面向观众的写法，技术明细拆到
+`docs/guides/stress-test-evidence.md`，历史轮次移入
+`archive/stress-test-rounds-2026-10-18-to-10-21.md`；把「用户文档不堆术语、表层文档不积历史、
+正式版前逐字复查」写进 `AGENTS.md` 与 `docs/guides/release-policy.md`；切分 `0.3.0-beta.2`
+（未打标签）。记录见 `archive/handoff-log-2026-11-04.md`。
 
-0.3 的产品工作已收口，当前处于「人工验收 + 切版本准备」。`dev` 上 beta.1 之后的改动都只记在
-`CHANGELOG.md` 的 `Unreleased`，尚未切 `0.3.0`；这些改动之后没有复跑压力分组。
+0.3 的产品工作已收口，当前处于「人工验收 + 正式版收尾」。剩余事项全部列在 `todo.md`：人工验收
+（B2 右键菜单、B4 仓储流程、B5 画板流程、历史页头与空间页 busy、错误边界等），以及正式版前的
+逐字复查与切版本动作。
 
 ## 下一步
 
-- 按 `todo.md` 的「人工验收（剩余）」逐项完成剩余人工验收：B2 右键菜单的键盘/滚动/缩放/
-  定位，B4 的仓库创建/回收站/永久删除/分支提交/历史删除与精简/恢复流程，B5 的画板切换/
-  撤销重做/文字编辑/擦除/整画布导出/退出结算/GPU 设备丢失恢复，以及历史页头三档宽度、
-  空间页 busy 与后台任务下的草稿编辑。
-- 切 `0.3.0` 前：跑 `stress_format` / `stress_damage`，用升级前的二进制造一份多节点旧仓库并在升级后
-  逐节点 restore 比对，再补 `verify-metadata.mjs` 的 `0.3.0 → 6` 登记、按发行政策同步五处版本字段、
-  跑 `npm run legal`、同步 `README.md` 与文档里的版本引用。
+- 逐项完成 `todo.md` 的「人工验收（剩余）」。
+- 正式版前按 `todo.md` 的「0.3.0 正式版前」执行：逐字复查全部长期维护文档、旧仓库升级比对、
+  切 `0.3.0` 并同步版本引用。
 - 0.4 草案（作品独立数据库、仓库升级规范化、控制总线按作品并行、识别页独立化）已完成第二轮
   修订，清掉全部待决策项，待维护者批准；见
   `0.4-artwork-database-upgrade-scheduling-and-identification-plan-draft-2026-10-22.md`。
-- 是否打 `v0.3.0` 标签、以及发布产物（NSIS、SBOM、签名披露）由维护者单独决定，口径见
-  `docs/guides/release-policy.md`。
+- 是否打 `v0.3.0-beta.2` 或 `v0.3.0` 标签、以及发布产物（NSIS、SBOM、签名披露）由维护者单独
+  决定，口径见 `docs/guides/release-policy.md`。
 
 ## 当前基线
 
 - 分支模型：`main` = 0.2 发布线（`v0.2.0`，指向 `0be6224`，仅接受 0.2 线修正）；`dev` = 0.3
   开发线，从 `0be6224` 创建。
-- 版本：`dev` 的五处版本字段是 `0.3.0-beta.1`；`v0.3.0-beta.1` 已打标签并作为 Pre-release 公开
-  （2026-10-25）。之后的改动全部写在 `CHANGELOG.md` 的 `## Unreleased`，切版本与打标签由维护者
-  按 `docs/guides/release-policy.md` 单独决定。
-- repository schema v6（v4 → v5 随 alpha3 落地，v5 → v6 随 alpha5 落地；alpha6 与
-  beta.1 沿用 v6）；ChunkFile 仓库可混存 v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 的
-  alpha1 与 alpha2 保持 v4；**0.3 共有两次迁移**（alpha3 的 v4 → v5 与 alpha5 的
-  v5 → v6），高于当前版本的仓库由旧程序直接拒绝。
+- 版本：`dev` 的五处版本字段是 `0.3.0-beta.2`，尚未打标签；公开的最新版本仍是
+  `v0.3.0-beta.1`（2026-10-25，Pre-release）。切版本与打标签由维护者按
+  `docs/guides/release-policy.md` 单独决定。
+- repository schema v6（v4 → v5 随 alpha3 落地，v5 → v6 随 alpha5 落地）；ChunkFile 仓库可混存
+  v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 共有两次迁移，高于当前版本的仓库由旧程序
+  直接拒绝。
 - 0.3 基线（一次性采集）已归档到 `archive/0.3-baseline-2026-10-18.md`；该文档现为
   0.2 → 0.3.0-beta.1 的对比报告。长期回归对照用 `stress_bench`，其 release 条目已随
   2026-10-25 的全量压力测试同轮刷新。

@@ -15,6 +15,8 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+## 0.3.0-beta.2 - 2026-11-04
+
 ### Added
 
 - Artwork history can be reset to the state a freshly created artwork has:
@@ -60,73 +62,47 @@ entries for the reader; they are not a template every entry has to fill.
   ghost is narrower so those props stay readable at small frame sizes. The
   NSIS installer and uninstaller are pointed at the same file, so setup and
   uninstall stop falling back to the stock NSIS icon.
-- `zstd` moves from 0.13 to 0.14 (zstd-safe 8.2, zstd-sys 2.1), which clears
-  the four RUSTSEC advisories (2026-0391, 2026-0398, 2026-0403, 2026-0410) that
-  had turned the dependency audit red. The stored format does not change:
-  deltas remain zstd frames, which are self-describing and readable across
-  versions.
-- The dependency audit additionally ignores RUSTSEC-2026-0429 (zip 8.6.0, an
-  oversized symlink buffer inside `ZipArchive::extract()`). Neither this crate
-  (`.procreate` previews read entries with `new` + `by_index` under a decode
-  budget) nor c2pa 0.90.11 calls that extract-to-disk path, and the patched
-  zip 9 cannot be adopted while c2pa pins zip 8.x.
-- Internal cleanup with no user-visible change: the backup runtime DTO has one
-  definition in `src/shared/backupRuntime.ts`, `PinBoardTextureCacheLevel` has
-  one definition in `pin-board/types.ts`, the history branch settings receive
-  the reveal-folder action from the app layer instead of importing `app/api`,
-  and unreferenced exports plus the stale texture-budget constants are gone.
-- Internal Rust consolidation with no user-visible change: whole-file SHA-256
-  and head/tail sampling live in `src-tauri/src/digest.rs` and are shared by
-  the authenticity, backup, cleanup and model checks. Authenticity commands
-  route repository and preview reads through the shared use-case, the scrub
-  report type moved next to that use-case, settings-snapshot counts and the
-  repository status check read under the repository read lease, and the pin
-  board clipboard, DDS cache/file, storage-overview disk scan and rendition
-  cache/render responsibilities each have their own module. Command names,
-  DTO fields, error text and cancellation semantics are unchanged.
-- Internal Rust structure with no user-visible change: the library repository is
-  split into discovery, tree and trash modules, the repository schema into
-  creation, migration and validation modules, and the history repository into
-  branch, graph and storage modules, all behind the same re-exports. The tree
-  read also stops selecting a description column it never read, dropping one
-  join per list. Permanent artwork deletion and artwork history reset keep their
-  single-transaction implementations, and new rollback tests inject a failure in
-  the middle of each transaction to prove that library, history, authenticity and
-  cleanup rows are committed or rolled back together.
-- Internal front-end structure with no user-visible change: the pin-board
-  renderer's immutable snapshots and save payloads, undo/redo stack, stroke
-  geometry and screen buffers, and texture eviction order now live in
-  `boardSnapshot.ts`, `historyStack.ts`, `strokeLayer.ts` and
-  `textureEviction.ts`. The renderer keeps board loading, pointer and text-edit
-  state, drawing, and save/settlement orchestration; command names, DTO fields,
-  saved payloads and the two separate save contracts are unchanged. Tests for the
-  new boundaries are direct, and the stale texture-policy contract path was
-  pointed at `pin_board/dds/mod.rs`.
 - The library tree menu, the library's `新建` menu and the history node menu now
   all use the shared `ContextMenu` instead of three hand-written copies. They
   close on Escape, an outside click, any scroll and window resizing, stay inside
   the viewport using their measured size, and no longer leave a second menu open
   behind them. The history node rename dialog now reuses `PromptDialog`, so it
   also closes on Escape and selects the current name when it opens.
-- Internal front-end cleanup with no user-visible behavior change: the two
-  pin-board save paths share only the field-cloning and text-payload helpers
-  (the settle snapshot still always carries text, the regular save still only
-  carries changed text), arrow-head preview geometry and point-to-segment /
-  bounds helpers are shared, the publication preview dialog is split into
-  `usePreviewViewport` and `usePreviewTiles`, the branch-settings 650 ms debounce
-  state machine lives in `useBranchSettingsDraft`, `useArtworkSummary` uses the
-  shared request epoch, the publication and identification busy flags use
-  `useAsyncOperation`, and `useRepositoryMaintenance` is composed from the
-  space, backup and integrity hooks behind one operation gate. The App
-  repository-switching tests are split by settings, backup and space page, and
-  the pin-board save-contract tests cover text, stroke and bitmap items without
-  asserting the two paths produce the same request.
-- Documentation and comments now match the code they describe: the log rotation
-  size is the actual 4,000,000 bytes, the Rust audit ignore list includes
-  RUSTSEC-2026-0429, the fuzz generators live in `src-tauri/src/fuzz_support.rs`,
-  the board DDS scrub entry is `pin_board::scrub::scrub_board_dds`, and the
-  archive index lists the 2026-10-09 log. The `api.ts` consumer lists name
-  `useArtworkSummary.ts` and the pin board's direct command paths, and the
+- `zstd` moves from 0.13 to 0.14 (zstd-safe 8.2, zstd-sys 2.1), which clears
+  the four RUSTSEC advisories (2026-0391, 2026-0398, 2026-0403, 2026-0410) that
+  had turned the dependency audit red. The stored format does not change:
+  deltas remain zstd frames, which are self-describing and readable across
+  versions. The dependency audit additionally ignores RUSTSEC-2026-0429 (zip
+  8.6.0, an oversized symlink buffer inside `ZipArchive::extract()`): neither
+  this crate nor c2pa 0.90.11 calls that extract-to-disk path, and the patched
+  zip 9 cannot be adopted while c2pa pins zip 8.x.
+- Internal Rust consolidation with no user-visible change: whole-file SHA-256
+  and head/tail sampling live in `src-tauri/src/digest.rs`, the library
+  repository is split into discovery/tree/trash modules, the repository schema
+  into creation/migration/validation, and the history repository into
+  branch/graph/storage, all behind the same re-exports. The tree read also
+  stops selecting a description column it never read, dropping one join per
+  list. Command names, DTO fields, error text and cancellation semantics are
+  unchanged; new rollback tests inject a failure mid-transaction to prove that
+  library, history, authenticity and cleanup rows commit or roll back together.
+- Internal front-end structure with no user-visible change: the backup runtime
+  DTO and the pin-board texture cache level each have one definition, the
+  pin-board renderer's snapshots and save payloads, undo/redo stack, stroke
+  geometry and texture eviction order live in `boardSnapshot.ts`,
+  `historyStack.ts`, `strokeLayer.ts` and `textureEviction.ts`; the
+  branch-settings debounce lives in `useBranchSettingsDraft`, the publication
+  preview dialog is split into `usePreviewViewport` and `usePreviewTiles`, and
+  `useRepositoryMaintenance` composes the space, backup and integrity hooks
+  behind one operation gate. Saved payloads and the two separate pin-board save
+  contracts are unchanged.
+- The reliability report is rewritten for the people who use the application:
+  it keeps the plain-language outcome per failure mode, the measured numbers and
+  the limits it does not guarantee, and no longer carries checkpoint indices,
+  internal identifiers or per-scenario assertion detail. Those moved to
+  `docs/guides/stress-test-evidence.md`, and the superseded test rounds to
+  `docs/planning/archive/`. Documentation and comments now also match the code
+  they describe: the log rotation size, the audit ignore list, the fuzz
+  generator location, the board DDS scrub entry and the archive index; the
   architecture pages no longer carry per-batch headings such as `0.3 阶段 3`.
 
 ### Fixed

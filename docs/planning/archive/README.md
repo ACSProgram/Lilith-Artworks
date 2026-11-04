@@ -260,6 +260,16 @@
   第二批同日），报告结论只作历史记录；仍未完成的 3.7（大文件内存与快照上界收紧）与 4.6
   （素材板真实上限与条目类型过滤）记在 `../todo.md`。界面自动化的边界以
   `docs/guides/validation.md` 的「明确禁止」为准。
+- `stress-test-rounds-2026-10-18-to-10-21.md`：从 `docs/user/stress-test-report.md` 清出的历史轮次
+  ——alpha1 那轮的 8 条未通过项追因与修复（检查点分层），以及 2026-10-18、2026-10-19、
+  2026-10-21 三次复跑摘要。这些轮次描述的「当前行为」已被后续批次取代；当前轮次的数据在
+  `docs/user/stress-test-report.md` 与 `docs/guides/stress-test-evidence.md`，最近一次全量轮次见
+  `handoff-log-2026-10-25.md`。
+- `handoff-log-2026-11-04.md`：2026-11-04 的 `0.3.0-beta.2` 切分与文档纪律整改——压力测试报告
+  改为面向观众并把技术明细拆到 `docs/guides/stress-test-evidence.md`、历史轮次移入
+  `stress-test-rounds-2026-10-18-to-10-21.md`，把「用户文档不堆术语、表层文档不积历史、正式版前
+  逐字复查」写进 `AGENTS.md` 与发行政策，表层文档清出三条已落地的维护者决策，版本切分与
+  `verify-metadata` / 发布说明脚本的 schema 路径修复。
 - `architecture-review-remediation-plan-2026-11-03.md`：架构审查整改计划与 B1–B5 实施记录
   （**已实施并提交**；原文自 `../` 移入）——文档事实与死代码修正、三处右键菜单统一与保存
   契约去重、Rust 摘要收敛与生产文件拆分、library/history 仓储与 schema 拆分及跨域事务回滚

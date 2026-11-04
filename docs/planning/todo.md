@@ -1,6 +1,6 @@
 # 待办清单
 
-更新时间：2026-11-03
+更新时间：2026-11-04
 
 本文件是本项目唯一的未完成事项清单：尚未实现、尚未验证或需要维护者决策的内容都记在这里。它和
 `current-handoff.md` 一样是**表层文档**——只保留当前状况、未完成事项与规划：某项完成或通过验收
@@ -9,18 +9,24 @@
 
 ## 0.3 状态
 
-0.3 在 `dev` 上分批实施；`0.3.0-beta.1` 已打标签并以 Pre-release 公开（2026-10-25，附
-setup.exe 与 SBOM），alpha1–alpha6 未打标签。beta.1 之后的改动只记在 `CHANGELOG.md` 的
-`Unreleased`，尚未切版本。0.3 沿用 repository schema v6，共有两次迁移（alpha3 的 v4 → v5 与
+0.3 在 `dev` 上开发，`0.3.0-beta.2` 已切分但未打标签；公开的最新版本仍是 `v0.3.0-beta.1`
+（2026-10-25，Pre-release）。repository schema v6，0.3 共有两次迁移（alpha3 的 v4 → v5 与
 alpha5 的 v5 → v6）。
 
-发布前压力测试（含 `manual` 8 GiB 档）已在 2026-10-25 全量通过，实测见
-`docs/user/stress-test-report.md`；`manual` 档只在正式发布前运行，不随日常开发或候选版本切分
-运行。之后的改动尚未复跑任何压力分组。
+0.3 的产品工作已收口，剩余是人工验收、正式版前的全量复查与发布决定。beta.1 之后的改动（含
+`0.3.0-beta.2` 这批）没有再跑压力分组；发布前压力测试（含 `manual` 8 GiB 档）最近一次全量通过是
+2026-10-25，实测见 `docs/user/stress-test-report.md`，`manual` 档只在正式发布前运行。人工验收的
+记录与证据见 `archive/handoff-log-2026-11-03.md` §7–§11。下文「待实现 / 待补强」是独立的补强
+候选，不阻塞 0.3 收尾。
 
-0.3 的产品工作已收口，剩余为人工验收与切版本准备。人工验收的记录与证据见
-`archive/handoff-log-2026-11-03.md` §7–§11。下文「待实现 / 待补强」是独立的补强候选，不阻塞
-0.3 收尾。
+## 0.3.0 正式版前
+
+- **逐字逐句复查全部长期维护文档**（除 `docs/planning/archive/`）：核对每条描述与当前代码一致，
+  删除旧轮次数据、已完成批次记录、被替代的口径与不再成立的数字；复查结论与删除项写入
+  `archive/handoff-log-2026-11-04.md`。口径见 `docs/guides/release-policy.md` 的「文档检查」。
+- 用升级前的二进制造一份多节点旧仓库，升级后逐节点 restore 比对；补 `verify-metadata.mjs` 的
+  `0.3.0 → 6` 登记。
+- 按发行政策把五处版本字段切到 `0.3.0`、跑 `npm run legal`、同步 `README.md` 与文档版本引用。
 
 ## 人工验收（剩余）
 
@@ -161,23 +167,9 @@ B4 实施记录）：
 - **分支模型**：`main` 固定为 0.2 发布线（`v0.2.0`，指向 `0be6224`），不再接收 0.3 改动；
   `dev` 从 `0be6224` 创建，作为 0.3 开发线。历史与发布记录见
   `archive/handoff-log-2026-10-18.md`。
-- **0.3 版本线**：alpha1–alpha6 未打标签；beta.1 已于 2026-10-25 打标签并作为 Pre-release 公开，
-  是 0.3 线当前最后一版。
-  逐批范围与落实口径见 `archive/handoff-log-2026-10-18.md` 至
-  `archive/handoff-log-2026-10-25.md` 与两份计划正文；0.3 因此有两次迁移（alpha3 的 v4 → v5
-  与 alpha5 的 v5 → v6）。
-- **快速命中计数改为自适应强制全量（2026-10-21）**：不采用固定 N。阈值按本轮到期队列长度与分支
-  文件大小分档，并以 7 天为年龄上限；后台忙时把全量确认推迟到队列消化后，长间隔下允许阈值小于 8。
-  数值与实测依据见 `docs/modules/history-and-backup.md` 的「调度」。
-- **提交路径不再复检旧快照（2026-10-20）**：`validate_head_snapshot` 从提交路径移除，只为它服务的
-  `repair_head_snapshot` 一并删除；旧快照的完整性交给恢复、`verify_history_node` /
-  `scrub_history` 与空闲完整性检查（默认关闭）。维护者明确接受「该开关默认关闭时这层体检实际
-  不生效」这个代价，也不采用按计数抽检。实测见
-  `archive/backup-scheduling-fix-plan-2026-10-20.md` §6.1 与 §6.4。
-- **退出结算以 finalize/settlement 为准（2026-11-03）**：`pin-board settle flush finished` 只在退出时
-  仍有排队快照时打印；空队列会在 `pendingSettle.ts` 的 `flushPendingSettle` 提前返回。正常关窗路径
-  的验收口径改为 `pin-board finalize start/done` 与 `shutdown settlement finished: outcome=ok`，
-  不再把缺少 flush 行视为缺陷。
+- **0.3 版本线**：公开的最新版本是 `v0.3.0-beta.1`（2026-10-25，Pre-release），alpha1–alpha6 未
+  打标签。逐批范围与落实口径见 `archive/handoff-log-2026-10-18.md` 至 `archive/handoff-log-2026-10-25.md`
+  与两份计划正文。
 - **缩略图格式扩展只做第一批（2026-10-20）**：`.sai2`、`.procreate` 与无魔数的 `.tga` 已实施，
   kra/krz、ora、cbz、ooxml、odf、blend、svg、exr/hdr/qoi/ff/pnm 暂不做，`supports_preview` 不登记
   它们；不引入 Windows Shell 缩略图接口。依据见

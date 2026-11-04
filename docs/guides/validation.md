@@ -106,7 +106,7 @@ DDS 损坏与损坏后内容变化再提交 R7）、`stress_format` ChunkFile �
   ≥ 77 GB；自该轮起 C7 随五个档位并行运行、与其余场景争用磁盘，是耗时较此前约 95 分钟上升的
   主因）。2026-10-25 在 0.3.0-beta.1 的 release 无头构建上完成含 `manual` 的全量复跑：五档各
   10/10 通过，`manual` 在 40 GiB 磁盘预算内跑完；各档墙钟与 C 组数值见
-  `docs/user/stress-test-report.md` 的「2026-10-25 复跑摘要」。
+  `docs/guides/stress-test-evidence.md` 的「2026-10-25 复跑摘要」。
 - **昂贵的分组只在准备发布、需要产出或更新 `docs/user/stress-test-report.md` 的实测数据时运行**，
   并由维护者显式发起；需要跑时先确认档位与磁盘预算。
 - **大文件档按磁盘预算并发执行**：`stress_large` 的场景通过 `scenario_slot` 按「预计峰值磁盘」
@@ -134,7 +134,7 @@ DDS 损坏与损坏后内容变化再提交 R7）、`stress_format` ChunkFile �
   构建档的表，不动这个字段。仓库里当前的一份是维护者本机（i5-13490F / 32 GB / Windows 11）
   上的 release 测量；换机器后请核对严格门是否仍通过，而不是把它当成跨机器标准。
 - 运行方式（构建无头入口、档位选择、环境变量与输出文件）见下方「运行方式」；各档位的实测数据、
-  磁盘需求与墙钟见 `docs/user/stress-test-report.md` 的「运行成本」一节。
+  磁盘需求与墙钟见 `docs/guides/stress-test-evidence.md` 的「运行成本」一节。
 - **断电持久性不做自动化验证**：测试用 `Child::kill()` 终止进程，它不触及操作系统与磁盘的
   缓存、也不保证目录项落盘，结构上无法覆盖「断电后已提交数据是否仍在」。该保证由操作系统、
   磁盘与 SQLite `synchronous = FULL` 声明承担，保留为声明/人工项，不列入自动化目标。
@@ -245,7 +245,7 @@ LILITH_STRESS_TIERS=extreme cargo test --features headless --test stress_authent
 - **不进版本控制、可随时清掉**：`target/` 已被 gitignore，`cargo clean` 一次清掉全部测试残留；
   强杀或 Ctrl-C 留下的 `<target>/stress/workspaces/.stress-*` 也属于可删的构建残渣。因此
   target 下的数值只是**本次运行**的记录：要长期引用的数值必须摘录进 `docs/`（交接文档、
-  `docs/user/stress-test-report.md`），或写进随版本控制的 `tests/perf-baseline.json`。
+  `docs/guides/stress-test-evidence.md`），或写进随版本控制的 `tests/perf-baseline.json`。
 - **新增测试的纪律**：临时空间必须经 `stress_support::Workspace`，报告与账本必须经
   `stress_support::record*` / `append_ledger`；不要在 `tests/` 下自建临时目录、不要直接用
   `%TEMP%`（系统会回收它，实测出现过工作区中途消失导致场景失败），也不要在仓库其他位置新增

@@ -7,8 +7,8 @@
 
 ## 面向使用者
 
-- [可靠性压力测试报告](user/stress-test-report.md)：自动压力测试证明了什么、覆盖哪些真实
-  情况、如何自行运行。
+- [可靠性压力测试报告](user/stress-test-report.md)：极端情况下作品数据会怎样、实测数字与不保证的
+  边界。
 - [README](../README.md)：产品定位、当前状态、使用声明与数据可靠性边界。
 - [安全策略](../SECURITY.md)：漏洞报告渠道与安全敏感区域。
 - [第三方许可摘要](../THIRD_PARTY_NOTICES.md)：人工维护的主要组件许可与告知义务。
@@ -32,6 +32,8 @@
 流程与计划：
 
 - [验证策略](guides/validation.md)：分层验证、压力测试边界与持续集成。
+- [压力测试实测证据](guides/stress-test-evidence.md)：逐组明细、实测数字、口径与已知边界，
+  面向开发者与审计。
 - [可移植性规范](guides/platform.md)：平台分支唯一入口 `src-tauri/src/platform/`、例外登记表与「加平台清单」。
 - [发行政策](guides/release-policy.md)：滞后版本号、`Unreleased` 暂存段、发布门槛与产物。
 - [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。

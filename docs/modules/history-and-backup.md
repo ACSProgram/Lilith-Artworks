@@ -268,7 +268,7 @@ scan_repository_storage_disk
 
 以下命题是历史/备份模块对使用者的承诺，每条都由自动化压力测试（`src-tauri/tests/`；九组便宜的
 分组随 Windows CI 运行，`stress_large`/`stress_scale`/`stress_bench` 仍在发布
-前手动运行，见 `docs/guides/validation.md` 与 `docs/user/stress-test-report.md`）以**独立进程
+前手动运行，见 `docs/guides/validation.md` 与 `docs/guides/stress-test-evidence.md`）以**独立进程
 调用真实可执行文件**的方式验证；断言只用子命令返回的 JSON 与磁盘事实，不读内部状态。
 
 | 不变量 | 证明场景 |

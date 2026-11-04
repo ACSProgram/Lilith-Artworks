@@ -49,7 +49,7 @@ if (nonOfficialPackages.length > 0) {
   throw new Error(`Package lock uses non-official registries: ${nonOfficialPackages.join(", ")}`);
 }
 
-const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "schema.rs"), "utf8");
+const schema = fs.readFileSync(path.join(root, "src-tauri", "src", "library", "schema", "mod.rs"), "utf8");
 const schemaVersion = schema.match(/SCHEMA_VERSION:\s*i64\s*=\s*(\d+)\s*;/)?.[1];
 // Explicit version → repository schema registry. Cutting a version must add its
 // entry in the same commit; an unregistered version is refused. 0.2.x stays on
@@ -65,6 +65,7 @@ const schemaByVersion = new Map([
   ["0.3.0-alpha.5", "6"],
   ["0.3.0-alpha.6", "6"],
   ["0.3.0-beta.1", "6"],
+  ["0.3.0-beta.2", "6"],
 ]);
 const expectedSchema = schemaByVersion.get(expected);
 if (!expectedSchema) {
