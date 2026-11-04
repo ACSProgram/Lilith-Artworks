@@ -1,5 +1,16 @@
 use serde::{Deserialize, Serialize};
 
+/// 保存仓库路径前的只读探测结果。探测不创建目录，也不初始化或迁移数据库。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum RepositoryPathState {
+    Missing,
+    NotDirectory,
+    EmptyDirectory,
+    Repository,
+    NonRepositoryDirectory,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct RepositoryStatus {

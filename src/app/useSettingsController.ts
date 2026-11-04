@@ -22,9 +22,20 @@ import {
 } from "../shared/diagnostics";
 import { errorMessage } from "../shared/errors";
 import type { PinBoardTextureCacheLevel } from "../modules/pin-board/types";
-import type { AppSettings, RepositoryStatus, SettingsSnapshot } from "./types";
+import type {
+  AppSettings,
+  RepositoryPathState,
+  RepositoryStatus,
+  SettingsSnapshot,
+} from "./types";
 
 export type SettingsPage = "general" | "repository" | "space" | "backup" | "pin-board" | "debug";
+
+/** 等待用户确认新建仓库的路径；只有不存在的目录与空目录会进入这里。 */
+export interface RepositoryCreationPrompt {
+  path: string;
+  state: Extract<RepositoryPathState, "missing" | "empty_directory">;
+}
 
 export const SETTINGS_PAGES: Array<{ id: SettingsPage; label: string }> = [
   { id: "general", label: "通用" },
@@ -91,6 +102,9 @@ export interface SettingsController {
   closeSettings: () => void;
   chooseRepository: () => Promise<void>;
   save: () => Promise<void>;
+  repositoryCreatePrompt: RepositoryCreationPrompt | null;
+  confirmRepositoryCreate: () => Promise<void>;
+  cancelRepositoryCreate: () => void;
   toggleDiagnostics: (enabled: boolean) => Promise<void>;
 }
 
@@ -106,6 +120,8 @@ export function useSettingsController(notify: Notify): SettingsController {
   const [settingsPage, setSettingsPage] = useState<SettingsPage>("general");
   const [busy, setBusy] = useState(true);
   const [diagnostics, setDiagnostics] = useState<DiagnosticsStatus | null>(null);
+  const [repositoryCreatePrompt, setRepositoryCreatePrompt] =
+    useState<RepositoryCreationPrompt | null>(null);
 
   const load = useCallback(async () => {
     setBusy(true);
@@ -176,7 +192,10 @@ export function useSettingsController(notify: Notify): SettingsController {
     }).catch((error) => notify(errorMessage(error)));
   }, [notify]);
 
-  const closeSettings = useCallback(() => setSettingsOpen(false), []);
+  const closeSettings = useCallback(() => {
+    setRepositoryCreatePrompt(null);
+    setSettingsOpen(false);
+  }, []);
 
   const chooseRepository = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -186,9 +205,8 @@ export function useSettingsController(notify: Notify): SettingsController {
       : current);
   }, []);
 
-  const save = useCallback(async () => {
-    if (!draft) return;
-    const repositoryChanged = draft.repositoryPath.trim() !== repository.rootPath;
+  const commitSave = useCallback(async (settings: AppSettings, allowCreate: boolean) => {
+    const repositoryChanged = settings.repositoryPath.trim() !== repository.rootPath;
     setBusy(true);
     notify(null);
     try {
@@ -200,7 +218,7 @@ export function useSettingsController(notify: Notify): SettingsController {
         diagnosticsLog("info", "repository switch: pin board settled");
         setRepository(EMPTY_REPOSITORY_STATUS);
       }
-      const next = await appApi.saveSettings(draft);
+      const next = await appApi.saveSettings(settings, allowCreate);
       setSnapshot(next);
       setDraft(next.settings);
       setRepository(await appApi.getRepositoryStatus());
@@ -233,7 +251,47 @@ export function useSettingsController(notify: Notify): SettingsController {
     } finally {
       setBusy(false);
     }
-  }, [draft, notify, repository.rootPath]);
+  }, [notify, repository.rootPath]);
+
+  const save = useCallback(async () => {
+    if (!draft) return;
+    const targetPath = draft.repositoryPath.trim();
+    const repositoryChanged = targetPath !== repository.rootPath;
+    if (repositoryChanged && targetPath !== "") {
+      setBusy(true);
+      notify(null);
+      try {
+        const state = await appApi.inspectRepositoryPath(targetPath);
+        if (state === "missing" || state === "empty_directory") {
+          setRepositoryCreatePrompt({ path: targetPath, state });
+          return;
+        }
+        if (state === "not_directory") {
+          notify("所选作品仓库路径不是目录。");
+          return;
+        }
+        if (state === "non_repository_directory") {
+          notify("所选目录非空，且不是 Lilith Artworks 作品仓库；请选择空目录或已有仓库。");
+          return;
+        }
+      } catch (error) {
+        notify(errorMessage(error));
+        return;
+      } finally {
+        setBusy(false);
+      }
+    }
+    // 已存在的仓库照常打开；路径为空表示解除仓库配置。
+    await commitSave(draft, false);
+  }, [commitSave, draft, notify, repository.rootPath]);
+
+  const confirmRepositoryCreate = useCallback(async () => {
+    if (!draft) return;
+    setRepositoryCreatePrompt(null);
+    await commitSave(draft, true);
+  }, [commitSave, draft]);
+
+  const cancelRepositoryCreate = useCallback(() => setRepositoryCreatePrompt(null), []);
 
   const toggleDiagnostics = useCallback(async (enabled: boolean) => {
     try {
@@ -260,6 +318,9 @@ export function useSettingsController(notify: Notify): SettingsController {
     closeSettings,
     chooseRepository,
     save,
+    repositoryCreatePrompt,
+    confirmRepositoryCreate,
+    cancelRepositoryCreate,
     toggleDiagnostics,
   };
 }

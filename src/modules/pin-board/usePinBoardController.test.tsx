@@ -12,6 +12,7 @@ const api = vi.hoisted(() => ({
   listPinBoards: vi.fn(),
   listPinBoardTrash: vi.fn(),
   loadPinBoard: vi.fn(),
+  createPinBoard: vi.fn(),
   importPinBoardImages: vi.fn(),
   readPinBoardClipboardPaths: vi.fn(),
 }));
@@ -119,6 +120,7 @@ describe("usePinBoardController", () => {
       artworkId: "artwork-1",
       active: true,
       settings,
+      unavailable: false,
     }));
 
     await waitFor(() => expect(result.current.view?.boardId).toBe(1));
@@ -135,6 +137,19 @@ describe("usePinBoardController", () => {
     expect(unregister).toHaveBeenCalledTimes(1);
   });
 
+  it("refuses to create a board while the renderer is unavailable", async () => {
+    const { result } = renderHook(() => usePinBoardController({
+      artworkId: "artwork-1",
+      active: true,
+      settings,
+      unavailable: true,
+    }));
+    await waitFor(() => expect(result.current.view?.boardId).toBe(1));
+
+    await act(async () => { await result.current.createBoard("New board"); });
+    expect(api.createPinBoard).not.toHaveBeenCalled();
+  });
+
   it("applies operation progress events to the current transfer", async () => {
     const renderer = fakeRenderer();
     const imported = deferred<{ view: PinBoardView; itemIds: number[] }>();
@@ -144,6 +159,7 @@ describe("usePinBoardController", () => {
       artworkId: "artwork-1",
       active: true,
       settings,
+      unavailable: false,
     }));
     await waitFor(() => expect(result.current.view?.boardId).toBe(1));
     act(() => result.current.setRenderer(renderer));

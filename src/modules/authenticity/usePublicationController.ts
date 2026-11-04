@@ -541,6 +541,12 @@ export function usePublicationController({
         if (report.failures.length > 0) {
           onError(`记录已删除，但有 ${report.failures.length} 个文件清理失败；请重试清理。`);
         }
+        // 成功横幅对应的就是这条记录时才清空；删除其它记录不能带走当前发布结果。
+        if (result?.id === record.id) {
+          setResult(null);
+          setPublishMetrics(null);
+          setWatermarkId("");
+        }
         if (selectedBranchIdRef.current === record.branchId) {
           setViewingRecord(null);
           await load();
@@ -549,7 +555,7 @@ export function usePublicationController({
     } catch {
       // 错误已由 onError 提示。
     }
-  }, [load, onError, runDeleteRecord]);
+  }, [load, onError, result, runDeleteRecord]);
 
   return {
     publication,

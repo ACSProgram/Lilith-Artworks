@@ -11,6 +11,7 @@ import type {
   BackupDisableNoticeTarget,
   RepositoryBackupReport,
   RepositoryBackupRun,
+  RepositoryPathState,
   RepositoryScrubReport,
   RepositoryStatus,
   RepositoryStorageDiskScan,
@@ -21,8 +22,10 @@ import type {
 export const appApi = {
   confirmShutdown: () => invokeCommand<void>("confirm_app_shutdown"),
   getSettings: () => invokeCommand<SettingsSnapshot>("get_app_settings"),
-  saveSettings: (settings: AppSettings) =>
-    invokeCommand<SettingsSnapshot>("save_app_settings", { settings }),
+  saveSettings: (settings: AppSettings, allowCreate: boolean) =>
+    invokeCommand<SettingsSnapshot>("save_app_settings", { settings, allowCreate }),
+  inspectRepositoryPath: (path: string) =>
+    invokeCommand<RepositoryPathState>("inspect_repository_path", { path }),
   getRepositoryStatus: () => invokeCommand<RepositoryStatus>("get_repository_status"),
   openLogDirectory: () => invokeCommand<void>("open_log_directory"),
   getDiagnosticsStatus: () => invokeCommand<DiagnosticsStatus>("get_diagnostics_status"),

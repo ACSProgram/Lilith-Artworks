@@ -229,6 +229,62 @@ describe("usePublicationController", () => {
     await waitFor(() => expect(api.getPublication.mock.calls.length).toBeGreaterThanOrEqual(2));
   });
 
+  it("clears the publish success banner only when its record is deleted", async () => {
+    api.getPublication.mockResolvedValue({
+      ...publishedBranch("first"),
+      records: [record("first")],
+    });
+    api.publish.mockResolvedValue({
+      record: record("first"),
+      watermarkWarnings: [],
+      renditionCacheHit: true,
+      renderMs: 0,
+      encodeMs: 0,
+      signingMs: 0,
+    });
+    api.deleteRecord.mockResolvedValue({ failures: [] });
+    dialog.save.mockResolvedValue("C:/output.jpg");
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+    act(() => { result.current.setPrivateKey("private-key"); });
+    await act(async () => { await result.current.generateOutputPreview(); });
+    await act(async () => { await result.current.publish(); });
+    expect(result.current.result?.id).toBe("record-1");
+    act(() => { result.current.setWatermarkId("2".repeat(40)); });
+
+    await act(async () => { await result.current.deleteRecord(record("first")); });
+    expect(result.current.result).toBeNull();
+    expect(result.current.publishMetrics).toBeNull();
+    expect(result.current.watermarkId).toBe("");
+  });
+
+  it("keeps the success banner when a different record is deleted", async () => {
+    api.getPublication.mockResolvedValue({
+      ...publishedBranch("first"),
+      records: [record("first"), { ...record("first"), id: "record-2" }],
+    });
+    api.publish.mockResolvedValue({
+      record: record("first"),
+      watermarkWarnings: [],
+      renditionCacheHit: true,
+      renderMs: 0,
+      encodeMs: 0,
+      signingMs: 0,
+    });
+    api.deleteRecord.mockResolvedValue({ failures: [] });
+    dialog.save.mockResolvedValue("C:/output.jpg");
+    const { result } = renderHook(() => usePublicationController(options("first")));
+    await waitFor(() => expect(result.current.preview).toEqual(previewImage));
+    act(() => { result.current.setPrivateKey("private-key"); });
+    await act(async () => { await result.current.generateOutputPreview(); });
+    await act(async () => { await result.current.publish(); });
+
+    await act(async () => {
+      await result.current.deleteRecord({ ...record("first"), id: "record-2" });
+    });
+    expect(result.current.result?.id).toBe("record-1");
+  });
+
   it("surfaces delete cleanup failures and reports the retry banner", async () => {
     api.getPublication.mockResolvedValue(publishedBranch("first"));
     api.deleteRecord.mockResolvedValue({

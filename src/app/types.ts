@@ -61,6 +61,14 @@ export interface RepositoryStatus {
   error: string | null;
 }
 
+/** 保存新仓库路径前的只读探测结果；`repository` 也包含可迁移的旧文件名数据库。 */
+export type RepositoryPathState =
+  | "missing"
+  | "not_directory"
+  | "empty_directory"
+  | "repository"
+  | "non_repository_directory";
+
 /** 仓库完整性检查与整仓备份报告共有的计数。 */
 export interface RepositoryIntegrityCounts {
   historyNodes: number;

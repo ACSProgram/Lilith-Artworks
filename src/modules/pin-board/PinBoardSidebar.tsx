@@ -24,6 +24,8 @@ export interface PinBoardSidebarProps {
   exporting: boolean;
   /** 传输进行中：新建与拖放排序都要等它结束。 */
   transferBusy: boolean;
+  /** 渲染器不可用：新建画板入口一并禁用；空状态文案同时改为不可用说明。 */
+  unavailable: boolean;
   /** 打开侧栏菜单前先关掉画布菜单，避免两个菜单叠在一起。 */
   onDismissCanvasMenu: () => void;
   onCreate: () => void;
@@ -44,6 +46,7 @@ export function PinBoardSidebar({
   selected,
   exporting,
   transferBusy,
+  unavailable,
   onDismissCanvasMenu,
   onCreate,
   onSelect,
@@ -112,7 +115,7 @@ export function PinBoardSidebar({
           type="button"
           title="新建画板"
           aria-label="新建画板"
-          disabled={transferBusy}
+          disabled={transferBusy || unavailable}
           onClick={onCreate}
         >
           <Plus size={16} />
@@ -187,7 +190,11 @@ export function PinBoardSidebar({
               );
             })}
             {boards.length === 0 && (
-              <div className="pin-board-tree-empty">尚无画板，点击右上角“新建画板”</div>
+              <div className="pin-board-tree-empty">
+                {unavailable
+                  ? "素材板不可用，新建画板已停用"
+                  : "尚无画板，点击右上角“新建画板”"}
+              </div>
             )}
           </div>
           : <LoaderCircle className="spin" size={20} />}
@@ -280,7 +287,7 @@ export function PinBoardSidebar({
                     } },
                   ]
                 : [
-                    { key: "create", label: "新建画板", icon: <Plus size={15} />, onClick: () => {
+                    { key: "create", label: "新建画板", icon: <Plus size={15} />, disabled: unavailable, onClick: () => {
                       onCreate();
                       setListContextMenu(null);
                     } },

@@ -21,7 +21,9 @@ use rusqlite::Connection;
 
 use crate::storage;
 
-pub(crate) use discovery::{check_existing, database_path, initialize, open_existing};
+pub(crate) use discovery::{
+    check_existing, database_path, initialize, inspect_path, open_existing,
+};
 pub(crate) use trash::{
     empty_trash, list_trash, permanently_delete_trash, restore_trash, trash_nodes,
 };

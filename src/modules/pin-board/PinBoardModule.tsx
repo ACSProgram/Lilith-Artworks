@@ -118,6 +118,11 @@ function afterLayoutSettles(): Promise<void> {
 }
 
 export function PinBoardModule({ artworkId, active, settings }: PinBoardModuleProps) {
+  /**
+   * 渲染器创建失败的常驻原因。素材板完全依赖 WebGPU，创建失败后画布不会再可用，
+   * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
+   */
+  const [unavailable, setUnavailable] = useState<string | null>(null);
   const {
     boards,
     trash,
@@ -157,12 +162,12 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
     canvasExportAutoScale,
     exportCanvas,
     cancelTransfer,
-  } = usePinBoardController({ artworkId, active, settings });
-  /**
-   * 渲染器创建失败的常驻原因。素材板完全依赖 WebGPU，创建失败后画布不会再可用，
-   * 因此这条说明独立于 4.5 秒自动清除的 `status` 单独保存。
-   */
-  const [unavailable, setUnavailable] = useState<string | null>(null);
+  } = usePinBoardController({
+    artworkId,
+    active,
+    settings,
+    unavailable: unavailable !== null,
+  });
   /** 切到后台写回的画板改动（切换作品不再阻塞等待仓库写入，进度在这里可见）。 */
   const pendingSettle = usePendingSettle();
   const [sidebar, setSidebar] = useState(getSidebarVisible);
@@ -447,6 +452,7 @@ export function PinBoardModule({ artworkId, active, settings }: PinBoardModulePr
         selected={selected}
         exporting={interaction.exporting}
         transferBusy={transferBusy}
+        unavailable={unavailable !== null}
         onDismissCanvasMenu={() => setContextMenu(null)}
         onCreate={() => setLabelPrompt({ kind: "create" })}
         onSelect={(board) => void selectBoard(board)}

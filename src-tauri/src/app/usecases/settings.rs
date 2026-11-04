@@ -1,10 +1,23 @@
+use std::path::{Path, PathBuf};
+
 use crate::app::{
     command_runtime::{CommandContext, CommandError},
     settings::{
-        prepare_repository, repository_counts, snapshot, snapshot_without_repository,
-        validate_settings, AppSettings, SettingsSnapshot, CURRENT_SETTINGS_VERSION,
+        check_repository_target, prepare_repository, repository_counts, snapshot,
+        snapshot_without_repository, validate_settings, AppSettings, SettingsSnapshot,
+        CURRENT_SETTINGS_VERSION,
     },
 };
+use crate::library::{self, RepositoryPathState};
+
+/// 保存仓库路径前的只读探测。只报告五种目录状态，不创建目录、不初始化数据库。
+pub(crate) fn inspect_repository_path(path: &str) -> Result<RepositoryPathState, CommandError> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return Err(CommandError::invalid_input("作品仓库路径为空"));
+    }
+    library::inspect_path(Path::new(trimmed)).map_err(CommandError::from)
+}
 
 /// 设置保存与仓库切换的唯一业务入口。设置页、托盘暂停开关与窗口几何捕获都写同一
 /// 份 `SettingsService` 快照；这里只负责命令语义（校验、切仓库、刷新调度器），
@@ -12,6 +25,7 @@ use crate::app::{
 pub(crate) fn save(
     context: &CommandContext,
     settings: AppSettings,
+    allow_create: bool,
 ) -> Result<SettingsSnapshot, CommandError> {
     validate_settings(&settings).map_err(CommandError::from)?;
     if settings.version != CURRENT_SETTINGS_VERSION {
@@ -26,10 +40,11 @@ pub(crate) fn save(
         .map_err(CommandError::from)?
         .map(|path| path.to_string_lossy().into_owned())
         != Some(requested_repository.clone());
-    // 切换/首次配置时先保证目标目录存在再取 owner lock；否则锁库无处落盘，
-    // 而初始化本身也是写操作。
+    // 切换/首次配置时先保证目标目录存在再取 owner lock；否则锁库无处落盘。
+    // 取锁会写入目标根目录，所以先做只读预检：被拒绝的保存不在用户目录里留文件。
     let target_repository = if repository_changed && !requested_repository.is_empty() {
-        let path = std::path::PathBuf::from(&requested_repository);
+        let path = PathBuf::from(&requested_repository);
+        check_repository_target(&path, allow_create).map_err(CommandError::from)?;
         if !path.exists() {
             std::fs::create_dir_all(&path)
                 .map_err(|error| CommandError::from(format!("无法创建作品仓库目录：{error}")))?;
@@ -42,9 +57,12 @@ pub(crate) fn save(
     let next =
         context.run_repository_switch(target_repository.as_deref(), repository_changed, || {
             let current_repository = app_state.repository_path().map_err(CommandError::from)?;
-            let prepared_repository =
-                prepare_repository(current_repository.as_deref(), &requested_repository)
-                    .map_err(CommandError::from)?;
+            let prepared_repository = prepare_repository(
+                current_repository.as_deref(),
+                &requested_repository,
+                allow_create,
+            )
+            .map_err(CommandError::from)?;
             app_state
                 .settings()
                 .update(Some(expected_revision), |current| {
@@ -107,6 +125,79 @@ mod tests {
     use super::*;
 
     #[test]
+    fn saving_a_missing_repository_requires_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = directory.path().join("new-repository");
+        let state = AppState::new(
+            AppSettings::default(),
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+        let coordinator = OperationCoordinator::new(
+            state.clone(),
+            BackupState::default(),
+            Arc::new(NoopEventSink),
+        );
+        let mut next = AppSettings::default();
+        next.repository_path = repository.to_string_lossy().into_owned();
+
+        let rejected = coordinator.execute(OperationDomain::Settings, |context| {
+            save(context, next.clone(), false)
+        });
+        let error = match rejected {
+            Err(error) => String::from(error),
+            Ok(_) => panic!("missing repository must require confirmation"),
+        };
+        assert!(error.contains("确认新建仓库"), "{error}");
+        assert!(!repository.exists());
+        assert!(state.repository_path().unwrap().is_none());
+
+        coordinator
+            .execute(OperationDomain::Settings, |context| {
+                save(context, next, true)
+            })
+            .unwrap();
+        assert!(library::database_path(&repository).is_file());
+    }
+
+    #[test]
+    fn rejected_repository_saves_leave_the_target_directory_untouched() {
+        let directory = tempfile::tempdir().unwrap();
+        let empty = directory.path().join("empty");
+        let occupied = directory.path().join("occupied");
+        std::fs::create_dir(&empty).unwrap();
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("notes.txt"), b"not a repository").unwrap();
+
+        let state = AppState::new(
+            AppSettings::default(),
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+        let coordinator = OperationCoordinator::new(
+            state.clone(),
+            BackupState::default(),
+            Arc::new(NoopEventSink),
+        );
+
+        for target in [&empty, &occupied] {
+            let mut next = AppSettings::default();
+            next.repository_path = target.to_string_lossy().into_owned();
+            let rejected = coordinator.execute(OperationDomain::Settings, |context| {
+                save(context, next, false)
+            });
+            assert!(rejected.is_err(), "未确认新建时不得保存未就绪的目录");
+            // owner lock 会在目标根目录写锁库：被拒绝的保存不能在用户目录里留下任何文件。
+            let entries = std::fs::read_dir(target).unwrap().count();
+            let expected = if target == &occupied { 1 } else { 0 };
+            assert_eq!(entries, expected, "{}", target.display());
+        }
+        assert!(state.repository_path().unwrap().is_none());
+    }
+
+    #[test]
     fn repository_switch_waits_for_an_active_repository_lease() {
         let directory = tempfile::tempdir().unwrap();
         let first = directory.path().join("first");
@@ -147,8 +238,9 @@ mod tests {
         let switching = coordinator.clone();
         let (done_tx, done_rx) = mpsc::channel();
         let switch_thread = thread::spawn(move || {
-            let result =
-                switching.execute(OperationDomain::Settings, |context| save(context, next));
+            let result = switching.execute(OperationDomain::Settings, |context| {
+                save(context, next, false)
+            });
             done_tx.send(result).unwrap();
         });
 

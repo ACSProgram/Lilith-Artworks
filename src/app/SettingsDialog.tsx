@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { LoaderCircle, Settings, Trash2, X } from "lucide-react";
+import { FolderPlus, LoaderCircle, Settings, Trash2, X } from "lucide-react";
 import { appApi } from "./api";
 import { useAppRuntime } from "./appRuntimeContext";
 import { useNotice } from "./noticeContext";
@@ -174,6 +174,25 @@ export function SettingsDialog() {
           </footer>
         </section>
       </div>
+
+      {settings.repositoryCreatePrompt && (
+        <ConfirmDialog
+          view={{
+            icon: <FolderPlus size={20} />,
+            eyebrow: "仓库位置",
+            title: "新建作品仓库",
+            subject: settings.repositoryCreatePrompt.path,
+            description: settings.repositoryCreatePrompt.state === "missing"
+              ? "目录不存在，保存后会在该路径新建一个作品仓库。"
+              : "目录为空，保存后会把该目录用作新的作品仓库。",
+            detail: "只会创建 Lilith Artworks 数据库与 artworks、temp 目录；如果路径输错，这里会留下一个空仓库。",
+            action: "新建并保存",
+          }}
+          busy={busy}
+          onCancel={settings.cancelRepositoryCreate}
+          onConfirm={() => void settings.confirmRepositoryCreate()}
+        />
+      )}
 
       {scanConfirmOpen && scanCandidates && scanCandidates.length > 0 && (
         <ConfirmDialog

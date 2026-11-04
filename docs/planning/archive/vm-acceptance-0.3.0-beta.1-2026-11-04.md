@@ -123,5 +123,5 @@ DDS/TGA 样本；正式签名安装包/SmartScreen；干净用户会话下的首
 ## 9. 发现的问题
 
 1 个中等级 + 7 个低等级，逐条定位、决策与两批修复安排见
-`../0.3-vm-acceptance-fixes-plan-2026-11-04.md`；摘要与未复现项见
-`handoff-log-2026-11-04.md` 第 6 节。
+`0.3-vm-acceptance-fixes-plan-2026-11-04.md`；摘要与未复现项见
+`handoff-log-2026-11-04.md` 第 6 节，修复实施记录见同文第 7 节。

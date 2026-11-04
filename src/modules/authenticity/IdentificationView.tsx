@@ -61,7 +61,7 @@ export function IdentificationView({ onError, onNavigateRecord }: Identification
         onDragLeave={onDragLeave}
         onDrop={onDrop}
       >
-        {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>点击选择，或把图片拖到这里。C2PA 会始终读取；TrustMark 可识别整图或框选区域。</span></button> : <>
+        {!preview ? <button className="image-empty" type="button" onClick={() => void choose()}><ScanSearch size={28} /><strong>选择待识别图片</strong><span>点击选择，或把图片拖到这里。C2PA 会始终读取；TrustMark 对框选区域更可靠，整图可能检不出小区域水印。</span></button> : <>
           <header><div><strong>{fileName(path)}</strong><span>{preview.width} x {preview.height}</span></div><button className="text-button" type="button" onClick={() => void choose()}>更换图片</button></header>
           <RegionEditor target="decode" preview={preview} regions={region ? [region] : []} maxRegions={1} onChange={(regions) => setRegion(regions[0] ?? null)} loupe={{ sourceKey: path, request: previewLoupe }} />
           <div className="decode-scope"><Fingerprint size={17} /><span>{region ? "识别框选区域" : "识别整张图片"}</span>{region && <button className="icon-button" type="button" title="取消区域并识别整图" onClick={() => setRegion(null)}><X size={15} /></button>}</div>

@@ -24,6 +24,13 @@ describe("IdentificationView", () => {
     vi.unstubAllGlobals();
   });
 
+  it("states the whole-image TrustMark limitation", () => {
+    render(<IdentificationView onError={vi.fn()} onNavigateRecord={vi.fn()} />);
+
+    expect(screen.getByText(/C2PA 会始终读取；TrustMark 对框选区域更可靠，整图可能检不出小区域水印。/))
+      .toBeTruthy();
+  });
+
   it("imports an image dropped onto the identify preview", async () => {
     api.stageDroppedImage.mockResolvedValue("C:/tmp/staged.png");
     api.previewExternal.mockResolvedValue(previewImage);

@@ -12,7 +12,7 @@ pub(crate) use model::CreatedArtwork;
 pub(crate) use model::LibraryNode;
 pub(crate) use model::{
     CreateArtworkRequest, LibrarySearchResult, LibraryTrashEntry, LibraryTree,
-    MoveLibraryNodesRequest, RepositoryStatus,
+    MoveLibraryNodesRequest, RepositoryPathState, RepositoryStatus,
 };
 /// 不带列表返回的创建入口：无头入口与 GUI use-case 共用同一实现。
 #[cfg(any(test, feature = "headless"))]
@@ -20,8 +20,8 @@ pub(crate) use repository::create_artwork;
 /// GUI 与 headless 共享的 use-case 入口。命令适配器只保留 Tauri 类型与错误映射。
 pub(crate) use repository::{
     check_existing, create_artwork_and_list, create_group, database_path, empty_trash, initialize,
-    list_trash, list_tree, move_nodes, open_existing, permanently_delete_trash, rename_node,
-    restore_trash, search, trash_nodes,
+    inspect_path, list_trash, list_tree, move_nodes, open_existing, permanently_delete_trash,
+    rename_node, restore_trash, search, trash_nodes,
 };
 #[cfg(test)]
 pub(crate) use schema::take_integrity_check_count;

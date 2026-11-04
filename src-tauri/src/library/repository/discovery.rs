@@ -12,7 +12,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 
 use crate::{platform::path::display_path, storage};
 
-use super::super::schema;
+use super::super::{schema, RepositoryPathState};
 
 pub(crate) fn database_path(root: &Path) -> PathBuf {
     storage::database_path(root)
@@ -68,6 +68,72 @@ pub(crate) fn check_existing(root: &Path) -> Result<(), String> {
     require_database_file(&database)?;
     let connection = storage::open(root)?;
     schema::validate_current(&connection)
+}
+
+/// 保存新仓库路径前的只读探测：不创建目录，不改名备用库，也不触碰 schema。
+pub(crate) fn inspect_path(root: &Path) -> Result<RepositoryPathState, String> {
+    validate_repository_root(root)?;
+    let metadata = match fs::metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RepositoryPathState::Missing);
+        }
+        Err(error) => return Err(format!("无法读取作品仓库路径：{error}")),
+    };
+    if !metadata.is_dir() {
+        return Ok(RepositoryPathState::NotDirectory);
+    }
+    if has_repository_database(root)? {
+        return Ok(RepositoryPathState::Repository);
+    }
+    for entry in fs::read_dir(root).map_err(|error| format!("无法读取作品仓库目录项：{error}"))?
+    {
+        let path = entry
+            .map_err(|error| format!("无法读取作品仓库目录项：{error}"))?
+            .path();
+        if !is_runtime_artifact(root, &path) {
+            return Ok(RepositoryPathState::NonRepositoryDirectory);
+        }
+    }
+    Ok(RepositoryPathState::EmptyDirectory)
+}
+
+/// 标准文件名或任意备用文件名下是否已有一个可识别的作品数据库。只读打开，
+/// 不执行 WAL 合并与改名——那些属于真正的打开流程。
+fn has_repository_database(root: &Path) -> Result<bool, String> {
+    let preferred = database_path(root);
+    if preferred.is_file() && is_repository_database(&preferred) {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(root).map_err(|error| format!("无法读取作品仓库目录项：{error}"))?
+    {
+        let path = entry
+            .map_err(|error| format!("无法读取作品仓库目录项：{error}"))?
+            .path();
+        if path == preferred || is_runtime_artifact(root, &path) {
+            continue;
+        }
+        if path.extension().and_then(|value| value.to_str()) == Some("sqlite3")
+            && is_repository_database(&path)
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn is_repository_database(path: &Path) -> bool {
+    let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
+        return false;
+    };
+    let format = connection
+        .query_row(
+            "SELECT value FROM repository_meta WHERE key = 'format'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional();
+    matches!(format, Ok(Some(format)) if format == schema::REPOSITORY_FORMAT)
 }
 
 fn validate_existing_root(root: &Path) -> Result<(), String> {
@@ -402,6 +468,80 @@ mod tests {
             .unwrap();
         drop(connection);
         open_existing(&fixture.root).unwrap();
+    }
+
+    #[test]
+    fn inspects_repository_path_states_without_creating_anything() {
+        let directory = tempfile::tempdir().unwrap();
+
+        let missing = directory.path().join("missing");
+        assert_eq!(
+            inspect_path(&missing).unwrap(),
+            RepositoryPathState::Missing
+        );
+        assert!(!missing.exists());
+
+        let file = directory.path().join("file.txt");
+        fs::write(&file, b"not a directory").unwrap();
+        assert_eq!(
+            inspect_path(&file).unwrap(),
+            RepositoryPathState::NotDirectory
+        );
+
+        let empty = directory.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        assert_eq!(
+            inspect_path(&empty).unwrap(),
+            RepositoryPathState::EmptyDirectory
+        );
+        assert!(!database_path(&empty).exists());
+
+        let occupied = directory.path().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("notes.txt"), b"not a repository").unwrap();
+        assert_eq!(
+            inspect_path(&occupied).unwrap(),
+            RepositoryPathState::NonRepositoryDirectory
+        );
+
+        let repository = directory.path().join("repository");
+        initialize(&repository).unwrap();
+        assert_eq!(
+            inspect_path(&repository).unwrap(),
+            RepositoryPathState::Repository
+        );
+    }
+
+    #[test]
+    fn inspection_recognizes_a_migratable_alternate_database_name() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        initialize(&root).unwrap();
+        fs::rename(database_path(&root), root.join("legacy.sqlite3")).unwrap();
+
+        assert_eq!(
+            inspect_path(&root).unwrap(),
+            RepositoryPathState::Repository
+        );
+        // 探测本身不做改名。
+        assert!(!database_path(&root).exists());
+        assert!(root.join("legacy.sqlite3").is_file());
+    }
+
+    #[test]
+    fn inspection_ignores_runtime_lock_artifacts_when_checking_emptiness() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        fs::create_dir(&root).unwrap();
+        let guard =
+            crate::repository_lock::RepositoryOwnerLock::acquire(&root, "gui", "settings:inspect")
+                .unwrap();
+
+        assert_eq!(
+            inspect_path(&root).unwrap(),
+            RepositoryPathState::EmptyDirectory
+        );
+        drop(guard);
     }
 
     #[test]

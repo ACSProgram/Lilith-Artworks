@@ -117,7 +117,7 @@ format / pin_board / authenticity / concurrency / input）。脚本按设计提�
 ### 6.3 发现的问题
 
 1 个中等级 + 7 个低等级（其中 1 条未复现），逐条定位、决策与两批修复安排见
-`../0.3-vm-acceptance-fixes-plan-2026-11-04.md`。摘要：
+`0.3-vm-acceptance-fixes-plan-2026-11-04.md`。摘要：
 
 - 中：异常中断后 `artworks/*/temp` 的 `.tmp*` 不会在启动时自动清理；垃圾扫描能发现，但需用户确认。
 - 低：设置路径不存在会直接建空库；素材板不可用时仍能新建空画板；手动提交失败被显示为「备份失败，
@@ -126,3 +126,44 @@ format / pin_board / authenticity / concurrency / input）。脚本按设计提�
   验收基线改为 945。
 - 未复现：报告提到的「识别页残留发布页区域 1 叠加层」；证据截图无该叠加层，识别页使用「识别框选
   区域」标签并在切页时重新挂载，暂不修复，保留复现步骤。
+
+## 7. 虚拟机验收问题的两批修复
+
+两批按 `0.3-vm-acceptance-fixes-plan-2026-11-04.md` 落地，逐条定位与决策见该计划 §2、§7。
+
+### 7.1 批 1：历史与备份的清理/失败语义（提交 `6907be0`）
+
+- 作品 `temp` 自动清扫：`cleanup` 增加 `artworks/*/temp/` 顶层过期 `.tmp*`（30 分钟宽限期）的
+  清扫，`AppState` 在首次校验成功一个仓库与每次切换仓库后各触发一次；垃圾扫描仍负责非 `.tmp*`
+  孤儿与需要用户确认的条目。
+- 手动提交失败改为提交区内联提示：`usecases::backup::commit` 不再写 `branches.last_error`，
+  `BranchFailure::Manual` 变体删除；历史页用 `useHistoryController.commitError` 在提交按钮旁
+  渲染失败，成功提交、切换分支与卸载时清空。
+
+### 7.2 批 2：设置与界面状态
+
+- 仓库路径保存前确认新建：新增只读命令 `inspect_repository_path`，`save_app_settings` 增加
+  `allow_create`；设置页在路径变化时先探测五种状态，`missing` / `empty_directory` 走共享
+  `ConfirmDialog`，`not_directory` / `non_repository_directory` 只报错、不写设置。
+- 素材板不可用时禁用新建：侧栏标题栏按钮与列表右键菜单「新建画板」按 `unavailable` 禁用，
+  控制器 `createBoard` 同条件拒绝，空状态不再指向不可用入口。
+- 删除发布记录清空成功横幅：只在删除的记录正是当前横幅对应记录时清 `result`、`publishMetrics`
+  与待发布水印 ID。
+- 识别页空状态与模块文档改为「TrustMark 对框选区域更可靠，整图可能检不出小区域水印」。
+- §4.5 的 945 验收基线只改口径，不动 `minWidth` 与布局。
+
+### 7.3 收尾审查修正
+
+批 2 的原始实现在报错前已经往目标目录写下 owner lock 的锁库：取锁发生在仓库状态检查之前，
+所以「空目录或非仓库目录 + 未确认新建」的保存在拒绝用户时也污染了那个目录。收尾审查把只读探测
+提到取锁之前（`check_repository_target`，切换闭包内复检一次覆盖外部改动），错误文案只保留一份；
+新增回归测试 `rejected_repository_saves_leave_the_target_directory_untouched`，去掉预检时它在
+空目录上失败（多出 `.lilith-write-lock.sqlite3`）。
+
+### 7.4 验证与遗留
+
+`cargo test --lib -- settings::` 26 项通过，`cargo check --lib` 无告警；相关前端 34 个测试文件
+349 项通过，`npx tsc --noEmit` 无错误。压力分组与 `npm run ci:local` 未运行，按
+`docs/guides/validation.md` 留到发布前。候选构建上的人工复验未做，验收项在 `../todo.md` 的
+「0.3 收尾人工复验」；两批修复不再有执行中的计划，`0.3-vm-acceptance-fixes-plan-2026-11-04.md`
+随本批次归档。

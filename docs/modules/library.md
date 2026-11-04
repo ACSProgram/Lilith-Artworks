@@ -32,7 +32,9 @@
 
 ## 仓库打开与初始化
 
-- 只有从未配置仓库或把仓库设置改到另一个路径并保存时，应用才允许在空目录中初始化新数据库。
+- 保存新仓库路径前，设置页先调用只读命令 `inspect_repository_path(path)` 探测五种状态：`missing`、`not_directory`、`empty_directory`、`repository`（含可迁移的旧文件名数据库）与 `non_repository_directory`。探测不创建目录、不改名备用库，也不初始化 schema。
+- `missing` 与 `empty_directory` 需要用户在共享 `ConfirmDialog` 中确认新建，确认后以 `allow_create: true` 保存；`not_directory` 与 `non_repository_directory` 直接报错且不写设置；`repository` 照常保存并沿用现有旧库发现与改名流程。
+- `save_app_settings(settings, allow_create)` 的 `allow_create` 是新建许可：为假时只打开既有仓库，缺失目录与空目录都返回可读错误，不会静默建库；为真时才允许初始化不存在的目录或空目录。`initialize` 本身仍拒绝非空且不含可识别数据库的目录，因此确认新建不能把普通目录变成仓库。保存路径在取跨进程 owner lock 之前先跑同一遍只读探测（`check_repository_target`），切换闭包内复检一次以覆盖探测与取锁之间的外部改动；被拒绝的保存不会在用户选中的目录里留下锁库等运行时文件。
 - 已配置路径的状态查询、Library/历史/认证命令、清理重试和后台调度都通过应用状态的统一仓库就绪入口，只打开现有数据库，不具备隐式创建能力。
 - 如果已配置目录不存在、被外部清空或缺少 `lilith-artworks.sqlite3`，仓库状态返回不可用并保留目录原状；用户需要重新选择新仓库，或先把数据库从备份恢复到原目录。
 - 共享 `storage::open` 使用不带 `CREATE` 的 SQLite `READ_WRITE` 打开标志；缺少数据库时直接失败，不生成无 schema 的占位文件。显式初始化负责新 schema 和受控目录创建。

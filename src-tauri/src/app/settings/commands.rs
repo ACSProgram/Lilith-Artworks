@@ -11,6 +11,7 @@ use tauri::{AppHandle, Manager, State};
 use crate::app::{command_runtime::OperationDomain, usecases, OperationCoordinator};
 use crate::authenticity::preview_session_id;
 use crate::backup::BackupState;
+use crate::library::RepositoryPathState;
 use crate::platform::{
     path::ensure_not_device_path,
     shell::{open_directory, open_existing_directory, reveal_in_file_manager},
@@ -19,6 +20,13 @@ use crate::{cleanup, library};
 
 use super::model::AppSettings;
 use super::state::{AppState, SettingsSnapshot};
+
+/// 保存仓库路径前的只读探测：`missing` / `not_directory` / `empty_directory` /
+/// `repository` / `non_repository_directory`。不创建目录，也不初始化数据库。
+#[tauri::command]
+pub(crate) fn inspect_repository_path(path: String) -> Result<RepositoryPathState, String> {
+    usecases::settings::inspect_repository_path(&path).map_err(String::from)
+}
 
 #[tauri::command]
 pub(crate) async fn get_app_settings(
@@ -83,11 +91,12 @@ pub(crate) async fn save_app_settings(
     app: AppHandle,
     coordinator: State<'_, OperationCoordinator>,
     settings: AppSettings,
+    allow_create: bool,
 ) -> Result<SettingsSnapshot, String> {
     let coordinator = coordinator.inner().clone();
     let next = coordinator
         .spawn(OperationDomain::Settings, move |context| {
-            usecases::settings::save(context, settings)
+            usecases::settings::save(context, settings, allow_create)
         })
         .await
         .map_err(String::from)?;
@@ -95,9 +104,33 @@ pub(crate) async fn save_app_settings(
     Ok(next)
 }
 
+/// 只读预检：这次保存能不能落到目标目录。
+///
+/// `allow_create` 为假时只接受已有仓库；为真时额外接受不存在的目录与空目录。取跨进程
+/// owner lock 会往目标根目录写锁库，因此保存路径必须在取锁前先跑这一遍，否则被拒绝
+/// 的保存会在用户选中的目录里留下 `.lilith-write-lock*`。
+pub(crate) fn check_repository_target(root: &Path, allow_create: bool) -> Result<(), String> {
+    match library::inspect_path(root)? {
+        RepositoryPathState::Repository => Ok(()),
+        RepositoryPathState::Missing if allow_create => Ok(()),
+        RepositoryPathState::EmptyDirectory if allow_create => Ok(()),
+        RepositoryPathState::Missing => {
+            Err("所选作品仓库目录不存在；请确认新建仓库后再保存".into())
+        }
+        RepositoryPathState::EmptyDirectory => {
+            Err("所选作品仓库目录为空；请确认新建仓库后再保存".into())
+        }
+        RepositoryPathState::NotDirectory => Err("所选作品仓库路径不是目录".into()),
+        RepositoryPathState::NonRepositoryDirectory => {
+            Err("所选目录非空，且不是 Lilith Artworks 作品仓库；请选择空目录或已有仓库".into())
+        }
+    }
+}
+
 pub(crate) fn prepare_repository(
     current_repository: Option<&Path>,
     requested: &str,
+    allow_create: bool,
 ) -> Result<Option<PathBuf>, String> {
     if requested.is_empty() {
         return Ok(None);
@@ -105,8 +138,15 @@ pub(crate) fn prepare_repository(
     let root = Path::new(requested);
     if current_repository == Some(root) {
         library::open_existing(root)?;
-    } else {
+    } else if allow_create {
+        // 已确认新建：只允许不存在的目录或空目录；`initialize` 仍会拒绝
+        // 非空非仓库目录，并允许可识别的旧库走迁移。
         library::initialize(root)?;
+    } else {
+        // 未确认时只打开既有仓库，绝不初始化。这里重跑一遍预检，因为预检与取锁之间
+        // 目录状态可能被外部改动。
+        check_repository_target(root, false)?;
+        library::open_existing(root)?;
     }
     sweep_stale_repository_temp(root);
     Ok(Some(root.to_path_buf()))
@@ -153,14 +193,59 @@ mod tests {
         let missing_existing = directory.path().join("missing-existing");
         fs::create_dir(&missing_existing).unwrap();
 
-        assert!(
-            prepare_repository(Some(&missing_existing), &missing_existing.to_string_lossy())
-                .is_err()
-        );
+        assert!(prepare_repository(
+            Some(&missing_existing),
+            &missing_existing.to_string_lossy(),
+            false
+        )
+        .is_err());
         assert!(!crate::storage::database_path(&missing_existing).exists());
 
         let new_repository = directory.path().join("new-repository");
-        prepare_repository(None, &new_repository.to_string_lossy()).unwrap();
+        prepare_repository(None, &new_repository.to_string_lossy(), true).unwrap();
         assert!(crate::storage::database_path(&new_repository).is_file());
+    }
+
+    #[test]
+    fn repository_save_refuses_creation_until_confirmed() {
+        let directory = tempfile::tempdir().unwrap();
+        let missing = directory.path().join("missing");
+        let error = prepare_repository(None, &missing.to_string_lossy(), false).unwrap_err();
+        assert!(error.contains("确认新建仓库"), "{error}");
+        assert!(!missing.exists());
+
+        let empty = directory.path().join("empty");
+        fs::create_dir(&empty).unwrap();
+        let error = prepare_repository(None, &empty.to_string_lossy(), false).unwrap_err();
+        assert!(error.contains("确认新建仓库"), "{error}");
+        assert!(!crate::storage::database_path(&empty).exists());
+
+        prepare_repository(None, &empty.to_string_lossy(), true).unwrap();
+        assert!(crate::storage::database_path(&empty).is_file());
+    }
+
+    #[test]
+    fn repository_save_rejects_a_non_repository_directory_with_or_without_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let occupied = directory.path().join("occupied");
+        fs::create_dir(&occupied).unwrap();
+        fs::write(occupied.join("notes.txt"), b"not a repository").unwrap();
+
+        for allow_create in [false, true] {
+            let error =
+                prepare_repository(None, &occupied.to_string_lossy(), allow_create).unwrap_err();
+            assert!(error.contains("Lilith Artworks"), "{error}");
+            assert!(!crate::storage::database_path(&occupied).exists());
+        }
+    }
+
+    #[test]
+    fn repository_save_opens_an_existing_repository_without_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let existing = directory.path().join("existing");
+        library::initialize(&existing).unwrap();
+
+        prepare_repository(None, &existing.to_string_lossy(), false).unwrap();
+        assert!(crate::storage::database_path(&existing).is_file());
     }
 }

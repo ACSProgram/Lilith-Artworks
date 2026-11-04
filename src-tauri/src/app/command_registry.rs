@@ -19,6 +19,7 @@ pub(crate) fn handler() -> impl Fn(Invoke<Wry>) -> bool + Send + Sync + 'static 
         // 设置与文件清理
         crate::app::settings::commands::get_app_settings,
         crate::app::settings::commands::save_app_settings,
+        crate::app::settings::commands::inspect_repository_path,
         crate::app::settings::commands::open_log_directory,
         crate::app::settings::commands::open_legal_directory,
         crate::app::settings::commands::open_settings_directory,

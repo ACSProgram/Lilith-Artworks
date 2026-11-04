@@ -10,7 +10,9 @@ mod service;
 mod state;
 mod window;
 
-pub(crate) use commands::{prepare_repository, set_automatic_backups_paused};
+pub(crate) use commands::{
+    check_repository_target, prepare_repository, set_automatic_backups_paused,
+};
 pub(crate) use model::{load_settings, validate_settings, AppSettings, CURRENT_SETTINGS_VERSION};
 pub(crate) use state::{
     repository_counts, snapshot, snapshot_without_repository, AppState, SettingsSnapshot,

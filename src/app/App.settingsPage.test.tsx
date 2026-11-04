@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import packageInfo from "../../package.json";
 import { deferred, settings, tree } from "./repositoryTestSupport";
@@ -6,6 +6,7 @@ import { deferred, settings, tree } from "./repositoryTestSupport";
 const appApi = vi.hoisted(() => ({
   getSettings: vi.fn(),
   saveSettings: vi.fn(),
+  inspectRepositoryPath: vi.fn(),
   getRepositoryStatus: vi.fn(),
   listPendingFileCleanup: vi.fn(),
   retryFileCleanup: vi.fn(),
@@ -81,6 +82,7 @@ describe("App settings and repository page", () => {
     localStorage.clear();
     vi.clearAllMocks();
     pinBoardLifecycle.preparePinBoardRuntimeChange.mockResolvedValue(undefined);
+    appApi.inspectRepositoryPath.mockResolvedValue("repository");
     appApi.listPendingFileCleanup.mockResolvedValue([]);
     appApi.retryFileCleanup.mockResolvedValue({ failures: [] });
     appApi.acknowledgeBackupDisableNotices.mockResolvedValue(undefined);
@@ -334,6 +336,109 @@ describe("App settings and repository page", () => {
     });
     await waitFor(() => expect(appApi.saveSettings).toHaveBeenCalledWith(
       expect.objectContaining({ repositoryPath: repositoryB }),
+      false,
+    ));
+  });
+
+  it("asks before creating a repository at a missing path", async () => {
+    const repositoryA = "C:\\repositories\\A";
+    const repositoryB = "C:\\repositories\\missing";
+    appApi.getSettings.mockResolvedValue(settings(repositoryA));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryA,
+      databasePath: `${repositoryA}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.inspectRepositoryPath.mockResolvedValue("missing");
+    appApi.saveSettings.mockResolvedValue(settings(repositoryB));
+    libraryApi.listTree.mockResolvedValue(tree("Repository A artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository A artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: repositoryB } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByRole("alertdialog", { name: "新建作品仓库" })).toBeTruthy();
+    expect(screen.getByText("目录不存在，保存后会在该路径新建一个作品仓库。")).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(within(screen.getByRole("alertdialog", { name: "新建作品仓库" }))
+      .getByRole("button", { name: "取消" }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).toBeNull());
+    expect(screen.getByRole("dialog", { name: "设置" })).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    fireEvent.click(await screen.findByRole("button", { name: "新建并保存" }));
+    await waitFor(() => expect(appApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ repositoryPath: repositoryB }),
+      true,
+    ));
+  });
+
+  it("rejects a path that is not a repository directory without creating anything", async () => {
+    const repositoryA = "C:\\repositories\\A";
+    const occupied = "C:\\repositories\\occupied";
+    appApi.getSettings.mockResolvedValue(settings(repositoryA));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryA,
+      databasePath: `${repositoryA}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    libraryApi.listTree.mockResolvedValue(tree("Repository A artwork", "C:\\work\\A.psd"));
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository A artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: occupied } });
+
+    appApi.inspectRepositoryPath.mockResolvedValue("non_repository_directory");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByText(
+      "所选目录非空，且不是 Lilith Artworks 作品仓库；请选择空目录或已有仓库。",
+    )).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+
+    appApi.inspectRepositoryPath.mockResolvedValue("not_directory");
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    expect(await screen.findByText("所选作品仓库路径不是目录。")).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+  });
+
+  it("treats an empty directory as a new repository after confirmation", async () => {
+    const repositoryA = "C:\\repositories\\A";
+    const empty = "C:\\repositories\\empty";
+    appApi.getSettings.mockResolvedValue(settings(repositoryA));
+    appApi.getRepositoryStatus.mockResolvedValue({
+      configured: true,
+      ready: true,
+      rootPath: repositoryA,
+      databasePath: `${repositoryA}\\lilith-artworks.sqlite3`,
+      error: null,
+    });
+    appApi.inspectRepositoryPath.mockResolvedValue("empty_directory");
+    appApi.saveSettings.mockResolvedValue(settings(empty));
+    libraryApi.listTree.mockResolvedValue(tree("Repository A artwork", "C:\\work\\A.psd"));
+
+    render(<App />);
+    await screen.findByRole("treeitem", { name: /Repository A artwork/ });
+    fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
+    fireEvent.click(await screen.findByRole("button", { name: "仓储" }));
+    fireEvent.change(await screen.findByLabelText("作品仓库路径"), { target: { value: empty } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("目录为空，保存后会把该目录用作新的作品仓库。")).toBeTruthy();
+    expect(appApi.saveSettings).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "新建并保存" }));
+    await waitFor(() => expect(appApi.saveSettings).toHaveBeenCalledWith(
+      expect.objectContaining({ repositoryPath: empty }),
+      true,
     ));
   });
 

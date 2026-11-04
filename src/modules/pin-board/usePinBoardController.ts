@@ -28,6 +28,8 @@ export interface PinBoardControllerOptions {
   artworkId: string;
   active: boolean;
   settings: PinBoardModuleSettings;
+  /** 渲染器不可用：新建画板在控制器这一层也拒绝，防止按钮之外的入口绕过禁用状态。 */
+  unavailable: boolean;
 }
 
 export interface PinBoardController {
@@ -93,6 +95,7 @@ export function usePinBoardController({
   artworkId,
   active,
   settings,
+  unavailable,
 }: PinBoardControllerOptions): PinBoardController {
   const [boards, setBoards] = useState<PinBoardSummary[] | null>(null);
   const [trash, setTrash] = useState<PinBoardSummary[]>([]);
@@ -303,6 +306,7 @@ export function usePinBoardController({
   }, [artworkId, boards, transfers.isTransferBusy]);
 
   const createBoard = useCallback(async (name: string) => {
+    if (unavailable) return;
     const trimmed = name.trim();
     if (!trimmed) return;
     try {
@@ -322,7 +326,7 @@ export function usePinBoardController({
     } catch (error) {
       setStatus(errorMessage(error));
     }
-  }, [artworkId, selected]);
+  }, [artworkId, selected, unavailable]);
 
   const renameBoard = useCallback(async (boardId: number, name: string) => {
     const trimmed = name.trim();

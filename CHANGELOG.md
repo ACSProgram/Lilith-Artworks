@@ -15,6 +15,12 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Changed
+
+- The identification empty state now says TrustMark is more reliable on a
+  selected region and that whole-image decoding may miss small watermarks,
+  matching the module documentation.
+
 ### Fixed
 
 - Crash residue in each artwork's `temp/` directory is swept automatically when
@@ -25,6 +31,16 @@ entries for the reader; they are not a template every entry has to fill.
   global error banner. It no longer writes the branch's automatic-backup error
   or promises a retry, so a read-only repository or a full disk no longer paints
   the branch status as a scheduled backup failure.
+- Saving a repository path now inspects the target first. A missing directory or
+  an empty directory asks for confirmation before a new repository is created,
+  a directory that is not a Lilith Artworks repository is rejected instead of
+  being silently initialized, and `save_app_settings` refuses to create anything
+  without that confirmation. A refused save leaves the chosen directory
+  untouched, including the runtime lock database.
+- The pin board's new-board entry and its list menu item stay disabled while the
+  renderer cannot start, and the empty list no longer points at that entry.
+- Deleting the certification record shown by the publish success banner clears
+  the banner, its metrics and the pending watermark ID.
 
 ## 0.3.0-beta.2 - 2026-11-04
 
