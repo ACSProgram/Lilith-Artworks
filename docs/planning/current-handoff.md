@@ -10,7 +10,7 @@
 
 0.3 的产品工作已收口，当前处于「人工验收补测 + 正式版收尾」。`0.3.0-beta.1` 虚拟机验收发现的
 1 个中等级 + 7 个低等级问题都已处理并落在 `dev`，逐条结论与实施记录见
-`archive/0.3-vm-acceptance-fixes-plan-2026-11-04.md` 与 `archive/handoff-log-2026-11-04.md`
+`archive/plans/2026-11-04-0.3-vm-acceptance-fixes.md` 与 `archive/handoff/2026-11-04.md`
 第 6–7 节；未复现的「识别页区域叠加层」保留复现步骤，等下一次复验再决定是否重开。
 
 剩余工作只有两类：需要在候选构建上人工复验的项（`todo.md` 的「0.3 收尾人工复验」），以及
@@ -38,7 +38,7 @@
 - repository schema v6（v4 → v5 随 alpha3 落地，v5 → v6 随 alpha5 落地）；ChunkFile 仓库可混存
   v1/v2，新节点默认写 v2（设置页可回退到 v1）。0.3 共有两次迁移，高于当前版本的仓库由旧程序
   直接拒绝。
-- 0.3 基线（一次性采集）已归档到 `archive/0.3-baseline-2026-10-18.md`；该文档现为
+- 0.3 基线（一次性采集）已归档到 `archive/records/2026-10-18-0.3-baseline.md`；该文档现为
   0.2 → 0.3.0-beta.1 的对比报告。长期回归对照用 `stress_bench`，其 release 条目已随
   2026-10-25 的全量压力测试同轮刷新。
 - 运行要求：Windows + WebView2；素材板另需支持 WebGPU 与 BC7 纹理压缩的图形适配器（见

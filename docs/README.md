@@ -37,11 +37,12 @@
 - [可移植性规范](guides/platform.md)：平台分支唯一入口 `src-tauri/src/platform/`、例外登记表与「加平台清单」。
 - [发行政策](guides/release-policy.md)：滞后版本号、`Unreleased` 暂存段、发布门槛与产物。
 - [日志与诊断规范](guides/logging.md)：日志分档、新增日志的取舍与格式约定。
-- [0.2 基线对比报告](planning/archive/0.3-baseline-2026-10-18.md)：0.2 → 0.3.0-beta.1
+- [0.2 基线对比报告](planning/archive/records/2026-10-18-0.3-baseline.md)：0.2 → 0.3.0-beta.1
   的同机实测对照，覆盖锁等待、任务耗时、取消延迟、深链恢复、调度扫描、清理查询与灾备 I/O；
   `stress_baseline` 组已退役，长期回归对照用 `stress_bench`。
 - [规划归档](planning/archive/README.md)：已完成或被替代的规划、批次记录与人工验收结论，不再作为
-  执行依据。0.3 的计划正文、逐批记录与各批验收结论都在其中；仍未完成的验收与补强项只在
+  执行依据；按 `handoff` / `plans` / `reviews` / `records` 四类分目录，索引与命名约定见该目录的
+  `README.md`。0.3 的计划正文、逐批记录与各批验收结论都在其中；仍未完成的验收与补强项只在
   `planning/todo.md`。
 
 ## 目录分工
@@ -52,5 +53,6 @@
 - `planning/current-handoff.md`：当前批次状态与当前基线，只写"现在"。
 - `planning/todo.md`：未完成、未验证或待决策事项的唯一清单。
 - `planning/archive/`：已完成或被替代的规划、批次记录与人工验收结论，即"历史增量"的唯一归属；
-  某批次或某项验收通过并归档后，其记录从 `current-handoff.md` 与 `todo.md` 同步删除，不在表层
-  留下"已通过"的痕迹。
+  按性质分为 `handoff/`（每日与批次日志）、`plans/`（计划与实施记录）、`reviews/`（审阅与审计）、
+  `records/`（基线与验收记录）四类，文件名统一为 `YYYY-MM-DD-<主题>.md`。某批次或某项验收通过
+  并归档后，其记录从 `current-handoff.md` 与 `todo.md` 同步删除，不在表层留下"已通过"的痕迹。

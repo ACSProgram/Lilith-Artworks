@@ -93,7 +93,7 @@ DDS 损坏与损坏后内容变化再提交 R7）、`stress_format` ChunkFile �
   ——前两组依赖大量磁盘与时间，`stress_bench` 是性能基准，
   数值需要人工解读（见其文件头与本节的环境变量）。
 - **`stress_baseline` 已于 2026-10-21 退役删除**：它是 0.3 阶段 0 的一次性采集，不是长期门槛；
-  历史数值归档在 `docs/planning/archive/0.3-baseline-2026-10-18.md`，长期回归对照用 `stress_bench`。
+  历史数值归档在 `docs/planning/archive/records/2026-10-18-0.3-baseline.md`，长期回归对照用 `stress_bench`。
 - **日常开发只在改动范围内运行轻量检查**：`npm test`、`npx tsc --noEmit`（前端改动时）、
   `cargo fmt --check`、`cargo check`、`cargo test --lib`、`git diff --check`。CI 已覆盖的九组
   不必在本地反复跑；**其余分组不要顺手运行**——即使到了收尾、整理、提交前的阶段也一样。

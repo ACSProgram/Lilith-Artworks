@@ -9,7 +9,7 @@
 - 素材板、画板画布、图片导入导出或画板回收站：先读 `docs/modules/pin-board.md`，再进入 `src/modules/pin-board/` 或 `src-tauri/src/pin_board/`。
 - 发布、成品、C2PA、TrustMark 或识别：先读 `docs/modules/authenticity.md`，再进入 `src/modules/authenticity/` 或 `src-tauri/src/authenticity/`。
 - 设置、窗口、托盘和应用生命周期：读 `docs/architecture/overview.md` 的“应用生命周期”，再进入 `src/app/` 或 `src-tauri/src/app/`、`src-tauri/src/lib.rs`。
-- 仓储空间状态（数据库记录口径或磁盘扫描）：先读 `docs/modules/history-and-backup.md` 的“仓储空间状态”，再进入 `src-tauri/src/storage_overview.rs` 或 `src/app/RepositoryStoragePanel.tsx`。
+- 仓储空间状态（数据库记录口径或磁盘扫描）：先读 `docs/modules/history-and-backup.md` 的“仓储空间状态”，再进入 `src-tauri/src/storage_overview/` 或 `src/app/RepositoryStoragePanel.tsx`。
 - 样式问题：业务模块样式优先读对应 `src/styles/<module>.css`；`src/styles/index.css` 只保留基础控件和仍未拆出的共享规则。
 - 日志与诊断（分档、新增日志的取舍、格式约定）：读 `docs/guides/logging.md`，再进入 `src/shared/diagnostics.ts` 或 `src-tauri/src/app/diagnostics.rs`。
 - 平台分支（路径表示、文件管理器、剪贴板、进程信息）：读 `docs/guides/platform.md`，再进入 `src-tauri/src/platform/`；业务代码里不写 `cfg` 分支，能力缺失按规范显式返回。
@@ -37,8 +37,11 @@
 - 当前有效事实写入 `docs/architecture/`、`docs/modules/` 和 `docs/guides/`。
 - **表层文档零历史堆积**：`docs/planning/current-handoff.md` 与 `docs/planning/todo.md` 只写「现在」
   与「还没做完」。已完成批次、已通过的人工验收、被替代的计划、已落地并被模块文档吸收的维护者决策
-  一律移入 `docs/planning/archive/`（按日期归入已有日志，并同步更新 `docs/planning/archive/README.md`
-  的索引），然后从表层删除——包括「已通过」「已收尾」「已于某日完成」这类痕迹。
+  一律移入 `docs/planning/archive/`，按性质归入 `handoff/`、`plans/`、`reviews/`、`records/` 之一，
+  按 `YYYY-MM-DD-<主题>.md` 命名（日期在前，类型由目录表达，文件名不再重复写 `plan` 或
+  `handoff-log`；跨若干天的日志用 `YYYY-MM-DD-to-YYYY-MM-DD-<主题>.md`，只有一份主日志时可省主题），
+  并同步更新 `docs/planning/archive/README.md` 的索引；然后从表层删除——包括
+  「已通过」「已收尾」「已于某日完成」这类痕迹。
   **每个批次结束时、每次切版本时、提交前各查一次**，不要攒到下一次整理。
 - **用户文档面向观众**：`docs/user/` 与根 `README.md` 写给人看，按根 `README.md` 的陈述式写法
   组织——以软件、仓库、作品为主语，不用第二人称，也不用内部标识、阶段编号、实现机制与逐条断言

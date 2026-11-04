@@ -99,4 +99,4 @@ release 构建，同一台桌面机：
 测试代码位于 `src-tauri/tests/`。构建方式、档位选择、磁盘预算与环境变量见
 [验证策略](../guides/validation.md)；逐组明细数字、口径说明与更细的边界见
 [压力测试实测证据](../guides/stress-test-evidence.md)；更早轮次的复跑记录见
-[归档](../planning/archive/stress-test-rounds-2026-10-18-to-10-21.md)。
+[归档](../planning/archive/records/2026-10-18-to-10-21-stress-test-rounds.md)。

@@ -17,6 +17,19 @@ entries for the reader; they are not a template every entry has to fill.
 
 ### Changed
 
+- The planning archive is split into `handoff/`, `plans/`, `reviews/` and
+  `records/`, and every archived document is renamed so the date comes first
+  (`YYYY-MM-DD-<topic>.md`, or `YYYY-MM-DD-to-YYYY-MM-DD-<topic>.md` for a
+  multi-day log). The document kind is carried by the directory instead of the
+  filename, so `handoff-log-` and `-plan` prefixes are gone.
+  `docs/planning/archive/README.md` is now a grouped table with one row per
+  document instead of a prose timeline, and the archive rules in `AGENTS.md`,
+  `CONTRIBUTING.md` and `docs/architecture/ai-reading-guide.md` describe the new
+  layout. References in the docs and in the older `CHANGELOG.md` sections were
+  updated to the new paths.
+- The repository-storage route in `AGENTS.md` points at the
+  `src-tauri/src/storage_overview/` module directory instead of a single file
+  that no longer exists.
 - The identification empty state now says TrustMark is more reliable on a
   selected region and that whole-image decoding may miss small watermarks,
   matching the module documentation.
@@ -347,8 +360,9 @@ entries for the reader; they are not a template every entry has to fill.
   is gone, `exportableCount` counts bitmaps only, and the export and
   system-clipboard actions are disabled together when the selection has no
   bitmap.
-- The 2026-10-21 test audit (`docs/planning/archive/test-audit-2026-10-21.md`) lands in
-  two batches. The one-off `stress_baseline` group and the 0.2.0-era debug
+- The 2026-10-21 test audit
+  (`docs/planning/archive/reviews/2026-10-21-test-audit.md`) lands in two
+  batches. The one-off `stress_baseline` group and the 0.2.0-era debug
   profile are deleted, with long-term regression left to `stress_bench`; the
   strict performance gate now states a direction per key (latency `<=`,
   throughput `>=`, so a faster restore is not a regression) and derived
@@ -1177,7 +1191,7 @@ entries for the reader; they are not a template every entry has to fill.
   `scheduler-scan` probe, and the test gate now measures cancel latency (an
   upper bound limited by its 5 ms poll interval) and stamps the build profile
   into each record. No product behavior changes. Results are summarized in
-  `docs/planning/0.3-baseline-2026-10-18.md`.
+  `docs/planning/archive/records/2026-10-18-0.3-baseline.md`.
 - A single `SettingsService` write entry for the settings page, tray toggle and
   window-geometry capture. The settings file gains a monotonic `revision`
   counter; saves compare it (CAS) and return `settings_conflict` instead of
@@ -1600,7 +1614,7 @@ entries for the reader; they are not a template every entry has to fill.
   passed on 2026-10-17 against `0.2.0-rc.4`. Because this release and
   `0.2.0-rc.4` are the same build, that acceptance carries over unchanged;
   the records are archived in
-  `docs/planning/archive/handoff-log-2026-10-16.md`.
+  `docs/planning/archive/handoff/2026-10-16.md`.
 - Standing limitations carried by this release: a repository written
   concurrently by the GUI and a headless process is not protected against
   races (headless versus headless is, through the cross-process write
@@ -1655,8 +1669,8 @@ entries for the reader; they are not a template every entry has to fill.
   `docs/architecture/ai-reading-guide.md`, `docs/guides/release-policy.md` and
   in the headers of both surface documents; the acceptance records and the batch
   rows they used to carry now live in the archive (the newest in
-  `archive/handoff-log-2026-10-16.md`), with the `archive/README.md` index
-  updated to match.
+  `docs/planning/archive/handoff/2026-10-16.md`), with the
+  `docs/planning/archive/README.md` index updated to match.
 - `rustls` moved to 0.23.46 in `src-tauri/Cargo.lock`, which clears the four
   advisories RustSec published on 2026-10-14 against 0.23.45
   (RUSTSEC-2026-0346 client session `Debug` output leaking TLS secrets,
@@ -1961,8 +1975,8 @@ entries for the reader; they are not a template every entry has to fill.
   `docs/architecture/ai-reading-guide.md`, `docs/guides/release-policy.md` and
   in the headers of both surface documents; the acceptance records and the batch
   rows they used to carry now live in the archive (the newest in
-  `archive/handoff-log-2026-10-16.md`), with the `archive/README.md` index
-  updated to match.
+  `docs/planning/archive/handoff/2026-10-16.md`), with the
+  `docs/planning/archive/README.md` index updated to match.
 - `rustls` moved to 0.23.46 in `src-tauri/Cargo.lock`, which clears the four
   advisories RustSec published on 2026-10-14 against 0.23.45
   (RUSTSEC-2026-0346 client session `Debug` output leaking TLS secrets,

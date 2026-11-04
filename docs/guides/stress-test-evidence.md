@@ -3,7 +3,7 @@
 本文件是压力测试的**技术证据**：逐组明细、实测数字、口径说明与已知边界，读者是开发者与审计。
 面向使用者的结论、保证与限制看 `docs/user/stress-test-report.md`；运行方式、档位与环境变量看
 `docs/guides/validation.md`；更早轮次的复跑记录见
-`docs/planning/archive/stress-test-rounds-2026-10-18-to-10-21.md`。
+`docs/planning/archive/records/2026-10-18-to-10-21-stress-test-rounds.md`。
 
 读这些表之前先看两点：
 
@@ -260,7 +260,7 @@ B2 目标输出不存在，只留下未发布的完整临时文件（仓库之�
 磁盘位损坏、外部工具误写或中断的复制，都会让仓库内文件与数据库记录的摘要不再一致。R 组验证
 三件事：内容级校验必须报错、数据库级校验不受影响、损坏被干净拒绝。R1 里「一次内容未变化的
 提交把 head 快照修好」记录的是 2026-10-20 之前的行为——该自动修复（连同提交路径的整份复检）
-已按 `../planning/archive/backup-scheduling-fix-plan-2026-10-20.md` §7 的 A7 移除，现行语义见
+已按 `../planning/archive/plans/2026-10-20-backup-scheduling-fix.md` §7 的 A7 移除，现行语义见
 `../modules/history-and-backup.md`。
 
 | 场景 | 操作 | 关键实测 |
@@ -430,7 +430,7 @@ P6 未引用扫描 32.1 ms、队列重放 26.1 ms；P7 调度扫描 27.4 ms；P8
 
 退役的 `stress_baseline` 本轮临时恢复做了一次对比复测：首次运行因 v4 → v6 迁移触发的
 「源仓库字节数不变」测试侧假设失败，在迁移后的副本上重跑 2/2 通过；对比数据与结论见
-`docs/planning/archive/0.3-baseline-2026-10-18.md` 第 7 节。该组仍保持退役，没有重新进 CI。
+`docs/planning/archive/records/2026-10-18-0.3-baseline.md` 第 7 节。该组仍保持退役，没有重新进 CI。
 
 ### 运行成本
 

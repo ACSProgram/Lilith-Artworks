@@ -33,7 +33,10 @@ Install locked frontend dependencies with `npm ci`. Run the app with
 - Record unfinished work in `docs/planning/todo.md` and the current batch state
   in `docs/planning/current-handoff.md`. Manual acceptance results go into the
   current batch's section under `docs/planning/archive/` and are removed from
-  `todo.md`; completed or superseded plans also move to `docs/planning/archive/`.
+  `todo.md`; completed or superseded plans also move there. Archive documents
+  live in `handoff/`, `plans/`, `reviews/` or `records/` and are named
+  `YYYY-MM-DD-<topic>.md` (`YYYY-MM-DD-to-YYYY-MM-DD-<topic>.md` for a
+  multi-day log); add a row to `docs/planning/archive/README.md`.
 - Do not commit signing keys, certificates, application state, generated build
   output, or model files without confirming their redistribution terms.
 

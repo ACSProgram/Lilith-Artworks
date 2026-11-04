@@ -16,11 +16,11 @@ alpha5 的 v5 → v6）。
 0.3 的产品工作已收口，剩余是人工验收、正式版前的全量复查与发布决定。beta.1 之后的改动（含
 `0.3.0-beta.2` 这批）没有再跑压力分组；发布前压力测试（含 `manual` 8 GiB 档）最近一次全量通过是
 2026-10-25，实测见 `docs/user/stress-test-report.md`，`manual` 档只在正式发布前运行。人工验收的
-记录与证据见 `archive/handoff-log-2026-11-03.md` §7–§11。下文「待实现 / 待补强」是独立的补强
+记录与证据见 `archive/handoff/2026-11-03.md` §7–§11。下文「待实现 / 待补强」是独立的补强
 候选，不阻塞 0.3 收尾。
 
 虚拟机验收发现的问题均已处理并落到 `dev`，只剩候选构建上的人工复验（见下文「0.3 收尾人工
-复验」）；逐条结论与实施记录见 `archive/0.3-vm-acceptance-fixes-plan-2026-11-04.md`。
+复验」）；逐条结论与实施记录见 `archive/plans/2026-11-04-0.3-vm-acceptance-fixes.md`。
 
 ## 0.3.0 正式版前
 
@@ -28,7 +28,7 @@ alpha5 的 v5 → v6）。
   后续构建的全量复验；修复后的复核项见下文「0.3 收尾人工复验」。
 - **逐字逐句复查全部长期维护文档**（除 `docs/planning/archive/`）：核对每条描述与当前代码一致，
   删除旧轮次数据、已完成批次记录、被替代的口径与不再成立的数字；复查结论与删除项写入
-  `archive/handoff-log-2026-11-04.md`。口径见 `docs/guides/release-policy.md` 的「文档检查」。
+  `archive/handoff/2026-11-04.md`。口径见 `docs/guides/release-policy.md` 的「文档检查」。
 - 用升级前的二进制造一份多节点旧仓库，升级后逐节点 restore 比对；补 `verify-metadata.mjs` 的
   `0.3.0 → 6` 登记。
 - 按发行政策把五处版本字段切到 `0.3.0`、跑 `npm run legal`、同步 `README.md` 与文档版本引用。
@@ -39,7 +39,7 @@ alpha5 的 v5 → v6）。
 
 ### 0.3 收尾人工复验（修复批次）
 
-修复批次的实施记录见 `archive/0.3-vm-acceptance-fixes-plan-2026-11-04.md` 第 9 节。以下各项
+修复批次的实施记录见 `archive/plans/2026-11-04-0.3-vm-acceptance-fixes.md` 第 9 节。以下各项
 需要在 `0.3.0-beta.2` / `0.3.0` 候选构建上人工确认，`0.3.0-beta.1` 的通过结论不能沿用：
 
 - 历史：强杀或断电近似后重开仓库，`artworks/*/temp` 中超过 30 分钟的 `.tmp*` 消失，垃圾扫描仍能
@@ -66,7 +66,7 @@ alpha5 的 v5 → v6）。
 
 `renderer.ts` 已拆出快照、撤销栈、笔迹图层与纹理淘汰策略，前端与 Rust 自动化测试通过；
 虚拟机验收只覆盖了无 WebGPU 的降级路径，以下画板流程仍需在支持 WebGPU 的真机复验（实施记录见
-`archive/architecture-review-remediation-plan-2026-11-03.md` 的 B5 实施记录）：
+`archive/plans/2026-11-03-architecture-review-remediation.md` 的 B5 实施记录）：
 
 - 切换画板与切换作品：有未保存改动时走后台结算，切回内容仍在；无改动时不产生写操作。
 - 撤销/重做：拖拽、缩放、旋转、翻转、图层切换、文字提交与擦除各产生预期的一条记录。
@@ -78,8 +78,8 @@ alpha5 的 v5 → v6）。
 
 ### 0.3 收尾 UI 修正
 
-计划与实施记录见 `archive/0.3-final-ui-fixes-plan-2026-11-03.md` 与
-`archive/handoff-log-2026-11-03.md` §10。
+计划与实施记录见 `archive/plans/2026-11-03-0.3-final-ui-fixes.md` 与
+`archive/handoff/2026-11-03.md` §10。
 
 - 历史页头：在 1280 / 1100 / 945 三档窗口宽度下，完整性检查运行时标题不再截断、进度条完整占一行、
   取消按钮可点（945 为 125% 缩放下实测的最小窗口宽度）。
@@ -90,13 +90,13 @@ alpha5 的 v5 → v6）。
 
 ### 0.3 收尾与认证整改（第三、六批）
 
-逐批实施记录见 `archive/0.3-closeout-and-authenticity-refactor-plan-2026-10-22.md` 第 14 节。
+逐批实施记录见 `archive/plans/2026-10-22-0.3-closeout-and-authenticity-refactor.md` 第 14 节。
 
 - 设置页四个长任务的失败提示仍未制造：需要一种让命令真的失败的隔离目标（例如只读备份目录），
   或可注入失败的测试宿主。
 - 取消命令本身失败时走统一错误提示的分支仍未单独构造：需要故障注入或故意断开后端。
 - 识别页仍需识别与记录搜索两个 busy 同时出现的窗口（需要更大/更慢的图片与精确截图时机，见
-  `archive/handoff-log-2026-11-03.md` §9）；资源管理器到识别页的真实拖放已在虚拟机验收中覆盖。
+  `archive/handoff/2026-11-03.md` §9）；资源管理器到识别页的真实拖放已在虚拟机验收中覆盖。
 
 ### 错误边界与上下文拆分
 
@@ -112,7 +112,7 @@ alpha5 的 v5 → v6）。
 
 ### 缩略图格式扩展
 
-第一批的计划与依据见 `archive/thumbnail-format-expansion-plan-2026-10-20.md`：
+第一批的计划与依据见 `archive/plans/2026-10-20-thumbnail-format-expansion.md`：
 
 - `.procreate` 的真实文件仍缺样本：本机只有合成 ZIP 单测，需要一份真实 `.procreate` 验证
   `QuickLook` 缩略图与缺条目占位。
@@ -131,7 +131,7 @@ alpha5 的 v5 → v6）。
 跨进程拒绝、强杀不留锁与持锁期间只读可用已由 `stress_concurrency` 覆盖，只剩界面观感：
 
 - 同进程写者排队而非互报「另一个进程写入」、自动备份进行中保存/退出画板；实施记录见
-  `archive/repository-write-lock-plan-2026-10-18.md`。需要慢速备份目标（网络盘/U 盘），或让保存
+  `archive/plans/2026-10-18-repository-write-lock.md`。需要慢速备份目标（网络盘/U 盘），或让保存
   与自动备份真正重叠后再观察 busy 文案。
 
 ### 切换作品的画板交接
@@ -149,7 +149,7 @@ alpha5 的 v5 → v6）。
 字体栏目前只做有效字号、颜色与对齐。粗体、斜体、下划线需要在 `pin_board_texts` 增加列，
 **等下一次仓库 schema 升级（0.4 或后续版本）时顺带做**：新增列、补 vN→vN+1 迁移，并同步接入
 `textLayout.ts` 的度量/栅格化、Rust 文字载荷 DTO、字体栏开关与测试。不要为本项单独切一次 schema。
-计划正文见 `archive/pin-board-text-inline-editing-plan-2026-10-24.md`。
+计划正文见 `archive/plans/2026-10-24-pin-board-text-inline-editing.md`。
 
 ## 待实现 / 待补强
 
@@ -171,14 +171,14 @@ alpha5 的 v5 → v6）。
 
 - **分支模型**：`main` 固定为 0.2 发布线（`v0.2.0`，指向 `0be6224`），不再接收 0.3 改动；
   `dev` 从 `0be6224` 创建，作为 0.3 开发线。历史与发布记录见
-  `archive/handoff-log-2026-10-18.md`。
+  `archive/handoff/2026-10-18.md`。
 - **0.3 版本线**：公开的最新版本是 `v0.3.0-beta.1`（2026-10-25，Pre-release），alpha1–alpha6 未
-  打标签。逐批范围与落实口径见 `archive/handoff-log-2026-10-18.md` 至 `archive/handoff-log-2026-10-25.md`
+  打标签。逐批范围与落实口径见 `archive/handoff/2026-10-18.md` 至 `archive/handoff/2026-10-25.md`
   与两份计划正文。
 - **缩略图格式扩展只做第一批（2026-10-20）**：`.sai2`、`.procreate` 与无魔数的 `.tga` 已实施，
   kra/krz、ora、cbz、ooxml、odf、blend、svg、exr/hdr/qoi/ff/pnm 暂不做，`supports_preview` 不登记
   它们；不引入 Windows Shell 缩略图接口。依据见
-  `archive/thumbnail-format-expansion-plan-2026-10-20.md`（§2、§9）。
+  `archive/plans/2026-10-20-thumbnail-format-expansion.md`（§2、§9）。
 - **作品独立数据库、仓库升级、控制总线与识别页独立化列入 0.4（2026-10-22）**：把每个作品拆成
   独立数据库以获得跨作品并行写；把「打开旧仓库即静默迁移」改成显式升级流程（升级页阻断其它
   操作、说明风险、可选不升级、进度可见、中断不损坏原仓库）；控制总线按作品并行并把长任务
@@ -190,8 +190,8 @@ alpha5 的 v5 → v6）。
   允许未签名发布，但发布说明必须显著披露未签名状态及 SmartScreen 影响；签名相关的人工门槛项
   在签名可用前无法执行。
 
-> 更早的决策及其依据见 `archive/handoff-log-2026-09-12-to-2026-10-08.md`、`archive/handoff-log-2026-10-09.md`、
-> `archive/handoff-log-2026-10-16.md` 与 `archive/handoff-log-2026-10-18.md`。已随批次落地并被模块文档
+> 更早的决策及其依据见 `archive/handoff/2026-09-12-to-2026-10-08.md`、`archive/handoff/2026-10-09.md`、
+> `archive/handoff/2026-10-16.md` 与 `archive/handoff/2026-10-18.md`。已随批次落地并被模块文档
 > 吸收的实现口径不再在此重复，现行契约以 `docs/modules/` 与 `docs/architecture/` 为准；用户文档与
 > 内部文档的分工见 `docs/README.md`。
 

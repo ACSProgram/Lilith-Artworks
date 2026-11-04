@@ -26,7 +26,7 @@
 - 右键菜单与「新建」菜单都使用共享 `ContextMenu`：提供新建、重命名和移到回收站，并统一 Escape、外部点击、滚动与窗口缩放关闭。服务端再次校验叶节点、循环移动和多选父子去重，不依赖前端保证数据完整性。
 - Library 不直接导入应用、History 或 Authenticity 模块。应用层注入 Artwork 工作区渲染器、文件清理重试和自动备份关闭通知的目标查询，并把认证记录或待处理分支转换为应用层导航目标；Library 只负责展开祖先、切换当前 Artwork 和保存定位目标。
 - `useLibraryController.ts` 是 `library/api.ts` 的唯一消费者。仓库切换会递增请求代次并清空旧树、选择、搜索和回收站状态；旧仓库的读取、搜索和 mutation 结果不能覆盖新仓库。成功的仓库写操作经统一 `AppEvent` 的 `repositoryChanged` 即时刷新作品树；30 秒刷新保留为后台调度写库（没有事件）与丢事件的兜底。`LibraryModule.tsx` 只编排选择、上下文菜单、编辑器、回收站窗口和 Artwork 工作区渲染。
-- `src/app/App.settingsPage.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互已于 2026-10-04 由维护者在生产使用中验证通过，记录见 `docs/planning/archive/handoff-log-2026-09-12-to-2026-10-08.md`。
+- `src/app/App.settingsPage.test.tsx` 覆盖仓库 A 切换到复用相同 Artwork/branch UUID 的克隆仓库 B：保存开始即卸载 A，B 不继承 Artwork/分支选择，A 的延迟搜索结果不能回流。真实仓库 lease、设置持久化与 Windows 交互已于 2026-10-04 由维护者在生产使用中验证通过，记录见 `docs/planning/archive/handoff/2026-09-12-to-2026-10-08.md`。
 
 当前批次状态见 `docs/planning/current-handoff.md`，未完成事项见 `docs/planning/todo.md`。
 
