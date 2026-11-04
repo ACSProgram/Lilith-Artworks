@@ -265,15 +265,21 @@
   2026-10-21 三次复跑摘要。这些轮次描述的「当前行为」已被后续批次取代；当前轮次的数据在
   `docs/user/stress-test-report.md` 与 `docs/guides/stress-test-evidence.md`，最近一次全量轮次见
   `handoff-log-2026-10-25.md`。
-- `handoff-log-2026-11-04.md`：2026-11-04 的 `0.3.0-beta.2` 切分与文档纪律整改——压力测试报告
-  改为面向观众并把技术明细拆到 `docs/guides/stress-test-evidence.md`、历史轮次移入
+- `vm-acceptance-0.3.0-beta.1-2026-11-04.md`：`0.3.0-beta.1` 的隔离虚拟机验收记录——安装与启动、
+  仓库与作品树、历史与恢复、自动备份与完整性、发布与认证、设置与窗口、破坏性用例的逐阶段结论，
+  以及未覆盖边界；完整报告、截图与仓库副本在仓库外。问题定位与两批修复计划见
+  `../0.3-vm-acceptance-fixes-plan-2026-11-04.md`。
+- `handoff-log-2026-11-04.md`：2026-11-04 的 `0.3.0-beta.2` 切分、文档纪律整改与虚拟机验收——
+  压力测试报告改为面向观众并把技术明细拆到 `docs/guides/stress-test-evidence.md`、历史轮次移入
   `stress-test-rounds-2026-10-18-to-10-21.md`，把「用户文档不堆术语、表层文档不积历史、正式版前
   逐字复查」写进 `AGENTS.md` 与发行政策，表层文档清出三条已落地的维护者决策，版本切分与
-  `verify-metadata` / 发布说明脚本的 schema 路径修复。
+  `verify-metadata` / 发布说明脚本的 schema 路径修复。同日归档 `0.3.0-beta.1` 的隔离虚拟机验收与
+  破坏性测试：通过项、未覆盖项、1 中 7 低问题与未复现项见该文件第 6 节，两批修复安排见
+  `../0.3-vm-acceptance-fixes-plan-2026-11-04.md`。
 - `architecture-review-remediation-plan-2026-11-03.md`：架构审查整改计划与 B1–B5 实施记录
   （**已实施并提交**；原文自 `../` 移入）——文档事实与死代码修正、三处右键菜单统一与保存
   契约去重、Rust 摘要收敛与生产文件拆分、library/history 仓储与 schema 拆分及跨域事务回滚
   测试、素材板 `renderer.ts` 拆分（快照、撤销栈、笔迹图层、纹理淘汰）与收尾审计。五个批次
-  均已实施并通过自动化验证，有效契约并入 `docs/modules/` 与 `docs/architecture/`；B2 的
-  菜单项、B4 的仓储流程与 B5 的画板流程仍需维护者手工复验，余项记在 `../todo.md`。本文件
-  自此为历史记录，不再作为执行依据。
+  均已实施并通过自动化验证，有效契约并入 `docs/modules/` 与 `docs/architecture/`；B4 的
+  仓储流程已在 2026-11-04 的虚拟机验收中覆盖，B2 的菜单项与 B5 的画板流程仍需复验（B5 需
+  支持 WebGPU 的真机），余项记在 `../todo.md`。本文件自此为历史记录，不再作为执行依据。
