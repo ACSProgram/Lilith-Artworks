@@ -9,6 +9,7 @@ mod estimate;
 mod export;
 mod file_ops;
 mod image_resource;
+mod legacy;
 mod model;
 mod preview;
 mod publication_repository;

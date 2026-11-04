@@ -58,7 +58,7 @@ Windows CI 必须通过以下项目：
 4. `cargo fmt --check --manifest-path src-tauri/Cargo.toml`；
 5. `cargo test --manifest-path src-tauri/Cargo.toml --lib`。
 
-CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；Rust 依赖审计固定使用 `rustsec/audit-check@v2.0.0`，精确忽略一组固定告警，忽略列表在 `.github/workflows/windows-ci.yml` 与 `.github/workflows/release.yml` 中逐字一致（`RUSTSEC-2023-0071` 因 PS256 已在前后端禁用并有直接回归测试；zip 8.x 三项 `RUSTSEC-2026-0367/0368/0369` 因易受攻击路径在当前依赖图中不可达；`RUSTSEC-2026-0429` 同属 zip 8.6.0，只影响 `ZipArchive::extract()` 落盘解压，本仓库与 c2pa 都不调用该路径；`RUSTSEC-2026-0387` 的 `crypto-bigint 0.5.5` 位于 c2pa 的 ECDSA 依赖栈，0.5 线无修复版本，且本地桌面签名进程的计时侧信道暴露面有限，待上游 `c2pa_raw_crypto` 升级到 `crypto-bigint 0.7` 后移除；理由均见该列表旁注与 `docs/planning/todo.md`）；忽略列表之外的漏洞仍使作业失败。
+CI 使用 Node 24。npm 生产与完整依赖审计固定访问官方 registry；Rust 依赖审计固定使用 `rustsec/audit-check@v2.0.0`，精确忽略一组固定告警，忽略列表在 `.github/workflows/windows-ci.yml` 与 `.github/workflows/release.yml` 中逐字一致（只保留 `RUSTSEC-2023-0071`：PS256 已在前后端禁用并有直接回归测试；其余公告均为 unmaintained/unsound/yanked 提示，不会让审计失败，因此不再忽略、保留在日志里。`c2pa 0.91.10` 已把 zip 9 与 `c2pa_raw_crypto 0.2.x` 带进依赖树，原先的 zip 8 四条（`RUSTSEC-2026-0367/0368/0369/0429`）与 crypto-bigint 0.5 一条（`RUSTSEC-2026-0387`）已随升级移除；旧清单由 `authenticity/legacy.rs` 只读兼容覆盖；理由见该列表旁注与 `docs/planning/todo.md`）；忽略列表之外的漏洞仍使作业失败。
 
 正式候选版还必须通过：
 

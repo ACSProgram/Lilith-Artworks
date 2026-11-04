@@ -76,7 +76,10 @@ pub(crate) fn scrub_controlled_files(
         let path = storage::resolve_path(root, &record.stored_path)?;
         storage::verify_file_sha256(&path, &record.output_sha256, "认证仓库副本")?;
         let manifest = c2pa::read_manifest(&path).map_err(|error| error.to_string())?;
-        if !manifest.present || !manifest.validation_accepted {
+        // 仓库副本的 SHA-256 已在上面核对。旧格式清单无法再用新校验器验签，
+        // 但「文件字节与登记一致 + 声明与数据库一致」仍然成立，因此不放行才是误报。
+        let verified = manifest.validation_accepted || manifest.legacy_format();
+        if !manifest.present || !verified {
             return Err(format!(
                 "认证记录 {} 的 C2PA 清单未通过完整性验证",
                 record.id
@@ -115,6 +118,9 @@ mod tests {
     use sha2::{Digest, Sha256};
 
     use super::*;
+    use crate::authenticity::test_support::{
+        fixture_directory, initialize_record_fixture, FIXTURE_RECORD_ID, FIXTURE_WATERMARK_ID,
+    };
 
     #[test]
     fn controlled_file_scrub_detects_a_replaced_final_artifact() {
@@ -177,5 +183,59 @@ mod tests {
 
         let error = scrub_controlled_files(&root, || false, |_, _| {}).unwrap_err();
         assert!(error.contains("已损坏或被替换"), "{error}");
+    }
+
+    /// 旧格式清单无法验签，但仓库副本摘要与数据库一致、声明也一致时应通过扫描；
+    /// 否则每个 0.90 记录都会在设置页被误报为损坏。
+    #[test]
+    fn legacy_manifests_pass_the_scrub_after_the_hash_and_claims_match() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        let bytes = fs::read(fixture_directory().join("legacy-0.90-trustmark.jpg")).unwrap();
+        let relative = "artworks/legacy-certifications/record.jpg";
+        let stored = storage::resolve_path(&root, relative).unwrap();
+        let sha = hex::encode_upper(Sha256::digest(&bytes));
+        initialize_record_fixture(&root, relative, &sha);
+
+        // 建库之后再落盘，避免初始化把已有文件误判为非空目录。
+        fs::create_dir_all(stored.parent().unwrap()).unwrap();
+        fs::write(&stored, &bytes).unwrap();
+
+        // 最终成品也指向真实文件，避免扫描先停在成品阶段。
+        let artifact = storage::resolve_path(&root, "artworks/final.jpg").unwrap();
+        fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+        fs::write(&artifact, b"artifact").unwrap();
+        let artifact_sha = hex::encode_upper(Sha256::digest(b"artifact"));
+        let connection = storage::open(&root).unwrap();
+        connection
+            .execute(
+                "UPDATE final_artifacts SET source_sha256 = ?1, byte_size = 8",
+                [artifact_sha],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE certification_records
+                 SET id = ?1, watermark_id = ?2, trustmark_enabled = 1, title = ?3,
+                     creator = ?4, rights_statement = ?5,
+                     authentication_content = ?6, output_bytes = ?7
+                 WHERE id = 'record'",
+                params![
+                    FIXTURE_RECORD_ID,
+                    FIXTURE_WATERMARK_ID,
+                    "Lilith C2PA fixture",
+                    "Lilith Artworks tests",
+                    "Regression fixture only",
+                    "A tiny deterministic TrustMark/C2PA sample",
+                    bytes.len() as i64,
+                ],
+            )
+            .unwrap();
+        drop(connection);
+
+        assert_eq!(
+            scrub_controlled_files(&root, || false, |_, _| {}).unwrap(),
+            (1, 1)
+        );
     }
 }

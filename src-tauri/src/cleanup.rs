@@ -1564,14 +1564,14 @@ mod tests {
         age_file(&expired_second);
 
         // 指向目录外文件的符号链接名字符合 `.tmp*`，但不是普通文件，必须保留。
-        #[cfg(unix)]
-        let symlink = {
-            let target = directory.path().join("target.bin");
-            fs::write(&target, b"target").unwrap();
-            let link = first_temp.join(".tmplink");
-            std::os::unix::fs::symlink(&target, &link).unwrap();
-            link
-        };
+        // 造不出文件符号链接的平台（Windows 需开发者模式或管理员权限）跳过这半条用例。
+        let symlink_target = directory.path().join("target.bin");
+        let symlink_path = first_temp.join(".tmplink");
+        fs::write(&symlink_target, b"target").unwrap();
+        let symlink =
+            crate::platform::test_support::symlink_to_file(&symlink_target, &symlink_path)
+                .ok()
+                .map(|()| symlink_path);
 
         let sweep = sweep_artwork_temp_at(&root, storage::now_ms().unwrap());
         assert_eq!(sweep.reclaimed, 2);
@@ -1581,8 +1581,11 @@ mod tests {
         assert!(fresh.exists());
         assert!(unrelated.exists());
         assert!(scratch_directory.is_dir());
-        #[cfg(unix)]
-        assert!(fs::symlink_metadata(&symlink).unwrap().is_symlink());
+        // 链接本身（造得出来的平台）与目录外的目标文件都要原样保留。
+        if let Some(link) = &symlink {
+            assert!(fs::symlink_metadata(link).unwrap().is_symlink());
+        }
+        assert!(symlink_target.exists());
 
         // 缺失作品目录同样按空处理。
         let missing_root = directory.path().join("missing");
@@ -1592,12 +1595,9 @@ mod tests {
     }
 
     /// 删除失败只计数并写日志，不阻断调用方。Windows 上用独占共享模式打开
-    /// 文件，让 `remove_file` 以共享冲突失败。
-    #[cfg(windows)]
+    /// 文件，让 `remove_file` 以共享冲突失败；造不出该失败的平台跳过。
     #[test]
     fn sweep_artwork_temp_counts_deletion_failures() {
-        use std::os::windows::fs::OpenOptionsExt;
-
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("repository");
         crate::library::initialize(&root).unwrap();
@@ -1606,11 +1606,11 @@ mod tests {
         let residue = temp.join(".tmpLocked");
         fs::write(&residue, b"scratch").unwrap();
         age_file(&residue);
-        let handle = fs::OpenOptions::new()
-            .read(true)
-            .share_mode(0)
-            .open(&residue)
-            .unwrap();
+        let handle = match crate::platform::test_support::open_blocking_deletion(&residue) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == std::io::ErrorKind::Unsupported => return,
+            Err(error) => panic!("独占打开 {} 失败：{error}", residue.display()),
+        };
 
         let sweep = sweep_artwork_temp_at(&root, storage::now_ms().unwrap());
 

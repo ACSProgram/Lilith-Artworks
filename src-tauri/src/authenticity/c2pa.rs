@@ -10,20 +10,51 @@ use std::{
 };
 
 use c2pa::{
-    assertions::SoftBinding, create_signer, crypto::raw_signature::SigningAlg, Builder,
-    BuilderIntent, ClaimGeneratorInfo, Context, Reader, Signer, ValidationState,
+    assertions::SoftBinding, create_signer, Builder, BuilderIntent, ClaimGeneratorInfo, Context,
+    Reader, Signer, SigningAlg, ValidationState,
 };
 use serde_json::{json, Value};
 
 use super::{
     error::{AuthenticityError, AuthenticityResult},
-    model::{CertificationConfig, ManifestSummary, ValidationItem},
-    trustmark::{identifier_from_soft_binding, soft_binding_value, SOFT_BINDING_ALGORITHM},
+    legacy,
+    model::{CertificationConfig, ManifestSummary, ValidationItem, LEGACY_VALIDATION_STATE},
+    trustmark::{
+        identifier_from_soft_binding, soft_binding_value, SOFT_BINDING_ALGORITHM, WATERMARK_BITS,
+    },
 };
 
 pub(crate) const ASSERTION_LABEL: &str = "com.lilith.artworks.claim";
 const TIMESTAMP_TIMEOUT: Duration = Duration::from_secs(30);
 const CANCELLATION_POLL: Duration = Duration::from_millis(100);
+
+/// 只验证签名与声明，不验证 CA 信任链。
+///
+/// 证书由用户自己提供，通常不在 C2PA 公共信任列表里。`c2pa 0.90` 把
+/// `signingCredential.untrusted` 当成提示，0.91 起把它算作失败：若不显式关闭，
+/// 每个自管证书签出的清单都会变成 `Invalid`，发布回读和全库扫描会全部拒绝。
+/// 本应用的信任模型是「本地记录 + 签名完整性」，从不宣称 `Trusted`，因此这里
+/// 保留 0.90 的语义，并把签名后的自动验证交给 `validate_signed_manifest` 单独把关。
+fn verification_context() -> c2pa::Result<Context> {
+    // `Store::from_context` 会用 `clear()` 抹掉内置 EKU 列表；不在这里补回，
+    // 任何证书都会被判 `signingCredential.invalid`（缺少 EKU）。这份列表与
+    // c2pa 自带的 `valid_eku_oids.cfg` 一致。
+    const ACCEPTED_EKUS: &str = "1.3.6.1.5.5.7.3.4\n\
+        1.3.6.1.5.5.7.3.36\n\
+        1.3.6.1.5.5.7.3.8\n\
+        1.3.6.1.5.5.7.3.9\n\
+        1.3.6.1.4.1.311.76.59.1.9\n\
+        1.3.6.1.4.1.62558.2.1";
+    Context::new().with_settings(json!({
+        "verify": {
+            "verify_after_sign": false,
+            "verify_trust": false,
+        },
+        "trust": {
+            "trust_config": ACCEPTED_EKUS,
+        }
+    }))
+}
 
 struct BoundedSigner {
     inner: c2pa::BoxedSigner,
@@ -144,7 +175,7 @@ pub(crate) fn sign_jpeg(
         cancelled: cancelled.clone(),
         timestamp_timed_out: timestamp_timed_out.clone(),
     };
-    let definition = json!({
+    let mut definition = json!({
         "title": config.title,
         "format": "image/jpeg",
         "claim_generator_info": [{
@@ -152,13 +183,6 @@ pub(crate) fn sign_jpeg(
             "version": env!("CARGO_PKG_VERSION")
         }]
     });
-    let mut builder = Builder::default().with_definition(definition.to_string())?;
-    builder.definition.claim_version = Some(2);
-    builder.set_intent(BuilderIntent::Edit);
-    let mut generator = ClaimGeneratorInfo::new("Lilith Artworks");
-    generator.set_version(env!("CARGO_PKG_VERSION"));
-    builder.set_claim_generator_info(generator);
-
     if config.trustmark_enabled {
         let binding_blocks = config
             .additional_regions
@@ -180,22 +204,37 @@ pub(crate) fn sign_jpeg(
                                 }
                             }],
                             "name": format!("Additional TrustMark region {}", index + 1),
-                            "identifier": format!("lilith-trustmark-region-{}", index + 1),
-                            "role": "c2pa.watermarked"
+                            "identifier": format!("lilith-trustmark-region-{}", index + 1)
+                            // `role` 自 0.91 起废弃，且 c2pa_cbor 无法把该枚举
+                            // 从文本反序列化回来：写入后整条断言会判 claim.malformed。
+                            // 水印语义由自定义 claim 的 watermark 字段承载。
                         }
                     },
-                    "value": soft_binding_value(identifier)
+                    // 规范要求 bstr：这里传字节序列，定义解析时由 c2pa 编成 CBOR 字节串。
+                    "value": soft_binding_value(identifier).into_bytes()
                 })
             })
             .collect::<Vec<_>>();
-        let soft_binding: SoftBinding = serde_json::from_value(json!({
-            "alg": SOFT_BINDING_ALGORITHM,
-            "blocks": binding_blocks,
-            "name": "Lilith Artworks durable identifier",
-            "alg-params": "variant=Q;schema=BCH_SUPER;payload=binary"
-        }))?;
-        builder.add_assertion(SoftBinding::LABEL, &soft_binding)?;
+        // 软绑定必须作为**清单定义**的一部分加入：`Builder::add_assertion` 会把它
+        // 留在 JSON 断言里，写入的 JUMBF 虽然是 CBOR，0.91 的校验器仍会拿 JSON
+        // 副本解码并判 `claim.malformed`。定义里的断言在解析阶段就转成 CBOR。
+        definition["assertions"] = json!([{
+            "label": SoftBinding::LABEL,
+            "data": {
+                "alg": SOFT_BINDING_ALGORITHM,
+                "blocks": binding_blocks,
+                "name": "Lilith Artworks durable identifier",
+                "alg-params": "variant=Q;schema=BCH_SUPER;payload=binary"
+            }
+        }]);
     }
+    let mut builder =
+        Builder::from_context(verification_context()?).with_definition(definition.to_string())?;
+    builder.definition.claim_version = Some(2);
+    builder.set_intent(BuilderIntent::Edit);
+    let mut generator = ClaimGeneratorInfo::new("Lilith Artworks");
+    generator.set_version(env!("CARGO_PKG_VERSION"));
+    builder.set_claim_generator_info(generator);
 
     builder.add_assertion_json(
         "stds.schema-org.CreativeWork",
@@ -288,26 +327,101 @@ pub(super) fn supported_signing_algorithm(value: &str) -> AuthenticityResult<Sig
         .map_err(|_| AuthenticityError::InvalidInput("不支持的 C2PA 签名算法".into()))
 }
 
+/// 读取清单；严格读取器读不出、或把声明的软绑定判为 `claim.malformed` 时，
+/// 回退到旧格式只读识别。
+///
+/// 回退只用于识别，不提升验证结论：旧格式结果一律标记为
+/// [`LEGACY_VALIDATION_STATE`]，`validation_accepted` 恒为 false。
 pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> {
-    let reader = match Reader::default().with_file(path) {
+    read_manifest_with(path, |path| {
+        Reader::from_context(verification_context()?).with_file(path)
+    })
+}
+
+fn read_manifest_with(
+    path: &Path,
+    open: impl FnOnce(&Path) -> c2pa::Result<Reader>,
+) -> AuthenticityResult<ManifestSummary> {
+    let reader = match open(path) {
         Ok(reader) => reader,
         Err(c2pa::Error::JumbfNotFound | c2pa::Error::JumbfBoxNotFound) => {
-            return Ok(ManifestSummary {
-                present: false,
-                validation_accepted: false,
-                validation_state: None,
-                validation_status: Vec::new(),
-                record_id: None,
-                watermark_id: None,
-                title: None,
-                creator: None,
-                rights_statement: None,
-                authentication_content: None,
-                manifest_json: None,
-            });
+            return Ok(legacy_manifest(path)
+                .map(legacy_summary)
+                .unwrap_or_else(ManifestSummary::absent));
         }
-        Err(error) => return Err(error.into()),
+        // 0.91 对旧软绑定既可能直接报错，也可能返回一个 `Invalid` 读取器；
+        // 后者在下面 `summarize` 之后处理。
+        Err(error) => {
+            return match legacy_manifest(path) {
+                Some(manifest) => Ok(legacy_summary(manifest)),
+                None => Err(error.into()),
+            };
+        }
     };
+    let summary = summarize(reader);
+    if summary.validation_accepted {
+        return Ok(summary);
+    }
+    // 0.91 读到 0.90 的软绑定不会报错：它返回 `Invalid` + `claim.malformed`，
+    // 同时仍能取出声明。只有确认软绑定是旧格式的文本串时才改为旧格式结果；
+    // 当前格式但验证失败的清单（例如文件内容被替换）保留原状态。
+    Ok(legacy_manifest(path).map(legacy_summary).unwrap_or(summary))
+}
+
+/// 只接受确认为 0.90 文本串软绑定的解析结果；缺失软绑定的当前格式清单不算旧格式。
+fn legacy_manifest(path: &Path) -> Option<legacy::LegacyManifest> {
+    legacy::read(path).filter(|manifest| manifest.legacy_soft_binding)
+}
+
+/// 旧格式结果：能按声明匹配，但不验证签名、也不验证文件哈希。
+fn legacy_summary(manifest: legacy::LegacyManifest) -> ManifestSummary {
+    let mut summary = ManifestSummary {
+        present: true,
+        validation_accepted: false,
+        validation_state: Some(LEGACY_VALIDATION_STATE.to_owned()),
+        validation_status: vec![ValidationItem {
+            code: "lilith.legacy_format".to_owned(),
+            explanation:
+                "旧版清单格式（软绑定为 CBOR 文本串）：只能按记录 ID 与声明匹配，签名未经验证。"
+                    .to_owned(),
+        }],
+        record_id: manifest.record_id,
+        watermark_id: manifest.watermark_id,
+        title: manifest.title,
+        creator: manifest.creator,
+        rights_statement: manifest.rights_statement,
+        authentication_content: manifest.authentication_content,
+        manifest_json: None,
+    };
+    summary.manifest_json = Some(
+        json!({
+            "legacyFormat": true,
+            "note": "由 c2pa 0.90 及更早版本签出的清单，只做了只读解析：未验证签名与文件哈希。",
+            "recordId": summary.record_id,
+            "watermarkId": summary.watermark_id,
+            "title": summary.title,
+            "creator": summary.creator,
+            "rightsStatement": summary.rights_statement,
+            "authenticationContent": summary.authentication_content,
+        })
+        .to_string(),
+    );
+    summary
+}
+
+/// 记录 ID 的合法范围。识别与发布回读共用这一条规则，避免两处判断漂移。
+pub(crate) fn record_id_from_value(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 160).then(|| value.to_owned())
+}
+
+/// 40 位二进制 TrustMark ID 的合法性判断。
+pub(crate) fn watermark_id_from_value(value: &str) -> Option<String> {
+    (value.len() == WATERMARK_BITS && value.bytes().all(|byte| matches!(byte, b'0' | b'1')))
+        .then(|| value.to_owned())
+}
+
+fn summarize(reader: Reader) -> ManifestSummary {
     let validation_state = reader.validation_state();
     let validation_accepted = matches!(
         validation_state,
@@ -331,24 +445,20 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
         .as_ref()
         .and_then(|value| value.get("recordId"))
         .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty() && value.len() <= 160)
-        .map(str::to_owned);
+        .and_then(record_id_from_value);
     let watermark_id = soft_binding
         .and_then(|binding| binding.blocks.first().map(|block| block.value.clone()))
+        // 规范要求 bstr；内容仍是本应用的 `1*<40 位 ID>` 文本。
+        .and_then(|value| String::from_utf8(value).ok())
         .and_then(|value| identifier_from_soft_binding(&value))
         .or_else(|| {
             claim
                 .as_ref()
                 .and_then(|value| value.get("watermarkId"))
                 .and_then(Value::as_str)
-                .filter(|value| {
-                    value.len() == super::trustmark::WATERMARK_BITS
-                        && value.bytes().all(|byte| matches!(byte, b'0' | b'1'))
-                })
-                .map(str::to_owned)
+                .and_then(watermark_id_from_value)
         });
-    Ok(ManifestSummary {
+    ManifestSummary {
         present: manifest.is_some(),
         validation_accepted,
         validation_state: Some(format!("{validation_state:?}")),
@@ -372,7 +482,7 @@ pub(crate) fn read_manifest(path: &Path) -> AuthenticityResult<ManifestSummary> 
             .and_then(Value::as_str)
             .map(str::to_owned),
         manifest_json: Some(reader.json()),
-    })
+    }
 }
 
 /// 期望的清单声明：发布后的回读核对与全库扫描共用同一组字段与比较规则。
@@ -411,10 +521,85 @@ mod tests {
     };
 
     use super::{
-        read_manifest, supported_signing_algorithm, wait_for_timestamp, TIMESTAMP_TIMEOUT,
+        read_manifest, read_manifest_with, supported_signing_algorithm, wait_for_timestamp,
+        LEGACY_VALIDATION_STATE, TIMESTAMP_TIMEOUT,
     };
 
+    use crate::authenticity::test_support::{
+        fixture_directory, FIXTURE_RECORD_ID, FIXTURE_WATERMARK_ID,
+    };
     use crate::fuzz_support::random_bytes;
+
+    /// 模拟 0.91 起的严格读取器：旧清单会被判为 `claim.malformed`。
+    fn strict_rejection(_: &std::path::Path) -> c2pa::Result<super::Reader> {
+        Err(c2pa::Error::InvalidAsset("claim.malformed".into()))
+    }
+
+    #[test]
+    fn strict_reader_rejection_falls_back_to_the_legacy_manifest() {
+        let summary = read_manifest_with(
+            &fixture_directory().join("legacy-0.90-trustmark.jpg"),
+            strict_rejection,
+        )
+        .unwrap();
+
+        assert!(summary.present);
+        assert!(!summary.validation_accepted);
+        assert!(summary.legacy_format());
+        assert_eq!(
+            summary.validation_state.as_deref(),
+            Some(LEGACY_VALIDATION_STATE)
+        );
+        assert_eq!(summary.record_id.as_deref(), Some(FIXTURE_RECORD_ID));
+        assert_eq!(summary.watermark_id.as_deref(), Some(FIXTURE_WATERMARK_ID));
+        assert_eq!(summary.title.as_deref(), Some("Lilith C2PA fixture"));
+        assert!(summary
+            .validation_status
+            .iter()
+            .any(|item| item.code == "lilith.legacy_format"));
+        assert!(summary
+            .manifest_json
+            .as_deref()
+            .is_some_and(|report| report.contains("\"legacyFormat\":true")));
+    }
+
+    /// 不注入错误时的真实回归：0.91 对 0.90 清单返回 `Invalid` 而不是报错，
+    /// 回退仍必须把软绑定为文本串的清单识别为旧格式。
+    #[test]
+    fn the_current_reader_falls_back_to_the_legacy_manifest() {
+        let summary =
+            read_manifest(&fixture_directory().join("legacy-0.90-trustmark.jpg")).unwrap();
+
+        assert!(summary.legacy_format());
+        assert!(!summary.validation_accepted);
+        assert_eq!(summary.record_id.as_deref(), Some(FIXTURE_RECORD_ID));
+        assert_eq!(summary.watermark_id.as_deref(), Some(FIXTURE_WATERMARK_ID));
+    }
+
+    #[test]
+    fn a_strict_failure_without_a_legacy_manifest_stays_an_error() {
+        let result = read_manifest_with(&fixture_directory().join("source.jpg"), strict_rejection);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn current_manifests_that_fail_validation_are_not_downgraded_to_legacy() {
+        let summary = read_manifest(&fixture_directory().join("tampered-trustmark.jpg")).unwrap();
+
+        assert!(!summary.validation_accepted);
+        assert!(!summary.legacy_format());
+    }
+
+    #[test]
+    fn current_manifests_are_not_downgraded_to_the_legacy_reader() {
+        let summary = read_manifest(&fixture_directory().join("valid-trustmark.jpg")).unwrap();
+
+        assert!(summary.present);
+        assert!(summary.validation_accepted);
+        assert!(!summary.legacy_format());
+        assert_eq!(summary.record_id.as_deref(), Some(FIXTURE_RECORD_ID));
+    }
 
     #[test]
     fn ps256_is_rejected_before_signing() {

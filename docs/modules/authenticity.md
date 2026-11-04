@@ -38,7 +38,7 @@ C2PA 是每次认证导出的强制基础，不能关闭。发布版固定输出
 - `stds.schema-org.CreativeWork`；
 - 最终成品的 `parentOf` ingredient；
 - `c2pa.transcoded` action；
-- 启用 TrustMark 时的 `c2pa.soft-binding` 和 `c2pa.watermarked` action。
+- 启用 TrustMark 时的 `c2pa.soft-binding` 和 `c2pa.watermarked` action。软绑定区块在清单定义里声明，写入时按规范编码为 CBOR 字节串；区域只带 `name` / `identifier`，不写 0.91 起废弃且无法从 CBOR 反序列化的 `role`。
 
 TrustMark 可关闭。启用时使用 Q/BCH_SUPER 模型和 40 位二进制 ID，只在用户框选的最多 8 个矩形区域内嵌入，强度范围为 0.50 到 1.50；没有框选区域时自动降级为仅 C2PA。模型文件不可用时 UI 也强制降级为仅 C2PA。模型变体和编码/解码模型 SHA-256 由后端读取后显示，不在前端写死。私钥只存在于单次命令内并用 `Zeroizing` 包装，不写入配置、数据库、localStorage 或日志。
 
@@ -67,11 +67,15 @@ RFC 3161 时间戳请求使用无重定向客户端，单次硬超时为 30 秒�
 
 单条记录可以在记录查看页的“更多记录操作”菜单中通过“删除本记录”删除，经应用内二次确认后由 `delete_certification_record` 执行：命令先解析记录所属分支并取得独占运行锁，在事务内为仓库副本登记带哈希的清理意图，再删除记录行并立即执行清理；哈希不匹配等清理失败会进入共享待清理队列并在界面提供重试。首次导出的 JPG 始终保留在原路径。删除记录不影响分支发布状态与最终成品；分支的全部记录仍只能通过“取消发布并删除本地数据”整体清除。
 
-签名完成后的回读采用 fail closed：必须存在 active manifest，验证状态必须是 `Valid` 或 `Trusted`，并逐项核对本次 record ID、TrustMark ID（启用时）、标题、创作者、权利声明和认证内容，任一不匹配都不会发布或写入记录。设置页全库完整性扫描会对已有认证仓库副本重复 SHA-256、C2PA 验证状态和数据库声明核对。
+签名完成后的回读采用 fail closed：必须存在 active manifest，验证状态必须是 `Valid` 或 `Trusted`（当前上下文不配置信任锚，实际只会出现 `Valid`），并逐项核对本次 record ID、TrustMark ID（启用时）、标题、创作者、权利声明和认证内容，任一不匹配都不会发布或写入记录。设置页全库完整性扫描会对已有认证仓库副本重复 SHA-256、C2PA 验证状态和数据库声明核对。
 
-`src-tauri/tests/fixtures/authenticity/` 保存约 41 KB 的公开测试专用 ES256 凭据、128 x 128 源图、真实 C2PA/TrustMark 签名图和覆盖字节被篡改的签名图。定向 Rust 测试使用生产回读、TrustMark 模型解码与发布校验函数，固定覆盖合格状态、像素水印与 C2PA 中的 record ID/TrustMark ID/全部声明匹配，以及文件替换、C2PA 无效状态和声明不匹配的 fail-closed 行为；fixture 私钥不得用于生产。
+**验证口径**：`c2pa` 的 `Reader` / `Builder` 统一使用一个只验证签名与声明、不验证 CA 信任链的 `Context`（`verify.verify_trust = false`、`verify_after_sign = false`）。证书由用户自己提供，通常不在公共信任列表里；0.91 把 `signingCredential.untrusted` 判为失败，沿用默认值会让所有自管证书签出的清单变成 `Invalid`。同时 `Store::from_context` 会清空内置 EKU 列表，因此上下文里显式补回 C2PA / 文档签名等允许的 EKU OID。签名后的把关仍由 `validate_signed_manifest` 完成：回读必须是 `Valid` 且全部声明逐项匹配。界面和记录里的 `Valid` 只表示「签名完整、声明匹配」，不表示 CA 信任。
 
-识别始终读取 C2PA；模型不可用时只读取 C2PA 清单，不打开整图，模型可用时还会对整图或用户框选区域解码 TrustMark（区域解码接收拥有的解码图，裁剪后释放原图，不再复制整幅图）。整图解码对小区域水印可能检不出，框选与嵌入区域一致时命中率更高；识别页空状态也写明这一限制，不承诺整图必检出。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
+**旧清单只读兼容**：`c2pa 0.90` 及更早把 `c2pa.soft-binding` 的 `value` 写成 CBOR 文本串（`1*<40 位 ID>`），而规范要求字节串；`0.91` 起严格解析会把整条清单判为 `claim.malformed`。当前依赖是 `c2pa 0.91.10`，新写出的软绑定是字节串；`authenticity/legacy.rs` 只为 0.90 及更早的清单保留只读识别：直接解析 JPEG 的 APP11/JUMBF，只取 `com.lilith.artworks.claim`、`c2pa.soft-binding` 与 claim 的 `dc:title`，不验签、不解码图片、不读签名盒；段数、字节数、盒数、CBOR 深度与条目数都有上限，任何结构异常都按「不是旧清单」处理。回退必须同时满足两点：严格读取器读不出，或读得出但把软绑定判为 `claim.malformed`；并且旧格式解析确实找到软绑定为文本串、带合法 `recordId`（或 40 位 TrustMark ID）的本应用 claim 断言。结果状态固定为 `LegacyUnverified`、附带 `lilith.legacy_format` 说明，`validation_accepted` 恒为 false：发布回读不接受旧格式；全库完整性扫描只在仓库副本 SHA-256 与数据库声明都核对通过时才接受它，因为「字节与登记一致 + 声明一致」不依赖签名。软绑定值是字节串时说明已经是规范写法，旧格式解析主动返回 `None`，把错误交回严格读取器；软绑定缺失的清单也不按旧格式降级。
+
+`src-tauri/tests/fixtures/authenticity/` 保存约 40 KB 的公开测试专用 ES256 凭据、128 x 128 源图、真实 C2PA/TrustMark 签名图、覆盖字节被篡改的签名图，以及一份冻结的 `legacy-0.90-trustmark.jpg`（0.90 写出的 tstr 软绑定）。定向 Rust 测试使用生产回读、TrustMark 模型解码与发布校验函数，固定覆盖合格状态、像素水印与 C2PA 中的 record ID/TrustMark ID/全部声明匹配，以及文件替换、C2PA 无效状态和声明不匹配的 fail-closed 行为；旧格式夹具另有独立测试覆盖字段读取、缺断言、字节串（新格式）、CBOR 炸弹与畸形盒。`legacy-0.90-trustmark.jpg` 不得用 `regenerate_c2pa_fixtures` 重签，否则旧格式回归会失去样本；fixture 私钥不得用于生产。
+
+识别始终读取 C2PA；严格读取器读不出、或把旧软绑定判为 `claim.malformed` 且确认是本应用旧格式时，回退到只读兼容解析（见上），结果状态明确标为 `LegacyUnverified` 而不是「已验证」。模型不可用时只读取 C2PA 清单，不打开整图，模型可用时还会对整图或用户框选区域解码 TrustMark（区域解码接收拥有的解码图，裁剪后释放原图，不再复制整幅图）。整图解码对小区域水印可能检不出，框选与嵌入区域一致时命中率更高；识别页空状态也写明这一限制，不承诺整图必检出。候选匹配分别使用 C2PA `recordId` 与解码出的 TrustMark ID 查询全库索引；旧 C2PA 记录没有 `recordId` 时回退使用声明中的 TrustMark ID。两组结果按记录 ID 去重并保留 `c2pa` / `trustmark` 证据来源，冲突时同时显示两个通道的候选，不把任一候选自动判为可信。点击候选会切换到所属 Artwork、发布分支并高亮具体导出记录。模型解码本身不等于真实性认证，必须结合 C2PA 验证状态和本地记录判断。
 
 ## 命令
 

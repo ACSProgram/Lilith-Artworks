@@ -12,3 +12,6 @@ pub(crate) mod clipboard;
 pub(crate) mod path;
 pub(crate) mod process;
 pub(crate) mod shell;
+/// 仅测试目标编译：给业务模块的单元测试造平台专属场景，见模块文档。
+#[cfg(test)]
+pub(crate) mod test_support;

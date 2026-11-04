@@ -10,7 +10,8 @@ macOS——打包、签名、自绘标题栏、剪贴板实现、素材板 WebGP
 
 ## 规则 1：平台分支的唯一入口
 
-`src-tauri/src/platform/` 是产品代码中所有平台分支的唯一入口，按职责分四个子文件：
+`src-tauri/src/platform/` 是产品代码中所有平台分支的唯一入口，按职责分四个产品
+子文件，外加一个只在测试目标里编译的探针模块：
 
 | 文件 | 职责 | 接口 |
 | --- | --- | --- |
@@ -18,6 +19,14 @@ macOS——打包、签名、自绘标题栏、剪贴板实现、素材板 WebGP
 | `shell.rs` | 文件管理器打开/定位 | `reveal_in_file_manager`、`open_directory`、`open_existing_directory` |
 | `clipboard.rs` | 剪贴板文件路径 | `file_paths` |
 | `process.rs` | 进程内存信息 | `peak_memory_bytes` |
+| `test_support.rs`（`#[cfg(test)]`） | 测试专用探针：给业务模块的单元测试造平台专属场景 | `symlink_to_file`、`open_blocking_deletion` |
+
+`test_support.rs` 不参与产品行为：它由 `#[cfg(test)]` 门控，只随库的单元测试
+构建编译（`src-tauri/tests/` 的集成测试链接的库不带它），用于那些「测试本身就要
+平台能力」的用例（例如 Unix 上无需额外权限就能造出的文件符号链接、只在 Windows
+造得出的独占删除失败）。造不出场景的平台返回 `ErrorKind::Unsupported`，由调用方
+跳过对应用例——业务测试因此不必自己写 `cfg` 分支，也让 `cleanup.rs`
+这类业务文件保持零平台分支。
 
 业务文件里出现 `cfg(target_os)`、`cfg(windows)`、`cfg!(windows)`、`cfg(unix)` 或
 `cfg_attr(...)` 即违规；由 Windows CI 的 grep 检查把关（见「规则 3」末尾）。

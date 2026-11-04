@@ -260,6 +260,9 @@ pub(crate) struct CertificationMatch {
     pub(crate) evidence_sources: Vec<String>,
 }
 
+/// 旧格式清单的验证状态值：能读、能按声明匹配，但签名与文件哈希都没有被验证。
+pub(crate) const LEGACY_VALIDATION_STATE: &str = "LegacyUnverified";
+
 pub(crate) struct ManifestSummary {
     pub(crate) present: bool,
     pub(crate) validation_accepted: bool,
@@ -272,4 +275,27 @@ pub(crate) struct ManifestSummary {
     pub(crate) rights_statement: Option<String>,
     pub(crate) authentication_content: Option<String>,
     pub(crate) manifest_json: Option<String>,
+}
+
+impl ManifestSummary {
+    pub(crate) fn absent() -> Self {
+        Self {
+            present: false,
+            validation_accepted: false,
+            validation_state: None,
+            validation_status: Vec::new(),
+            record_id: None,
+            watermark_id: None,
+            title: None,
+            creator: None,
+            rights_statement: None,
+            authentication_content: None,
+            manifest_json: None,
+        }
+    }
+
+    /// 由旧版（c2pa 0.90 及更早）清单的只读解析得到。
+    pub(crate) fn legacy_format(&self) -> bool {
+        self.validation_state.as_deref() == Some(LEGACY_VALIDATION_STATE)
+    }
 }

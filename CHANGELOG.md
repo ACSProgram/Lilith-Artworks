@@ -15,8 +15,38 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Added
+
+- Certification reads manifests written by c2pa 0.90 and earlier again. Those
+  builds stored the soft binding value as a CBOR text string while the
+  specification defines a byte string, so later c2pa releases reject the whole
+  manifest as `claim.malformed` even though the file is intact.
+  `authenticity/legacy.rs` parses just enough of the JPEG JUMBF store to recover
+  the record ID, TrustMark ID, title and claim fields; it does not verify the
+  signature, decode the image or read the signature box, and every length and
+  nesting level is bounded. The result is always reported as
+  `LegacyUnverified` with a `lilith.legacy_format` status: publishing still
+  refuses it, and the full-library scan accepts it only after the repository
+  copy's SHA-256 and declared fields match. A frozen 0.90 fixture keeps this
+  path covered while the current fixture follows the upgraded dependency.
+
 ### Changed
 
+- `c2pa` moves from 0.90.11 to 0.91.10 and `zip` from 8.x to 9.x. Newly signed
+  manifests store the soft binding value as the CBOR byte string the
+  specification requires; the block region no longer carries the deprecated
+  `role` field, which 0.91 cannot deserialize back from CBOR and which made the
+  whole assertion fail as `claim.malformed`. The dependency audit drops the four
+  zip 8 advisories (`RUSTSEC-2026-0367/0368/0369/0429`) and the crypto-bigint
+  0.5 advisory (`RUSTSEC-2026-0387`). Only the already-disabled PS256 `rsa`
+  advisory stays ignored; the remaining unmaintained/unsound/yanked warnings are
+  no longer suppressed and stay visible in the audit output.
+- Reading and signing now share a context that verifies signature integrity and
+  claim content but not CA trust, preserving the previous behaviour for
+  user-supplied certificates; the allowed EKU list is supplied explicitly
+  because `Store::from_context` clears the built-in one. Manifests signed by
+  previous releases (c2pa 0.90 and earlier) stay readable through
+  `authenticity/legacy.rs` and are reported as `LegacyUnverified`.
 - The planning archive is split into `handoff/`, `plans/`, `reviews/` and
   `records/`, and every archived document is renamed so the date comes first
   (`YYYY-MM-DD-<topic>.md`, or `YYYY-MM-DD-to-YYYY-MM-DD-<topic>.md` for a

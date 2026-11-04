@@ -47,33 +47,21 @@ jobs:
           # argument, which makes cargo-audit exit without JSON on stdout and
           # the action fail with "Unexpected end of JSON input".
           #
-          # RUSTSEC-2026-0367/0368/0369 (zip 8.x): our zip 8.6.0 is a transitive
-          # dependency of c2pa 0.90.11, which only reads archive assets and is
-          # never handed untrusted ZIP files, so the vulnerable extract-to-disk
-          # paths (symlink escape, SUID/SGID preservation) are unreachable.
-          # c2pa 0.91.3 moves to zip 9.0.4, but its validator rejects manifests
-          # signed by <= 0.90 (soft binding values stored as CBOR text strings
-          # now fail "claim.malformed"), which would fail closed every
-          # previously published record. Ignored until upstream offers a
-          # migration path for old manifests; tracked in docs/planning/todo.md.
+          # RUSTSEC-2023-0071 (rsa 0.9.10): Marvin timing side channel with no
+          # fixed 0.9 release. c2pa keeps rsa in its dependency tree for PS256,
+          # but PS256 is disabled in both the UI and the backend and this app
+          # signs locally, so the vulnerable paths are unreachable. Tracked in
+          # docs/planning/todo.md. This is the only ignored advisory.
           #
-          # RUSTSEC-2026-0387 (crypto-bigint 0.5.5): c2pa 0.90.11's ECDSA
-          # stack (ecdsa/p256/p384/p521 -> elliptic-curve 0.13.8) still uses
-          # crypto-bigint 0.5. The patched 0.7.6 line needs ecdsa 0.17 /
-          # p256 0.14, which c2pa_raw_crypto 0.1.2 (also used by c2pa 0.91.x)
-          # does not provide yet. The advisory is a timing side channel; this
-          # app signs locally rather than exposing a network signing service,
-          # so the exposure is accepted and tracked in docs/planning/todo.md.
+          # Everything else the advisory database reports for this lockfile is
+          # an unmaintained/unsound/yanked warning, not a vulnerability;
+          # cargo-audit does not fail on those, so they stay visible instead of
+          # being suppressed here.
           #
-          # RUSTSEC-2026-0429 (zip 8.6.0): same crate and same reasoning as
-          # 0367/0368/0369. The bug sizes a symlink-target buffer inside
-          # `ZipArchive::extract()`, the extract-to-disk path. Neither this
-          # crate (preview/zip.rs reads entries with `new` + `by_index` under a
-          # decode budget) nor c2pa 0.90.11 (no `.extract(` call anywhere in its
-          # sources) reaches that path. The patched zip 9.x cannot be adopted
-          # while c2pa 0.90.11 pins zip 8.x, so this stays ignored until the
-          # c2pa upgrade; tracked in docs/planning/todo.md.
-          ignore: RUSTSEC-2023-0071,RUSTSEC-2024-0370,RUSTSEC-2024-0429,RUSTSEC-2024-0436,RUSTSEC-2025-0075,RUSTSEC-2025-0080,RUSTSEC-2025-0081,RUSTSEC-2025-0098,RUSTSEC-2025-0100,RUSTSEC-2026-0367,RUSTSEC-2026-0368,RUSTSEC-2026-0369,RUSTSEC-2026-0387,RUSTSEC-2026-0429
+          # The zip 8.x advisories (RUSTSEC-2026-0367/0368/0369/0429) and
+          # crypto-bigint 0.5 (RUSTSEC-2026-0387) were removed with the c2pa
+          # 0.91.10 upgrade, which uses zip 9 and c2pa_raw_crypto 0.2.x.
+          ignore: RUSTSEC-2023-0071
 
       - name: Generate source dependency SBOM
         uses: anchore/sbom-action@v0.24.0

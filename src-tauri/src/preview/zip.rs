@@ -82,6 +82,9 @@ fn layout_for(path: &Path) -> Option<&'static Layout> {
 fn find_entry<R: Read + Seek>(archive: &mut zip::ZipArchive<R>, candidate: &str) -> Option<usize> {
     archive
         .file_names()
+        // zip 9 把条目名返回为 `Result<Cow<str>, ZipError>`：非 UTF-8 名直接跳过，
+        // 它们不可能与约定的候选名匹配。
+        .filter_map(Result::ok)
         .position(|name| name.eq_ignore_ascii_case(candidate))
 }
 
