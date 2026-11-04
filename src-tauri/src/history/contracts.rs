@@ -179,6 +179,9 @@ fn is_delta_name(name: &str) -> bool {
 /// 暂存文件命名：`tempfile::NamedTempFile` 的默认前缀是 `.tmp`，随后是随机后缀
 /// （例如 `.tmpd0BGy8`）。作品 `temp/` 只由本进程的备份/恢复写入，因此只认这个
 /// 前缀；用户手工放进该目录的其它文件不会被当成孤儿报告。
+///
+/// `cleanup::is_scratch_file_name` 是同一规则的另一个实现（仓库打开时的自动
+/// 清扫）；任一处调整规则时两处一起改。
 fn is_scratch_name(name: &str) -> bool {
     name.strip_prefix(".tmp")
         .is_some_and(|suffix| !suffix.is_empty())

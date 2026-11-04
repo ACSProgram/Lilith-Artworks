@@ -1,5 +1,5 @@
 import {
-  Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
+  AlertTriangle, Check, CircleDot, Download, GitBranch, GitFork, LoaderCircle,
   ListCollapse, MoreVertical, Pencil, Play, RotateCcw, Trash2, X,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -51,7 +51,8 @@ export function HistoryModule({
   onError, onRevealPath,
 }: HistoryModuleProps) {
   const {
-    history, loading, busy, runtime, visibleRuntime, saveBranch, commitBranch,
+    history, loading, busy, runtime, visibleRuntime, commitError, clearCommitError,
+    saveBranch, commitBranch,
     restoreNode, compactNodes, deleteBranch, resetArtworkHistory, reverifyBranch, deleteSubtree,
     setCheckpoint, forkBranch, renameNode, readNodeFormat, readNodeThumbnail,
     refreshNodeThumbnail, cancelOperation,
@@ -123,7 +124,11 @@ export function HistoryModule({
     exitCompactMode();
   }, [artworkId, exitCompactMode]);
 
-  useEffect(() => setCommitFeedback(null), [selectedBranchId]);
+  useEffect(() => {
+    setCommitFeedback(null);
+    // 提交失败属于发起它的那个分支：切换分支后不再保留。
+    clearCommitError();
+  }, [clearCommitError, selectedBranchId]);
 
   useEffect(() => {
     setSelectedNodeId((current) => current && history?.nodes.some((node) => node.id === current)
@@ -439,6 +444,7 @@ export function HistoryModule({
         </div>
         {selectedBranch && !selectedBranch.sourcePath && <span className="commit-feedback muted" role="status">该分支未选择工作文件，自动备份与主动提交不可用。</span>}
         {commitFeedback && <span className="commit-feedback" role="status"><Check size={13} />{commitFeedback}</span>}
+        {commitError && <span className="commit-feedback error" role="alert"><AlertTriangle size={13} />{commitError}</span>}
       </div>
       {!compactMode && <button className="secondary-button" type="button" disabled={writeLocked || !selectedBranch || !branchLine.some((node) => canCompact(node, history))} onClick={startCompactMode}><ListCollapse aria-hidden="true" size={16} />精简当前分支</button>}
     </section>

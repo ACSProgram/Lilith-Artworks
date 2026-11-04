@@ -138,33 +138,40 @@ impl AppState {
     pub(crate) fn ready_repository_path(&self) -> Result<PathBuf, String> {
         let started = std::time::Instant::now();
         let root = self.repository_path()?.ok_or("尚未配置作品仓库")?;
-        let mut validated = self
-            .validated_repository
-            .lock()
-            .map_err(|_| "仓库校验状态已损坏")?;
-        if validated.as_deref() == Some(root.as_path()) {
-            if let Err(error) = crate::library::check_existing(&root) {
-                *validated = None;
+        {
+            let mut validated = self
+                .validated_repository
+                .lock()
+                .map_err(|_| "仓库校验状态已损坏")?;
+            if validated.as_deref() == Some(root.as_path()) {
+                if let Err(error) = crate::library::check_existing(&root) {
+                    *validated = None;
+                    return Err(error);
+                }
+                return Ok(root);
+            }
+
+            *validated = None;
+            if let Err(error) = crate::library::open_existing(&root) {
+                log::warn!(
+                    "repository validation failed: path={}, elapsed_ms={}, error={error}",
+                    root.display(),
+                    started.elapsed().as_millis()
+                );
                 return Err(error);
             }
-            return Ok(root);
-        }
-
-        *validated = None;
-        if let Err(error) = crate::library::open_existing(&root) {
-            log::warn!(
-                "repository validation failed: path={}, elapsed_ms={}, error={error}",
+            *validated = Some(root.clone());
+            log::info!(
+                "repository validated: path={}, elapsed_ms={}",
                 root.display(),
                 started.elapsed().as_millis()
             );
-            return Err(error);
         }
-        *validated = Some(root.clone());
-        log::info!(
-            "repository validated: path={}, elapsed_ms={}",
-            root.display(),
-            started.elapsed().as_millis()
-        );
+        // 首次成功校验或切换仓库后清扫一次作品级 `temp/`。清扫要遍历每个作品的
+        // 临时目录，因此在校验缓存锁之外执行，快速路径（已校验过的仓库）不受影响；
+        // 经 `with_ready_repository*` 进来的调用方此时仍持有仓库操作锁，并发命令会
+        // 为此等一次磁盘遍历，但每个仓库路径只发生一次。
+        sweep_stale_artwork_temp(&root);
         Ok(root)
     }
 
@@ -394,6 +401,20 @@ impl AppState {
     }
 }
 
+/// 作品级 `temp/` 的自动清扫（见 `ready_repository_path`）：回收强杀或断电留下的
+/// 超期 `.tmp*` 暂存文件。这些路径不在引用清单里，清扫直接删除；失败只记日志，
+/// 绝不阻断仓库打开。
+fn sweep_stale_artwork_temp(root: &Path) {
+    let report = crate::cleanup::sweep_artwork_temp(root);
+    if report.reclaimed > 0 || report.failed > 0 {
+        log::info!(
+            "作品临时目录清扫：回收 {} 项，失败 {} 项",
+            report.reclaimed,
+            report.failed
+        );
+    }
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SettingsSnapshot {
@@ -513,6 +534,58 @@ mod tests {
         let error = state.ready_repository_path().unwrap_err();
         assert!(error.contains("不是 Lilith Artworks 仓库"), "{error}");
         assert_eq!(crate::library::take_integrity_check_count(), 0);
+    }
+
+    /// 首次校验仓库与切换仓库都会清扫作品 `temp/` 里超过宽限期的 `.tmp*`。
+    #[test]
+    fn repository_readiness_sweeps_expired_artwork_temp_on_open_and_switch() {
+        use std::time::{Duration, SystemTime};
+
+        fn seed_expired_residue(root: &Path) -> std::path::PathBuf {
+            crate::library::initialize(root).unwrap();
+            let temp = root
+                .join("artworks")
+                .join(crate::storage::new_id())
+                .join("temp");
+            std::fs::create_dir_all(&temp).unwrap();
+            let residue = temp.join(".tmpd0BGy8");
+            std::fs::write(&residue, b"scratch").unwrap();
+            let old = SystemTime::now() - Duration::from_secs(3_600);
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&residue)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+            residue
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let first_root = directory.path().join("first");
+        let first_residue = seed_expired_residue(&first_root);
+        let second_root = directory.path().join("second");
+        let second_residue = seed_expired_residue(&second_root);
+        let mut settings = AppSettings::default();
+        settings.repository_path = first_root.to_string_lossy().into_owned();
+        let state = AppState::new(
+            settings,
+            directory.path().join("settings.json"),
+            directory.path().join("logs"),
+            None,
+        );
+
+        assert_eq!(state.ready_repository_path().unwrap(), first_root);
+        assert!(!first_residue.exists(), "首次校验后应清扫超期暂存文件");
+
+        state
+            .settings()
+            .update(None, |settings| {
+                settings.repository_path = second_root.to_string_lossy().into_owned();
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(state.ready_repository_path().unwrap(), second_root);
+        assert!(!second_residue.exists(), "切换仓库后同样应清扫");
     }
 
     #[test]

@@ -124,6 +124,8 @@ function controllerReturn(overrides: Record<string, unknown> = {}) {
     busy: false,
     runtime: idleRuntime,
     visibleRuntime: idleRuntime,
+    commitError: null,
+    clearCommitError: vi.fn(),
     saveBranch: vi.fn().mockResolvedValue(undefined),
     commitBranch: vi.fn(),
     restoreNode: vi.fn(),
@@ -735,5 +737,55 @@ describe("HistoryModule node hover preview", () => {
 
     expect(container.querySelector(".history-hover-preview")).toBeNull();
     expect(readNodeThumbnail).not.toHaveBeenCalled();
+  });
+});
+
+describe("HistoryModule commit feedback", () => {
+  beforeEach(() => {
+    controller.useHistoryController.mockReturnValue(controllerReturn());
+  });
+
+  afterEach(() => cleanup());
+
+  it("shows a manual commit failure in the commit block instead of the global error", () => {
+    const clearCommitError = vi.fn();
+    const onError = vi.fn();
+    controller.useHistoryController.mockReturnValue(controllerReturn({
+      commitError: "磁盘空间不足",
+      clearCommitError,
+    }));
+
+    const { container } = render(<HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId="main"
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={onError}
+    />);
+
+    const error = container.querySelector(".commit-block .commit-feedback.error");
+    expect(error?.textContent).toContain("磁盘空间不足");
+    expect(onError).not.toHaveBeenCalled();
+    // 分支状态只描述自动备份：手动失败不得写成「备份失败，将按策略重试」。
+    expect(screen.queryByText("备份失败，将按策略重试")).toBeNull();
+  });
+
+  it("clears the commit failure when the branch changes", () => {
+    const clearCommitError = vi.fn();
+    controller.useHistoryController.mockReturnValue(controllerReturn({ clearCommitError }));
+
+    const module = (branchId: string) => <HistoryModule
+      artworkId="artwork-1"
+      selectedBranchId={branchId}
+      onSelectBranch={vi.fn()}
+      onHistoryChanged={vi.fn()}
+      onError={vi.fn()}
+    />;
+    const view = render(module("main"));
+    clearCommitError.mockClear();
+
+    view.rerender(module("other"));
+
+    expect(clearCommitError).toHaveBeenCalled();
   });
 });

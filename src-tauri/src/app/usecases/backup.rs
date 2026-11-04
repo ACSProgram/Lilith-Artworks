@@ -40,22 +40,12 @@ pub(crate) fn commit(
             context.cancel(),
             context.chunk_write_options(),
         );
-        match &result {
-            // 经此入口的成功提交无论是否产生新节点都完整读过工作文件，连续
-            // 快速命中计数随之归零；下一次自动检查重新从零开始积累。
-            Ok(_) => {
-                if let Err(error) = history::reset_quick_hit_count(session.root(), branch_id) {
-                    log::warn!("failed to reset quick hit count for branch {branch_id}: {error}");
-                }
-            }
-            Err(error) => {
-                let _ = history::record_branch_failure(
-                    session.root(),
-                    branch_id,
-                    history::BranchFailure::Manual {
-                        error: &error.to_string(),
-                    },
-                );
+        // 经此入口的成功提交无论是否产生新节点都完整读过工作文件，连续快速
+        // 命中计数随之归零；下一次自动检查重新从零开始积累。失败不写分支状态：
+        // `last_error` 只描述自动备份，手动失败由前端在提交区内联提示。
+        if result.is_ok() {
+            if let Err(error) = history::reset_quick_hit_count(session.root(), branch_id) {
+                log::warn!("failed to reset quick hit count for branch {branch_id}: {error}");
             }
         }
         result.map_err(backup_error)
@@ -427,6 +417,17 @@ mod tests {
             .quick_hit_count
     }
 
+    fn branch_last_error(root: &Path, branch_id: &str) -> Option<String> {
+        crate::storage::open(root)
+            .unwrap()
+            .query_row(
+                "SELECT last_error FROM branches WHERE id = ?1",
+                [branch_id],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
     #[test]
     fn manual_commit_resets_quick_hit_count_on_success() {
         let (directory, root, source, branch_id) = fixture();
@@ -489,6 +490,11 @@ mod tests {
             quick_hits(&root, &branch_id),
             6,
             "失败的提交不得清零连续快速命中计数"
+        );
+        assert_eq!(
+            branch_last_error(&root, &branch_id),
+            None,
+            "手动提交失败只在前端提示，不得写成分支的自动备份失败"
         );
     }
 

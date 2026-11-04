@@ -97,14 +97,13 @@ pub(crate) fn record_source_metadata(
     Ok(())
 }
 
-/// 分支状态写入的三种语义。
+/// 分支状态写入的两种语义。
 ///
-/// 三者都会写 `last_error`，但退避、连续失败计数与自动备份开关的后果完全不同：
-/// 把「路径不参与无人值守」误当成一次失败会累计到自动关闭，而手动提交失败也不该
-/// 推进调度退避。入口只有一个，语义由调用方显式选择。
+/// 两者都会写 `last_error`，但退避、连续失败计数与自动备份开关的后果不同：
+/// 把「路径不参与无人值守」误当成一次失败会累计到自动关闭。手动提交失败不写
+/// `last_error`（它只描述自动备份），因此没有对应变体；入口只有一个，语义由
+/// 调用方显式选择。
 pub(crate) enum BranchFailure<'a> {
-    /// 手动提交失败：只写错误文案。
-    Manual { error: &'a str },
     /// 自动备份失败：写错误、递增失败数、写重试时间，第 5 次连续失败时关闭。
     Automatic { error: &'a str, failed_ms: i64 },
     /// 工作文件位于网络位置或设备命名空间：写原因、清零失败与重试，不关闭自动备份。
@@ -118,15 +117,6 @@ pub(crate) fn record_branch_failure(
     failure: BranchFailure<'_>,
 ) -> Result<bool, String> {
     match failure {
-        BranchFailure::Manual { error } => {
-            storage::open(root)?
-                .execute(
-                    "UPDATE branches SET last_error = ?2 WHERE id = ?1",
-                    params![branch_id, error],
-                )
-                .map_err(storage::database_error)?;
-            Ok(false)
-        }
         BranchFailure::Ineligible { reason } => {
             // 原因未变时不写库：调度器每轮都会调用，不能因此产生写入。
             storage::open(root)?

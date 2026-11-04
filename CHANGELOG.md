@@ -15,6 +15,17 @@ entries for the reader; they are not a template every entry has to fill.
 
 ## Unreleased
 
+### Fixed
+
+- Crash residue in each artwork's `temp/` directory is swept automatically when
+  a repository is first opened or switched to. Only `.tmp*` regular files older
+  than the 30-minute grace period are removed; the garbage scan still reports
+  other orphans for confirmation, and a deletion failure only counts and logs.
+- A failed manual commit is reported next to the commit button instead of the
+  global error banner. It no longer writes the branch's automatic-backup error
+  or promises a retry, so a read-only repository or a full disk no longer paints
+  the branch status as a scheduled backup failure.
+
 ## 0.3.0-beta.2 - 2026-11-04
 
 ### Added

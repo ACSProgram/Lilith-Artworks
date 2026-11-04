@@ -87,6 +87,11 @@ export function useHistoryController({
   const [loading, setLoading] = useState(true);
   const { busy, run: runBusy } = useAsyncOperation();
   const [runtime, setRuntime] = useState(IDLE_RUNTIME);
+  /**
+   * 手动提交失败的提示。它只属于提交区：`branches.lastError` 描述自动备份，
+   * 手动失败不再写进分支状态，也不能冒充「将按策略重试」。
+   */
+  const [commitError, setCommitError] = useState<string | null>(null);
   const [localOperation, setLocalOperation] = useState<{ operation: string; label: string } | null>(null);
   const artworkIdRef = useRef(artworkId);
   const onHistoryChangedRef = useRef(onHistoryChanged);
@@ -204,6 +209,7 @@ export function useHistoryController({
 
   useEffect(() => {
     setHistory(null);
+    setCommitError(null);
     setLoading(true);
     void reload().catch(reportError);
     return invalidateReads;
@@ -306,6 +312,8 @@ export function useHistoryController({
     operation: string,
     label: string,
     action: () => Promise<void>,
+    /** 需要就地展示的错误走这里；缺省时进入全局错误提示。 */
+    onError?: (error: unknown) => void,
   ): Promise<boolean> => {
     invalidateReads();
     // 每次新操作都从「未请求取消」开始：上一次留下的请求只属于上一次操作。
@@ -314,7 +322,7 @@ export function useHistoryController({
     onErrorRef.current(null);
     let completed = false;
     try {
-      await runBusy(action, { onError: reportError });
+      await runBusy(action, { onError: onError ?? reportError });
       completed = true;
       return true;
     } catch {
@@ -349,16 +357,21 @@ export function useHistoryController({
     }
   }, [invalidateReads, replaceHistory, reportError]);
 
+  const clearCommitError = useCallback(() => setCommitError(null), []);
+
   const commitBranch = useCallback(async (branchId: string, note: string): Promise<BackupCommitResult | null> => {
+    // 新的提交尝试从空白开始：上一次的失败不应挂在新一次操作旁边。
+    setCommitError(null);
     let result: BackupCommitResult | null = null;
     const succeeded = await runOperation("commit", "正在提交工作文件", async () => {
       result = await historyApi.commit(branchId, note);
       try {
         await reload();
       } catch (error) {
+        // 提交本身已成功，只是列表刷新失败：仍走全局提示，不并入提交失败。
         onErrorRef.current(`提交已完成，但历史列表刷新失败：${errorMessage(error)}`);
       }
-    });
+    }, (error) => setCommitError(errorMessage(error)));
     return succeeded ? result : null;
   }, [reload, runOperation]);
 
@@ -465,6 +478,8 @@ export function useHistoryController({
     busy,
     runtime,
     visibleRuntime,
+    commitError,
+    clearCommitError,
     saveBranch,
     commitBranch,
     restoreNode,

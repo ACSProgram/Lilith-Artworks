@@ -555,7 +555,7 @@ pub(crate) fn replay(root: &Path, cleanup_ids: &[String]) {
     }
 }
 
-/// 一次仓库临时目录清扫的结果：`reclaimed` 为成功回收的条目数，`failed` 为删除失败数。
+/// 一次临时目录清扫的结果：`reclaimed` 为成功回收的条目数，`failed` 为删除失败数。
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct TempSweepReport {
     pub(crate) reclaimed: u64,
@@ -613,45 +613,136 @@ fn sweep_repository_temp_at(
         let Some(name) = file_name.to_str() else {
             continue;
         };
+        let path = entry.path();
         // `symlink_metadata` 不跟随符号链接：指向目录的链接按链接本身判定，
         // `is_dir` 为假，不会递归删除链接目标。
-        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+        let Ok(metadata) = fs::symlink_metadata(&path) else {
             continue;
         };
-        let is_directory = metadata.is_dir();
-        let remove = if is_preview_session_name(name) {
-            is_directory && active_session_directory.as_deref() != Some(name)
-        } else if is_scratch_file_name(name) {
-            metadata.is_file()
-        } else {
-            continue;
-        };
-        if !remove {
-            continue;
-        }
-        let Some(modified_ms) = modified_ms(&metadata) else {
-            continue;
-        };
-        if modified_ms >= cutoff_ms {
-            continue;
-        }
-        let result = if is_directory {
-            fs::remove_dir_all(entry.path())
-        } else {
-            fs::remove_file(entry.path())
-        };
-        match result {
-            Ok(()) => sweep.reclaimed += 1,
-            Err(error) => {
-                sweep.failed += 1;
-                log::warn!(
-                    "无法回收仓库临时目录中的残留 {}：{error}",
-                    display_path(&entry.path())
-                );
+        if is_preview_session_name(name) {
+            if !metadata.is_dir() || active_session_directory.as_deref() == Some(name) {
+                continue;
             }
+            let Some(modified_ms) = modified_ms(&metadata) else {
+                continue;
+            };
+            if modified_ms >= cutoff_ms {
+                continue;
+            }
+            record_removal(&mut sweep, fs::remove_dir_all(&path), &path);
+        } else if is_scratch_file_name(name) {
+            sweep_expired_scratch_file(&path, &metadata, cutoff_ms, &mut sweep);
         }
     }
     sweep
+}
+
+/// 清扫作品级 `artworks/*/temp/` 中超期的 `.tmp*` 暂存残留。
+///
+/// 备份、恢复与检查点在发布前把内容写成 `NamedTempFile`，正常路径由 `Drop`
+/// 删除；进程被强杀或断电时它们会留在作品 `temp/` 里。这些路径从不进入引用
+/// 清单，因此与仓库根 `temp/` 一样直接删除而不走 `pending_file_cleanup`。
+/// 只处理作品 `temp/` 顶层的 `.tmp*` 普通文件：不递归、不跟随符号链接、不动
+/// 目录和其它命名（`scan_unreferenced` 仍会报告它们，由用户确认清理）。
+/// 修改时间晚于 `now - SCAN_GRACE_MS` 的条目视为可能仍属于进行中的操作
+/// （本进程或另一进程）；删除失败只计数并写日志，不阻断仓库打开；缺失作品
+/// 目录或 `temp/` 按空处理。
+pub(crate) fn sweep_artwork_temp(root: &Path) -> TempSweepReport {
+    let now_ms = match storage::now_ms() {
+        Ok(now_ms) => now_ms,
+        Err(error) => {
+            log::warn!("无法读取当前时间，跳过作品临时目录清扫：{error}");
+            return TempSweepReport::default();
+        }
+    };
+    sweep_artwork_temp_at(root, now_ms)
+}
+
+fn sweep_artwork_temp_at(root: &Path, now_ms: i64) -> TempSweepReport {
+    let mut sweep = TempSweepReport::default();
+    let cutoff_ms = now_ms.saturating_sub(SCAN_GRACE_MS);
+    let artworks = root.join("artworks");
+    let entries = match fs::read_dir(&artworks) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return sweep,
+        Err(error) => {
+            log::warn!(
+                "无法读取作品目录 {}，跳过作品临时目录清扫：{error}",
+                display_path(&artworks)
+            );
+            return sweep;
+        }
+    };
+    for entry in entries.flatten() {
+        // `file_type` 不跟随符号链接：指向作品目录的链接不会被当作作品遍历。
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+        let temp_directory = entry.path().join("temp");
+        let children = match fs::read_dir(&temp_directory) {
+            Ok(children) => children,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                log::warn!(
+                    "无法读取作品临时目录 {}，跳过清扫：{error}",
+                    display_path(&temp_directory)
+                );
+                continue;
+            }
+        };
+        for child in children.flatten() {
+            let file_name = child.file_name();
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
+            if !is_scratch_file_name(name) {
+                continue;
+            }
+            let path = child.path();
+            // `symlink_metadata` 不跟随符号链接：链接本身不是普通文件，保留。
+            let Ok(metadata) = fs::symlink_metadata(&path) else {
+                continue;
+            };
+            sweep_expired_scratch_file(&path, &metadata, cutoff_ms, &mut sweep);
+        }
+    }
+    sweep
+}
+
+/// 删除一个超期的暂存文件；宽限期内、目录或符号链接、删除失败都不算回收。
+///
+/// 仓库根 `temp/` 与作品 `temp/` 共用这一条：宽限期判定、只删普通文件与失败
+/// 计数集中在这里，两处清扫不会各自漂移。
+fn sweep_expired_scratch_file(
+    path: &Path,
+    metadata: &fs::Metadata,
+    cutoff_ms: i64,
+    sweep: &mut TempSweepReport,
+) {
+    if !metadata.is_file() {
+        return;
+    }
+    let Some(modified_ms) = modified_ms(metadata) else {
+        return;
+    };
+    if modified_ms >= cutoff_ms {
+        return;
+    }
+    record_removal(sweep, fs::remove_file(path), path);
+}
+
+/// 记一次删除结果：成功计入回收数，失败只计数并写日志，不向调用方传播。
+fn record_removal(sweep: &mut TempSweepReport, result: std::io::Result<()>, path: &Path) {
+    match result {
+        Ok(()) => sweep.reclaimed += 1,
+        Err(error) => {
+            sweep.failed += 1;
+            log::warn!("无法回收临时目录中的残留 {}：{error}", display_path(path));
+        }
+    }
 }
 
 /// 预览会话目录命名：`authenticity-preview-<UUID v4>`；后缀不是合法 UUID 的
@@ -661,6 +752,9 @@ fn is_preview_session_name(name: &str) -> bool {
         .is_some_and(|session| uuid::Uuid::parse_str(session).is_ok())
 }
 
+/// 暂存文件命名：`tempfile::NamedTempFile` 的默认前缀 `.tmp` 加非空后缀。
+/// `history::contracts` 的 `is_scratch_name` 是同一规则的另一个实现（垃圾扫描
+/// 的候选判定）；任一处调整规则时两处一起改。
 fn is_scratch_file_name(name: &str) -> bool {
     name.strip_prefix(SCRATCH_FILE_PREFIX)
         .is_some_and(|suffix| !suffix.is_empty())
@@ -1437,6 +1531,93 @@ mod tests {
         let empty = sweep_repository_temp_at(&other_root, None, storage::now_ms().unwrap());
         assert_eq!(empty.reclaimed, 0);
         assert_eq!(empty.failed, 0);
+    }
+
+    /// 作品级 `temp/` 清扫只回收多个作品目录中宽限期外的 `.tmp*` 普通文件：
+    /// 宽限期内、其它命名、同名目录与符号链接一律保留；缺失 `temp/` 按空处理。
+    #[test]
+    fn sweep_artwork_temp_removes_expired_scratch_files_across_artworks() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let first_artwork = new_artwork_directory(&root);
+        let second_artwork = new_artwork_directory(&root);
+        let untouched_artwork = new_artwork_directory(&root);
+        let first_temp = first_artwork.join("temp");
+        let second_temp = second_artwork.join("temp");
+        fs::create_dir_all(&first_temp).unwrap();
+        fs::create_dir_all(&second_temp).unwrap();
+        // 作品目录存在但没有 `temp/`：按空处理，不报错。
+        fs::create_dir_all(&untouched_artwork).unwrap();
+
+        let expired = first_temp.join(".tmpd0BGy8");
+        let fresh = first_temp.join(".tmpAbC123");
+        let unrelated = first_temp.join("notes.txt");
+        let scratch_directory = first_temp.join(".tmpdirectory");
+        let expired_second = second_temp.join(".tmp42");
+        for path in [&expired, &fresh, &unrelated, &expired_second] {
+            fs::write(path, b"scratch").unwrap();
+        }
+        fs::create_dir_all(&scratch_directory).unwrap();
+        age_file(&expired);
+        age_file(&unrelated);
+        age_file(&expired_second);
+
+        // 指向目录外文件的符号链接名字符合 `.tmp*`，但不是普通文件，必须保留。
+        #[cfg(unix)]
+        let symlink = {
+            let target = directory.path().join("target.bin");
+            fs::write(&target, b"target").unwrap();
+            let link = first_temp.join(".tmplink");
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            link
+        };
+
+        let sweep = sweep_artwork_temp_at(&root, storage::now_ms().unwrap());
+        assert_eq!(sweep.reclaimed, 2);
+        assert_eq!(sweep.failed, 0);
+        assert!(!expired.exists());
+        assert!(!expired_second.exists());
+        assert!(fresh.exists());
+        assert!(unrelated.exists());
+        assert!(scratch_directory.is_dir());
+        #[cfg(unix)]
+        assert!(fs::symlink_metadata(&symlink).unwrap().is_symlink());
+
+        // 缺失作品目录同样按空处理。
+        let missing_root = directory.path().join("missing");
+        let empty = sweep_artwork_temp_at(&missing_root, storage::now_ms().unwrap());
+        assert_eq!(empty.reclaimed, 0);
+        assert_eq!(empty.failed, 0);
+    }
+
+    /// 删除失败只计数并写日志，不阻断调用方。Windows 上用独占共享模式打开
+    /// 文件，让 `remove_file` 以共享冲突失败。
+    #[cfg(windows)]
+    #[test]
+    fn sweep_artwork_temp_counts_deletion_failures() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("repository");
+        crate::library::initialize(&root).unwrap();
+        let temp = new_artwork_directory(&root).join("temp");
+        fs::create_dir_all(&temp).unwrap();
+        let residue = temp.join(".tmpLocked");
+        fs::write(&residue, b"scratch").unwrap();
+        age_file(&residue);
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&residue)
+            .unwrap();
+
+        let sweep = sweep_artwork_temp_at(&root, storage::now_ms().unwrap());
+
+        assert_eq!(sweep.reclaimed, 0);
+        assert_eq!(sweep.failed, 1);
+        assert!(residue.exists());
+        drop(handle);
     }
 
     #[test]

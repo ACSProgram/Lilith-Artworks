@@ -13,6 +13,7 @@ const historyApi = vi.hoisted(() => ({
   runtime: vi.fn(),
   compact: vi.fn(),
   cancel: vi.fn(),
+  commit: vi.fn(),
 }));
 
 vi.mock("./api", () => ({ historyApi }));
@@ -293,6 +294,49 @@ describe("useHistoryController background completion refresh", () => {
     });
 
     expect(historyApi.get).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useHistoryController commit errors", () => {
+  afterEach(() => {
+    cleanup();
+    vi.clearAllMocks();
+    latest = null;
+  });
+
+  it("keeps a manual commit failure inline and clears it after success", async () => {
+    const controller = await readyController();
+    historyApi.commit.mockRejectedValueOnce(new Error("磁盘空间不足"));
+
+    let failed: unknown;
+    await act(async () => {
+      failed = await controller.commitBranch("branch-1", "note");
+    });
+
+    expect(failed).toBeNull();
+    expect(latest!.commitError).toBe("磁盘空间不足");
+    // 手动失败只属于提交区，不进入全局错误提示。
+    expect(onError).not.toHaveBeenCalledWith("磁盘空间不足");
+
+    historyApi.commit.mockResolvedValueOnce({ created: true, unchanged: false, historyId: "n1" });
+    await act(async () => {
+      await latest!.commitBranch("branch-1", "note");
+    });
+
+    expect(latest!.commitError).toBeNull();
+  });
+
+  it("clears the inline error on request", async () => {
+    const controller = await readyController();
+    historyApi.commit.mockRejectedValueOnce(new Error("写入失败"));
+    await act(async () => {
+      await controller.commitBranch("branch-1", "note");
+    });
+    expect(latest!.commitError).toBe("写入失败");
+
+    await act(async () => latest!.clearCommitError());
+
+    expect(latest!.commitError).toBeNull();
   });
 });
 

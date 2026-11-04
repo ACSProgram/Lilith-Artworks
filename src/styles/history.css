@@ -203,6 +203,7 @@
 .commit-control input:disabled { color: var(--control-disabled-text); background: var(--control-disabled-bg); }
 .commit-feedback { display: inline-flex; align-items: center; gap: 5px; color: var(--accent); font-size: 9px; }
 .commit-feedback.muted { color: var(--muted); }
+.commit-feedback.error { color: var(--danger); }
 .branch-title-field input:focus, .backup-interval input:focus, .commit-control input:focus, .history-header-actions select:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
 
 .compact-mode-bar {
